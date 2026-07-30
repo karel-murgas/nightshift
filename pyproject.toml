@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-team"
+version = "0.1.0"
+description = "The machinery for running a board-driven AI team against a Python repo: gates, hooks, board, preflight, runner."
+requires-python = ">=3.11"          # tomllib; the manifest is TOML and reading it must need no dependency
+license = { text = "Proprietary" }
+dependencies = []                   # stdlib only, deliberately — see README
+authors = [{ name = "Karel Murgas" }]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-xdist>=3"]
+
+[tool.setuptools.packages.find]
+include = ["aiteam*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

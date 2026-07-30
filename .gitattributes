@@ -1,0 +1,19 @@
+# Line endings — one rule, both directions. Applied to this repo before it ships
+# to anyone, because `aiteam init` will tell every consuming project to write this
+# exact line (07_portability.md §5) and a framework that trips its own gate on a
+# fresh Windows clone has no standing to ask.
+#
+# Git for Windows ships `core.autocrlf=true` in its *system* config, which says
+# "the working tree should be CRLF". Files written by a tool that bypasses git's
+# smudge filter — an editor, a Python script — land as LF, and git then reports
+# them as modified forever with an empty diff. Attributes override core.autocrlf
+# on every machine, so pinning eol here fixes it for good and travels with the
+# repo instead of living in one box's config.
+* text=auto eol=lf
+
+*.png  binary
+*.jpg  binary
+*.gif  binary
+*.ico  binary
+*.zip  binary
+*.pdf  binary
