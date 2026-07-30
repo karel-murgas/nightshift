@@ -1,4 +1,4 @@
-"""Tests for `aiteam/limits.py` — recognising the usage-limit wall.
+"""Tests for `nightshift/limits.py` — recognising the usage-limit wall.
 
 Two properties carry the weight here, and they pull against each other.
 
@@ -18,7 +18,7 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
-from aiteam import limits
+from nightshift import limits
 
 NOW = dt.datetime(2026, 7, 23, 2, 0, 0)
 

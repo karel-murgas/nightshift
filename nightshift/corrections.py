@@ -9,10 +9,10 @@ nothing more: deciding *which* class an entry belongs to is judgment and stays
 with whoever appends the line.
 
 Usage (from anywhere inside the repo being reported on):
-    python -m aiteam.corrections              # the full report
-    python -m aiteam.corrections --class derived-not-verified   # one cluster's entries
-    python -m aiteam.corrections --since 2026-07-23
-    python -m aiteam.corrections --compact    # archive every resolved entry (see below)
+    python -m nightshift.corrections              # the full report
+    python -m nightshift.corrections --class derived-not-verified   # one cluster's entries
+    python -m nightshift.corrections --since 2026-07-23
+    python -m nightshift.corrections --compact    # archive every resolved entry (see below)
 
 The lifecycle half (`12_corrections_lifecycle.md`, 2026-07-26): a resolved entry's
 NOTE ends `[[disposition: kind: pointer]]` -- the reader's own missing field,
@@ -30,8 +30,8 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from aiteam import textio  # both logs are committed; write_text would CRLF them on Windows
-from aiteam.manifest import find_root
+from nightshift import textio  # both logs are committed; write_text would CRLF them on Windows
+from nightshift.manifest import find_root
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -57,7 +57,7 @@ _ARCHIVE_HEADER = (
     "# Corrections archive\n"
     "#\n"
     "# Resolved entries moved out of .ai/corrections.log by\n"
-    "# `python -m aiteam.corrections --compact` (12_corrections_lifecycle.md). Same six\n"
+    "# `python -m nightshift.corrections --compact` (12_corrections_lifecycle.md). Same six\n"
     "# pipe fields as the active log; every entry here carries a `[[disposition: ...]]`\n"
     "# annotation on its NOTE -- that is what made it eligible to move. Read by\n"
     "# `corrections.report()` for historical cluster counts; never by `backlog()`, so\n"

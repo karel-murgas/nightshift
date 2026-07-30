@@ -1,4 +1,4 @@
-"""Tests for `aiteam/manifest.py` — the per-project config (07_portability.md §4).
+"""Tests for `nightshift/manifest.py` — the per-project config (07_portability.md §4).
 
 Three properties carry the weight, and each is a failure mode the plan names by
 name rather than a generic round-trip:
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from aiteam import manifest as m
+from nightshift import manifest as m
 
 
 def _write(root: Path, text: str) -> Path:
@@ -254,5 +254,5 @@ def test_no_root_at_all_raises_rather_than_falling_back_to_the_cwd(tmp_path):
 
 def test_loading_a_root_with_no_manifest_names_the_fix(tmp_path):
     (tmp_path / ".ai").mkdir()
-    with pytest.raises(m.ManifestError, match="aiteam init"):
+    with pytest.raises(m.ManifestError, match="nightshift init"):
         m.load(tmp_path)

@@ -17,7 +17,7 @@ moment a session's lessons still exist in context (`10_self_improvement.md` §3,
 
 **What it checks**, in cheapest-first order so a fast failure is fast:
 
-1. `python -m aiteam.gates.run` — the whole gate suite, ~8 s.
+1. `python -m nightshift.gates.run` — the whole gate suite, ~8 s.
 2. `python .ai/audit.py --check` — the enforcement matrix has not drifted.
    Still a project-side script: the matrix it checks is the project's own earned
    evidence (§7 — "an *empty* audit matrix and an *empty* corrections log"), and
@@ -89,9 +89,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from aiteam import bridge, textio  # textio: LF-pinned writes (gate write_newline)
-from aiteam.manifest import ManifestError, find_root
-from aiteam.manifest import load as load_manifest
+from nightshift import bridge, textio  # textio: LF-pinned writes (gate write_newline)
+from nightshift.manifest import ManifestError, find_root
+from nightshift.manifest import load as load_manifest
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -447,7 +447,7 @@ def run_checks(root: Path, base: str, no_corrections: str | None,
                fresh_tests: bool = False) -> Result:
     result = Result()
 
-    gates = subprocess.run([sys.executable, "-m", "aiteam.gates.run"],
+    gates = subprocess.run([sys.executable, "-m", "nightshift.gates.run"],
                            cwd=root, capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
     result.add("gates", gates.returncode == 0,

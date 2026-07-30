@@ -1,4 +1,4 @@
-# ai-team
+# nightshift
 
 The machinery for running a board-driven AI team against a Python repo — the gate
 runner, the hooks, the board and card schema, the preflight, the corrections log,
@@ -14,12 +14,12 @@ empty corrections log, and adds rules as its own failures earn them.
 
 | Step | State |
 |---|---|
-| 1. repo, `pyproject.toml`, `aiteam/manifest.py` | done |
+| 1. repo, `pyproject.toml`, `nightshift/manifest.py` | done |
 | 2. the zero-coupling modules move | done |
 | 3. the 16 universal gates and the 4 hooks | not started |
 | 3b. the three i18n gates behind an adapter | not started |
 | 4. the constant-holders behind the manifest | not started |
-| 5. `aiteam init` + `doctor` | not started |
+| 5. `nightshift init` + `doctor` | not started |
 | 6. this README, for real | not started |
 | 7. stand up in a second project | not started |
 | 8. ship to one colleague | not started |
@@ -27,17 +27,17 @@ empty corrections log, and adds rules as its own failures earn them.
 ## Install
 
 ```
-pip install -e path/to/ai-team
+pip install -e path/to/nightshift
 ```
 
-A consuming project then keeps `.ai/manifest.toml` (see `aiteam/manifest.py` for
+A consuming project then keeps `.ai/manifest.toml` (see `nightshift/manifest.py` for
 the schema), its own gates under `.ai/gates/`, its own `.ai/corrections.log`, its
 own `Board/`, and its own `.claude/`.
 
 ## What is here now
 
 ```
-aiteam/
+nightshift/
   manifest.py     # the per-project config: schema, load, validate
   bridge.py       # TEMPORARY — imports modules still living in the project's .ai/
   textio.py       # LF-pinned text writes

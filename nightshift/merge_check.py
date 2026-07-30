@@ -33,10 +33,10 @@ No LLM anywhere in this file, same rule as the gates and the runner (§12):
 every branch below is a git exit code or a file read.
 
 Usage (from anywhere inside the repo):
-    python -m aiteam.merge_check                    # every branch in review/ + testing/
-    python -m aiteam.merge_check --card ice-damage   # just one card, any lane
-    python -m aiteam.merge_check --lane review       # only one lane
-    python -m aiteam.merge_check --skip-tests        # gates only, faster
+    python -m nightshift.merge_check                    # every branch in review/ + testing/
+    python -m nightshift.merge_check --card ice-damage   # just one card, any lane
+    python -m nightshift.merge_check --lane review       # only one lane
+    python -m nightshift.merge_check --skip-tests        # gates only, faster
 
 **The least portable module in this package, and the one that says so.**
 07_portability.md §1 measured coupling as *project-specific content* — named
@@ -55,8 +55,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from aiteam import bridge
-from aiteam.manifest import find_root
+from nightshift import bridge
+from nightshift.manifest import find_root
 
 # Every possible outcome of one branch's check. Deliberately more than
 # pass/fail: "why" a branch is not mergeable-and-green is the whole point of
@@ -75,7 +75,7 @@ _LANES: tuple[str, ...] = ("review", "testing")
 
 # --- the four project modules this file is made of (see the module docstring) ---
 #
-# Functions rather than module-level imports so that `import aiteam.merge_check`
+# Functions rather than module-level imports so that `import nightshift.merge_check`
 # costs nothing and fails nowhere. Each names itself in the error, because a bare
 # "no module named runner" from inside an installed package reads as a broken
 # install rather than as the true statement: this half is not extracted yet.

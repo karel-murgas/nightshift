@@ -1,6 +1,6 @@
 """Shared types for gate modules.
 
-`from aiteam.gates.base import Violation` — an installed-package import, so it
+`from nightshift.gates.base import Violation` — an installed-package import, so it
 resolves the same whether the gate is core, lives in a project's `.ai/gates/`, is
 driven by `run.py`, or is executed directly as a script. It used to be `from base
 import Violation`, which worked only because `run.py` had put that one directory

@@ -42,7 +42,7 @@ import json
 import os
 from pathlib import Path
 
-from aiteam import textio  # LF-pinned writes (gate write_newline)
+from nightshift import textio  # LF-pinned writes (gate write_newline)
 
 DIR = Path(".ai/runs/records")
 

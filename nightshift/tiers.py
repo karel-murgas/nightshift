@@ -84,7 +84,7 @@ def resolve(repo_root: Path, tier: str) -> str:
 if __name__ == "__main__":
     import sys
 
-    from aiteam.manifest import find_root
+    from nightshift.manifest import find_root
 
     # Not `Path(__file__).parent.parent` any more: installed into site-packages
     # that answer is a directory inside the virtualenv, not the repo being asked

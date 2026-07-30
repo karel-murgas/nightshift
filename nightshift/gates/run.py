@@ -4,7 +4,7 @@ directory (00_architecture.md SS12). Each gate module is independently
 importable and runnable; this script just discovers and drives them.
 
 Usage (from anywhere inside the repo being gated):
-    python -m aiteam.gates.run [--fix] [gate_name ...]
+    python -m nightshift.gates.run [--fix] [gate_name ...]
 
 **Two gate directories, not one.** Core gates ship inside this package; a
 project's own gates live in its `<root>/.ai/gates/`. That split is permanent, not
@@ -23,7 +23,7 @@ dot-prefixed `.ai/` root throughout. Python cannot import a dotted directory nam
 as a package (`import ai` will never find a folder literally named `.ai`), so a
 project's gates cannot be a package either. This script puts both gate directories
 on `sys.path`, which is what lets a project gate do a plain `import doc_scan` or
-`import appeal_markers` for its neighbours -- while `from aiteam.gates.base import
+`import appeal_markers` for its neighbours -- while `from nightshift.gates.base import
 Violation` resolves through the installed package from anywhere, including when a
 gate module is run directly as a script.
 """
@@ -34,7 +34,7 @@ import importlib
 import sys
 from pathlib import Path
 
-from aiteam.manifest import AI_DIR, find_root
+from nightshift.manifest import AI_DIR, find_root
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")  # violation text can contain cs/es diacritics
@@ -87,7 +87,7 @@ def discover(repo_root: Path) -> dict[str, object]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run the AI-team gates (deterministic Python only).")
+        description="Run the Nightshift gates (deterministic Python only).")
     parser.add_argument("gates", nargs="*", help="specific gate names to run (default: all)")
     parser.add_argument("--fix", action="store_true",
                         help="apply autofixes where a gate supports one (currently none do)")

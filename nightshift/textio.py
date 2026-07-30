@@ -5,7 +5,7 @@ A repo running this framework pins `.gitattributes` to `* text=auto eol=lf` -- L
 in the index *and* in the working tree, so that no filter ever rewrites anything
 and no writer can leave a phantom-dirty file (one git reports as modified forever,
 with an empty diff, because only the line-ending representation disagrees). The
-`line_endings` gate enforces it, and `aiteam init` offers to write the line,
+`line_endings` gate enforces it, and `nightshift init` offers to write the line,
 because on Windows Git ships `core.autocrlf=true` and a fresh clone without it
 makes that gate fire immediately (07_portability.md §5).
 
@@ -32,7 +32,7 @@ using it there either, and a uniform rule is what stops the seventh writer from
 copying the wrong pattern. `encoding="utf-8"` is not optional and not a default:
 this tree carries non-ASCII in cards, in the corrections log and in the digest.
 
-Deliberately stdlib-only and dependency-free -- it imports nothing from `aiteam`
+Deliberately stdlib-only and dependency-free -- it imports nothing from `nightshift`
 either -- so it is safe to import from any module regardless of import order. It is
 the one thing almost everything else here depends on, which is exactly why it must
 depend on nothing.

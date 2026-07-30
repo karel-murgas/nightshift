@@ -1,5 +1,5 @@
 # Line endings — one rule, both directions. Applied to this repo before it ships
-# to anyone, because `aiteam init` will tell every consuming project to write this
+# to anyone, because `nightshift init` will tell every consuming project to write this
 # exact line (07_portability.md §5) and a framework that trips its own gate on a
 # fresh Windows clone has no standing to ask.
 #

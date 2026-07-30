@@ -1,7 +1,7 @@
 """**Temporary.** Imports a module that still lives in the consuming project's
 `.ai/`, for the window between step 2 and step 4 of `07_portability.md` §8.
 
-Delete this file when step 4 lands. Nothing else in `aiteam` should ever grow a
+Delete this file when step 4 lands. Nothing else in `nightshift` should ever grow a
 call to it.
 
 **Why it exists at all.** §1 measured coupling as *Dungeoneer-specific content* —
@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-from aiteam.manifest import AI_DIR, ManifestError
+from nightshift.manifest import AI_DIR, ManifestError
 
 __all__ = ["project_module", "add_project_path"]
 

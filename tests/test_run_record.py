@@ -1,4 +1,4 @@
-"""Tests for `aiteam/run_record.py` — the run's own account of itself.
+"""Tests for `nightshift/run_record.py` — the run's own account of itself.
 
 The record exists because board state cannot describe a run (see the module
 docstring, and `test_board_digest.py`'s first test). What has to be true of it:
@@ -14,7 +14,7 @@ import datetime as dt
 import json
 from pathlib import Path
 
-from aiteam import run_record
+from nightshift import run_record
 
 
 def _files(root: Path) -> list[Path]:

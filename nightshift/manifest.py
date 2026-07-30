@@ -34,7 +34,7 @@ declared, every reader disagrees, and nothing says so. The cost of being strict 
 that adding a field to the schema is a breaking change for a manifest that already
 used that name for something else — which is the loud direction.
 
-Discovery — *proposing* these values by reading a repo — is `aiteam init`, step 5.
+Discovery — *proposing* these values by reading a repo — is `nightshift init`, step 5.
 Nothing in this module infers anything: it reads what someone wrote down.
 """
 from __future__ import annotations
@@ -57,7 +57,7 @@ __all__ = [
 # It cannot be a Python package: a leading dot is not an identifier, so `import ai`
 # will never find a folder literally named `.ai`. That is why the modules still
 # living there are imported flat after a `sys.path` insert (see `bridge.py`) rather
-# than as `ai.suite`, and why this package is `aiteam` rather than `ai`.
+# than as `ai.suite`, and why this package is `nightshift` rather than `ai`.
 AI_DIR = ".ai"
 MANIFEST_NAME = "manifest.toml"
 
@@ -151,7 +151,7 @@ class Memory:
     that is the recommended starting value.
 
     Not an oversight: doc 10 §4's lesson is that a budget picked to fit the current
-    size is the move the gate exists to stop. `aiteam init` must therefore propose
+    size is the move the gate exists to stop. `nightshift init` must therefore propose
     the gate disabled, or a round number the maintainer states out loud — never
     `sum(current sizes)`.
     """
@@ -406,7 +406,7 @@ def load(root: Path | None = None) -> Manifest:
     path = manifest_path(root)
     if not path.is_file():
         raise ManifestError(
-            f"{path} does not exist — run `aiteam init` in {root} to write one"
+            f"{path} does not exist — run `nightshift init` in {root} to write one"
         )
     try:
         with path.open("rb") as fh:

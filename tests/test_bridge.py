@@ -1,4 +1,4 @@
-"""Tests for `aiteam/bridge.py` — the seam that step 4 deletes.
+"""Tests for `nightshift/bridge.py` — the seam that step 4 deletes.
 
 There is exactly one thing worth testing about a temporary shim, and it is the
 error message. A colleague who installs this package into a repo that has no
@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from aiteam import bridge, merge_check, preflight
-from aiteam.manifest import ManifestError
+from nightshift import bridge, merge_check, preflight
+from nightshift.manifest import ManifestError
 
 
 def _repo(tmp_path: Path, **modules: str) -> Path:
@@ -42,7 +42,7 @@ def test_a_missing_project_module_names_the_caller_and_the_step(tmp_path):
 
 def test_importing_merge_check_costs_nothing_in_an_unextracted_repo():
     """The reason the four lookups are functions rather than module-level imports:
-    `import aiteam.merge_check` must not fail in a repo that has no `.ai/runner.py`,
+    `import nightshift.merge_check` must not fail in a repo that has no `.ai/runner.py`,
     or the package cannot even be introspected there."""
     assert callable(merge_check.main)
     assert callable(preflight.main)

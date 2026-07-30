@@ -1,4 +1,4 @@
-"""Tests for `aiteam/gates/run.py` — the part of the move that is not a move.
+"""Tests for `nightshift/gates/run.py` — the part of the move that is not a move.
 
 Everything else in step 2 is the same code in a new home. Gate discovery is new
 behaviour, because the split it implements is permanent: core gates ship in the
@@ -21,10 +21,10 @@ from pathlib import Path
 
 import pytest
 
-from aiteam.gates import run as gates_run
+from nightshift.gates import run as gates_run
 
 GATE = '''
-from aiteam.gates.base import Violation
+from nightshift.gates.base import Violation
 
 def check(root):
     return [Violation("{file}", 1, "{rule}")]
@@ -134,14 +134,14 @@ def test_a_name_collision_between_core_and_project_is_refused(tmp_path, monkeypa
 # --- it is runnable the way everything invokes it ----------------------------
 
 def test_python_dash_m_finds_the_repo_from_the_working_directory(tmp_path):
-    """`python -m aiteam.gates.run` with no `--root` is what the hooks, the
+    """`python -m nightshift.gates.run` with no `--root` is what the hooks, the
     preflight and the runner all use. Losing that is the failure mode of moving a
     script into a package: `Path(__file__).parent.parent` used to be the repo and
     is now a directory inside site-packages."""
     root = _project(tmp_path, always_ok="def check(root):\n    return []\n")
     nested = root / "pkg" / "sub"
     nested.mkdir(parents=True)
-    done = subprocess.run([sys.executable, "-m", "aiteam.gates.run"], cwd=nested,
+    done = subprocess.run([sys.executable, "-m", "nightshift.gates.run"], cwd=nested,
                           capture_output=True, text=True, encoding="utf-8", errors="replace")
     assert done.returncode == 0, done.stdout + done.stderr
     assert "All clear" in done.stdout
