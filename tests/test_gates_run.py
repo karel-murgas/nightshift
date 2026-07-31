@@ -71,8 +71,11 @@ def test_a_project_gate_is_found_with_no_registration_step(tmp_path):
 
 
 def test_a_project_gate_runs_and_its_violations_are_reported(tmp_path, capsys):
+    """Selects the one gate under test by name — core now ships real gates
+    (07_portability.md §8 step 3) that would otherwise also run against this
+    minimal fixture and add their own violations or noise to the count."""
     root = _project(tmp_path, no_tabs=GATE.format(file="a.py", rule="tabs are forbidden"))
-    assert gates_run.main(["--root", str(root)]) == 1
+    assert gates_run.main(["--root", str(root), "no_tabs"]) == 1
     out = capsys.readouterr().out
     assert "a.py:1 — tabs are forbidden" in out
     assert "1 violation(s)" in out
@@ -80,7 +83,7 @@ def test_a_project_gate_runs_and_its_violations_are_reported(tmp_path, capsys):
 
 def test_a_clean_project_reports_all_clear(tmp_path, capsys):
     root = _project(tmp_path, always_ok="def check(root):\n    return []\n")
-    assert gates_run.main(["--root", str(root)]) == 0
+    assert gates_run.main(["--root", str(root), "always_ok"]) == 0
     assert "All clear" in capsys.readouterr().out
 
 
@@ -103,8 +106,8 @@ def test_naming_an_unknown_gate_lists_what_is_available(tmp_path, capsys):
 # --- the two directories -----------------------------------------------------
 
 def test_both_directories_are_searched(tmp_path):
-    """Core ships no gates yet (step 3), so this asserts the mechanism rather than
-    a count: the core directory is in the search path, and the project's is too."""
+    """The mechanism, not a count of what core ships today: the core directory
+    is in the search path, and the project's is too."""
     root = _project(tmp_path, mine="def check(root):\n    return []\n")
     dirs = gates_run.gate_dirs(root)
     assert dirs[0] == Path(gates_run.__file__).resolve().parent
@@ -112,10 +115,18 @@ def test_both_directories_are_searched(tmp_path):
 
 
 def test_a_repo_with_no_gates_of_its_own_is_fine(tmp_path):
+    """No project gates directory at all is fine — discovery still finds
+    every gate core ships (07_portability.md §8 step 3), and nothing project-
+    specific."""
     (tmp_path / ".ai").mkdir()
     (tmp_path / ".ai" / "manifest.toml").write_text("", encoding="utf-8", newline="")
-    assert gates_run.gate_dirs(tmp_path) == [Path(gates_run.__file__).resolve().parent]
-    assert gates_run.discover(tmp_path) == {}
+    core_dir = Path(gates_run.__file__).resolve().parent
+    assert gates_run.gate_dirs(tmp_path) == [core_dir]
+    found = gates_run.discover(tmp_path)
+    assert found, "core ships no gates at all — that would be its own regression"
+    assert all(Path(mod.__file__).resolve().parent == core_dir for mod in found.values()), (
+        "every gate found in a project with no gates of its own must come from core"
+    )
 
 
 def test_a_name_collision_between_core_and_project_is_refused(tmp_path, monkeypatch):
@@ -141,7 +152,10 @@ def test_python_dash_m_finds_the_repo_from_the_working_directory(tmp_path):
     root = _project(tmp_path, always_ok="def check(root):\n    return []\n")
     nested = root / "pkg" / "sub"
     nested.mkdir(parents=True)
-    done = subprocess.run([sys.executable, "-m", "nightshift.gates.run"], cwd=nested,
+    # Selects the one gate under test by name — core now ships real gates
+    # (07_portability.md §8 step 3) that would otherwise also run against this
+    # minimal fixture (no .gitattributes, no corrections.log) and fail it.
+    done = subprocess.run([sys.executable, "-m", "nightshift.gates.run", "always_ok"], cwd=nested,
                           capture_output=True, text=True, encoding="utf-8", errors="replace")
     assert done.returncode == 0, done.stdout + done.stderr
     assert "All clear" in done.stdout
