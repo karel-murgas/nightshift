@@ -147,8 +147,11 @@ def check(repo_root: Path) -> list[Violation]:
         if not _is_binary(data) and b"\r\n" in data:
             violations.append(Violation(
                 rel, 0,
-                "CRLF in the working tree — git wants LF here, so this file will "
-                "report as modified with an empty diff until it is rewritten",
+                "CRLF in the working tree — git sees this as clean (the stored LF "
+                "blob and the CRLF worktree file normalise to the same content, so "
+                "`git diff` shows nothing and `git status` reports nothing to "
+                "commit). The fix is per-machine and does not sync: run "
+                "`.ai/normalize_worktree.py`",
             ))
 
     return violations
