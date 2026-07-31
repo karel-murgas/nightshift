@@ -190,9 +190,14 @@ def check_branch(root: Path, card_id: str, branch: str, base: str,
         # — a changed test file's slice depends on what it imports.
         selection = _suite(root).select(changed, tree)
         try:
-            ok, why = runner._run_tests(tree, out_dir / "pytest.txt", test_timeout,
-                                        out_dir / "junit.xml",
-                                        selection.pytest_args(tree / "tests"))
+            # The excerpt is dropped here: this is the interactive review helper, so
+            # its reader is a terminal the maintainer is already looking at, not a
+            # card that has to survive being read on another machine. `why` names the
+            # first failing test (`suite.check_junit`), and the full log is in
+            # `out_dir` on this box, where they are standing.
+            ok, why, _ = runner._run_tests(tree, out_dir / "pytest.txt", test_timeout,
+                                           out_dir / "junit.xml",
+                                           selection.pytest_args(tree / "tests"))
         except subprocess.TimeoutExpired:
             ok, why = False, f"pytest: timed out after {test_timeout}s"
         if not ok:

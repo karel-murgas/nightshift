@@ -94,18 +94,27 @@ class Record:
 
     def dispatched(self, card_id: str, *, worker: str, model: str, attempt: int,
                    title: str = "", outcome: str = "", detail: str = "",
-                   cost_usd: float = 0.0, landed: str = "") -> None:
+                   cost_usd: float = 0.0, landed: str = "", evidence: str = "") -> None:
         """One dispatch and how it ended.
 
         `landed` is `settle`'s own one-line account (`→ testing/ (reviewed ok…)`,
         `attempt 1 failed, will retry (…)`), kept verbatim because it is the only
         place the *consequence* is stated — the outcome says `failed`, the landing
         says whether that meant a retry or `failed/`.
+
+        `evidence` is the bounded block behind `detail` on a failure — which tests
+        failed and on what assertion (`suite.failure_excerpt`). It is here as well
+        as on the card because the two artefacts answer different questions and
+        reach the maintainer by different routes: the card is the one place to look
+        when working *that* card, and `Digest.md` is what gets read in the morning
+        without opening anything. Both are committed, which is the point — the
+        run-log copy is gitignored and cannot be read from another machine.
         """
         self.data.setdefault("dispatched", []).append({
             "card": card_id, "title": title, "worker": worker, "model": model,
             "attempt": attempt, "outcome": outcome, "detail": detail,
-            "cost_usd": round(cost_usd, 2), "landed": landed, "at": _now(),
+            "cost_usd": round(cost_usd, 2), "landed": landed,
+            "evidence": evidence, "at": _now(),
         })
         self.save()
 
