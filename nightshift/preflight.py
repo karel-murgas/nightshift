@@ -181,10 +181,38 @@ class Result:
         self.checks.append(Check(name, ok, detail))
 
 
+def _diff_base(root: Path, base: str) -> str | None:
+    """The ref to diff `HEAD` against, or `None` when no honest one exists.
+
+    Normally this is `base` itself. The exception is being checked out **on**
+    the integration branch, which is a legitimate place to work — plan and board
+    commits do not always get a feature branch. There, `git merge-base HEAD base`
+    resolves to `HEAD`: a real, resolving merge-base and a **vacuously empty
+    diff**. That is strictly worse than failing to resolve one, because the
+    no-merge-base guards below exist precisely to stop "cannot tell" being read
+    as "nothing changed" — and self-diff produces that same false negative
+    through a door those guards do not watch.
+
+    So when `HEAD` is `base`, diff against `origin/<base>` instead: the work
+    being validated is exactly what this checkout has that the remote does not.
+    If that ref is absent (no remote, or never fetched) return `None` and let the
+    caller take the no-merge-base path it already has — the conservative
+    direction, and not a third behaviour to reason about.
+    """
+    head = _git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if head != base:
+        return base
+    remote = f"origin/{base}"
+    if _git(root, "rev-parse", "--verify", "--quiet", remote).returncode == 0:
+        return remote
+    return None
+
+
 def _corrections_touched(root: Path, base: str) -> tuple[bool, str]:
     """Did this branch's diff against the integration base touch the log?"""
-    merge_base = _git(root, "merge-base", "HEAD", base)
-    if merge_base.returncode != 0 or not merge_base.stdout.strip():
+    ref = _diff_base(root, base)
+    merge_base = _git(root, "merge-base", "HEAD", ref) if ref else None
+    if merge_base is None or merge_base.returncode != 0 or not merge_base.stdout.strip():
         # No common ancestor resolves (a fresh clone that never fetched the
         # integration branch). Fall back to "was the log touched in HEAD's
         # commit at all" rather than silently passing — the failure direction
@@ -193,7 +221,7 @@ def _corrections_touched(root: Path, base: str) -> tuple[bool, str]:
         return (".ai/corrections.log" in names, "no merge-base; checked HEAD only")
     mb = merge_base.stdout.strip()
     names = _git(root, "diff", "--name-only", f"{mb}..HEAD").stdout
-    return (".ai/corrections.log" in names, f"diff against {base} ({mb[:8]})")
+    return (".ai/corrections.log" in names, f"diff against {ref} ({mb[:8]})")
 
 
 def _changed_paths(root: Path, base: str) -> tuple[set[str], str]:
@@ -218,13 +246,14 @@ def _changed_paths(root: Path, base: str) -> tuple[set[str], str]:
     """
     changed: set[str] = set()
 
-    merge_base = _git(root, "merge-base", "HEAD", base)
-    mb = merge_base.stdout.strip() if merge_base.returncode == 0 else ""
+    ref = _diff_base(root, base)
+    merge_base = _git(root, "merge-base", "HEAD", ref) if ref else None
+    mb = merge_base.stdout.strip() if merge_base is not None and merge_base.returncode == 0 else ""
     if mb:
         changed.update(_git(root, "diff", "--name-only", f"{mb}..HEAD").stdout.split())
-        how = f"vs {base} ({mb[:8]})"
+        how = f"vs {ref} ({mb[:8]})"
     else:
-        how = f"no merge-base with {base}"
+        how = f"no merge-base with {ref or base}"
 
     for line in _git(root, "status", "--porcelain").stdout.splitlines():
         path = line[3:].strip().strip('"')
