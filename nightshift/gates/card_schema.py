@@ -77,7 +77,27 @@ _RUNNER_FIELDS = frozenset({"attempts", "branch", "started", "finished"})
 # It has to be allowed or the first reorder turns the whole board red, and a
 # gate that fires on the maintainer using their own board is a gate that gets
 # muted. Nothing on our side reads it — see 03_board.md §2.
-_TOOL_FIELDS = frozenset({"kanban_order"})
+_TOOL_FIELDS = frozenset({"kanban_order", "tags"})
+
+# `tags` is the maintainer's own classification, surfaced on the board and in
+# Obsidian's tag pane. Allowed for the same reason `kanban_order` is: it is read
+# by the tools a human drives the board with, not by the runner. The one tag with
+# operational meaning today is `nightshift` — a card whose deliverable lands in the
+# framework repo, which the runner therefore cannot cut a worktree for; those carry
+# `unattended: false` so it declines them up front instead of failing mid-dispatch.
+_TAG = re.compile(r"^[a-z][a-z0-9-]*$")
+
+
+def _tags(fields: dict[str, str]) -> list[str]:
+    """The `tags` value as a list. Inline form only (`tags: [a, b]`), because
+    `_frontmatter` is a flat one-line-per-key parser and a YAML block list would
+    read as an empty value — silently tagging nothing. Returning [] for the empty
+    and absent cases keeps every caller a plain membership test."""
+    raw = fields.get("tags", "").strip()
+    if not raw:
+        return []
+    return [t.strip().strip('"').strip("'").lstrip("#")
+            for t in raw.strip("[]").split(",") if t.strip()]
 
 _SLUG = re.compile(r"^[a-z][a-z0-9-]*$")
 
@@ -193,6 +213,21 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
         bad("tier", f"`tier: {fields['tier']}` — must be one of {sorted(_TIERS)} (00_architecture.md §16)")
     if "unattended" in fields and fields["unattended"].lower() not in _BOOLS:
         bad("unattended", f"`unattended: {fields['unattended']}` — must be true or false")
+    tags = _tags(fields)
+    for tag in tags:
+        if not _TAG.match(tag):
+            bad("tags", f"`{tag}` — tags are lowercase slugs; write them inline, "
+                        f"e.g. `tags: [nightshift]`")
+    # The one tag the runner's behaviour depends on. A `nightshift` card's
+    # deliverable lands in the framework repo, and the runner only ever cuts a
+    # worktree of THIS one — so an unattended dispatch cannot finish it and would
+    # either fail or mutate the editable install globally, mid-run, uncommitted.
+    # Enforced rather than remembered: getting this wrong costs a whole dispatch
+    # to discover, which is exactly what happened on 2026-07-31.
+    if "nightshift" in tags and fields.get("unattended", "").lower() != "false":
+        bad("unattended", "a `nightshift`-tagged card must be `unattended: false` — its "
+                          "deliverable is outside this repo, so the runner cannot cut a "
+                          "worktree for it")
     for line_no, claimed in ([] if lane in _DISPATCHED else _body_unattended_claims(text)):
         if "unattended" in fields and claimed != fields["unattended"].lower():
             out.append(Violation(
