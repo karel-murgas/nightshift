@@ -17,6 +17,14 @@ moment a session's lessons still exist in context (`10_self_improvement.md` §3,
 
 **What it checks**, in cheapest-first order so a fast failure is fast:
 
+0. `nightshift.doctor` — the per-machine preconditions no gate can see, because
+   they are true of the *box* and not of the tree: an LF working tree, `claude`
+   on PATH, this hostname configured in `.ai/hosts.json`, the project modules
+   `bridge` reaches back for, and (reported, never enforced) which `nightshift`
+   commit is installed. First, ahead of the gates, because these failures
+   disguise themselves as something else — a CRLF worktree fails `line_endings`
+   once per file, and no other gate's signal is legible under three hundred of
+   those.
 1. `python -m nightshift.gates.run` — the whole gate suite, ~8 s.
 2. `python .ai/audit.py --check` — the enforcement matrix has not drifted.
    Still a project-side script: the matrix it checks is the project's own earned
@@ -475,6 +483,14 @@ def run_checks(root: Path, base: str, no_corrections: str | None,
                skip_tests: bool = False, full_tests: bool = False,
                fresh_tests: bool = False) -> Result:
     result = Result()
+
+    # Imported here rather than at module level: `doctor` imports *this* module
+    # (for `Check` and the two bridged accessors it probes), and a module-level
+    # import in both directions is a cycle. It is also the honest layering —
+    # doctor is a set of predicates, this is the thing that runs them.
+    from nightshift import doctor
+
+    result.checks.extend(doctor.checks(root))
 
     gates = subprocess.run([sys.executable, "-m", "nightshift.gates.run"],
                            cwd=root, capture_output=True, text=True,
