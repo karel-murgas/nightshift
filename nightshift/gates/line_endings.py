@@ -36,8 +36,18 @@ Three things are checked, because the rule has three ways to rot:
 3. No tracked text file in the *working tree* contains CRLF — the phantom-dirty
    precursor, caught while it is still one file rather than four hundred.
 
-Binary files are excluded by content (a NUL in the first 8 kB), not by
-extension, so a new asset type does not silently become a false positive.
+All three come from a single `git ls-files --eol`, which reports the index
+representation, the working-tree representation and the resolved attribute for every
+tracked file at once. Binary files are excluded by git's own `-text` verdict rather than
+by extension or by sniffing for a NUL, so a new asset type does not silently become a
+false positive, and a file the project has *declared* binary is honoured even when its
+first bytes read as text.
+
+Asking git rather than deriving it also took this gate from **25.2s to 0.61s**
+(2026-08-01). That mattered more than it looks: it was 76% of the whole 31-gate suite,
+the suite runs three times per card (the on-save hook, the runner's gate step, the
+rebase re-verification), and at 33s it blew the 15s on-save hook timeout — so the hook
+was killed on every edit and reported nothing, for about 16 minutes per card.
 """
 from __future__ import annotations
 
@@ -55,49 +65,60 @@ _RULE_LINE = "* text=auto eol=lf"
 # reason to weaken the gate.
 _CRLF_ALLOWED: frozenset[str] = frozenset()
 
-_BINARY_SNIFF_BYTES = 8000
+# `_tracked_files`, `_blob` and `_is_binary` lived here until 2026-08-01 and are gone:
+# `git ls-files --eol` answers all three at once. Tracked-only scoping is inherent to
+# `ls-files`; the index representation no longer needs a `cat-file` per file (which was
+# 546 subprocesses and 25 of this gate's 25.2 seconds); and `-text` is git's own binary
+# verdict, which beats a NUL sniff because it consults `.gitattributes` — a file the
+# project *declared* binary is now treated as binary even if its first bytes read as text.
+#
+# What `git ls-files --eol` reports per file. `mixed` is both endings in one file,
+# which is a CRLF problem by any reading. `none` means no line endings at all (a
+# one-line file with no trailing newline) and is fine.
+_CRLF_EOLS = frozenset({"crlf", "mixed"})
+_BINARY = "-text"
 
 
-def _tracked_files(repo_root: Path) -> list[str] | None:
-    """Paths git tracks, relative to the repo root. None if git cannot answer.
+def _eol_report(repo_root: Path) -> dict[str, tuple[str, str]] | None:
+    """`{path: (index eol, worktree eol)}` — git's own answer, in ONE call.
 
-    Tracked only, deliberately: an untracked scratch file's line endings are
-    nobody's business until it is committed, and flagging them would make the
-    gate fire on work in progress.
+    This gate used to derive the same facts itself: `git cat-file` per tracked file for
+    the blob, plus a `read_bytes()` per file for the worktree, plus a NUL sniff to guess
+    binary. That is 546 subprocesses on Dungeoneer and **25.2 seconds** — 76% of the
+    entire 31-gate suite, and paid three times per card (the on-save hook, the runner's
+    gate step, the rebase re-verification). `git ls-files --eol` reports index eol,
+    worktree eol and the resolved attribute for every tracked file in **0.45s**, which is
+    the same information from the authority that defines it.
+
+    Returns None when git cannot answer — not a repo, no git binary — which the caller
+    treats as "cannot compare", not as "clean".
     """
     try:
         out = subprocess.run(
-            ["git", "-C", str(repo_root), "ls-files", "-z"],
-            capture_output=True, text=True, timeout=60,
-            # Explicit, not the locale codec — a filename byte cp1252 cannot
-            # map would otherwise make .stdout None rather than raise, and the
-            # gate would report "git cannot answer" and check nothing.
-            encoding="utf-8", errors="replace",
+            ["git", "-C", str(repo_root), "ls-files", "--eol", "-z"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            check=False, timeout=60,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     if out.returncode != 0:
         return None
-    return [p for p in out.stdout.split("\0") if p]
 
-
-def _blob(repo_root: Path, rel: str) -> bytes | None:
-    """The staged bytes for `rel`, unfiltered. `cat-file`, not `show`: `git show
-    :path` applies text conversion, which would hand back exactly the
-    normalised view this gate is trying to see past.
-    """
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(repo_root), "cat-file", "blob", f":{rel}"],
-            capture_output=True, timeout=60,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return out.stdout if out.returncode == 0 else None
-
-
-def _is_binary(data: bytes) -> bool:
-    return b"\0" in data[:_BINARY_SNIFF_BYTES]
+    report: dict[str, tuple[str, str]] = {}
+    for record in (out.stdout or "").split("\0"):
+        # `i/lf    w/lf    attr/text=auto eol=lf \tpath`. The path is after a TAB and
+        # may itself contain spaces, so split on the TAB rather than on whitespace.
+        fields, tab, rel = record.partition("\t")
+        if not tab or not rel.strip():
+            continue
+        index_eol = worktree_eol = ""
+        for field in fields.split():
+            if field.startswith("i/"):
+                index_eol = field[2:]
+            elif field.startswith("w/"):
+                worktree_eol = field[2:]
+        report[rel.strip()] = (index_eol, worktree_eol)
+    return report
 
 
 def check(repo_root: Path) -> list[Violation]:
@@ -120,31 +141,29 @@ def check(repo_root: Path) -> list[Violation]:
             "files go phantom-dirty",
         ))
 
-    tracked = _tracked_files(repo_root)
-    if tracked is None:
+    report = _eol_report(repo_root)
+    if report is None:
         # Not a repo, or no git binary. Nothing to compare against; the
         # attributes check above is still meaningful, so report what we have
         # rather than failing the whole gate harness.
         return violations
 
-    for rel in tracked:
+    for rel, (index_eol, worktree_eol) in sorted(report.items()):
         if rel in _CRLF_ALLOWED:
             continue
-
-        blob = _blob(repo_root, rel)
-        if blob is not None and not _is_binary(blob) and b"\r\n" in blob:
+        # git's own binary verdict, which is what `-text` means. It replaces a
+        # NUL-sniff of the first N bytes and is strictly better: it consults
+        # .gitattributes, so a file the project has *declared* binary is treated
+        # as binary even when its first bytes happen to look like text.
+        if _BINARY in (index_eol, worktree_eol):
+            continue
+        if index_eol in _CRLF_EOLS:
             violations.append(Violation(
                 rel, 0,
                 "CRLF in the committed blob — it was staged through a path that "
                 "skipped the .gitattributes filter; `git add --renormalize` it",
             ))
-
-        path = repo_root / rel
-        try:
-            data = path.read_bytes()
-        except OSError:
-            continue  # deleted or unreadable in this checkout; not this gate's call
-        if not _is_binary(data) and b"\r\n" in data:
+        if worktree_eol in _CRLF_EOLS:
             violations.append(Violation(
                 rel, 0,
                 "CRLF in the working tree — git sees this as clean (the stored LF "
