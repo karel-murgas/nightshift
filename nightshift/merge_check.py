@@ -55,7 +55,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from nightshift import bridge
+from nightshift import bridge, gitmerge
 from nightshift.manifest import find_root
 
 # Every possible outcome of one branch's check. Deliberately more than
@@ -162,13 +162,19 @@ def check_branch(root: Path, card_id: str, branch: str, base: str,
                           (made.stderr or made.stdout or "").strip()[:200])
 
     try:
-        merged = _git(tree, "merge", "--no-commit", "--no-ff", branch)
+        merged = _git(tree, "merge", *gitmerge.STRATEGY_ARGS, "--no-commit", "--no-ff",
+                      branch)
         if merged.returncode != 0:
             status = _git(tree, "status", "--porcelain")
             conflicts = _conflicted_paths(status.stdout or "")
+            why = gitmerge.failure_detail(merged)
             _git(tree, "merge", "--abort")
+            # Both halves: which paths, and what git said. A merge can fail with *no*
+            # unmerged paths — refused before it started — and reporting only the
+            # (then empty) conflict list is how a real cause goes unrecorded.
             return MergeCheck(card_id, branch, CONFLICT,
-                              f"conflict in {', '.join(conflicts) or '(see git output)'}")
+                              f"conflict in {', '.join(conflicts) or '(no unmerged paths)'}"
+                              f" — {why}")
 
         out_dir = _run_dir(root, card_id)
         gate_status, gate_why = runner._run_gates(root, tree, out_dir / "gates.txt")
