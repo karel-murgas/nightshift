@@ -150,6 +150,27 @@ def _staged(repo: Path) -> list[str] | None:
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
+def _has_untrack_in_index(repo: Path) -> bool:
+    """Is a staged deletion of a file that still exists on disk — i.e. `git rm --cached`?
+
+    This is the one intent git offers **no pathspec form** for, so the guard must let it
+    past or it forbids an operation outright rather than scoping it. `git commit -- <path>`
+    rebuilds that path from the *working tree*, and the whole point of `--cached` is that
+    the file is still there — so naming it in a pathspec silently re-adds it and the
+    untrack is undone. Found the hard way on 2026-08-01 untracking `.obsidian/`: the
+    pathspec commit reported success, changed only `.gitignore`, and left all 16 files
+    tracked. The denial text was actively wrong there, telling the caller to do the one
+    thing that could not work.
+
+    Narrow on purpose. A staged deletion whose file is *also* gone from disk still needs a
+    pathspec, because `git commit -- <path>` records that deletion correctly.
+    """
+    out = _git(["diff", "--cached", "--name-only", "--diff-filter=D"], repo)
+    if not out:
+        return False
+    return any((repo / line.strip()).exists() for line in out.splitlines() if line.strip())
+
+
 def _flags(tokens: list[str]) -> tuple[bool, bool, bool]:
     """`(has explicit pathspec, sweeps the worktree, is an amend)`."""
     after_commit = tokens[tokens.index("commit") + 1:]
@@ -193,6 +214,8 @@ def evaluate(payload: dict, cwd: Path | None = None) -> str | None:
         if amend and not staged:
             continue
         if _sequencer_busy(repo):   # git owns the index; a pathspec is rejected
+            continue
+        if _has_untrack_in_index(repo):  # `git rm --cached` has no pathspec form
             continue
         return _deny_index(staged)
     return None
