@@ -8,7 +8,16 @@ version = "0.1.0"
 description = "The machinery for running a board-driven AI team against a Python repo: gates, hooks, board, preflight, runner."
 requires-python = ">=3.11"          # tomllib; the manifest is TOML and reading it must need no dependency
 license = { text = "Proprietary" }
-dependencies = []                   # stdlib only, deliberately — see README
+# The no-dependency rule is about **bootstrap**, not about the package: a project
+# is configured by `.ai/manifest.toml`, and reading that file must never require
+# something to be installed first — which `requires-python` above already buys, by
+# pinning the version where `tomllib` is stdlib. Past bootstrap, a dependency that
+# a gate needs is exactly what belongs here, because the alternative is a step every
+# new repo has to remember. `vulture` is the first: `nightshift.gates.dead_code`
+# shells out to it, and a real dependency is what makes
+# `pip install -e path/to/nightshift` the only step that repo takes. Deliberately
+# not an optional extra — an extra is the manual step.
+dependencies = ["vulture>=2.16"]
 authors = [{ name = "Karel Murgas" }]
 
 [project.optional-dependencies]

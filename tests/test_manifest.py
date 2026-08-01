@@ -66,6 +66,10 @@ forbid = [{ importer = "dungeoneer.combat", imports = "dungeoneer.rendering" }]
 adapter = ".ai/i18n_adapter.py"
 base = "en"
 targets = ["cs", "es"]
+
+[dead_code]
+paths = ["dungeoneer", "main.py"]
+min_confidence = 80
 """
 
 
@@ -89,6 +93,8 @@ def test_every_section_of_the_documented_sketch_round_trips(tmp_path):
     assert manifest.memory.freshness[0].requires == ".claude/memory/ref_i18n.md"
     assert manifest.layering[0].imports == "dungeoneer.rendering"
     assert manifest.i18n is not None and manifest.i18n.targets == ("cs", "es")
+    assert manifest.dead_code.paths == ("dungeoneer", "main.py")
+    assert manifest.dead_code.min_confidence == 80
 
 
 def test_paths_resolve_against_the_root_the_manifest_was_read_from(tmp_path):
@@ -129,6 +135,25 @@ def test_an_i18n_table_without_an_adapter_is_refused(tmp_path):
     _write(tmp_path, "[i18n]\nbase = 'en'\ntargets = ['cs']\n")
     with pytest.raises(m.ManifestError, match="adapter"):
         m.load(tmp_path)
+
+
+def test_omitting_the_dead_code_table_leaves_a_configuration_that_still_runs(tmp_path):
+    """`[dead_code]` is `[i18n]`'s opposite, deliberately. The gate it configures
+    ships in core so that a new repo gets dead-code detection from the install
+    alone — so an absent table has to mean "the defaults", never "off"."""
+    _write(tmp_path, "[project]\nsource_dirs = ['pkg']\n")
+    manifest = m.load(tmp_path)
+    assert manifest.dead_code.min_confidence == 80
+    assert manifest.dead_code_paths == ("pkg",), "the gate would scan nothing"
+
+
+def test_declared_dead_code_paths_override_source_dirs(tmp_path):
+    """The measured reason the field exists: an entry point outside the source
+    dirs has to be scanned with them, or everything only it imports reads as
+    dead. See `nightshift/gates/dead_code.py`."""
+    _write(tmp_path, "[project]\nsource_dirs = ['pkg']\n"
+                     "[dead_code]\npaths = ['pkg', 'main.py']\n")
+    assert m.load(tmp_path).dead_code_paths == ("pkg", "main.py")
 
 
 def test_the_orientation_budget_is_off_unless_someone_states_a_number(tmp_path):
@@ -209,6 +234,21 @@ def test_a_declared_but_missing_directory_is_a_warning_not_an_error(tmp_path):
     _write(tmp_path, "[tests]\ndir = 'tests'\n")
     problems = m.validate(m.load(tmp_path))
     assert [p.level for p in problems if p.where == "tests.dir"] == ["warning"]
+
+
+def test_a_non_integer_confidence_raises_rather_than_being_coerced(tmp_path):
+    _write(tmp_path, "[dead_code]\nmin_confidence = 'high'\n")
+    with pytest.raises(m.ManifestError, match="min_confidence"):
+        m.load(tmp_path)
+
+
+def test_a_confidence_outside_a_percentage_is_an_error(tmp_path):
+    """vulture would accept it silently and report nothing — the shape of
+    "configured, therefore assumed checked, therefore never looked at"."""
+    _write(tmp_path, "[dead_code]\nmin_confidence = 800\n")
+    problems = m.validate(m.load(tmp_path))
+    assert any(p.level == "error" and p.where == "dead_code.min_confidence"
+               for p in problems)
 
 
 def test_an_integration_branch_equal_to_stable_is_flagged(tmp_path):

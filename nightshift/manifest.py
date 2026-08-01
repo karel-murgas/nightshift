@@ -9,7 +9,10 @@ framework repo can serve N projects instead of being forked per project.
 **Absence is meaningful, and it is not the same as a default.** Three shapes:
 
 * A table with sensible universal defaults (`[tests]`, `[branches].stable`,
-  `[board]`) fills itself in when omitted.
+  `[board]`, `[dead_code]`) fills itself in when omitted. `[dead_code]` is the
+  case where that is load-bearing rather than convenient: the gate it configures
+  ships in core so that a new repo gets dead-code detection from `pip install`
+  alone, so its table has to be an *override* and never a prerequisite.
 * A table whose absence *disables a feature* returns `None`, never a default.
   `[i18n]` is the case §4 names explicitly: a project with no localisation omits
   the table, the three i18n gates never register, and nothing is lost. A default
@@ -46,7 +49,7 @@ from pathlib import Path
 __all__ = [
     "AI_DIR", "MANIFEST_NAME", "ManifestError",
     "Manifest", "Project", "Tests", "Branches", "Board", "Worker",
-    "Memory", "FreshnessRule", "LayeringRule", "I18n", "Problem",
+    "Memory", "FreshnessRule", "LayeringRule", "I18n", "DeadCode", "Problem",
     "find_root", "manifest_path", "load", "parse", "validate", "require",
 ]
 
@@ -188,6 +191,35 @@ class I18n:
 
 
 @dataclass(frozen=True)
+class DeadCode:
+    """What `nightshift.gates.dead_code` points `vulture` at, and how sure it
+    must be before it speaks.
+
+    **Both fields exist because `source_dirs` is the wrong answer twice**, in
+    opposite directions — measured on Dungeoneer, 2026-08-01, and written down
+    at length in the gate's own docstring:
+
+    * an entry point *outside* the source dirs (`main.py`) has to be included,
+      or every `if TYPE_CHECKING:` import it is the sole consumer of reads as
+      dead — 8 false positives there, all of which the entry point resolves
+      with no whitelist file at all;
+    * `extra_source_dirs` has to stay *out*, because a test directory adds ~25
+      decorator-injected pytest fixtures vulture cannot see are used.
+
+    So the paths are their own field rather than either existing one. Empty
+    means `project.source_dirs`, which is the right default for a project whose
+    package *is* its entry point — see `Manifest.dead_code_paths`.
+
+    `min_confidence = 80` is a staged floor, not a natural constant: 60 is where
+    vulture reports genuinely orphaned functions and classes, and 80 is what a
+    tree that has never been swept can go green on today. A project lowers it
+    once it has cleared the 60-band, and the gate's docstring says so.
+    """
+    paths: tuple[str, ...] = ()
+    min_confidence: int = 80
+
+
+@dataclass(frozen=True)
 class Manifest:
     """One project's declared facts, plus the repo root they are relative to.
 
@@ -204,8 +236,20 @@ class Manifest:
     memory: Memory = field(default_factory=Memory)
     layering: tuple[LayeringRule, ...] = ()
     i18n: I18n | None = None
+    dead_code: DeadCode = field(default_factory=DeadCode)
 
     # --- resolved paths, so no caller re-joins them ---------------------------
+
+    @property
+    def dead_code_paths(self) -> tuple[str, ...]:
+        """What the dead-code gate scans: the `[dead_code]` table's paths, or
+        `source_dirs` when it declares none.
+
+        Resolved here rather than in the gate so that "the table is an override,
+        never a prerequisite" is a property of the config and is visible to
+        anything else that wants to know — a gate that fell back on its own
+        would make the default invisible from the manifest side."""
+        return self.dead_code.paths or self.project.source_dirs
 
     @property
     def tests_path(self) -> Path:
@@ -296,7 +340,7 @@ def _unknown(table: dict, known: tuple[str, ...], where: str) -> list[Problem]:
 
 
 _KNOWN_TABLES = ("project", "tests", "branches", "board", "worker", "memory",
-                 "layering", "i18n")
+                 "layering", "i18n", "dead_code")
 _KNOWN: dict[str, tuple[str, ...]] = {
     "project": ("name", "source_dirs", "extra_source_dirs", "doc_files"),
     "tests": ("dir", "parallel"),
@@ -306,6 +350,7 @@ _KNOWN: dict[str, tuple[str, ...]] = {
     "memory": ("orientation", "budget_bytes", "freshness"),
     "layering": ("forbid",),
     "i18n": ("adapter", "base", "targets", "untranslated_allowlist", "loanwords_denylist"),
+    "dead_code": ("paths", "min_confidence"),
 }
 
 
@@ -357,6 +402,13 @@ def parse(data: dict, root: Path) -> Manifest:
     if budget is not None and not isinstance(budget, int):
         raise ManifestError("memory.budget_bytes must be an integer number of bytes")
 
+    # Unlike `[i18n]`, an absent `[dead_code]` is not an absence — it is the
+    # defaults, because the gate must run on a repo that has configured nothing.
+    dead_code_t = _table(data, "dead_code")
+    confidence = dead_code_t.get("min_confidence", DeadCode.min_confidence)
+    if not isinstance(confidence, int) or isinstance(confidence, bool):
+        raise ManifestError("dead_code.min_confidence must be an integer percentage")
+
     return Manifest(
         root=root,
         project=Project(
@@ -391,6 +443,10 @@ def parse(data: dict, root: Path) -> Manifest:
         ),
         layering=tuple(layering),
         i18n=i18n,
+        dead_code=DeadCode(
+            paths=_as_str_tuple(dead_code_t.get("paths", []), "dead_code.paths"),
+            min_confidence=confidence,
+        ),
     )
 
 
@@ -480,6 +536,12 @@ def validate(manifest: Manifest, data: dict | None = None) -> list[Problem]:
             problems.append(Problem("error", "i18n.targets",
                                     f"{manifest.i18n.base!r} is the base language; a "
                                     f"language cannot be its own translation target"))
+
+    for i, rel in enumerate(manifest.dead_code.paths):
+        check_path(rel, f"dead_code.paths[{i}]", must_exist=True, kind="scanned path")
+    if not 0 <= manifest.dead_code.min_confidence <= 100:
+        problems.append(Problem("error", "dead_code.min_confidence",
+                                "must be a percentage between 0 and 100"))
 
     if manifest.memory.budget_bytes is not None and manifest.memory.budget_bytes <= 0:
         problems.append(Problem("error", "memory.budget_bytes",
