@@ -63,6 +63,60 @@ def _clean_import_state():
         del sys.modules[name]
 
 
+# --- --skip ------------------------------------------------------------------
+#
+# Exists for the on-save hook, which has a timeout. Dungeoneer measured the full
+# suite at 33.2s against a 15s hook timeout, of which `line_endings` alone was
+# 25.2s — so the hook was killed on every edit and `; exit 0` hid it: ~16 minutes
+# of a 40-minute card spent on a check that never once finished. Skipping the one
+# slow gate brings it to 8.2s. Naming the other 30 positionally would have been a
+# hand-written list that silently stops covering each new gate.
+
+def test_skip_excludes_only_the_named_gate(tmp_path, capsys):
+    root = _project(tmp_path,
+                    slow_one=GATE.format(file="a.py", rule="slow"),
+                    fast_one=GATE.format(file="b.py", rule="fast"))
+    assert gates_run.main(["--root", str(root), "slow_one", "fast_one",
+                           "--skip", "slow_one"]) == 1
+    out = capsys.readouterr().out
+    assert "b.py:1 — fast" in out
+    assert "a.py" not in out, "the skipped gate still ran"
+
+
+def test_skip_applies_to_the_default_all_gates_selection(tmp_path, capsys):
+    """The case the hook actually uses: no positional names, so the default is
+    every gate — and that must stay the default, so a gate added tomorrow runs
+    without anyone editing the hook.
+
+    Asserts on the skipped gate's absence rather than the exit code: with no
+    positional selection the core gates run too, and against a fixture this
+    minimal some of them legitimately fail (no corrections log, no
+    `.gitattributes`). Same reason the test below selects by name."""
+    root = _project(tmp_path, only_one=GATE.format(file="a.py", rule="boom"))
+    gates_run.main(["--root", str(root), "--skip", "only_one"])
+    out = capsys.readouterr().out
+    assert "a.py" not in out and "boom" not in out
+    assert "only_one" not in out.rsplit("violation(s) across", 1)[-1], \
+        "the skipped gate is still listed as having run"
+
+
+def test_an_unknown_skip_name_is_an_error_not_a_silent_no_op(tmp_path, capsys):
+    """A typo fails in the *safe* direction — the gate still runs — which is
+    exactly why it would never be noticed. Same refusal as `manifest.validate`
+    gives an unknown key."""
+    root = _project(tmp_path, real_gate=GATE.format(file="a.py", rule="x"))
+    assert gates_run.main(["--root", str(root), "--skip", "raelgate"]) == 2
+    assert "Unknown gate(s): raelgate" in capsys.readouterr().out
+
+
+def test_skipping_everything_is_refused_rather_than_reported_all_clear(tmp_path, capsys):
+    """"0 gates, 0 violations" would print as success. A run that checks nothing
+    must not look like a run that found nothing."""
+    root = _project(tmp_path, only_one=GATE.format(file="a.py", rule="x"))
+    assert gates_run.main(["--root", str(root), "only_one", "--skip", "only_one"]) == 2
+    assert "every gate was skipped" in capsys.readouterr().out
+
+
 # --- the project's own gates -------------------------------------------------
 
 def test_a_project_gate_is_found_with_no_registration_step(tmp_path):

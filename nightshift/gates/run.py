@@ -93,15 +93,31 @@ def main(argv: list[str] | None = None) -> int:
                         help="apply autofixes where a gate supports one (currently none do)")
     parser.add_argument("--root", type=Path, default=None,
                         help="repo to gate (default: found from the working directory)")
+    # Everything EXCEPT these. The distinction from naming gates positionally matters
+    # for the caller this exists for -- an editor's on-save hook, which has a timeout
+    # and must not be the place a slow gate is discovered. Listing the ~30 wanted gates
+    # instead would be a hand-written list of subjects, which goes stale silently the
+    # day a gate is added: the new gate simply would not run there and nothing would
+    # say so. Skipping names the exemption instead, so the default stays "all of them".
+    parser.add_argument("--skip", action="append", default=[], metavar="NAME",
+                        help="run every gate EXCEPT these (repeatable)")
     args = parser.parse_args(argv)
 
     repo_root = (args.root or find_root()).resolve()
     all_gates = discover(repo_root)
     selected = args.gates or sorted(all_gates)
-    unknown = [g for g in selected if g not in all_gates]
+    # A typo'd --skip is an error, not a silent no-op. It fails in the *safe*
+    # direction (the gate still runs), which is exactly why it would never be
+    # noticed -- the same "typo'd key that silently does nothing" this project
+    # refuses in `manifest.validate`.
+    unknown = [g for g in (*selected, *args.skip) if g not in all_gates]
     if unknown:
         print(f"Unknown gate(s): {', '.join(unknown)}")
         print(f"Available: {', '.join(sorted(all_gates))}")
+        return 2
+    selected = [g for g in selected if g not in set(args.skip)]
+    if not selected:
+        print("Nothing to run — every gate was skipped.")
         return 2
 
     total = 0
