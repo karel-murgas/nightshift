@@ -38,6 +38,7 @@ import ast
 import re
 from pathlib import Path
 
+from nightshift.gates import corpus
 from nightshift.gates.base import Violation
 
 NAME = "branch_role_prose"
@@ -118,9 +119,8 @@ def _roles(repo_root: Path) -> tuple[str, frozenset[str]] | None:
     path = repo_root / _BRANCHES_FILE
     if not path.exists():
         return None
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    except (SyntaxError, UnicodeDecodeError):
+    tree = corpus.tree(path)
+    if tree is None:
         return None
 
     integration: str | None = None

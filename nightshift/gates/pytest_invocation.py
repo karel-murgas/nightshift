@@ -51,6 +51,7 @@ import ast
 from pathlib import Path
 
 import appeal_markers
+from nightshift.gates import corpus
 from nightshift.gates.base import Violation
 
 NAME = "pytest_invocation"
@@ -101,9 +102,8 @@ def check(repo_root: Path) -> list[Violation]:
     violations: list[Violation] = []
 
     for path in _files(repo_root):
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
-        except (SyntaxError, ValueError):
+        tree = corpus.tree(path)
+        if tree is None:
             continue  # not this gate's job to report unparseable Python
         rel = path.relative_to(repo_root).as_posix()
         for line, flag in _offending_sequences(tree):

@@ -38,6 +38,7 @@ import ast
 from pathlib import Path
 
 import appeal_markers
+from nightshift.gates import corpus
 from nightshift.gates.base import Violation
 
 NAME = "subprocess_result_checked"
@@ -74,9 +75,8 @@ def check(repo_root: Path) -> list[Violation]:
         if "__pycache__" in path.parts:
             continue
         rel = path.relative_to(repo_root).as_posix()
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        except (OSError, SyntaxError, UnicodeDecodeError):
+        tree = corpus.tree(path)
+        if tree is None:
             continue
         for node in ast.walk(tree):
             # An `ast.Expr` statement is a value computed and thrown away.

@@ -43,6 +43,7 @@ import ast
 from pathlib import Path
 
 import appeal_markers
+from nightshift.gates import corpus
 from nightshift.gates.base import Violation
 
 NAME = "run_stop_recorded"
@@ -93,9 +94,8 @@ def check(repo_root: Path) -> list[Violation]:
     path = repo_root / _TARGET
     if not path.is_file():
         return []
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
-    except (SyntaxError, ValueError):
+    tree = corpus.tree(path)
+    if tree is None:
         return []  # not this gate's job to report unparseable Python
 
     rel = _TARGET.as_posix()

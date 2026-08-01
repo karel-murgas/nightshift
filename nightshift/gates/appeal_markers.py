@@ -52,6 +52,7 @@ import tokenize
 from dataclasses import dataclass
 from pathlib import Path
 
+from nightshift.gates import corpus
 from nightshift.manifest import AI_DIR
 
 # `# gate-ok(<gate>): <reason>` — the gate name is a gate's module stem, core or
@@ -95,10 +96,21 @@ def _comment_lines(source: str) -> dict[int, tuple[str, bool]]:
 
 
 def scan_file(path: Path, repo_root: Path) -> list[Appeal]:
-    """Every `# gate-ok(...)` marker in one Python file, reasons joined."""
-    try:
-        source = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    """Every `# gate-ok(...)` marker in one Python file, reasons joined.
+
+    Cached per file *version* (`gates.corpus`), because seven gates support
+    appeals and each used to tokenize the whole tree to find them — ~5.0s of
+    an 8.3s suite spent re-deriving one answer seven times. The cache key
+    includes the repo root: `Appeal.file` is repo-relative, so the same file
+    scanned as part of two different roots is genuinely two different answers.
+    """
+    return corpus.cached(
+        f"appeals:{repo_root}", path, lambda p: _scan_file_uncached(p, repo_root))
+
+
+def _scan_file_uncached(path: Path, repo_root: Path) -> list[Appeal]:
+    source = corpus.read_text(path)
+    if source is None:
         return []
     rel = path.relative_to(repo_root).as_posix()
     comments = _comment_lines(source)
