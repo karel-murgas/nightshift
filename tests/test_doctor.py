@@ -6,77 +6,41 @@ catch live in the disagreement between what git stored, what is on disk, and
 what this particular box has — and a mock of any of those three is a mock of the
 thing under test.
 
-The one thing deliberately stubbed is the project's `runner.py`. Doctor's
-contract there is "ask the project's own resolver and report its answer, do not
-grow a second one"; whether `claude_binary()` itself handles `CLAUDE_BIN` and
-`~/.local/bin` correctly is tested where that function lives (Dungeoneer's
-`tests/test_self_improvement.py`, which also drives doctor against the real
-module). Importing the real 2 000-line runner here would additionally couple the
-framework's test suite to one consuming project, which is the coupling
-`07_portability.md` exists to remove.
+The one thing deliberately patched is `runner.claude_binary`. Doctor's contract
+there is "ask the resolver that already owns the question and report its answer,
+do not grow a second one"; whether that function handles `CLAUDE_BIN`, PATH and
+`~/.local/bin` correctly is tested where it lives. Asserting it *here* would mean
+asserting facts about whichever box the suite happens to run on, which is what
+these checks exist to report rather than to require.
 """
 from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
 from nightshift import doctor, preflight
 
-_RUNNER_STUB = '''\
-from pathlib import Path
-
-HOSTS_FILE = Path(".ai/hosts.json")
-HOST_FILE = Path(".ai/host.json")
-
-
-def claude_binary():
-    return {found!r}
-'''
-
-
-@pytest.fixture(autouse=True)
-def _isolate_project_modules():
-    """`bridge` imports `runner`/`suite`/`branches` as *top-level* modules and
-    inserts each tmp repo's `.ai/` on `sys.path`. Without this, the second test to
-    run gets the first test's stub out of `sys.modules`, and a test that asserts a
-    module is *missing* can find an earlier tmp repo's copy through a stale path
-    entry — both of which pass or fail for reasons that have nothing to do with the
-    repo under test."""
-    before = list(sys.path)
-    for name in ("runner", "suite", "branches"):
-        sys.modules.pop(name, None)
-    yield
-    sys.path[:] = before
-    for name in ("runner", "suite", "branches"):
-        sys.modules.pop(name, None)
-
-
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args],
                    check=True, capture_output=True, encoding="utf-8", errors="replace")
 
 
-def _project(tmp_path: Path, *, claude: str | None = "/usr/bin/claude",
-             hosts: dict | None = None, with_suite: bool = True,
-             with_runner: bool = True, name: str = "repo") -> Path:
+def _project(tmp_path: Path, *, hosts: dict | None = None, name: str = "repo") -> Path:
     """A synthetic project: a git repo with the `.ai/` the framework reaches into."""
     repo = tmp_path / name
     (repo / ".ai").mkdir(parents=True)
     _git_init(repo)
 
     (repo / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
-    (repo / ".ai" / "manifest.toml").write_text("", encoding="utf-8", newline="")
-    (repo / ".ai" / "branches.py").write_text('INTEGRATION = "development_team"\n',
-                                              encoding="utf-8", newline="")
-    if with_suite:
-        (repo / ".ai" / "suite.py").write_text("GAME = 'game'\n", encoding="utf-8", newline="")
-    if with_runner:
-        (repo / ".ai" / "runner.py").write_text(_RUNNER_STUB.format(found=claude),
-                                                encoding="utf-8", newline="")
+    # `[branches].integration` is what `preflight.integration_base` reads since
+    # 07_portability.md §8 step 4 replaced `.ai/branches.py`. The
+    # `preflight-config` check probes that accessor, so an empty manifest here
+    # would fail it for the wrong reason.
+    (repo / ".ai" / "manifest.toml").write_text(
+        '[branches]\nintegration = "development_team"\n', encoding="utf-8", newline="")
     entries = {"some-other-box": {"capabilities": []}} if hosts is None else hosts
     (repo / ".ai" / "hosts.json").write_text(json.dumps(entries, indent=2) + "\n",
                                              encoding="utf-8", newline="")
@@ -108,7 +72,7 @@ def test_a_clean_project_passes_every_check(tmp_path, monkeypatch):
     results = doctor.checks(repo)
 
     assert [check.name for check in results] == [
-        "lf-worktree", "claude-bin", "hosts-json", "bridge", "nightshift"]
+        "lf-worktree", "claude-bin", "hosts-json", "preflight-config", "nightshift"]
     assert all(check.ok for check in results), [
         (c.name, c.detail) for c in results if not c.ok]
 
@@ -119,20 +83,21 @@ def test_a_crlf_working_tree_fails_and_names_the_per_machine_fix(tmp_path, monke
     to name the script that repairs *this* checkout."""
     monkeypatch.setattr(doctor.socket, "gethostname", lambda: "this-box")
     repo = _project(tmp_path, hosts={"this-box": {}})
-    (repo / ".ai" / "branches.py").write_bytes(b'INTEGRATION = "development_team"\r\n')
+    (repo / ".ai" / "hosts.json").write_bytes(b'{"this-box": {}}\r\n')
 
     check = _named(doctor.checks(repo), "lf-worktree")
 
     assert not check.ok
     assert ".ai/normalize_worktree.py" in check.detail
-    assert ".ai/branches.py" in check.detail
+    assert ".ai/hosts.json" in check.detail
 
 
 # --- claude on PATH -----------------------------------------------------------
 
 
-def test_an_unresolvable_claude_binary_fails_and_names_claude_bin(tmp_path):
-    repo = _project(tmp_path, claude=None)
+def test_an_unresolvable_claude_binary_fails_and_names_claude_bin(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor.runner, "claude_binary", lambda: None)
+    repo = _project(tmp_path)
 
     check = _named(doctor.checks(repo), "claude-bin")
 
@@ -140,23 +105,27 @@ def test_an_unresolvable_claude_binary_fails_and_names_claude_bin(tmp_path):
     assert "CLAUDE_BIN" in check.detail
 
 
-def test_a_resolved_claude_binary_is_reported(tmp_path):
-    repo = _project(tmp_path, claude="/opt/bin/claude")
+def test_a_resolved_claude_binary_is_reported(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor.runner, "claude_binary", lambda: "/opt/bin/claude")
+    repo = _project(tmp_path)
 
     check = _named(doctor.checks(repo), "claude-bin")
 
     assert check.ok and "/opt/bin/claude" in check.detail
 
 
-def test_a_project_without_runner_py_fails_the_claude_check_legibly(tmp_path):
-    """Not a crash and not a silent pass: the bridge's own message, which says the
-    module is unextracted rather than the install being broken."""
-    repo = _project(tmp_path, with_runner=False)
+def test_the_check_asks_the_runners_own_resolver(tmp_path, monkeypatch):
+    """Doctor's contract: ask the resolver that already knows about `CLAUDE_BIN`
+    and this box's `~/.local/bin`, never grow a second `shutil.which`. Asserted
+    by patching that one function and watching the check follow it — which is
+    also what stops the two answers drifting apart."""
+    calls: list[int] = []
+    monkeypatch.setattr(doctor.runner, "claude_binary",
+                        lambda: calls.append(1) or "/somewhere/claude")
+    repo = _project(tmp_path)
 
-    check = _named(doctor.checks(repo), "claude-bin")
-
-    assert not check.ok
-    assert ".ai/runner.py" in check.detail
+    assert _named(doctor.checks(repo), "claude-bin").detail == "/somewhere/claude"
+    assert calls, "the check must go through runner.claude_binary()"
 
 
 # --- hosts.json ---------------------------------------------------------------
@@ -206,21 +175,22 @@ def test_an_untracked_host_override_satisfies_the_check(tmp_path, monkeypatch):
     assert _named(doctor.checks(repo), "hosts-json").ok
 
 
-# --- the project bridge -------------------------------------------------------
+# --- what the preflight reads late --------------------------------------------
 
 
-def test_a_missing_suite_module_fails_the_bridge_check_with_the_manifest_error(tmp_path):
-    """Today this is discovered inside the pytest step, after gates and the audit
-    matrix have already run — the most expensive possible place to learn that
-    `.ai/` is incomplete. The `ManifestError`'s own text must survive to the
-    surface, not be swallowed into a generic 'bridge failed'."""
-    repo = _project(tmp_path, with_suite=False)
+def test_an_undeclared_integration_branch_fails_and_names_the_key(tmp_path):
+    """Read deep inside the preflight's pytest step, after the gates and the
+    audit matrix have already run — the most expensive possible place to learn
+    that the manifest is incomplete. The `ManifestError`'s own text must survive
+    to the surface, not be swallowed into a generic 'config failed'."""
+    repo = _project(tmp_path)
+    (repo / ".ai" / "manifest.toml").write_text('[branches]\nstable = "main"\n',
+                                                encoding="utf-8", newline="")
 
-    check = _named(doctor.checks(repo), "bridge")
+    check = _named(doctor.checks(repo), "preflight-config")
 
     assert not check.ok
-    assert ".ai/suite.py" in check.detail
-    assert "step 4" in check.detail, "the message must say unextracted, not broken"
+    assert "branches.integration" in check.detail
 
 
 # --- the framework version (answer A: report only) ----------------------------
@@ -290,5 +260,6 @@ def test_the_preflight_runs_the_doctor_checks_before_the_gates(tmp_path, monkeyp
                                   no_corrections="fixture", skip_tests=True)
 
     names = [check.name for check in result.checks]
-    assert names[:5] == ["lf-worktree", "claude-bin", "hosts-json", "bridge", "nightshift"]
+    assert names[:5] == ["lf-worktree", "claude-bin", "hosts-json", "preflight-config",
+                         "nightshift"]
     assert names.index("gates") == 5

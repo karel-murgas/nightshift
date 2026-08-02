@@ -42,11 +42,10 @@ Usage (from anywhere inside the repo):
 07_portability.md §1 measured coupling as *project-specific content* — named
 constants — and by that measure this file scores zero, which is why §8 puts it in
 step 2. What that measure could not see is that this module is almost entirely
-*calls into four other modules*, and all four (`board`, `branches`, `runner`,
-`suite`) are still project-side until step 4. So every one of them comes through
-`bridge`, lazily: importing this module must not fail in a repo that has not been
-extracted yet, and when a call does fail the message has to say "not extracted
-yet", not "no module named runner".
+*calls into other modules* — `board`, `branches`, `runner`, `suite`. All four
+were project-side when this was written and reached through a `bridge`; step 4
+moved every one of them into this package, so the seam is gone and the imports
+are plain.
 """
 from __future__ import annotations
 
@@ -55,7 +54,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from nightshift import bridge, gitmerge
+from nightshift import board, branches, gitmerge, runner, suite
 from nightshift.manifest import find_root
 
 # Every possible outcome of one branch's check. Deliberately more than
@@ -75,28 +74,6 @@ _LANES: tuple[str, ...] = ("review", "testing")
 
 # --- the four project modules this file is made of (see the module docstring) ---
 #
-# Functions rather than module-level imports so that `import nightshift.merge_check`
-# costs nothing and fails nowhere. Each names itself in the error, because a bare
-# "no module named runner" from inside an installed package reads as a broken
-# install rather than as the true statement: this half is not extracted yet.
-
-def _runner(root: Path):
-    return bridge.project_module(root, "runner",
-                                 "merge_check (it reuses _run_gates/_run_tests/worktree_root)")
-
-
-def _board(root: Path):
-    return bridge.project_module(root, "board", "merge_check (it reads the cards in each lane)")
-
-
-def _branches(root: Path):
-    return bridge.project_module(root, "branches", "merge_check (it needs the branch to merge onto)")
-
-
-def _suite(root: Path):
-    return bridge.project_module(root, "suite", "merge_check (the same test slice the runner uses)")
-
-
 @dataclass(frozen=True)
 class MergeCheck:
     card_id: str
@@ -120,13 +97,13 @@ def _check_root(root: Path) -> Path:
     """Where this script's own throwaway worktrees live — a sibling of the
     runner's dispatch worktrees, never inside them, so a card actively being
     dispatched and the same card being merge-checked cannot collide."""
-    path = _runner(root).worktree_root(root) / "_merge-check"
+    path = runner.worktree_root(root) / "_merge-check"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def _run_dir(root: Path, card_id: str) -> Path:
-    path = root / _runner(root).RUNS / "_merge-check" / card_id
+    path = root / runner.RUNS / "_merge-check" / card_id
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -147,7 +124,6 @@ def check_branch(root: Path, card_id: str, branch: str, base: str,
     Every exit path removes the worktree it made, success or failure alike —
     this is a question, not a step, and must leave no trace either way.
     """
-    runner = _runner(root)
     if _git(root, "rev-parse", "--verify", branch).returncode != 0:
         return MergeCheck(card_id, branch, BRANCH_MISSING,
                           f"`branch: {branch}` is on the card but the ref no longer exists")
@@ -194,7 +170,7 @@ def check_branch(root: Path, card_id: str, branch: str, base: str,
         changed = set(_git(root, "diff", "--name-only", f"{base}...{branch}").stdout.split())
         # Classified against `tree` (the merged result pytest will run), not `root`
         # — a changed test file's slice depends on what it imports.
-        selection = _suite(root).select(changed, tree)
+        selection = suite.select(changed, tree)
         try:
             # The excerpt is dropped here: this is the interactive review helper, so
             # its reader is a terminal the maintainer is already looking at, not a
@@ -203,7 +179,7 @@ def check_branch(root: Path, card_id: str, branch: str, base: str,
             # `out_dir` on this box, where they are standing.
             ok, why, _ = runner._run_tests(tree, out_dir / "pytest.txt", test_timeout,
                                            out_dir / "junit.xml",
-                                           selection.pytest_args(tree / "tests"))
+                                           selection.pytest_args(tree / suite.tests_rel(root)))
         except subprocess.TimeoutExpired:
             ok, why = False, f"pytest: timed out after {test_timeout}s"
         if not ok:
@@ -223,8 +199,7 @@ def report(root: Path, lanes: tuple[str, ...] = _LANES, base: str | None = None,
     """Every card with a `branch:` in the given lanes, checked. `only` narrows
     to one card id, searched across the given lanes rather than just one — the
     same "a name is a specific request" reasoning `runner.resolve_named` uses."""
-    base = base or _branches(root).INTEGRATION
-    board = _board(root)
+    base = base or branches.integration(root)
     results: list[MergeCheck] = []
     for lane in lanes:
         for card in board.cards(root, lane):
@@ -260,11 +235,11 @@ def _parser(root: Path) -> argparse.ArgumentParser:
     the lane names it will accept and the default base it prints in `--help`."""
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--lane", action="append", choices=list(_board(root).LANES),
+    parser.add_argument("--lane", action="append", choices=list(board.LANES),
                         help="lane(s) to check (default: review, testing)")
     parser.add_argument("--card", help="check only this card id, in any of the given lanes")
     parser.add_argument("--base",
-                        help=f"branch to merge onto (default: {_branches(root).INTEGRATION})")
+                        help=f"branch to merge onto (default: {branches.integration(root)})")
     parser.add_argument("--test-timeout", type=int, default=600,
                         help="seconds allowed for the test suite (default 600)")
     parser.add_argument("--skip-tests", action="store_true",

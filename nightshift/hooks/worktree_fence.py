@@ -27,14 +27,15 @@ which sits under the main repo). Interactive sessions never set it, so this
 guard is invisible there and touches only dispatched workers. An empty/unset
 var is a no-op: allow everything.
 
-**The env var name is read from the project's `runner.py::FENCE_ENV`, not
-duplicated here.** `runner.py` has not moved to core yet (07_portability.md §8
-step 4), so this hook must not invent a second, driftable source for the one
-constant that decides whether it can see the fence at all — the same reasoning
-`branch_role_prose` uses to parse `branches.py::INTEGRATION` rather than
-hardcode a copy. A project with no `.ai/runner.py` (or an older one predating
-`FENCE_ENV`) falls back to a generic default name, which nothing sets, so the
-fence stays off — the same safe direction as every other failure path here.
+**The env var name is read from `[worker].fence_env`, not duplicated here.**
+It was parsed out of the project's `runner.py::FENCE_ENV` until
+07_portability.md §8 step 4 moved the runner into this package and the constant
+into the manifest. This hook must not invent a second, driftable source for the
+one setting that decides whether it can see the fence at all — the same
+reasoning `branch_role_prose` uses to read the declared integration branch
+rather than hardcode a copy. A project that declares no `fence_env` falls back
+to a generic default name, which nothing sets, so the fence stays off — the
+same safe direction as every other failure path here.
 
 Reads the PreToolUse payload on stdin, writes a JSON decision on stdout. Fails
 **open** on anything it cannot parse — a guard that wedges a worker on confusion
@@ -49,7 +50,6 @@ Wired as `python -m nightshift.hooks.worktree_fence` in a consuming project's
 """
 from __future__ import annotations
 
-import ast
 import json
 import os
 import re
@@ -58,11 +58,9 @@ from pathlib import Path
 
 NAME = "worktree_fence"
 
-_RUNNER_FILE = Path(".ai") / "runner.py"
-_FENCE_CONST = "FENCE_ENV"
-# What nothing sets when no project runner declares its own name — the fence
+# What nothing sets when a project declares no `[worker].fence_env` — the fence
 # then never arms, which is the correct behaviour for a project that has not
-# extracted `runner.py` yet, or has none at all.
+# configured one.
 _DEFAULT_ENV_NAME = "NIGHTSHIFT_FENCE_ALLOW"
 
 # `cd`/`pushd` to an absolute path is the exact move that took the worker out of
@@ -84,26 +82,21 @@ def _repo_root() -> Path | None:
 
 
 def _fence_env_name(repo_root: Path | None) -> str:
-    """The env var name the project's runner uses, parsed out of
-    `.ai/runner.py::FENCE_ENV` — not imported (a hook should not depend on
-    `.ai/` being importable) and not duplicated (see the module docstring)."""
+    """The env var name this project's runner sets — `[worker].fence_env`.
+
+    Every failure to read it returns the default, which nothing sets, so the
+    fence stays off. That is deliberate: a guard that wedges a worker because
+    it could not parse a config is worse than no guard, and the runner backstop
+    is the real net.
+    """
     if repo_root is None:
         return _DEFAULT_ENV_NAME
-    path = repo_root / _RUNNER_FILE
-    if not path.is_file():
-        return _DEFAULT_ENV_NAME
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    except (SyntaxError, UnicodeDecodeError):
+        from nightshift.manifest import load
+
+        return load(repo_root).worker.fence_env or _DEFAULT_ENV_NAME
+    except Exception:
         return _DEFAULT_ENV_NAME
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
-            continue
-        target = node.targets[0]
-        if isinstance(target, ast.Name) and target.id == _FENCE_CONST \
-                and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-            return node.value.value
-    return _DEFAULT_ENV_NAME
 
 
 def _resolve(path: str) -> Path | None:

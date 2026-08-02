@@ -20,11 +20,13 @@ import branch_role_prose  # noqa: E402
 
 
 def _repo(tmp_path: Path, claude_md: str, integration: str = "development_team") -> Path:
-    branches = tmp_path / ".ai" / "branches.py"
-    branches.parent.mkdir(parents=True, exist_ok=True)
-    branches.write_text(
-        f'INTEGRATION = "{integration}"\n'
-        'STABLE = frozenset({"dev", "main", "master"})\n',
+    manifest = tmp_path / ".ai" / "manifest.toml"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        "[branches]\n"
+        f'integration = "{integration}"\n'
+        'stable = "main"\n'
+        'forbidden_extra = ["dev", "master"]\n',
         encoding="utf-8",
     )
     (tmp_path / "CLAUDE.md").write_text(claude_md, encoding="utf-8")
@@ -38,7 +40,7 @@ def test_catches_a_stale_claude_md(tmp_path):
     every session to commit to a branch `forbidden_bases()` rejected as stable."""
     v = branch_role_prose.check(_repo(tmp_path, "## Git workflow\n\n- Always commit to `dev`\n"))
     assert len(v) == 1
-    assert "STABLE" in v[0].rule
+    assert "forbidden_bases()" in v[0].rule
     assert "development_team" in v[0].rule
 
 
@@ -47,7 +49,7 @@ def test_catches_a_wrong_non_stable_branch(tmp_path):
         _repo(tmp_path, "- Active integration branch: `feature/old-thing`\n")
     )
     assert len(v) == 1
-    assert "INTEGRATION is `development_team`" in v[0].rule
+    assert "integration is `development_team`" in v[0].rule
 
 
 def test_accepts_the_correct_branch(tmp_path):
@@ -56,30 +58,41 @@ def test_accepts_the_correct_branch(tmp_path):
     ) == []
 
 
-# --- the migration branches.py was designed for ---------------------------
+# --- the migration `nightshift.branches` was designed for -----------------
 
-def test_flipping_the_constant_flips_what_is_correct(tmp_path):
-    """`branches.py`'s promise: retiring the integration branch is a one-line
-    edit. This gate is what makes the prose half of that promise real — after
-    the flip, the doc that still names the old branch is the one that fails."""
+def test_flipping_the_manifest_flips_what_is_correct(tmp_path):
+    """`nightshift.branches`'s promise: retiring the integration branch is a
+    one-line edit. This gate is what makes the prose half of that promise real —
+    after the flip, the doc that still names the old branch is the one that
+    fails."""
     doc = "- Active integration branch: **`development_team`**\n"
     assert branch_role_prose.check(_repo(tmp_path, doc, integration="development_team")) == []
 
     v = branch_role_prose.check(_repo(tmp_path, doc, integration="dev"))
     assert len(v) == 1
-    assert "INTEGRATION is `dev`" in v[0].rule
+    assert "integration is `dev`" in v[0].rule
 
 
 # --- the false-positive brake ---------------------------------------------
 
-def test_a_line_deferring_to_the_constant_is_always_fine(tmp_path):
+def test_a_line_deferring_to_the_source_of_truth_is_always_fine(tmp_path):
     """The pattern the gate wants docs to adopt: name the source, not the
     branch."""
     doc = (
         "- Work on a branch off the **integration branch**; the branch holding\n"
-        "  that role is named in `.ai/branches.py` (today `development_team`)\n"
+        "  that role is `.ai/manifest.toml`'s `[branches].integration` (today\n"
+        "  `development_team`)\n"
     )
     assert branch_role_prose.check(_repo(tmp_path, doc, integration="dev")) == []
+
+
+def test_deferring_to_the_deleted_branches_py_is_no_longer_an_excuse(tmp_path):
+    """`branches.py` was deleted by 07_portability.md §8 step 4. Prose pointing
+    at a file that no longer exists is a dangling pointer, not deference, and
+    exempting it would let the stalest lines in the tree stay green."""
+    doc = "- Active integration branch: `dev` — see `.ai/branches.py`\n"
+    v = branch_role_prose.check(_repo(tmp_path, doc, integration="development_team"))
+    assert len(v) == 1
 
 
 def test_discussing_a_branch_without_claiming_a_role_is_not_flagged(tmp_path):
@@ -94,8 +107,15 @@ def test_discussing_a_branch_without_claiming_a_role_is_not_flagged(tmp_path):
     assert branch_role_prose.check(_repo(tmp_path, doc)) == []
 
 
-def test_missing_branches_py_reports_nothing(tmp_path):
+def test_an_undeclared_integration_branch_reports_nothing(tmp_path):
+    """No declared fact, nothing to check. The gate must not invent one — the
+    third shape in `manifest.py`'s docstring."""
     (tmp_path / "CLAUDE.md").write_text("- Always commit to `dev`\n", encoding="utf-8")
+    assert branch_role_prose.check(tmp_path) == []
+
+    (tmp_path / ".ai").mkdir()
+    (tmp_path / ".ai" / "manifest.toml").write_text(
+        '[branches]\nstable = "main"\n', encoding="utf-8")
     assert branch_role_prose.check(tmp_path) == []
 
 
@@ -104,6 +124,6 @@ def test_missing_docs_report_nothing(tmp_path):
     no-op, not a crash — the honest degradation for the one part of this gate
     that is not yet manifest-driven (07_portability.md §8 D3)."""
     (tmp_path / ".ai").mkdir()
-    (tmp_path / ".ai" / "branches.py").write_text(
-        'INTEGRATION = "main"\nSTABLE = frozenset()\n', encoding="utf-8")
+    (tmp_path / ".ai" / "manifest.toml").write_text(
+        '[branches]\nintegration = "trunk"\n', encoding="utf-8")
     assert branch_role_prose.check(tmp_path) == []

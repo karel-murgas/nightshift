@@ -12,7 +12,7 @@ charter prose the agent has to remember**, while the agent does its own file dis
 one field from it — a boundary, not a promise. A prose-only "never open X" rule handed to
 something that greps for itself will eventually be crossed by a wide enough search.
 
-**What counts as private is derived, never listed here.** `board.py::LANES` is the
+**What counts as private is derived, never listed here.** `nightshift.board.LANES` is the
 board's single home for "which lanes exist", and the private lane is defined by its
 *absence* from that tuple — that is literally what `board.py`'s own comment says
 (`ideas/` is absent "for the same reason it is absent from reconcile.LANES: it is
@@ -55,7 +55,6 @@ Wired as `python -m nightshift.hooks.ideas_fence` under `PreToolUse` for
 """
 from __future__ import annotations
 
-import ast
 import json
 import os
 import sys
@@ -63,8 +62,6 @@ from pathlib import Path
 
 NAME = "ideas_fence"
 
-_BOARD_FILE = Path(".ai") / "board.py"
-_LANES_CONST = "LANES"
 _UNLOCK_ENV = "NIGHTSHIFT_PRIVATE_LANE_UNLOCK"
 
 _WATCHED = ("Read", "Grep", "Glob", "Bash")
@@ -92,33 +89,22 @@ def _board_root(repo_root: Path) -> str:
 
 
 def known_lanes(repo_root: Path) -> tuple[str, ...]:
-    """`board.py::LANES`, parsed rather than imported — `.ai/` is not an importable
-    package, and a hook must not depend on it being one."""
-    path = repo_root / _BOARD_FILE
-    if not path.is_file():
-        return ()
+    """The lanes the board machinery enumerates — `board.LANES`.
+
+    Parsed out of `.ai/board.py` until 07_portability.md §8 step 4, because
+    `.ai/` is not an importable package and a hook must not depend on it being
+    one. `board` now ships in this package, so the honest move is to import the
+    one definition instead of keeping a parser that could disagree with it.
+
+    `()` on any failure, which turns the fence off — the same safe direction the
+    parser took, and the same one every other path in this file takes.
+    """
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    except (OSError, SyntaxError, UnicodeDecodeError):
+        from nightshift.board import LANES
+
+        return tuple(LANES)
+    except Exception:
         return ()
-    for node in ast.walk(tree):
-        target = None
-        if isinstance(node, ast.Assign) and len(node.targets) == 1:
-            target = node.targets[0]
-            value = node.value
-        elif isinstance(node, ast.AnnAssign):
-            target = node.target
-            value = node.value
-        else:
-            continue
-        if not (isinstance(target, ast.Name) and target.id == _LANES_CONST):
-            continue
-        if not isinstance(value, (ast.Tuple, ast.List)):
-            continue
-        names = [e.value for e in value.elts
-                 if isinstance(e, ast.Constant) and isinstance(e.value, str)]
-        return tuple(names)
-    return ()
 
 
 def private_lanes(repo_root: Path) -> tuple[str, ...]:
@@ -165,12 +151,12 @@ def _deny_text(board: str, lane: str) -> str:
     return (
         f"Blocked: `{board}/{lane}/` is a private lane and no judgment actor may open "
         f"it.\n"
-        f"It is private because it is absent from `board.py::LANES`, which is the "
+        f"It is private because it is absent from `nightshift.board.LANES`, which is the "
         f"board's single list of working lanes. The only component permitted in there is "
         f"`reconcile.py`, which reads one frontmatter field and never the body.\n"
         f"If you need context for a card, use `{board}/inbox/`, the card itself, and the "
         f"codebase — that is what the note you were given was built from.\n"
-        f"If `{lane}` is in fact a working lane, the fix is to add it to `board.py::LANES`, "
+        f"If `{lane}` is in fact a working lane, the fix is to add it to `nightshift.board.LANES`, "
         f"not to read around this.\n"
         f"(nightshift.hooks.{NAME})"
     )

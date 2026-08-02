@@ -26,10 +26,10 @@ moment a session's lessons still exist in context (`10_self_improvement.md` §3,
    once per file, and no other gate's signal is legible under three hundred of
    those.
 1. `python -m nightshift.gates.run` — the whole gate suite, ~8 s.
-2. `python .ai/audit.py --check` — the enforcement matrix has not drifted.
-   Still a project-side script: the matrix it checks is the project's own earned
-   evidence (§7 — "an *empty* audit matrix and an *empty* corrections log"), and
-   `audit.py` itself does not move until step 4.
+2. `python -m nightshift.audit --check` — the enforcement matrix has not
+   drifted. The script moved to the package at 07_portability.md §8 step 4; the
+   matrix it reads is still the project's own earned evidence (§7 — "an *empty*
+   audit matrix and an *empty* corrections log"), declared as `[audit].matrix`.
 3. **A correction was recorded, or a reasoned zero was.** The branch's diff
    against the integration base must touch `.ai/corrections.log`, *or*
    `--no-corrections "<reason>"` must be given. Without the escape, the gate
@@ -81,9 +81,8 @@ a clean worktree of a merged result:
 Deterministic; no LLM (`00_architecture.md` §12). It shells out to tools that
 are themselves the checks — it makes no judgement of its own.
 
-**Not standalone yet** (07_portability.md §8). `suite` and `branches` are still
-project-side modules, reached through `bridge`; step 4 moves them and the bridge
-goes away. `audit.py` and the project's own gates stay project-side permanently.
+A project's own gates stay project-side permanently, and so does the content
+the audit reads: the matrix and the corrections log are its earned evidence (§7).
 """
 from __future__ import annotations
 
@@ -97,9 +96,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import bridge, textio  # textio: LF-pinned writes (gate write_newline)
+from nightshift import branches, suite, textio  # textio: LF-pinned writes (gate write_newline)
 from nightshift.manifest import ManifestError, find_root
-from nightshift.manifest import load as load_manifest
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -131,27 +129,18 @@ def tests_dir(root: Path) -> Path:
     """Where pytest is pointed, from the manifest. `tests/` when there is no
     manifest yet — the one place a default is right, because a repo with no
     manifest is one where nothing has been configured *at all*, and refusing to
-    run the preflight there would block the very first commit that adds one."""
-    try:
-        return load_manifest(root).tests_path
-    except ManifestError:
-        return root / "tests"
+    run the preflight there would block the very first commit that adds one.
+
+    Through `suite`, which owns test policy, rather than reading the manifest
+    here: this is the only caller that wants it absolute, and two readers of one
+    field is how the fallback drifts."""
+    return root / suite.tests_rel(root)
 
 
 def integration_base(root: Path) -> str:
-    """The branch this work will merge into, from `branches.py` — never hard-coded."""
-    return bridge.project_module(root, "branches", "the preflight").INTEGRATION
-
-
-def _suite(root: Path):
-    """`suite` — the shared select/parallelise/judge policy.
-
-    Imported lazily, and through `bridge` because it has not been extracted yet
-    (step 4). Lazily for the reason the module docstring gives: this file's job is
-    to shell out to the checks, so it must not acquire an import-time dependency on
-    the runner's half of the tree. `suite` itself imports nothing local.
-    """
-    return bridge.project_module(root, "suite", "the preflight's pytest step")
+    """The branch this work will merge into, from `[branches].integration` —
+    never hard-coded."""
+    return branches.integration(root)
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
@@ -307,7 +296,7 @@ def _save_pytest_cache(root: Path, cache: dict) -> None:
     textio.write_text_lf(path, json.dumps(cache, indent=2) + "\n")
 
 
-def _env_tag(merge_base: str, suite) -> str:
+def _env_tag(merge_base: str) -> str:
     """The non-file inputs a part's pytest verdict depends on. The merge-base pins
     the baseline the slice is computed against; the interpreter version and whether
     xdist is present change *how* pytest runs (serial vs parallel), so a run under
@@ -316,7 +305,7 @@ def _env_tag(merge_base: str, suite) -> str:
             f"|xdist={suite.xdist_available()}")
 
 
-def _part_fingerprint(root: Path, changed: set[str], part: str, suite, env_tag: str) -> str:
+def _part_fingerprint(root: Path, changed: set[str], part: str, env_tag: str) -> str:
     """A content hash of everything `part`'s tests can be affected by.
 
     The env tag, plus the path and byte-content of every changed file that
@@ -349,14 +338,14 @@ def _cache_hit(record: dict | None, fp: str) -> bool:
     return bool(record) and record.get("ok") is True and record.get("fp") == fp
 
 
-def _run_subset(root: Path, suite, parts: frozenset, reason: str) -> tuple[bool, int, str, str]:
+def _run_subset(root: Path, parts: frozenset, reason: str) -> tuple[bool, int, str, str]:
     """Run pytest over exactly `parts` (a non-empty part set) and judge it by its
     own JUnit report. Returns `(ok, total, why, mode)`.
 
     The one place a pytest subprocess is actually launched — the classic
     whole-slice run and a stale-only subset both go through here, so they select,
     parallelise and judge identically. Everything about *what* runs and *how it is
-    judged* comes from `.ai/suite.py`, the same run the runner and `merge_check`
+    judged* comes from `nightshift.suite`, the same run the runner and `merge_check`
     perform (see the module docstring for why that sharing is the point).
     """
     selection = suite.Selection.for_parts(parts, reason)
@@ -424,7 +413,6 @@ def _run_pytest(root: Path, base: str, full: bool, fresh: bool = False) -> tuple
     is set — both force every target part to actually run. See the module
     docstring for the fingerprint contract that makes reuse provably safe.
     """
-    suite = _suite(root)
     changed, how = _changed_paths(root, base)
     if full:
         selection = suite.Selection(suite.ALL, "--full-tests given")
@@ -450,8 +438,8 @@ def _run_pytest(root: Path, base: str, full: bool, fresh: bool = False) -> tuple
     # would match across genuinely different trees. Fall back to always-run there,
     # the same safe direction `_changed_paths` itself takes.
     reuse = not (full or fresh) and bool(merge_base)
-    env_tag = _env_tag(merge_base, suite)
-    fps = {part: _part_fingerprint(root, changed, part, suite, env_tag) for part in target_parts}
+    env_tag = _env_tag(merge_base)
+    fps = {part: _part_fingerprint(root, changed, part, env_tag) for part in target_parts}
 
     # Load even when not reusing, so an untouched part's entry is preserved rather
     # than wiped when this run repopulates only the parts it ran.
@@ -461,7 +449,7 @@ def _run_pytest(root: Path, base: str, full: bool, fresh: bool = False) -> tuple
 
     ran_total = mode = None
     if stale:
-        ok, ran_total, why, mode = _run_subset(root, suite, frozenset(stale),
+        ok, ran_total, why, mode = _run_subset(root, frozenset(stale),
                                                f"preflight stale part(s): {'+'.join(stale)}")
         if not ok:
             # A failed part is not cached — the tree that broke it must be re-run,
@@ -498,11 +486,12 @@ def run_checks(root: Path, base: str, no_corrections: str | None,
     result.add("gates", gates.returncode == 0,
                gates.stdout.strip().splitlines()[-1] if gates.stdout.strip() else "")
 
-    audit = subprocess.run([sys.executable, str(root / ".ai" / "audit.py"), "--check"],
+    audit = subprocess.run([sys.executable, "-m", "nightshift.audit", "--check"],
                            cwd=root, capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
     result.add("audit-matrix", audit.returncode == 0,
-               "matrix and tree agree" if audit.returncode == 0 else "drift — see `python .ai/audit.py`")
+               "matrix and tree agree" if audit.returncode == 0
+               else "drift — see `python -m nightshift.audit`")
 
     if no_corrections is not None:
         result.add("corrections", True, f"explicit zero: {no_corrections}")
@@ -578,7 +567,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="bypass the per-part pytest reuse cache and re-run the selected "
                              "slice from scratch, even if a prior preflight already validated "
                              "an identical tree")
-    parser.add_argument("--base", help="integration branch to diff against (default: branches.INTEGRATION)")
+    parser.add_argument("--base", help="integration branch to diff against "
+                                   "(default: [branches].integration)")
     parser.add_argument("--root", type=Path, default=None,
                         help="repo to check (default: found from the working directory)")
     args = parser.parse_args(argv)

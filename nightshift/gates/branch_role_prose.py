@@ -1,12 +1,12 @@
 """Gate: prose naming the integration branch must agree with
-`.ai/branches.py::INTEGRATION`. Dungeoneer audit row 22.
+`.ai/manifest.toml`'s `[branches].integration`. Dungeoneer audit row 22.
 
-`branches.py` was written to make a branch-role migration a one-line edit:
-change `INTEGRATION`, and `forbidden_bases()` and `merge_base_candidates()`
-both follow. Its own docstring then concedes the hole — a standing rule
-restated in prose elsewhere names the branch too, which no import can reach.
-A one-line edit with a manual step attached is a two-line edit that will be
-done once and forgotten.
+`nightshift.branches` was written to make a branch-role migration a one-line
+edit: change `integration`, and `forbidden_bases()` and
+`merge_base_candidates()` both follow. Its own docstring then concedes the
+hole — a standing rule restated in prose elsewhere names the branch too, which
+no import can reach. A one-line edit with a manual step attached is a two-line
+edit that will be done once and forgotten.
 
 It had already drifted in Dungeoneer, which is how this gate came to exist. On
 2026-07-24 `CLAUDE.md` still read *"Active development branch: `dev` / Always
@@ -18,9 +18,10 @@ commit to a branch the runner refuses to build on.
 ## What it checks
 
 Every doc in `_DOCS` that names *any* branch holding a role — the integration
-branch or a stable one — must name the right one. Concretely: a line matching
-`_ROLE_LINE` (prose asserting "X is the branch you work on") must name
-`INTEGRATION`, and must not assert that a `STABLE` branch is the working one.
+branch or a forbidden one — must name the right one. Concretely: a line
+matching `_ROLE_LINE` (prose asserting "X is the branch you work on") must name
+`[branches].integration`, and must not assert that a branch `forbidden_bases()`
+rejects is the working one.
 
 This is deliberately narrow. It does not police every mention of a retired
 branch name — the docs discuss branch history, and a gate that fired on the
@@ -34,18 +35,18 @@ is a no-op rather than a crash.
 """
 from __future__ import annotations
 
-import ast
 import re
 from pathlib import Path
 
-from nightshift.gates import corpus
+from nightshift import branches
 from nightshift.gates.base import Violation
+from nightshift.manifest import ManifestError
 
 NAME = "branch_role_prose"
 FAST = True
-DESCRIPTION = "docs naming the integration branch must agree with .ai/branches.py::INTEGRATION"
+DESCRIPTION = "docs naming the integration branch must agree with .ai/manifest.toml [branches]"
 
-_BRANCHES_FILE = Path(".ai") / "branches.py"
+_SOURCE = ".ai/manifest.toml [branches].integration"
 _DOCS = (
     Path("CLAUDE.md"),
     Path(".claude") / "plans" / "ai_team" / "SESSIONS.md",
@@ -65,19 +66,24 @@ _ROLE_LINE = re.compile(
 # A line that points at the source of truth is always correct, whatever branch
 # it names in passing — that is the pattern this gate wants docs to adopt.
 #
-# Must match the *file*, not the word "integration": the first version of this
-# was `branches\.py|INTEGRATION` case-insensitively, which exempted every line
-# reading "Active integration branch: X" — precisely the lines it exists to
-# check. Its own tests caught it, but only because they asserted a wrong branch
-# is *rejected* rather than only that a right one is accepted.
-_DEFERS = re.compile(r"branches\.py")
+# Must match the *config location*, not the word "integration": the first
+# version of this was `branches\.py|INTEGRATION` case-insensitively, which
+# exempted every line reading "Active integration branch: X" — precisely the
+# lines it exists to check. Its own tests caught it, but only because they
+# asserted a wrong branch is *rejected* rather than only that a right one is
+# accepted.
+#
+# `branches.py` is deliberately NOT still accepted here. That file was deleted
+# by 07_portability.md §8 step 4, and prose deferring to a file that no longer
+# exists is not deference, it is a dangling pointer that happens to be exempt.
+_DEFERS = re.compile(r"manifest\.toml|branches\.integration")
 
 
 def check(repo_root: Path) -> list[Violation]:
     roles = _roles(repo_root)
     if roles is None:
         return []
-    integration, stable = roles
+    integration, forbidden = roles
 
     violations: list[Violation] = []
     for doc in _DOCS:
@@ -94,58 +100,32 @@ def check(repo_root: Path) -> list[Violation]:
             named = m.group("branch")
             if named == integration:
                 continue
-            if named in stable:
+            if named in forbidden:
                 violations.append(Violation(
                     rel, lineno,
-                    f"{NAME}: names `{named}` as the branch to work on, but `{named}` is "
-                    f"STABLE — `forbidden_bases()` rejects it as a base. The integration "
-                    f"branch is `{integration}` (.ai/branches.py::INTEGRATION)",
+                    f"{NAME}: names `{named}` as the branch to work on, but "
+                    f"`forbidden_bases()` rejects `{named}` as a base. The integration "
+                    f"branch is `{integration}` ({_SOURCE})",
                 ))
             else:
                 violations.append(Violation(
                     rel, lineno,
                     f"{NAME}: names `{named}` as the integration branch, but "
-                    f".ai/branches.py::INTEGRATION is `{integration}`",
+                    f"{_SOURCE} is `{integration}`",
                 ))
     return violations
 
 
 def _roles(repo_root: Path) -> tuple[str, frozenset[str]] | None:
-    """`(INTEGRATION, STABLE)` parsed out of `branches.py`.
+    """`(integration, forbidden_bases)` from the manifest, or `None`.
 
-    Parsed, not imported: a gate should not depend on `.ai/` being importable
-    as a package from wherever it is run.
+    `None` — the whole gate is a no-op — whenever the project has not declared
+    `[branches].integration`. That is the same shape as the old "no
+    `branches.py` here" answer and for the same reason: this gate checks prose
+    against a declared fact, and with no fact declared there is nothing to
+    check. It must not invent one, for `manifest.py`'s third-shape reason.
     """
-    path = repo_root / _BRANCHES_FILE
-    if not path.exists():
+    try:
+        return branches.integration(repo_root), branches.forbidden_bases(repo_root)
+    except ManifestError:
         return None
-    tree = corpus.tree(path)
-    if tree is None:
-        return None
-
-    integration: str | None = None
-    stable: set[str] = set()
-    for node in tree.body:
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
-            continue
-        target = node.targets[0]
-        if not isinstance(target, ast.Name):
-            continue
-        if target.id == "INTEGRATION" and isinstance(node.value, ast.Constant):
-            if isinstance(node.value.value, str):
-                integration = node.value.value
-        elif target.id == "STABLE":
-            stable = set(_strings(node.value))
-
-    if integration is None:
-        return None
-    return integration, frozenset(stable)
-
-
-def _strings(node: ast.AST) -> list[str]:
-    """String constants inside a literal set/frozenset(...) expression."""
-    out: list[str] = []
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-            out.append(sub.value)
-    return out

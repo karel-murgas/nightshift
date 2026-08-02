@@ -49,7 +49,7 @@ from pathlib import Path
 __all__ = [
     "AI_DIR", "MANIFEST_NAME", "ManifestError",
     "Manifest", "Project", "Tests", "Branches", "Board", "Worker",
-    "Memory", "FreshnessRule", "LayeringRule", "I18n", "DeadCode", "Problem",
+    "Memory", "FreshnessRule", "LayeringRule", "I18n", "DeadCode", "Audit", "Problem",
     "find_root", "manifest_path", "load", "parse", "validate", "require",
 ]
 
@@ -220,6 +220,43 @@ class DeadCode:
 
 
 @dataclass(frozen=True)
+class Audit:
+    """Where this project keeps its rule-enforcement matrix, and which of its
+    own gates that matrix is not expected to have a row for.
+
+    Both empty by default, and that is a working configuration rather than a
+    gap: §7 is explicit that a new repo starts with an *empty* audit matrix,
+    because the 55 rows here are Dungeoneer's earned evidence and shipping them
+    as someone else's rules is the thing the extraction must not do. So
+    `nightshift.audit` reports "nothing to count" rather than failing.
+
+    `infra_gates` maps a gate name to the *reason* it is out of the matrix's
+    scope. A bare list would be the exemption without the bargain — the same
+    thing `# gate-ok(...)` refuses.
+    """
+    matrix: str = ""
+    infra_gates: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class Tiers:
+    """Which document carries the `tier: → model` binding block.
+
+    A path, not a table of models, and that is the whole point: `00_architecture.md`
+    §16 says the binding may be written down in exactly one place and that no caller
+    ever names a model. A `[tiers]` table listing models here would be a second
+    place, which is the rule's own failure mode.
+
+    The default is this project's plan doc, which a second project will not have —
+    §7 is explicit that the plan docs do not port. `tiers.binding()` therefore fails
+    loudly and names this key, rather than guessing a model. Guessing is the one
+    behaviour §16 forbids outright: the 2026-07-22 bug was a correct table nothing
+    read, and a dispatcher that silently defaulted would recreate it invisibly.
+    """
+    binding_doc: str = ".claude/plans/ai_team/00_architecture.md"
+
+
+@dataclass(frozen=True)
 class Manifest:
     """One project's declared facts, plus the repo root they are relative to.
 
@@ -237,6 +274,8 @@ class Manifest:
     layering: tuple[LayeringRule, ...] = ()
     i18n: I18n | None = None
     dead_code: DeadCode = field(default_factory=DeadCode)
+    audit: Audit = field(default_factory=Audit)
+    tiers: Tiers = field(default_factory=Tiers)
 
     # --- resolved paths, so no caller re-joins them ---------------------------
 
@@ -340,7 +379,7 @@ def _unknown(table: dict, known: tuple[str, ...], where: str) -> list[Problem]:
 
 
 _KNOWN_TABLES = ("project", "tests", "branches", "board", "worker", "memory",
-                 "layering", "i18n", "dead_code")
+                 "layering", "i18n", "dead_code", "audit", "tiers")
 _KNOWN: dict[str, tuple[str, ...]] = {
     "project": ("name", "source_dirs", "extra_source_dirs", "doc_files"),
     "tests": ("dir", "parallel"),
@@ -351,6 +390,8 @@ _KNOWN: dict[str, tuple[str, ...]] = {
     "layering": ("forbid",),
     "i18n": ("adapter", "base", "targets", "untranslated_allowlist", "loanwords_denylist"),
     "dead_code": ("paths", "min_confidence"),
+    "audit": ("matrix", "infra_gates"),
+    "tiers": ("binding_doc",),
 }
 
 
@@ -404,6 +445,13 @@ def parse(data: dict, root: Path) -> Manifest:
 
     # Unlike `[i18n]`, an absent `[dead_code]` is not an absence — it is the
     # defaults, because the gate must run on a repo that has configured nothing.
+    audit_t = _table(data, "audit")
+    infra = audit_t.get("infra_gates", {})
+    if not isinstance(infra, dict) or not all(isinstance(v, str) for v in infra.values()):
+        raise ManifestError(
+            "audit.infra_gates must be a table of gate name -> the reason it is out "
+            "of the matrix's scope; a bare list would be the exemption without the reason")
+
     dead_code_t = _table(data, "dead_code")
     confidence = dead_code_t.get("min_confidence", DeadCode.min_confidence)
     if not isinstance(confidence, int) or isinstance(confidence, bool):
@@ -446,6 +494,14 @@ def parse(data: dict, root: Path) -> Manifest:
         dead_code=DeadCode(
             paths=_as_str_tuple(dead_code_t.get("paths", []), "dead_code.paths"),
             min_confidence=confidence,
+        ),
+        audit=Audit(
+            matrix=str(audit_t.get("matrix", "")),
+            infra_gates=tuple(sorted(infra.items())),
+        ),
+        tiers=Tiers(
+            binding_doc=str(_table(data, "tiers").get("binding_doc",
+                                                      Tiers.binding_doc)),
         ),
     )
 
@@ -537,6 +593,7 @@ def validate(manifest: Manifest, data: dict | None = None) -> list[Problem]:
                                     f"{manifest.i18n.base!r} is the base language; a "
                                     f"language cannot be its own translation target"))
 
+    check_path(manifest.audit.matrix, "audit.matrix", must_exist=True, kind="rule matrix")
     for i, rel in enumerate(manifest.dead_code.paths):
         check_path(rel, f"dead_code.paths[{i}]", must_exist=True, kind="scanned path")
     if not 0 <= manifest.dead_code.min_confidence <= 100:

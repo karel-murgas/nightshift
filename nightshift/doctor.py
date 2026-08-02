@@ -26,7 +26,7 @@ stops. A check that repaired the tree would be a check nobody reads the output o
 
 **Reuse over re-implementation.** Each check is a call to the predicate that
 already owns the question — `gates.line_endings.check`, the project's
-`runner.claude_binary`, `preflight.integration_base` / `preflight._suite`. A
+`runner.claude_binary`, `preflight.integration_base`. A
 second implementation of "is `claude` installed" would be a second thing to keep
 true.
 """
@@ -38,13 +38,13 @@ import subprocess
 from pathlib import Path
 
 import nightshift
-from nightshift import bridge, preflight
+from nightshift import preflight, runner
 from nightshift.gates import line_endings
 from nightshift.manifest import AI_DIR, ManifestError
 from nightshift.preflight import Check
 
 __all__ = ["checks", "lf_worktree", "claude_on_path", "hosts_entry",
-           "project_bridge", "framework_version"]
+           "preflight_config", "framework_version"]
 
 _HOSTS = f"{AI_DIR}/hosts.json"
 _HOST_OVERRIDE = f"{AI_DIR}/host.json"
@@ -85,10 +85,6 @@ def claude_on_path(root: Path) -> Check:
     answers to "where is claude" is exactly the drift worth not having. A night
     that discovers this at 03:00 has already moved a card and spent an attempt.
     """
-    try:
-        runner = bridge.project_module(root, "runner", "the doctor's claude-on-PATH check")
-    except ManifestError as exc:
-        return Check("claude-bin", False, str(exc))
     found = runner.claude_binary()
     if found:
         return Check("claude-bin", True, found)
@@ -113,11 +109,6 @@ def hosts_entry(root: Path) -> Check:
     is empty. Only the first is a problem, so the question has to be asked of the
     file. The paths still come from the runner, so there is one home for them.
     """
-    try:
-        runner = bridge.project_module(root, "runner", "the doctor's hosts.json check")
-    except ManifestError as exc:
-        return Check("hosts-json", False, str(exc))
-
     hostname = socket.gethostname()
     if (root / runner.HOST_FILE).is_file():
         return Check("hosts-json", True,
@@ -140,27 +131,27 @@ def hosts_entry(root: Path) -> Check:
     return Check("hosts-json", True, f"{hostname} configured in {_HOSTS}")
 
 
-def project_bridge(root: Path) -> Check:
-    """The project-side modules the framework still reaches back for resolve.
+def preflight_config(root: Path) -> Check:
+    """What the preflight reads late enough to fail expensively.
 
-    `preflight` needs `branches` (the integration branch) and `suite` (the test
-    policy) through `bridge`, and today the first attempt at either happens deep
-    inside the pytest step — after the gates and the audit matrix have already
-    run. A `.ai/` missing one of them therefore fails late and expensively, with
-    an error about pytest.
+    This was the `bridge` check: `preflight` reached back into a project's
+    `.ai/` for `branches` and `suite`, and the first attempt at either happened
+    deep inside the pytest step — after the gates and the audit matrix had
+    already run — so an incomplete `.ai/` failed slowly, with an error about
+    pytest. 07_portability.md §8 step 4 moved both into the package, which
+    removes the *import* half of that problem and leaves the half that was
+    always the real one: `[branches].integration` is the field `manifest.py`
+    refuses to guess, and it is still read late.
 
-    Through the two existing accessors, not a hand-kept list of bridged names.
-    That has a known edge, worth stating rather than mechanising: a *third*
-    bridged call added to `preflight.py` without going through a named accessor
-    would silently not be covered here. `bridge` is deleted by
-    `07_portability.md` §8 step 4, so this whole check goes with it.
+    So the check narrows rather than disappearing, and it is named for what it
+    now verifies. `bridge` is gone entirely: step 4 moved the last module it
+    reached for.
     """
-    for probe in (preflight.integration_base, preflight._suite):
-        try:
-            probe(root)
-        except ManifestError as exc:
-            return Check("bridge", False, str(exc))
-    return Check("bridge", True, f"{AI_DIR}/branches.py and {AI_DIR}/suite.py resolve")
+    try:
+        preflight.integration_base(root)
+    except ManifestError as exc:
+        return Check("preflight-config", False, str(exc))
+    return Check("preflight-config", True, "[branches].integration is declared")
 
 
 def framework_version(root: Path, checkout: Path | None = None) -> Check:
@@ -201,7 +192,7 @@ def framework_version(root: Path, checkout: Path | None = None) -> Check:
 # The order they are reported in: cheapest and most self-explanatory first, and
 # the two that need the project's `.ai/` last, so a repo the framework was just
 # installed into says something useful before it says something confusing.
-CHECKS = (lf_worktree, claude_on_path, hosts_entry, project_bridge, framework_version)
+CHECKS = (lf_worktree, claude_on_path, hosts_entry, preflight_config, framework_version)
 
 
 def checks(root: Path) -> list[Check]:
