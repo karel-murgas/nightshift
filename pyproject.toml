@@ -23,8 +23,26 @@ authors = [{ name = "Karel Murgas" }]
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-xdist>=3"]
 
+# Two commands, not one per module. `init` runs in a repo that is not configured
+# yet and `doctor` is what you reach for before you know what is wrong; every
+# other entry point stays `python -m nightshift.<module>`, because a command with
+# two spellings is a command three docs will cite differently. See `cli.py`.
+[project.scripts]
+nightshift = "nightshift.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["nightshift*"]
+
+# The templates are data, not code, so `packages.find` does not see them. Without
+# this a wheel install ships an `init` that cannot write anything -- the failure
+# would be a traceback about a missing file, on the one command a new user runs first.
+[tool.setuptools.package-data]
+nightshift = [
+    "templates/*",
+    "templates/*/*",
+    "templates/*/*/*",
+    "templates/*/*/*/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

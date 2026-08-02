@@ -1,0 +1,21 @@
+# One correction, one line. Six pipe-separated fields, no wrapping:
+#
+#   DATE | SLUG | CLASS | CHANNEL | GATE | NOTE
+#
+# DATE     YYYY-MM-DD
+# SLUG     short kebab-case handle; reuse one only for a literally recurring problem
+# CLASS    from .ai/gates/data/corrections_vocab.json -- which ships EMPTY, so the
+#          first entry you write also adds its class to that file
+# CHANNEL  who found it: karel-style maintainer name, claude, gate, test, audit, none
+# GATE     yes | yes-now | no-judgment | no-gap | n/a
+# NOTE     >=40 chars, and length is not the point. Three things earn the entry:
+#          what was wrong concretely, WHY IT WAS BELIEVED, and what generalises.
+#          The middle one is what makes clustering possible -- the shape of the
+#          error is what repeats, not its subject.
+#
+# Validated by `nightshift.gates.corrections_log` on every edit, so a malformed
+# line cannot sit here quietly. Read the distribution with
+# `python -m nightshift.corrections`.
+#
+# This file starts empty and that is the intended state. The framework ships the
+# machinery for earning rules, not a set of earned rules.

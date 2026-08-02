@@ -1,0 +1,12 @@
+# Normalise every text file to LF in the index and in the working tree.
+#
+# Not a style preference. On Windows git ships `core.autocrlf=true`, so without
+# this line a fresh clone gets CRLF working-tree files whose LF blob normalises
+# to the same content -- invisible to `git status`, and one `line_endings`
+# violation per file the moment any tool writes one. The origin project hit 304
+# of them in a single night, under which no other signal was legible.
+#
+# A checkout that predates this file still has CRLF on disk: `.gitattributes`
+# fixes what git writes next, not what is already there. Run
+# `python -m nightshift.doctor` -- it reports the per-machine half.
+* text=auto eol=lf

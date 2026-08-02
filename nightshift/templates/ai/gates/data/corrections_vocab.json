@@ -1,0 +1,37 @@
+{
+  "_comment": [
+    "The closed vocabulary the corrections log is checked against.",
+    "",
+    "SHIPPED EMPTY, ON PURPOSE. The origin project's twelve classes are its own",
+    "earned evidence, and `corrections_log` requires every declared value to be",
+    "USED by some entry -- copying that file into a fresh repo produces one",
+    "violation per unused class (18 of them, measured 2026-08-02). That is not the",
+    "gate being awkward; it is the gate enforcing the rule that a value list nobody",
+    "uses is how a closed list quietly becomes an open one.",
+    "",
+    "So a class arrives with the first entry that needs it. Adding one is a",
+    "deliberate edit to this file, which is exactly the visibility that keeps the",
+    "list closed -- and it means your vocabulary describes YOUR failures rather",
+    "than someone else's.",
+    "",
+    "`gate` and `disposition` are the framework's own axes and are not usage-",
+    "checked, so they ship filled in. Do not edit them to make a run pass; that is",
+    "the appeal path's job."
+  ],
+  "class": {},
+  "channel": {},
+  "gate": {
+    "yes": "an existing gate would have failed on this",
+    "yes-now": "a gate built or fixed as a result of this correction now catches it",
+    "no-judgment": "genuinely needs human or LLM judgment, not pattern-matching",
+    "no-gap": "mechanically catchable in principle, but no gate exists yet",
+    "n/a": "not a defect, so the question does not apply -- a baseline, a measurement or a recorded decision"
+  },
+  "disposition": {
+    "gate": "closed by a gate now enforcing it -- pointer names the gate module",
+    "recipe": "closed by a recipe or skill change -- pointer names the recipe/skill file",
+    "commit": "closed by a specific code or doc change with no gate/recipe of its own -- pointer is a commit sha or short description of the change",
+    "doc": "closed by a memory or plan-doc correction -- pointer names the doc",
+    "no-action": "deliberately left open by judgment rather than by an oversight -- pointer states the reason acting further is not warranted"
+  }
+}

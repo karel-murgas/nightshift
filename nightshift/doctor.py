@@ -14,12 +14,22 @@ modules the framework reaches back for are the same shape: real, silent, and
 per-checkout.
 
 `07_portability.md` §5 puts this class of check in `nightshift doctor`, alongside
-`nightshift init`. Step 5 has not been built, and the checks are useful before it
-is — so they live here, as a plain list of predicates, and `preflight` runs them
-**first**, ahead of the gates. First because these failures are the ones that
-disguise themselves as something else: a CRLF worktree fails the `line_endings`
-gate three hundred times over, and no other gate's signal is legible underneath
-that. When `init`/`doctor` do arrive as a CLI, this is the module they call.
+`nightshift init`, and `preflight` runs them **first**, ahead of the gates. First
+because these failures are the ones that disguise themselves as something else: a
+CRLF worktree fails the `line_endings` gate three hundred times over, and no other
+gate's signal is legible underneath that.
+
+**`drift()` is the other half, added at step 5.** It re-runs `discover.survey()`
+against a repo that already has a manifest and reports where the two disagree — a
+renamed package, a moved test directory, an integration branch that no longer
+exists. Cheap, because it is the same function `init` proposes from, which is the
+whole reason the two must not grow separate copies: a manifest is a hand-written
+config, and every hand-written config in this tree has gone stale at least once.
+
+Drift is **reported, never fixed**, and it is not a preflight check. A branch that
+was renamed on purpose is drift too, and a doctor that failed the push over it —
+or worse, quietly rewrote the manifest — would be answering a question nobody
+asked. `preflight` keeps running only `CHECKS`.
 
 **Nothing here fixes anything.** Every failure names the exact command to run and
 stops. A check that repaired the tree would be a check nobody reads the output of.
@@ -35,6 +45,8 @@ from __future__ import annotations
 import json
 import socket
 import subprocess
+import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import nightshift
@@ -43,7 +55,7 @@ from nightshift.gates import line_endings
 from nightshift.manifest import AI_DIR, ManifestError
 from nightshift.preflight import Check
 
-__all__ = ["checks", "lf_worktree", "claude_on_path", "hosts_entry",
+__all__ = ["checks", "drift", "Drift", "lf_worktree", "claude_on_path", "hosts_entry",
            "preflight_config", "framework_version"]
 
 _HOSTS = f"{AI_DIR}/hosts.json"
@@ -200,14 +212,106 @@ def checks(root: Path) -> list[Check]:
     return [check(root) for check in CHECKS]
 
 
+@dataclass(frozen=True)
+class Drift:
+    """One manifest field where what is written and what discovery finds disagree."""
+    key: str
+    declared: object
+    found: object
+    why: str
+
+
+def drift(root: Path) -> list[Drift]:
+    """Where `.ai/manifest.toml` and the tree have parted company.
+
+    Compared only for the fields discovery can answer *confidently* — the
+    `CONFIRM` ones are guesses by construction, and reporting "you wrote
+    `development_team`, I guessed `dev`" every single run is how a report gets
+    ignored. `NEVER` fields are not compared for the reason they exist.
+
+    A field discovery cannot find (`value is None`) is not drift either: an absent
+    assets directory does not mean `[worker].harvest_dirs` is wrong, it means
+    discovery has nothing to say. Only a confident, different answer counts.
+    """
+    from nightshift import discover
+    from nightshift.manifest import load
+
+    try:
+        written = load(root)
+    except ManifestError as exc:
+        return [Drift("manifest", None, None, f"unreadable: {exc}")]
+
+    tables = {
+        "project": {"name": written.project.name,
+                    "source_dirs": list(written.project.source_dirs),
+                    "doc_files": list(written.project.doc_files)},
+        "tests": {"dir": written.tests.dir},
+        "branches": {"stable": written.branches.stable},
+        "tiers": {"binding_doc": written.tiers.binding_doc},
+        "worker": {"fence_env": written.worker.fence_env,
+                   "harvest_dirs": list(written.worker.harvest_dirs),
+                   "integration_checkout_dir": written.worker.integration_checkout_dir},
+    }
+
+    out: list[Drift] = []
+    for proposal in discover.survey(root):
+        if proposal.confidence != discover.HIGH or proposal.value is None:
+            continue
+        table, _, field_name = proposal.key.partition(".")
+        if table not in tables or field_name not in tables[table]:
+            continue
+        declared = tables[table][field_name]
+        if declared in ("", [], None):
+            continue  # not written down; `init` would add it, not correct it
+        if declared != proposal.value:
+            out.append(Drift(proposal.key, declared, proposal.value, proposal.why))
+
+    # The integration branch is the one CONFIRM field worth a targeted check, and
+    # the check is existence rather than agreement: a manifest naming a branch that
+    # is gone stops every dispatch, and no heuristic is needed to notice that.
+    # `_git` here returns the CompletedProcess even on a non-zero exit (`None` means
+    # git could not run at all), so the verdict is the return code, not the object.
+    integration = written.branches.integration
+    verify = _git(root, "rev-parse", "--verify", f"refs/heads/{integration}") if integration else None
+    if integration and verify is not None and verify.returncode != 0:
+        out.append(Drift("branches.integration", integration, None,
+                         "no such branch — nothing can dispatch until this is a branch "
+                         "that exists, and forbidden_bases() is derived from it"))
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
+    import argparse
+
     from nightshift.manifest import find_root
 
-    root = find_root()
+    parser = argparse.ArgumentParser(
+        prog="nightshift doctor",
+        description="Per-machine preconditions, plus drift between the manifest and the tree.")
+    parser.add_argument("--root", type=Path, default=None)
+    parser.add_argument("--no-drift", action="store_true",
+                        help="preconditions only, the way preflight runs them")
+    args = parser.parse_args(argv)
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
+    root = (args.root or find_root()).resolve()
     print(f"doctor for {root}\n")
     results = checks(root)
     for check in results:
         print(f"  [{'OK  ' if check.ok else 'FAIL'}] {check.name:<12} {check.detail}")
+
+    if not args.no_drift:
+        found = drift(root)
+        print()
+        if not found:
+            print("  no drift — the manifest and the tree agree")
+        for item in found:
+            print(f"  [DRIFT] {item.key}")
+            print(f"          declared: {item.declared!r}")
+            print(f"          found:    {item.found!r}  ({item.why})")
+        if found:
+            print("\n  Reported, not fixed. Drift can be intentional — a rename you meant.")
     return 0 if all(check.ok for check in results) else 1
 
 

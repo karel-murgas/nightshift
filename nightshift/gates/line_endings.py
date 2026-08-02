@@ -170,7 +170,7 @@ def check(repo_root: Path) -> list[Violation]:
                 "blob and the CRLF worktree file normalise to the same content, so "
                 "`git diff` shows nothing and `git status` reports nothing to "
                 "commit). The fix is per-machine and does not sync: run "
-                "`.ai/normalize_worktree.py`",
+                "python -m nightshift.normalize_worktree",
             ))
 
     return violations

@@ -80,7 +80,12 @@ def test_a_clean_project_passes_every_check(tmp_path, monkeypatch):
 def test_a_crlf_working_tree_fails_and_names_the_per_machine_fix(tmp_path, monkeypatch):
     """The phantom-dirty case: git holds LF, disk holds CRLF, `git status` reports
     nothing. The fix does not sync — there is nothing to commit — so the detail has
-    to name the script that repairs *this* checkout."""
+    to name the remedy that repairs *this* checkout.
+
+    That remedy used to be `.ai/normalize_worktree.py`, which existed only in the
+    origin project: every other repo was told to run a file it did not have. It
+    moved into the package at 07_portability.md §8 step 5, so the detail now names
+    a module, which is true wherever the package is installed."""
     monkeypatch.setattr(doctor.socket, "gethostname", lambda: "this-box")
     repo = _project(tmp_path, hosts={"this-box": {}})
     (repo / ".ai" / "hosts.json").write_bytes(b'{"this-box": {}}\r\n')
@@ -88,7 +93,7 @@ def test_a_crlf_working_tree_fails_and_names_the_per_machine_fix(tmp_path, monke
     check = _named(doctor.checks(repo), "lf-worktree")
 
     assert not check.ok
-    assert ".ai/normalize_worktree.py" in check.detail
+    assert "python -m nightshift.normalize_worktree" in check.detail
     assert ".ai/hosts.json" in check.detail
 
 

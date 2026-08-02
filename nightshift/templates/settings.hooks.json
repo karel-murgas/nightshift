@@ -1,0 +1,130 @@
+{
+  "_comment": [
+    "The hook wiring nightshift needs, as a fragment of .claude/settings.json.",
+    "`nightshift init` merges this into an existing settings.json rather than",
+    "overwriting it: a project's `permissions` block is its own and must survive.",
+    "",
+    "EVERY command here is `python -m nightshift.<module>`, never a repo-relative",
+    "path. A relative command is resolved against the SESSION's cwd, so a stray",
+    "`cd` in an unrelated Bash call disarms the guard instead of tripping it",
+    "(`hook-command-resolved-against-a-moved-cwd`). The `hook_command_cwd` gate",
+    "enforces that, and `nightshift.hooks.project_script` is the cwd-independent",
+    "way to reach a script that must stay project-side.",
+    "",
+    "The PostToolUse gate run is `; exit 0` on purpose: a violation must show in",
+    "the transcript, not block the edit that would fix it."
+  ],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m nightshift.hooks.tier_guard",
+            "timeout": 10,
+            "statusMessage": "Checking the card-execution tier..."
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m nightshift.hooks.preflight_guard",
+            "if": "Bash(git push:*)",
+            "timeout": 15,
+            "statusMessage": "Checking the pre-merge preflight receipt..."
+          },
+          {
+            "type": "command",
+            "command": "python -m nightshift.hooks.preflight_guard",
+            "if": "Bash(git merge:*)",
+            "timeout": 15,
+            "statusMessage": "Checking the pre-merge preflight receipt..."
+          },
+          {
+            "type": "command",
+            "command": "python -m nightshift.hooks.preflight_guard",
+            "if": "Bash(gh pr create:*)",
+            "timeout": 15,
+            "statusMessage": "Checking the pre-merge preflight receipt..."
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|Bash|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m nightshift.hooks.worktree_fence",
+            "timeout": 10,
+            "statusMessage": "Checking the worktree fence (a dispatched worker writes only in its worktree)..."
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m nightshift.hooks.commit_pathspec",
+            "timeout": 15,
+            "statusMessage": "Checking that git commit names what it commits..."
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Grep|Glob|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m nightshift.hooks.ideas_fence",
+            "timeout": 10,
+            "statusMessage": "Checking the private-lane fence..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m nightshift.gates.run; exit 0",
+            "timeout": 30,
+            "statusMessage": "Running gates (nightshift.gates.run)..."
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m nightshift.gates.run deletion_sweep; exit 0",
+            "if": "Bash(git rm:*)",
+            "timeout": 20,
+            "statusMessage": "Checking docs for references to the deleted code..."
+          },
+          {
+            "type": "command",
+            "command": "python -m nightshift.gates.run deletion_sweep; exit 0",
+            "if": "Bash(rm:*)",
+            "timeout": 20,
+            "statusMessage": "Checking docs for references to the deleted code..."
+          },
+          {
+            "type": "command",
+            "command": "python -m nightshift.gates.run deletion_sweep; exit 0",
+            "if": "Bash(git mv:*)",
+            "timeout": 20,
+            "statusMessage": "Checking docs for references to the moved code..."
+          }
+        ]
+      }
+    ]
+  }
+}
