@@ -50,7 +50,7 @@ __all__ = [
     "AI_DIR", "MANIFEST_NAME", "ManifestError",
     "Manifest", "Project", "Tests", "Branches", "Board", "Worker",
     "Memory", "FreshnessRule", "LayeringRule", "I18n", "DeadCode", "Audit", "Problem",
-    "find_root", "manifest_path", "load", "parse", "validate", "require",
+    "find_root", "manifest_path", "load", "parse", "validate", "require", "schema",
 ]
 
 # The consuming project's config directory. A framework convention, not a project
@@ -393,6 +393,17 @@ _KNOWN: dict[str, tuple[str, ...]] = {
     "audit": ("matrix", "infra_gates"),
     "tiers": ("binding_doc",),
 }
+
+
+def schema() -> dict[str, tuple[str, ...]]:
+    """Every manifest table, in declared order, with its known field names.
+
+    The one source `readme_gen`'s manifest-fields README block reads (07_portability.md
+    §8 D4) — a field `validate()` stops accepting, or a new one it starts accepting,
+    cannot silently leave that generated table wrong, because there is nowhere else
+    for it to come from.
+    """
+    return {name: _KNOWN[name] for name in _KNOWN_TABLES}
 
 
 def parse(data: dict, root: Path) -> Manifest:

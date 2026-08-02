@@ -1,28 +1,10 @@
 # nightshift
 
-The machinery for running a board-driven AI team against a Python repo — the gate
-runner, the hooks, the board and card schema, the preflight, the corrections log,
-the overnight runner. **You get the machinery for earning gates, not an earned gate
-suite:** a new repo starts with the generic gates, an empty audit matrix and an
-empty corrections log, and adds rules as its own failures earn them.
-
-> **This README is a placeholder.** The real one — page-one quickstart, then
-> reference, with generated blocks checked by a `readme_generated` gate — is
-> step 6 of `07_portability.md` §8.
-
-## Status
-
-| Step | State |
-|---|---|
-| 1. repo, `pyproject.toml`, `nightshift/manifest.py` | done |
-| 2. the zero-coupling modules move | done |
-| 3. the universal gates and the hooks | done |
-| 3b. the three i18n gates behind an adapter | done |
-| 4. the constant-holders behind the manifest | done — 2026-08-02, `bridge.py` deleted with them |
-| 5. `nightshift init` + `doctor` | done — 2026-08-02, with `templates/` for the `.claude/` half |
-| 6. this README, for real | not started |
-| 7. stand up in a second project | not started |
-| 8. ship to one colleague | not started |
+The machinery for running a board-driven AI team against a Python repo: the gate
+runner, the hooks, the board, preflight, the corrections log, the overnight
+dispatcher. **You get the machinery for earning gates, not an earned gate suite**
+— a new repo starts with the generic gates, an empty audit matrix and an empty
+corrections log, and adds rules as its own failures earn them.
 
 ## Install
 
@@ -31,60 +13,373 @@ pip install -e path/to/nightshift
 nightshift init --integration <your-integration-branch>
 ```
 
-That is the whole install. `init` discovers what it can, asks about the one thing it
-must never guess, and writes the rest: the manifest, the board, the four core
-charters, the three operator skills, the hook wiring, `CLAUDE.md`, memory stubs, an
-empty corrections log and a `.gitattributes`. Nothing existing is overwritten, so
-running it again is how a half-configured repo gets what it is missing.
+`init` discovers what it can — package name, test dir, whether xdist is
+installed, the stable branch — and writes the rest: the manifest, the board, the
+four core charters, the three operator skills, the hook wiring, `CLAUDE.md`,
+memory stubs, an empty corrections log and `.gitattributes`. `--integration` is
+the one thing it will never guess; `capabilities` and `permission_mode` in
+`.ai/hosts.json` are the other two, and it always proposes them empty. Nothing
+existing is overwritten, so running it again is how a half-configured repo gets
+what it is missing. `nightshift doctor` re-runs the same survey afterwards, for
+drift and for the per-machine checks git cannot carry.
 
-Measured on an empty repo: green gate suite and one dispatchable card, no hand
-editing. Then `nightshift doctor` for the per-machine preconditions git cannot carry,
-and for drift between the manifest and the tree.
+## Use
 
-**The one warning, and it is on page one because not reading it has a cost you cannot
-undo:** `permission_mode: bypassPermissions` in `.ai/hosts.json` is what a code card
-needs to run, and *it is the whole machine, not a sandbox.* A dispatched worker under
-it can do anything you can. `init` will never set it for you.
+The whole daily loop is three commands: gates run themselves on save, via the
+hooks. `python -m nightshift.preflight` before every push or merge. `python -m
+nightshift.runner` for a night of unattended work.
 
-A consuming project owns `.ai/manifest.toml` (schema: `nightshift/manifest.py`), its
-own gates under `.ai/gates/`, its own `.ai/corrections.log`, its `Board/` and its
-`.claude/`.
+## First real run
 
-## What is here now
+```
+python -m nightshift.runner --dry-run                  # what would dispatch, and why not
+python -m nightshift.runner --card <id> --max-cards 1   # one named card, then stop
+```
+
+`--dry-run` first, always — it changes nothing and does not mind a dirty tree.
+Then one card by name before an unattended run: a wrong first move here costs
+tokens, not time.
+
+## The one warning
+
+**`permission_mode: bypassPermissions` in `.ai/hosts.json` is what a code card
+needs to run, and it is the whole machine, not a sandbox.** A dispatched worker
+under it can do anything you can. `init` will never set it for you — you state it,
+on the machine you mean it for, having read this paragraph.
+
+---
+
+## Reference
+
+- [What is here](#what-is-here)
+- [The board](#the-board)
+- [Triage by hand](#triage-by-hand)
+- [The runner, in full](#the-runner-in-full)
+- [`hosts.json`](#hostsjson)
+- [Budgets and stop conditions](#budgets-and-stop-conditions)
+- [The digest](#the-digest)
+- [The corrections log](#the-corrections-log)
+- [Gates: the shipped set, writing your own, and appeals](#gates-the-shipped-set-writing-your-own-and-appeals)
+- [The manifest](#the-manifest)
+- [The staleness sweep](#the-staleness-sweep)
+- [What you do not get](#what-you-do-not-get)
+- [Troubleshooting](#troubleshooting)
+
+### What is here
 
 ```
 nightshift/
-  manifest.py     # the per-project config: schema, load, validate
-  branches.py     # which branch is integration, which are forbidden bases
-  board.py        # lanes, card read/write, the board commit
-  suite.py        # the ONE home for which test slice runs, and how
-  runner.py       # the overnight dispatcher
-  night.py        # the unattended entry point around it
-  reconcile.py    # inbox notes -> cards
-  digest.py       # the morning report
-  stale_sweep.py  # which docs are due a staleness check
-  preflight.py    # the mandatory pre-merge check
-  merge_check.py  # does this card's branch merge clean, gated, tested?
-  doctor.py       # the preconditions git cannot carry
-  audit.py        # the rule matrix, checked against the tree
-  corrections.py  # the corrections log reader
-  discover.py     # what a repo can be asked about itself
-  init.py         # stand it up: discover, confirm, write
-  cli.py          # the `nightshift` command — init and doctor, nothing else
-  normalize_worktree.py  # the per-machine CRLF remedy line_endings names
-  worker_prompt.py  run_record.py  tiers.py  limits.py  textio.py  gitmerge.py
-  gates/          # base.py, run.py, corpus.py, doc_scan.py + 19 shipped gates
-  hooks/          # 7 PreToolUse / PostToolUse hooks
-  templates/      # what init writes into a project — see templates/README.md
-tests/            # 416 tests, every one against a synthetic project
+  manifest.py       # the per-project config: schema, load, validate
+  branches.py       # which branch is integration, which are forbidden bases
+  board.py          # lanes, card read/write, the board commit
+  suite.py          # the one home for which test slice runs, and how
+  runner.py         # the overnight dispatcher
+  night.py          # the unattended entry point around it
+  reconcile.py      # inbox notes -> cards
+  digest.py         # the morning report
+  stale_sweep.py    # which docs are due a staleness check
+  preflight.py      # the mandatory pre-merge check
+  merge_check.py    # does this card's branch merge clean, gated, tested?
+  doctor.py         # the preconditions git cannot carry
+  audit.py          # the rule matrix, checked against the tree
+  corrections.py    # the corrections log reader
+  discover.py       # what a repo can be asked about itself
+  init.py           # stand it up: discover, confirm, write
+  readme_gen.py     # this file's generated blocks — see below
+  cli.py            # the `nightshift` command: init and doctor, nothing else
+  gates/            # base.py, run.py, corpus.py, doc_scan.py + the shipped gates
+  hooks/            # PreToolUse / PostToolUse hooks
+  templates/        # what `init` writes into a project — templates/README.md
+tests/              # every test against a synthetic project, never this repo's own
 ```
 
-Every module is standalone: the package reaches a consuming project only through
-`.ai/manifest.toml` and the paths that manifest declares. `bridge.py` — the seam
-that used to import back into the project's `.ai/` — was deleted along with the
-last module it reached for.
+Every module reaches a consuming project only through `.ai/manifest.toml` and
+the paths that manifest declares — there is no back-reference from core into
+project code. A consuming project keeps only `.ai/manifest.toml`, its own
+`.ai/gates/`, its own `.ai/corrections.log`, its `Board/` and its `.claude/`.
 
-The tests are deliberately written against a project called `myapp`, not against
-Dungeoneer. A framework suite that only ever proves the machinery works on the repo
-it was extracted from would not catch a manifest field being ignored, which is
-exactly what it caught during step 4.
+### The board
+
+One card = one markdown file. One state = which directory it is in — no
+database, no daemon, resumable from disk alone after a reboot.
+
+```
+inbox/ → tasks/ → review/ → testing/ → done/
+            ↕                             ↘ failed/
+      needs-decision/
+```
+
+<!-- generated:board-lanes -->
+| Lane | Order |
+|---|---|
+| `inbox` | 1 |
+| `tasks` | 2 |
+| `needs-decision` | 3 |
+| `review` | 4 |
+| `testing` | 5 |
+| `done` | 6 |
+| `failed` | 7 |
+<!-- /generated:board-lanes -->
+
+`inbox/` is where a raw note becomes an actionable card; `tasks/` is
+dispatchable; `needs-decision/` is a **success state**, not a failure — a card
+parks there carrying a `## Question` section (what was attempted, what is
+ambiguous, the candidate answers and what each implies), and answering it is
+how it moves on. `review/` and `testing/` are gates-green work waiting on a
+person. `done/` and `failed/` are the archive — nothing is deleted, because the
+self-improvement loop reads them as evidence.
+
+Move a card by dragging it in whatever Kanban view you point at `Board/`, not by
+moving the file — a manual move leaves the old `state:` frontmatter behind,
+which reads as a drag-in-progress and gets pulled back. `python -m
+nightshift.reconcile` is what makes the folder catch up with a `state:` edit;
+it reports by default, `--apply` performs, `--commit` commits.
+
+### Triage by hand
+
+A note dropped in `inbox/` does not need frontmatter — that is what triage adds.
+Ask an agent running the `triage` charter to turn one `inbox/` note into a card;
+it reads the note, the board and enough of the codebase to scope the work, and
+either writes a `tasks/`-ready card or a card parked in `needs-decision/` with
+an explicit question. It never invents an answer to resolve an ambiguity itself
+— parking on a question is the correct outcome of an honest triage, not a
+shortfall.
+
+### The runner, in full
+
+<!-- generated:runner-flags -->
+| Flag | Meaning |
+|---|---|
+| `--dry-run` | report what would be dispatched and why not; no LLM, no writes |
+| `--status` | print where a run currently is (card, phase, elapsed) from `.ai/runs/status.json` and exit. |
+| `--base` | branch to build on (default <your-integration-branch>) |
+| `--card` | dispatch only this card id. |
+| `--max-cards` | stop after N dispatches |
+| `--until` | stop dispatching at this local time, HH:MM |
+| `--max-minutes` | stop dispatching after N minutes |
+| `--sessions` | how many usage-limit windows the night may spend. |
+| `--budget` | optional USD cap for the whole run. |
+| `--card-budget` | optional USD cap handed to each worker process; 0 (default) passes no cap at all |
+| `--test-timeout` | seconds allowed for the test suite (~2 min today) |
+| `--stale` | after the cards, run the Tier-2 staleness sweep on the N highest-churn docs, spending only leftover window. |
+| `--append-digest` | write this run's digest without advancing the read baseline, so the next run's digest still reaches back to the last one written *without* this flag — for a stretch of runs (a scheduled weekend) nobody is there to read each one. |
+<!-- /generated:runner-flags -->
+
+Naming a card with `--card` is an explicit human request, so `unattended:
+false`, the backoff wait and the attempt limit are waived for it; a missing
+`requires:` capability, no charter or a schema failure are not, and the run
+always says why and exits non-zero rather than doing nothing quietly.
+
+A real run takes cards from `tasks/` only, one worktree and branch per card,
+and files the result: gates green → `review/`, worker parked it →
+`needs-decision/`, gates red → retried up to the failure limit, then
+`failed/`. It writes `Digest.md` at the end. **Stop a run: create `.ai/STOP`**
+— the runner checks for it every minute, mid-run included, even while sleeping
+out a usage limit.
+
+### `hosts.json`
+
+Per-machine config, keyed by hostname, committed on purpose — a box is
+configured once and it syncs, instead of a setup step that is silently missing
+until something quietly fails to dispatch.
+
+* **`capabilities`** — the slugs a card's `requires:` is checked against. An
+  unlisted hostname resolves to nothing, so a card needing hardware this box
+  lacks simply never dispatches here, at zero token cost. **Never inferred** —
+  `nightshift init` always proposes it empty.
+* **`permission_mode`** — handed to `claude --permission-mode`. `bypassPermissions`
+  is what a code card needs; the default cannot run Bash, so pytest and git are
+  unavailable and the card burns an attempt doing nothing. **Never inferred** —
+  see [the one warning](#the-one-warning).
+* **`allowed_tools`** — optional, only meaningful below `bypassPermissions`. A
+  tool the card needs but the list omits is denied, and in unattended mode
+  there is nobody to ask, so the worker stalls for a reason that looks nothing
+  like the real one.
+* `.ai/host.json` (gitignored) overrides this file wholesale, for a one-off
+  answer on one box you do not want to commit.
+
+### Budgets and stop conditions
+
+A night is measured in session windows before it is measured in dollars.
+`--sessions 1` (the default) works until the plan's usage limit is reached and
+stops; `--sessions 2` sleeps through the first reset and stops at the second
+wall. `--budget` and `--card-budget` default to 0 (no cap) — on a subscription
+plan the figure is API-equivalent rather than money spent.
+
+Three more stops, each a fact about the run rather than a dial: a card that
+fails several attempts in a row goes to `failed/`; a card that resumes with no
+change to the working tree twice in a row is judged stuck and given back
+rather than retried forever; and `.ai/STOP`, checked every minute, is the
+manual kill switch — gitignored, so it works from a synced vault on your
+phone.
+
+### The digest
+
+`python -m nightshift.digest` writes `Digest.md` — generated and overwritten on
+every run, never a place to leave an answer by hand. It opens with a one-line
+banner (runs since last read, landed / failed / decide counts), then one block
+per run since the last digest — failed, needs-your-decision, passed, stale-hunter
+findings, skipped — followed by standing board state: open decisions, the
+`failed/` lane, counts for `testing/` and `review/`, and the dispatch queue.
+Answer a `needs-decision/` card in its own `## Thread` section, on the board —
+the digest is regenerated and any answer written there is gone.
+
+### The corrections log
+
+One line per correction in `.ai/corrections.log`: `DATE | SLUG | CLASS | CHANNEL
+| GATE | NOTE`. `CLASS` comes from `.ai/gates/data/corrections_vocab.json`,
+which ships **empty** — the first entry you write also adds its class. `NOTE`
+should be at least 40 characters and say three things: what was wrong
+concretely, why it was believed, and what generalises — the middle one is what
+makes clustering possible, since the shape of an error is what repeats, not
+its subject. `corrections_log` validates the file on every gate run, so a
+malformed line cannot sit unnoticed.
+
+```
+python -m nightshift.corrections              # the distribution report
+python -m nightshift.corrections --class <c>   # every entry in one class
+python -m nightshift.corrections --compact     # archive old entries, keep the log short
+```
+
+### Gates: the shipped set, writing your own, and appeals
+
+```
+python -m nightshift.gates.run                    # every gate
+python -m nightshift.gates.run --skip <name>       # every gate except this one (repeatable)
+python -m nightshift.gates.run <name> [<name>...]  # only these
+```
+
+Core gates live in the package; a project's own live in `.ai/gates/`. A name
+collision between the two is an error, not a precedence rule — rename the
+project's one.
+
+<!-- generated:gate-list -->
+| Gate | What it checks |
+|---|---|
+| `branch_role_prose` | docs naming the integration branch must agree with .ai/manifest.toml [branches] |
+| `card_schema` | cards on the board match 03_board.md's schema |
+| `corrections_log` | the correction log parses and its class/channel values are in vocabulary |
+| `dead_code` | vulture reports no dead code in the project's source at the configured confidence |
+| `deletion_sweep` | a removed file or top-level class/def must not still be named by any live doc |
+| `doc_reference_liveness` | docs must not name files or symbols that no longer exist |
+| `doc_signature_drift` | a signature written into a doc must match the real parameter names, in order |
+| `gate_appeals` | every `# gate-ok(...)` appeal names a real gate and carries a written reason |
+| `i18n_loanwords` | denylisted base-language terms must not appear (case-sensitive, whole-word) in target values |
+| `i18n_parity` | every declared target language's key set must match the base language's exactly |
+| `i18n_untranslated` | a target-language value identical to the base must be allowlisted, or it's untranslated |
+| `line_endings` | Line endings stay LF, in the index and in the working tree. |
+| `pytest_invocation` | only .ai/suite.py may spell pytest's parallel flags; callers use parallel_args() |
+| `readme_generated` | README.md's generated blocks (gate list, runner flags, manifest fields) match a fresh generation |
+| `run_stop_recorded` | runner.py logs a stop reason only via _stop(), which also records it |
+| `subprocess_encoding` | no subprocess call under .ai/ decodes output with the locale codec |
+| `subprocess_result_checked` | no subprocess call under .ai/ discards its result |
+| `write_newline` | no text-mode write under .ai/ leaves newline translation unpinned |
+<!-- /generated:gate-list -->
+
+The three `i18n_*` gates only register when `.ai/manifest.toml` declares
+`[i18n]` — a project with no localisation gets nothing, not a crash. `dead_code`
+and the doc-scan family (`doc_reference_liveness`, `doc_signature_drift`,
+`deletion_sweep`) read `[project]`; the rest are config-free.
+
+**Writing your own:** a file in `.ai/gates/` exposing `check(repo_root) ->
+list[Violation]` is a gate — no registration, `run.py` discovers it by glob. A
+gate needing a scope-and-pattern check ("inside file X, forbid call Y") is
+almost always one of a few recurring shapes rather than a new idea; read a
+shipped gate's own docstring before writing one, since the incident that
+earned it is usually the fastest way to see whether yours matches.
+
+**Appeals, three levels, in `gates/appeal_markers.py` / `gates/gate_appeals.py`:**
+
+| Level | What it is | Who decides | Written where |
+|---|---|---|---|
+| L1 — exempt one site | this line is a false positive | the agent may, and must say why | `# gate-ok(<gate>): <reason>`, counted as debt |
+| L2 — narrow the gate | the rule is wrong at the edges | proposed by the agent, approved by a person | the gate's own docstring, plus a corrections-log entry |
+| L3 — retire the gate | the rule should not be enforced at all | a person, only | the project's own audit matrix, if it keeps one |
+
+A fourth move is never legitimate: editing the rule's prose until the code
+complies. If the prose is wrong, that is L2 or L3, and both go through a
+person. `# gate-ok(...)` must name one real gate and carry a reason of at
+least a minimum length (`appeal_markers.MIN_REASON`) — `gate_appeals` fails a
+marker that names no gate, names a gate that does not exist, or gives too
+short a reason. Docs have the older, equivalent `<!-- stale-ok: reason -->`
+marker for the same purpose.
+
+### The manifest
+
+<!-- generated:manifest-fields -->
+| Table | Fields | Purpose |
+|---|---|---|
+| `[project]` | `name=''`, `source_dirs=()`, `extra_source_dirs=()`, `doc_files=('CLAUDE.md',)` | What the code under test is called and where it lives. |
+| `[tests]` | `dir='tests'`, `parallel=True` | `dir` is where pytest is pointed. |
+| `[branches]` | `integration=None`, `stable='main'`, `forbidden_extra=()` | `integration` has no default on purpose (module docstring). |
+| `[board]` | `root='Board'` | Lane names are framework config, not project facts (D5), so they are not here — only where the board lives. |
+| `[worker]` | `harvest_dirs=()`, `fence_env=''`, `integration_checkout_dir=''` | The three constants that were the entire project-specific content of `runner.py`'s 3,597 lines. |
+| `[memory]` | `orientation=()`, `budget_bytes=None`, `freshness=()` | `budget_bytes = None` means **the orientation-budget gate does not run**, and that is the recommended starting value. |
+| `[layering]` | `forbid = [{importer, imports}]` | `importer` must not import `imports`. |
+| `[i18n]` | `adapter` (required), `base='en'`, `targets=()`, `untranslated_allowlist=''`, `loanwords_denylist=''` | Present only if the project has localisation; `Manifest.i18n` is `None` otherwise and the three i18n gates never register. |
+| `[dead_code]` | `paths=()`, `min_confidence=80` | What `nightshift.gates.dead_code` points `vulture` at, and how sure it must be before it speaks. |
+| `[audit]` | `matrix=''`, `infra_gates=()` | Where this project keeps its rule-enforcement matrix, and which of its own gates that matrix is not expected to have a row for. |
+| `[tiers]` | `binding_doc='.claude/plans/ai_team/00_architecture.md'` | Which document carries the `tier: → model` binding block. |
+<!-- /generated:manifest-fields -->
+
+Absence is meaningful and is not the same as a default: `[i18n]` omitted
+disables the three i18n gates rather than defaulting them against strings that
+are not there; `branches.integration` has no default at all and is never
+guessed, because `forbidden_bases()` depends on it and a plausible-looking
+wrong answer means the runner builds on a branch nobody chose. An unknown key
+anywhere in the file is an error, not a silent no-op.
+
+### The staleness sweep
+
+`--stale [N]` on the runner spends leftover window, after the night's cards,
+running the Tier-2 staleness checker (`stale-hunter`) against the
+highest-churn docs — the ones whose named source files have changed the most
+since they were last verified. A doc whose sources have not moved since its
+last complete verification is skipped entirely; a doc never verified sorts to
+the top. Findings become one fix-card per doc — the sweep itself never edits a
+doc — and a doc is only marked verified in the ledger on a *complete* verdict,
+so a sweep cut off mid-doc re-checks that doc next time rather than recording
+one it did not finish.
+
+### What you do not get
+
+* **The gate suite as a value proposition.** A new repo starts with the
+  generic gates above, an empty audit matrix and an empty corrections log.
+  Rules get added the way this project's own were: by an observed failure,
+  never by import.
+* **Asset generation.** Any image, audio or other generation stack a project
+  wires up is that project's own, in its own scope — nothing here assumes one
+  exists.
+* **Non-Python support.** The AST-based gates and `suite.py`'s test-splitting
+  both assume a Python project underneath.
+* **The reasoning behind any of this.** The plan documents that produced this
+  package are a record of one project's decisions, not part of the product —
+  this README and the code's own docstrings are what ships.
+
+### Troubleshooting
+
+Run `nightshift doctor` first — it reports, in order: the working tree is LF
+(a CRLF file is invisible to `git status` but fails the line-endings gate on
+every affected file); `claude` is resolvable on `PATH` (or `CLAUDE_BIN` points
+at a real executable); this hostname has an entry in `.ai/hosts.json` (an
+unlisted host makes every `requires:` card silently undispatchable — no error,
+just nothing happening); `[branches].integration` is declared (the field that
+is never guessed); and which commit of `nightshift` is actually installed,
+reported but never enforced, since the intended mode while this is still
+changing daily is an editable install shared live across every consumer.
+
+* **A fresh clone warns "LF will be replaced by CRLF" on the first commit.**
+  `.gitattributes` is missing `* text=auto eol=lf` — `nightshift init` writes
+  it if absent; add it by hand otherwise.
+* **Files show clean in `git status` but the line-endings gate still fires.**
+  A checkout that predates `.gitattributes` landing has CRLF already on disk;
+  the LF blob and the CRLF working-tree file normalise to the same bytes, so
+  git sees nothing to commit. Run `python -m nightshift.normalize_worktree`
+  once, per machine — there is nothing to commit afterwards either, because
+  the fix does not change file content.
+* **A `requires:` card never dispatches, with no error.** Check `hosts.json`
+  for this hostname first — an unlisted host is the single most common cause,
+  and it is silent by design (see above).
+* **The runner refuses to build, citing a forbidden base.** `stable` and any
+  `forbidden_extra` branches are refused as a base on purpose; check them
+  against `[branches]` before assuming the tooling is wrong.
