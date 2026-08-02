@@ -52,13 +52,14 @@ from pathlib import Path
 
 import appeal_markers
 from nightshift.gates import corpus
+from nightshift.gates import scope
 from nightshift.gates.base import Violation
 
 NAME = "pytest_invocation"
 FAST = True
-DESCRIPTION = "only .ai/suite.py may spell pytest's parallel flags; callers use parallel_args()"
+DESCRIPTION = "only suite.py may spell pytest's parallel flags; callers use parallel_args()"
 
-_ROOT = Path(".ai")
+# Scope: `.ai/` plus `[project].tooling_dirs` — see `gates/scope.py`.
 # The file that owns the policy. Excluded rather than special-cased in the walk so
 # the exemption is one readable name.
 _OWNER = "suite.py"
@@ -69,14 +70,7 @@ _WATCHED = frozenset({"-n", "--dist", "--numprocesses"})
 
 
 def _files(repo_root: Path) -> list[Path]:
-    base = repo_root / _ROOT
-    if not base.is_dir():
-        return []
-    return [
-        path
-        for path in sorted(base.rglob("*.py"))
-        if "__pycache__" not in path.parts and path.name != _OWNER
-    ]
+    return scope.tooling_files(repo_root, exclude=_OWNER)
 
 
 def _offending_sequences(tree: ast.AST) -> list[tuple[int, str]]:

@@ -138,9 +138,21 @@ def tests_dir(root: Path) -> Path:
 
 
 def integration_base(root: Path) -> str:
-    """The branch this work will merge into, from `[branches].integration` —
-    never hard-coded."""
-    return branches.integration(root)
+    """The branch this work will merge into, from `[branches].integration`.
+
+    Falls back to `stable` when none is declared, which is not a softening of the
+    "never guess the integration branch" rule — that rule protects
+    `forbidden_bases()`, i.e. the branch the runner *builds on*. Here the base is
+    only what the diff is taken against, and the fallback is the same one
+    `branches.merge_base_candidates()` already makes for the gates asking the same
+    question. Refusing instead means a repo that never dispatches — this package's
+    own, and any project using the gates without the runner — cannot preflight at
+    all, which trades a real check for a hypothetical one.
+    """
+    try:
+        return branches.integration(root)
+    except ManifestError:
+        return branches.stable(root)
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
@@ -155,9 +167,19 @@ def head_sha(root: Path) -> str:
 
 @dataclass
 class Check:
+    """One named verdict. `skipped` means "this question does not apply here".
+
+    Distinct from `ok=True` on purpose. Three of the doctor's preconditions are
+    about *dispatching* — is `claude` installed, is this host configured, is there
+    an integration branch to build on — and a repo with no board never dispatches.
+    Reporting those as passes would be a lie in the reassuring direction; reporting
+    them as failures makes the framework's own checkout permanently red. `skipped`
+    says which it is, and does not count against `Result.ok`.
+    """
     name: str
     ok: bool
     detail: str = ""
+    skipped: bool = False
 
 
 @dataclass
@@ -552,7 +574,7 @@ def is_validated(root: Path, sha: str) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Pre-merge preflight (10_self_improvement.md §4).")
+    parser = argparse.ArgumentParser(description="Pre-merge preflight: doctor, gates, audit, corrections and the test slice this branch can affect. Writes a receipt the push guard reads.")
     parser.add_argument("--no-corrections", metavar="REASON",
                         help="record an explicit, reasoned zero when this branch has no "
                              "lesson worth logging — the honest alternative to inventing one")
@@ -586,7 +608,7 @@ def main(argv: list[str] | None = None) -> int:
     result = run_checks(root, base, args.no_corrections, args.skip_tests,
                         args.full_tests, args.fresh_tests)
     for check in result.checks:
-        mark = "OK  " if check.ok else "FAIL"
+        mark = "SKIP" if check.skipped else ("OK  " if check.ok else "FAIL")
         print(f"  [{mark}] {check.name:<12} {check.detail}")
 
     if result.ok:

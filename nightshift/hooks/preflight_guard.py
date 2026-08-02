@@ -116,7 +116,7 @@ def _decision(command: str, repo_root: Path) -> dict:
         f"(or `--no-corrections \"<reason>\"` if this branch has no lesson to log) "
         f"and let it pass before pushing/merging — it runs the gates, the audit and "
         f"the full test suite once, so the loop's lessons are recorded before the "
-        f"work leaves the branch (10_self_improvement.md §4)."
+        f"work leaves the branch."
     )
 
 

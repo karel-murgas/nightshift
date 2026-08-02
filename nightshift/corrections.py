@@ -57,7 +57,7 @@ _ARCHIVE_HEADER = (
     "# Corrections archive\n"
     "#\n"
     "# Resolved entries moved out of .ai/corrections.log by\n"
-    "# `python -m nightshift.corrections --compact` (12_corrections_lifecycle.md). Same six\n"
+    "# `python -m nightshift.corrections --compact`. Same six\n"
     "# pipe fields as the active log; every entry here carries a `[[disposition: ...]]`\n"
     "# annotation on its NOTE -- that is what made it eligible to move. Read by\n"
     "# `corrections.report()` for historical cluster counts; never by `backlog()`, so\n"
@@ -199,7 +199,7 @@ def compact(root: Path) -> int:
     return len(move)
 
 
-def _table(title: str, counts: Counter, total: int, blurbs: dict[str, str] | None = None) -> str:
+def _table(title: str, counts: Counter, total: int) -> str:
     width = max((len(k) for k in counts), default=0)
     out = [title, "-" * len(title)]
     for key, n in counts.most_common():

@@ -42,13 +42,14 @@ from pathlib import Path
 
 import appeal_markers
 from nightshift.gates import corpus
+from nightshift.gates import scope
 from nightshift.gates.base import Violation
 
 NAME = "subprocess_encoding"
 FAST = True
-DESCRIPTION = "no subprocess call under .ai/ decodes output with the locale codec"
+DESCRIPTION = "no subprocess call in the tooling decodes output with the locale codec"
 
-_ROOT = Path(".ai")
+# Scope: `.ai/` plus `[project].tooling_dirs` — see `gates/scope.py`.
 _WATCHED = frozenset({"run", "call", "Popen", "check_output"})
 # Both spellings select text mode. `universal_newlines` is the older alias and is
 # still accepted, so a gate that only knew `text` would miss half the ways in.
@@ -89,13 +90,7 @@ def _has_encoding(node: ast.Call) -> bool:
 def check(repo_root: Path) -> list[Violation]:
     appeals = appeal_markers.scan(repo_root)
     violations: list[Violation] = []
-    base = repo_root / _ROOT
-    if not base.is_dir():
-        return violations
-
-    for path in sorted(base.rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
+    for path in scope.tooling_files(repo_root):
         rel = path.relative_to(repo_root).as_posix()
         tree = corpus.tree(path)
         if tree is None:

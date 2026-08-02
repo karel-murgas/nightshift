@@ -198,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
     import argparse as _argparse
 
     parser = _argparse.ArgumentParser(
-        description="Regenerate README.md's generated blocks (07_portability.md §8 D4).")
+        description="Regenerate README.md's generated blocks from the code that owns each list.")
     parser.add_argument("--root", type=Path, default=None,
                         help="repo whose README.md to check (default: found from cwd)")
     parser.add_argument("--write", action="store_true",

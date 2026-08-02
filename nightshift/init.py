@@ -188,20 +188,37 @@ def merge_hooks(existing: dict, fragment: dict) -> tuple[dict, int]:
 
 
 def _accept(root: Path, proposals: list[discover.Proposal],
-            integration: str | None) -> dict[str, dict]:
-    tables = discover.as_manifest_tables(proposals)
+            integration: str | None, optional: set[str] | None = None) -> dict[str, dict]:
+    """Every `HIGH` proposal, plus the `CONFIRM` ones the operator said yes to.
+
+    `as_manifest_tables` used to take the whole survey, which quietly wrote both
+    optional `CONFIRM` fields — see `discover`'s docstring. Accepting them by name
+    keeps "a guess is never written unasked" a property of the code rather than of
+    whoever reads the report.
+    """
+    accepted = set(optional or ())
+    tables = discover.as_manifest_tables(
+        [p for p in proposals
+         if not p.needs_confirmation or p.key in accepted or p.key == "branches.integration"])
     if integration:
         tables.setdefault("branches", {})["integration"] = integration
     else:
         tables.get("branches", {}).pop("integration", None)
+        if not tables.get("branches"):
+            tables.pop("branches", None)
     return tables
 
 
 def build_plan(root: Path, *, integration: str | None,
-               proposals: list[discover.Proposal] | None = None) -> Plan:
-    """Every file `init` would create, with its final content. Writes nothing."""
+               proposals: list[discover.Proposal] | None = None,
+               optional: set[str] | None = None) -> Plan:
+    """Every file `init` would create, with its final content. Writes nothing.
+
+    `optional` is the set of non-required `CONFIRM` keys the operator accepted.
+    Omitted means none, which is the correct non-interactive answer.
+    """
     proposals = proposals if proposals is not None else discover.survey(root)
-    tables = _accept(root, proposals, integration)
+    tables = _accept(root, proposals, integration, optional)
     plan = Plan(root=root, tables=tables)
     values = tokens(root, tables)
     by_key = {p.key: p for p in proposals}
@@ -281,6 +298,23 @@ def build_plan(root: Path, *, integration: str | None,
         else:
             plan.kept.append(".claude/settings.json")
 
+    # A guess that was not accepted is worth one line, or the operator never learns
+    # the gate behind it is switched off — which is the quiet half of "absence is
+    # meaningful". Says what it would have written, so adding it by hand is a copy.
+    for proposal in proposals:
+        if not proposal.needs_confirmation or proposal.value is None:
+            continue
+        table, _, field_name = proposal.key.partition(".")
+        if tables.get(table, {}).get(field_name) is not None:
+            continue
+        if proposal.key == "branches.integration":
+            continue  # its absence gets its own, louder message in `main`
+        plan.notes.append(
+            f"{proposal.key}: not written. Discovery suggests "
+            f"{'; '.join(_describe(proposal.value))} — add it to "
+            f"{AI_DIR}/{MANIFEST_NAME} by hand if you agree. Until then the gate "
+            f"that reads it does not run, which is a fine day-one state.")
+
     # The two environment problems that fix nothing by being written down.
     crlf = by_key.get("crlf_worktree")
     if crlf and crlf.value:
@@ -337,6 +371,46 @@ def confirm_integration(root: Path, proposal: discover.Proposal,
     return answer if answer and answer != "none" else None
 
 
+def confirm_optional(proposals: list[discover.Proposal], *,
+                     assume_yes: bool, interactive: bool) -> set[str]:
+    """The non-required `CONFIRM` fields the operator accepts. Default: none.
+
+    `--yes` does not cover these either, and for the same reason it does not cover
+    the integration branch: each is a claim about the project, not a fact read off
+    it. The difference is what "no" means — the integration branch has no working
+    default so `init` says so and exits non-zero, while an omitted
+    `[memory].orientation` or `[layering]` simply leaves the gate that reads it
+    switched off, which is a fine state for a repo on day one.
+    """
+    optional = [p for p in proposals
+                if p.needs_confirmation and p.key != "branches.integration"
+                and p.value is not None]
+    if not optional or not interactive:
+        return set()
+
+    accepted: set[str] = set()
+    for proposal in optional:
+        print(f"\n  {proposal.key} — {proposal.why}")
+        for line in _describe(proposal.value):
+            print(f"      {line}")
+        default = "y" if assume_yes else "n"
+        answer = (_ask("  write this to the manifest? [y/N]", default) or "n").lower()
+        if answer.startswith("y"):
+            accepted.add(proposal.key)
+    return accepted
+
+
+def _describe(value: object) -> list[str]:
+    """A proposal's value as lines a person can actually read before saying yes."""
+    if isinstance(value, list):
+        return [
+            (f"{v['importer']} must not import {v['imports']}"
+             if isinstance(v, dict) and "importer" in v else str(v))
+            for v in value
+        ]
+    return [str(value)]
+
+
 def report(plan: Plan, proposals: list[discover.Proposal]) -> None:
     print("\ndiscovered:")
     for proposal in proposals:
@@ -350,7 +424,10 @@ def report(plan: Plan, proposals: list[discover.Proposal]) -> None:
         table, _, key = proposal.key.partition(".")
         decided = plan.tables.get(table, {}).get(key)
         if proposal.needs_confirmation and decided != value:
-            note = f"   (discovery proposed: {value if value is not None else '—'})"
+            shown_guess = value if value is not None else "—"
+            note = (f"   (not written — discovery guessed: {shown_guess})"
+                    if decided is None
+                    else f"   (discovery proposed: {shown_guess})")
             value = decided
         if isinstance(value, list) and len(value) > 3:
             value = value[:3] + [f"...({len(value)})"]
@@ -415,8 +492,12 @@ def main(argv: list[str] | None = None) -> int:
     integration = confirm_integration(
         root, by_key["branches.integration"],
         assume_yes=args.yes, given=args.integration)
+    optional = confirm_optional(
+        proposals, assume_yes=args.yes,
+        interactive=not args.dry_run and sys.stdin.isatty())
 
-    plan = build_plan(root, integration=integration, proposals=proposals)
+    plan = build_plan(root, integration=integration, proposals=proposals,
+                      optional=optional)
     report(plan, proposals)
 
     if args.dry_run:

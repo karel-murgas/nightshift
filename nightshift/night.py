@@ -10,13 +10,15 @@ Both schedulers call *this*, never `runner.py` directly:
 
 The two environments differ in exactly four ways, and this script *is* those
 four differences and nothing else. Every argument is forwarded to `runner.py`
-untouched, so `python .ai/night.py --sessions 1 --max-cards 8 --stale` means the
+untouched, so `python -m nightshift.night --sessions 1 --max-cards 8 --stale` means the
 same thing on both.
 
   1. **Dependencies.** The laptop has them; a fresh cloud clone does not. An
-     unknown host gets `pip install -r requirements.txt` first — and it must
-     happen here, before anything imports `runner`, because `runner` pulls in
-     `board`/`digest`/… which pull in the game deps.
+     unknown host installs the project's own first — `requirements.txt` if it has
+     one, else `pip install -e .` — and it must happen here, before anything
+     imports `runner`, because `runner` pulls in `board`/`digest`/… which pull in
+     the project's deps. A project that declares neither has nothing to install
+     and is not failed for it.
 
   2. **Permission posture.** `runner.py` reads it from `.ai/hosts.json`, keyed by
      hostname. A cloud hostname is not a key there, so it would fall back to
@@ -124,14 +126,32 @@ def _claude_present() -> bool:
     return fallback.is_file()
 
 
+def _install_argv() -> list[str] | None:
+    """How to install this project's dependencies, or `None` if it declares none.
+
+    `requirements.txt` if there is one, else `pip install -e .` when the project
+    has a `pyproject.toml` — which is how a modern project (this package included)
+    declares its dependencies, and hardcoding the first spelling made the cloud
+    path abort on any project using only the second. `None` is a real answer: a
+    stdlib-only project has nothing to install and must not fail for it.
+    """
+    if REQUIREMENTS.is_file():
+        return [sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS)]
+    if (ROOT / "pyproject.toml").is_file():
+        return [sys.executable, "-m", "pip", "install", "-e", "."]
+    return None
+
+
 def _pip_install() -> None:
-    _log(f"installing dependencies from {REQUIREMENTS.name} …")
-    result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS)],
-        cwd=ROOT,
-    )
+    argv = _install_argv()
+    if argv is None:
+        _log("no requirements.txt and no pyproject.toml — nothing to install, "
+             "continuing. If the runner then fails on an import, that is the reason.")
+        return
+    _log(f"installing dependencies: {' '.join(argv[1:])} …")
+    result = subprocess.run(argv, cwd=ROOT)
     if result.returncode != 0:
-        _log("pip install FAILED — the runner cannot import its deps; aborting.")
+        _log("dependency install FAILED — the runner cannot import its deps; aborting.")
         sys.exit(result.returncode)
 
 

@@ -32,7 +32,21 @@ NAME = "deletion_sweep"
 FAST = True
 DESCRIPTION = "a removed file or top-level class/def must not still be named by any live doc"
 
-_WATCHED_ROOT = "dungeoneer/"
+
+def _watched_roots(repo_root: Path) -> tuple[str, ...]:
+    """Path prefixes whose deletions this gate cares about.
+
+    Was the literal `"dungeoneer/"`, which made the gate a permanent no-op in every
+    repo but the one it was written in — silently, because a `startswith` filter
+    that matches nothing produces no violations rather than an error. Measured
+    2026-08-02: deleting a documented module in a second project while the doc
+    still named it reported "All clear".
+
+    `doc_scan.source_dirs` is the same table the rest of this family already reads,
+    so the three doc gates now agree about what "the source tree" means instead of
+    two of them agreeing and one holding a private answer.
+    """
+    return tuple(f"{d.rstrip('/')}/" for d in doc_scan.source_dirs(repo_root))
 
 
 def _git(repo_root: Path, args: list[str]) -> str:
@@ -88,6 +102,7 @@ def removed_names(repo_root: Path) -> dict[str, str]:
     """
     dead: dict[str, str] = {}
     base = _merge_base(repo_root)
+    watched = _watched_roots(repo_root)
 
     def note(name: str, reason: str) -> None:
         dead.setdefault(name, reason)
@@ -101,7 +116,7 @@ def removed_names(repo_root: Path) -> dict[str, str]:
     # 1. Working-tree deletions (what a pre-commit hook sees).
     for line in _git(repo_root, ["status", "--porcelain"]).splitlines():
         code, _, path = line[:2], line[2:3], line[3:].strip().strip('"')
-        if "D" not in code or not path.startswith(_WATCHED_ROOT):
+        if "D" not in code or not path.startswith(watched):
             continue
         old = _git(repo_root, ["show", f"HEAD:{path}"])
         bury_file(path, old, f"deleted from the working tree ({path})")
@@ -115,7 +130,7 @@ def removed_names(repo_root: Path) -> dict[str, str]:
         if len(parts) < 2:
             continue
         status, path = parts[0], parts[-1]
-        if not path.startswith(_WATCHED_ROOT) or not path.endswith(".py"):
+        if not path.startswith(watched) or not path.endswith(".py"):
             continue
         if status.startswith("D"):
             bury_file(path, _git(repo_root, ["show", f"{base}:{path}"]),

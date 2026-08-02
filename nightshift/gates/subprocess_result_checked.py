@@ -39,13 +39,15 @@ from pathlib import Path
 
 import appeal_markers
 from nightshift.gates import corpus
+from nightshift.gates import scope
 from nightshift.gates.base import Violation
 
 NAME = "subprocess_result_checked"
 FAST = True
-DESCRIPTION = "no subprocess call under .ai/ discards its result"
+DESCRIPTION = "no subprocess call in the tooling discards its result"
 
-_ROOT = Path(".ai")
+# Scope: `.ai/` plus `[project].tooling_dirs` — see `gates/scope.py` for why this
+# stopped being a literal.
 # Every subprocess entry point that returns something worth looking at.
 # `check_call`/`check_output` raise on failure, so discarding those is safe and
 # they are absent on purpose.
@@ -67,13 +69,7 @@ def _is_subprocess_call(node: ast.AST) -> str | None:
 def check(repo_root: Path) -> list[Violation]:
     appeals = appeal_markers.scan(repo_root)
     violations: list[Violation] = []
-    base = repo_root / _ROOT
-    if not base.is_dir():
-        return violations
-
-    for path in sorted(base.rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
+    for path in scope.tooling_files(repo_root):
         rel = path.relative_to(repo_root).as_posix()
         tree = corpus.tree(path)
         if tree is None:

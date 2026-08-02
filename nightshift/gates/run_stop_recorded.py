@@ -44,13 +44,19 @@ from pathlib import Path
 
 import appeal_markers
 from nightshift.gates import corpus
+from nightshift.gates import scope
 from nightshift.gates.base import Violation
 
 NAME = "run_stop_recorded"
 FAST = True
 DESCRIPTION = "runner.py logs a stop reason only via _stop(), which also records it"
 
-_TARGET = Path(".ai") / "runner.py"
+# The runner, wherever the tooling lives — `gates/scope.py`. This was
+# `Path(".ai") / "runner.py"`, a path that stopped existing when 07_portability.md
+# §8 step 4 moved the module into the package; `check()` opens with "no such file →
+# no violations", so the gate reported green while reading nothing at all, in every
+# repo, for as long as it had shipped. Measured 2026-08-02.
+_TARGET_NAME = "runner.py"
 # The helper that owns the format. A call to it is the fix, not the violation.
 _HELPER = "_stop"
 _LOGGER = "_log"
@@ -91,35 +97,40 @@ def _helper_lines(tree: ast.AST) -> set[int]:
 
 
 def check(repo_root: Path) -> list[Violation]:
-    path = repo_root / _TARGET
-    if not path.is_file():
-        return []
-    tree = corpus.tree(path)
-    if tree is None:
-        return []  # not this gate's job to report unparseable Python
-
-    rel = _TARGET.as_posix()
-    exempt_lines = _helper_lines(tree)
-    appeals = appeal_markers.scan(repo_root)
     violations: list[Violation] = []
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id == _LOGGER):
+    appeals = appeal_markers.scan(repo_root)
+
+    # Every `runner.py` in the tooling — normally exactly one, and none at all in a
+    # repo that consumes the framework rather than carrying it. "None" is a real
+    # answer here and always was; what it must not be is the answer in the repo that
+    # *does* own the runner, which is what the hardcoded path made it.
+    for path in scope.tooling_files(repo_root):
+        if path.name != _TARGET_NAME:
             continue
-        if not _first_arg_text(node).startswith(_MARKER):
-            continue
-        if node.lineno in exempt_lines:
-            continue
-        if appeal_markers.exempt(appeals, NAME, rel, node.lineno):
-            continue
-        violations.append(Violation(
-            rel, node.lineno,
-            f"run_stop_recorded: this logs a stop reason directly. Call "
-            f"`{_HELPER}(\"<reason>\")` instead — it writes the same log line *and* "
-            f"puts the reason in the run record, which is where the morning digest "
-            f"reads why the run ended. A stop that only reaches the log renders as "
-            f"a run that simply ran out of cards",
-        ))
+        tree = corpus.tree(path)
+        if tree is None:
+            continue  # not this gate's job to report unparseable Python
+
+        rel = path.relative_to(repo_root).as_posix()
+        exempt_lines = _helper_lines(tree)
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == _LOGGER):
+                continue
+            if not _first_arg_text(node).startswith(_MARKER):
+                continue
+            if node.lineno in exempt_lines:
+                continue
+            if appeal_markers.exempt(appeals, NAME, rel, node.lineno):
+                continue
+            violations.append(Violation(
+                rel, node.lineno,
+                f"run_stop_recorded: this logs a stop reason directly. Call "
+                f"`{_HELPER}(\"<reason>\")` instead — it writes the same log line *and* "
+                f"puts the reason in the run record, which is where the morning digest "
+                f"reads why the run ended. A stop that only reaches the log renders as "
+                f"a run that simply ran out of cards",
+            ))
     return violations
 
 

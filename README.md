@@ -6,6 +6,8 @@ dispatcher. **You get the machinery for earning gates, not an earned gate suite*
 — a new repo starts with the generic gates, an empty audit matrix and an empty
 corrections log, and adds rules as its own failures earn them.
 
+<!-- stale-ok: `.ai/hosts.json` below is a file `nightshift init` writes into a
+     CONSUMING project. This package is not its own consumer, so it has none. -->
 ## Install
 
 ```
@@ -40,6 +42,8 @@ python -m nightshift.runner --card <id> --max-cards 1   # one named card, then s
 Then one card by name before an unattended run: a wrong first move here costs
 tokens, not time.
 
+<!-- stale-ok: `.ai/hosts.json` is a consuming project's per-machine config, written
+     by `init` into the repo being configured — never into this one. -->
 ## The one warning
 
 **`permission_mode: bypassPermissions` in `.ai/hosts.json` is what a code card
@@ -87,16 +91,27 @@ nightshift/
   init.py           # stand it up: discover, confirm, write
   readme_gen.py     # this file's generated blocks — see below
   cli.py            # the `nightshift` command: init and doctor, nothing else
-  gates/            # base.py, run.py, corpus.py, doc_scan.py + the shipped gates
+  gates/            # base.py, run.py, corpus.py, doc_scan.py, scope.py + the gates
   hooks/            # PreToolUse / PostToolUse hooks
   templates/        # what `init` writes into a project — templates/README.md
 tests/              # every test against a synthetic project, never this repo's own
+.ai/                # this package's own manifest — it is gated by itself
 ```
 
 Every module reaches a consuming project only through `.ai/manifest.toml` and
 the paths that manifest declares — there is no back-reference from core into
 project code. A consuming project keeps only `.ai/manifest.toml`, its own
 `.ai/gates/`, its own `.ai/corrections.log`, its `Board/` and its `.claude/`.
+
+**This package is one of the repos its own gates run against.** It was not,
+until 2026-08-02, and that single gap produced a cluster of findings in one
+review: five gates were still scoped to `.ai/` — the directory 16,800 lines had
+moved *out* of — and two of them had been reporting green while reading nothing
+at all. A scope is a question about the manifest here, never a literal, and
+`tests/test_self_gating.py` is what keeps it that way. A repo with no `Board/`
+never dispatches, so `doctor` skips the three preconditions that are about
+dispatching rather than failing them; that is how the framework can be its own
+subject without being its own consumer.
 
 ### The board
 
@@ -145,6 +160,10 @@ an explicit question. It never invents an answer to resolve an ambiguity itself
 — parking on a question is the correct outcome of an honest triage, not a
 shortfall.
 
+<!-- stale-ok: this section documents a CONSUMING project's runtime artefacts —
+     `.ai/runs/status.json`, `.ai/STOP`, `Digest.md`. They are written by a run, in
+     the repo being run against, and by construction none of them exists in this
+     package's own checkout. Naming them is what the section is for. -->
 ### The runner, in full
 
 <!-- generated:runner-flags -->
@@ -177,6 +196,9 @@ and files the result: gates green → `review/`, worker parked it →
 — the runner checks for it every minute, mid-run included, even while sleeping
 out a usage limit.
 
+<!-- stale-ok: `.ai/hosts.json` and `.ai/host.json` are per-machine config files in a
+     CONSUMING project — `nightshift init` writes the first and `night.py` the second.
+     This package is not its own consumer, so neither resolves here. -->
 ### `hosts.json`
 
 Per-machine config, keyed by hostname, committed on purpose — a box is
@@ -213,6 +235,8 @@ rather than retried forever; and `.ai/STOP`, checked every minute, is the
 manual kill switch — gitignored, so it works from a synced vault on your
 phone.
 
+<!-- stale-ok: `Digest.md` is written into a consuming project by a run; it does not
+     and should not exist in this package's checkout. -->
 ### The digest
 
 `python -m nightshift.digest` writes `Digest.md` — generated and overwritten on
@@ -257,7 +281,7 @@ project's one.
 | Gate | What it checks |
 |---|---|
 | `branch_role_prose` | docs naming the integration branch must agree with .ai/manifest.toml [branches] |
-| `card_schema` | cards on the board match 03_board.md's schema |
+| `card_schema` | cards on the board match the card schema, and `state:` agrees with the lane |
 | `corrections_log` | the correction log parses and its class/channel values are in vocabulary |
 | `dead_code` | vulture reports no dead code in the project's source at the configured confidence |
 | `deletion_sweep` | a removed file or top-level class/def must not still be named by any live doc |
@@ -267,19 +291,26 @@ project's one.
 | `i18n_loanwords` | denylisted base-language terms must not appear (case-sensitive, whole-word) in target values |
 | `i18n_parity` | every declared target language's key set must match the base language's exactly |
 | `i18n_untranslated` | a target-language value identical to the base must be allowlisted, or it's untranslated |
+| `import_layering` | a declared one-way dependency between packages stays one-way |
 | `line_endings` | Line endings stay LF, in the index and in the working tree. |
-| `pytest_invocation` | only .ai/suite.py may spell pytest's parallel flags; callers use parallel_args() |
+| `memory_freshness` | a diff touching a declared source area must also touch its memory doc |
+| `orientation_budget` | the declared orientation files stay under [memory].budget_bytes |
+| `pytest_invocation` | only suite.py may spell pytest's parallel flags; callers use parallel_args() |
 | `readme_generated` | README.md's generated blocks (gate list, runner flags, manifest fields) match a fresh generation |
 | `run_stop_recorded` | runner.py logs a stop reason only via _stop(), which also records it |
-| `subprocess_encoding` | no subprocess call under .ai/ decodes output with the locale codec |
-| `subprocess_result_checked` | no subprocess call under .ai/ discards its result |
-| `write_newline` | no text-mode write under .ai/ leaves newline translation unpinned |
+| `subprocess_encoding` | no subprocess call in the tooling decodes output with the locale codec |
+| `subprocess_result_checked` | no subprocess call in the tooling discards its result |
+| `write_newline` | no text-mode write in the tooling leaves newline translation unpinned |
 <!-- /generated:gate-list -->
 
-The three `i18n_*` gates only register when `.ai/manifest.toml` declares
-`[i18n]` — a project with no localisation gets nothing, not a crash. `dead_code`
-and the doc-scan family (`doc_reference_liveness`, `doc_signature_drift`,
-`deletion_sweep`) read `[project]`; the rest are config-free.
+Several gates are inert until the manifest gives them something to read, and
+that is a supported state rather than a gap: the three `i18n_*` gates need
+`[i18n]`, `orientation_budget` needs `[memory].budget_bytes`, `memory_freshness`
+needs `[memory].freshness`, and `import_layering` needs `[layering].forbid`.
+Without those they run and report nothing. `dead_code` and the doc-scan family
+(`doc_reference_liveness`, `doc_signature_drift`, `deletion_sweep`) read
+`[project]`; the five discipline gates read `[project].tooling_dirs` on top of
+`.ai/`; the rest are config-free.
 
 **Writing your own:** a file in `.ai/gates/` exposing `check(repo_root) ->
 list[Violation]` is a gate — no registration, `run.py` discovers it by glob. A
@@ -304,22 +335,26 @@ marker that names no gate, names a gate that does not exist, or gives too
 short a reason. Docs have the older, equivalent `<!-- stale-ok: reason -->`
 marker for the same purpose.
 
+<!-- stale-ok: the generated table below prints each field's DEFAULT, and
+     `[tiers].binding_doc` defaults to `docs/tier-binding.md` — a path in the repo
+     being configured, which `init` creates there. It is not a file of this
+     package's. -->
 ### The manifest
 
 <!-- generated:manifest-fields -->
 | Table | Fields | Purpose |
 |---|---|---|
-| `[project]` | `name=''`, `source_dirs=()`, `extra_source_dirs=()`, `doc_files=('CLAUDE.md',)` | What the code under test is called and where it lives. |
+| `[project]` | `name=''`, `source_dirs=()`, `extra_source_dirs=()`, `tooling_dirs=()`, `doc_files=('CLAUDE.md',)` | What the code under test is called and where it lives. |
 | `[tests]` | `dir='tests'`, `parallel=True` | `dir` is where pytest is pointed. |
 | `[branches]` | `integration=None`, `stable='main'`, `forbidden_extra=()` | `integration` has no default on purpose (module docstring). |
 | `[board]` | `root='Board'` | Lane names are framework config, not project facts (D5), so they are not here — only where the board lives. |
 | `[worker]` | `harvest_dirs=()`, `fence_env=''`, `integration_checkout_dir=''` | The three constants that were the entire project-specific content of `runner.py`'s 3,597 lines. |
 | `[memory]` | `orientation=()`, `budget_bytes=None`, `freshness=()` | `budget_bytes = None` means **the orientation-budget gate does not run**, and that is the recommended starting value. |
-| `[layering]` | `forbid = [{importer, imports}]` | `importer` must not import `imports`. |
-| `[i18n]` | `adapter` (required), `base='en'`, `targets=()`, `untranslated_allowlist=''`, `loanwords_denylist=''` | Present only if the project has localisation; `Manifest.i18n` is `None` otherwise and the three i18n gates never register. |
+| `[layering]` | `forbid = [{importer, imports, exempt}]` | `importer` must not import `imports`. |
+| `[i18n]` | `adapter` (required), `base='en'`, `targets=()`, `untranslated_allowlist=''`, `loanwords_denylist=''` | Present only if the project has localisation; `Manifest.i18n` is `None` otherwise and the three i18n gates find nothing to check. |
 | `[dead_code]` | `paths=()`, `min_confidence=80` | What `nightshift.gates.dead_code` points `vulture` at, and how sure it must be before it speaks. |
 | `[audit]` | `matrix=''`, `infra_gates=()` | Where this project keeps its rule-enforcement matrix, and which of its own gates that matrix is not expected to have a row for. |
-| `[tiers]` | `binding_doc='.claude/plans/ai_team/00_architecture.md'` | Which document carries the `tier: → model` binding block. |
+| `[tiers]` | `binding_doc='docs/tier-binding.md'` | Which document carries the `tier: → model` binding block. |
 <!-- /generated:manifest-fields -->
 
 Absence is meaningful and is not the same as a default: `[i18n]` omitted
@@ -356,6 +391,8 @@ one it did not finish.
   package are a record of one project's decisions, not part of the product —
   this README and the code's own docstrings are what ships.
 
+<!-- stale-ok: `.ai/hosts.json` again — a consuming project's file. Every path in
+     this section names something in the repo being troubleshot. -->
 ### Troubleshooting
 
 Run `nightshift doctor` first — it reports, in order: the working tree is LF

@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nightshift — slides</title>
+<meta name="description" content="Slide deck: one set of guardrails, two ways to work — inline and overnight.">
+<style>
+/* ─────────────────────────────────────────────────────────────
+   nightshift — a SPOKEN deck. Few words per slide; the speaker
+   carries the argument. Diagrams and numbers over prose.
+   Palette: cool blue-black night, sodium-lamp amber.
+   Type: monospace as the display face — the product talks in text.
+   ───────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+
+:root {
+  --ground:#0D1219; --surface:#151C26; --raised:#1C2431;
+  --line:#2A3441; --line-soft:#1F2833;
+  --text:#E2E8F1; --dim:#8E9AAB; --faint:#5A6675;
+  --amber:#EE9A3E; --amber-soft:#3A2A17;
+  --pass:#5FB489; --fail:#D96C61; --hold:#6FA0D6;
+  --mono: ui-monospace,"Cascadia Mono","JetBrains Mono","SFMono-Regular",Consolas,"DejaVu Sans Mono",monospace;
+  --sans: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --ground:#EDF0F5; --surface:#FFFFFF; --raised:#F5F7FA;
+    --line:#CBD5E1; --line-soft:#E2E8F0;
+    --text:#111823; --dim:#4F5B6B; --faint:#8595A8;
+    --amber:#A85B08; --amber-soft:#FBEBD8;
+    --pass:#2A7A56; --fail:#AB3C35; --hold:#33639C;
+  }
+}
+:root[data-theme="light"]{--ground:#EDF0F5;--surface:#FFFFFF;--raised:#F5F7FA;--line:#CBD5E1;--line-soft:#E2E8F0;--text:#111823;--dim:#4F5B6B;--faint:#8595A8;--amber:#A85B08;--amber-soft:#FBEBD8;--pass:#2A7A56;--fail:#AB3C35;--hold:#33639C;}
+:root[data-theme="dark"]{--ground:#0D1219;--surface:#151C26;--raised:#1C2431;--line:#2A3441;--line-soft:#1F2833;--text:#E2E8F1;--dim:#8E9AAB;--faint:#5A6675;--amber:#EE9A3E;--amber-soft:#3A2A17;--pass:#5FB489;--fail:#D96C61;--hold:#6FA0D6;}
+
+body {
+  margin:0; background:var(--ground); color:var(--text);
+  font-family:var(--sans); -webkit-font-smoothing:antialiased;
+  scroll-snap-type:y mandatory; overflow-y:scroll; height:100vh;
+}
+
+/* ── slide shell ──────────────────────────────────────────── */
+.slide {
+  min-height:100svh; scroll-snap-align:start; scroll-snap-stop:always;
+  display:flex; flex-direction:column; justify-content:center;
+  padding:clamp(2.5rem,6vh,5rem) clamp(1.5rem,6vw,6rem) clamp(4rem,8vh,6rem);
+  position:relative;
+}
+.inner { width:100%; max-width:64rem; margin:0 auto;
+         display:flex; flex-direction:column; gap:clamp(1.4rem,3.2vh,2.5rem); }
+
+.kicker {
+  font-family:var(--mono); font-size:clamp(.62rem,1.1vw,.72rem); font-weight:700;
+  letter-spacing:.22em; text-transform:uppercase; color:var(--amber); margin:0;
+}
+h1 { font-family:var(--mono); font-weight:700; margin:0; line-height:1;
+     letter-spacing:-.04em; font-size:clamp(3rem,11vw,7.5rem); }
+h2 { font-family:var(--mono); font-weight:700; margin:0; line-height:1.08;
+     letter-spacing:-.03em; font-size:clamp(1.7rem,4.6vw,3.1rem); text-wrap:balance; }
+h3 { font-family:var(--mono); font-weight:700; margin:0; font-size:clamp(.88rem,1.6vw,1rem);
+     letter-spacing:-.01em; }
+.say { font-size:clamp(1rem,1.85vw,1.3rem); line-height:1.45; color:var(--dim);
+       margin:0; max-width:46ch; text-wrap:pretty; }
+.say b { color:var(--text); font-weight:600; }
+.say em { font-style:normal; color:var(--amber); }
+code { font-family:var(--mono); font-size:.88em; background:var(--raised);
+       border:1px solid var(--line-soft); border-radius:3px; padding:.06em .34em; white-space:nowrap; }
+
+/* ── chrome ───────────────────────────────────────────────── */
+.rail { position:fixed; right:clamp(.7rem,2vw,1.6rem); top:50%; transform:translateY(-50%);
+        display:flex; flex-direction:column; gap:.55rem; z-index:50; }
+.rail button { width:9px; height:9px; padding:0; border-radius:50%; cursor:pointer;
+        border:1px solid var(--faint); background:transparent; transition:background .18s,border-color .18s; }
+.rail button[aria-current="true"] { background:var(--amber); border-color:var(--amber); }
+.rail button:hover { border-color:var(--amber); }
+.num { position:absolute; left:clamp(1.5rem,6vw,6rem); bottom:clamp(1.5rem,4vh,2.5rem);
+       font-family:var(--mono); font-size:.7rem; letter-spacing:.16em; color:var(--faint); }
+.hint { position:fixed; right:clamp(2.4rem,5vw,4rem); bottom:clamp(1.2rem,3vh,2rem);
+        font-family:var(--mono); font-size:.66rem; letter-spacing:.12em; color:var(--faint);
+        z-index:50; transition:opacity .6s; }
+:focus-visible { outline:2px solid var(--amber); outline-offset:3px; border-radius:2px; }
+
+/* ── title ────────────────────────────────────────────────── */
+.lamp { width:14px; height:14px; border-radius:50%; background:var(--amber);
+        box-shadow:0 0 0 5px color-mix(in srgb,var(--amber) 15%,transparent); flex:none; }
+@media (prefers-reduced-motion:no-preference){
+  .lamp { animation:pulse 4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{box-shadow:0 0 0 5px color-mix(in srgb,var(--amber) 15%,transparent);}
+                     50%{box-shadow:0 0 0 11px color-mix(in srgb,var(--amber) 5%,transparent);} }
+}
+.title-row { display:flex; align-items:center; gap:1.1rem; }
+
+/* ── two-panel ────────────────────────────────────────────── */
+.duo { display:grid; grid-template-columns:repeat(auto-fit,minmax(17rem,1fr)); gap:clamp(1rem,2.5vw,2rem); }
+.panel { border-left:3px solid var(--amber); padding:.2rem 0 .2rem 1.3rem;
+         display:flex; flex-direction:column; gap:.55rem; }
+.panel.q { border-left-color:var(--line); }
+.panel .big { font-family:var(--mono); font-weight:700; letter-spacing:-.02em;
+              font-size:clamp(1.05rem,2.1vw,1.45rem); line-height:1.3; }
+.panel p { margin:0; font-size:clamp(.84rem,1.4vw,.96rem); color:var(--dim); line-height:1.5; }
+
+/* ── THE MAP ──────────────────────────────────────────────── */
+.map { display:flex; flex-direction:column; align-items:center; width:100%; }
+.map-top { display:grid; grid-template-columns:1fr 1fr; gap:clamp(1rem,3vw,2.5rem); width:100%; }
+@media (max-width:640px){ .map-top { grid-template-columns:1fr; } }
+.mode { background:var(--surface); border:1px solid var(--line); border-top:3px solid var(--amber);
+        border-radius:6px; padding:clamp(.85rem,2vw,1.25rem); display:flex; flex-direction:column; gap:.5rem; }
+.mode.night { border-top-color:var(--hold); }
+.mode h3 { color:var(--amber); }
+.mode.night h3 { color:var(--hold); }
+.mode ul { margin:0; padding-left:1.05rem; display:flex; flex-direction:column; gap:.26rem; }
+.mode li { font-size:clamp(.77rem,1.35vw,.9rem); color:var(--dim); line-height:1.45; }
+.funnel { width:100%; height:clamp(1.8rem,4.5vh,3rem); color:var(--faint); }
+.funnel svg { width:100%; height:100%; display:block; }
+.shared { width:100%; background:var(--raised); border:1px solid var(--amber);
+          border-radius:6px; padding:clamp(.9rem,2.2vw,1.35rem); text-align:center; }
+.shared .lab { font-family:var(--mono); font-size:.66rem; letter-spacing:.2em;
+               text-transform:uppercase; color:var(--amber); }
+.shared .items { display:flex; flex-wrap:wrap; justify-content:center; gap:.42rem .65rem; margin-top:.7rem; }
+.chip { font-family:var(--mono); font-size:clamp(.7rem,1.3vw,.85rem); color:var(--text);
+        background:var(--surface); border:1px solid var(--line); border-radius:99px; padding:.24rem .8rem; }
+
+/* ── board lanes ──────────────────────────────────────────── */
+.lanes { display:flex; flex-wrap:wrap; gap:.5rem; }
+.lane { flex:1 1 7.5rem; min-width:6.6rem; background:var(--surface);
+        border:1px solid var(--line); border-top:3px solid var(--line);
+        border-radius:5px; padding:.7rem .75rem; display:flex; flex-direction:column; gap:.22rem; }
+.lane b { font-family:var(--mono); font-size:.77rem; }
+.lane span.d { font-size:.73rem; color:var(--dim); line-height:1.4; }
+.lane .who { font-family:var(--mono); font-size:.58rem; letter-spacing:.14em;
+             text-transform:uppercase; color:var(--faint); }
+.lane.you { border-top-color:var(--amber); }
+.lane.you .who { color:var(--amber); }
+.lane.bot { border-top-color:var(--pass); }
+.lane.ask { border-top-color:var(--hold); }
+.lane.ask .who { color:var(--hold); }
+.lane.dead { border-top-color:var(--fail); }
+
+/* ── hand-operated steps ──────────────────────────────────── */
+.hands { display:grid; grid-template-columns:repeat(auto-fit,minmax(12.5rem,1fr)); gap:1px;
+         background:var(--line-soft); border:1px solid var(--line-soft); border-radius:6px; overflow:hidden; }
+.hand { background:var(--surface); padding:clamp(.85rem,2vw,1.2rem); display:flex; flex-direction:column; gap:.35rem; }
+.hand .cmd { font-family:var(--mono); font-size:clamp(.78rem,1.4vw,.92rem); color:var(--amber); font-weight:700; }
+.hand p { margin:0; font-size:clamp(.76rem,1.32vw,.88rem); color:var(--dim); line-height:1.45; }
+.hand .tag { font-family:var(--mono); font-size:.58rem; letter-spacing:.14em; text-transform:uppercase; color:var(--faint); }
+
+/* ── card mock ────────────────────────────────────────────── */
+.card-mock { background:var(--surface); border:1px solid var(--line); border-radius:6px;
+             font-family:var(--mono); font-size:clamp(.68rem,1.25vw,.82rem); line-height:1.7; overflow:hidden; }
+.card-mock .fm { padding:.75rem 1.1rem; border-bottom:1px solid var(--line-soft); color:var(--dim); }
+.card-mock .fm i { font-style:normal; color:var(--faint); }
+.card-mock .sec { padding:.5rem 1.1rem; color:var(--faint); border-bottom:1px solid var(--line-soft); }
+.card-mock .hl { background:var(--amber-soft); border-left:3px solid var(--amber);
+                 padding:.85rem 1.1rem; border-bottom:1px solid var(--line-soft); }
+.card-mock .hl b { color:var(--amber); display:block; margin-bottom:.35rem; }
+.card-mock .hl span { color:var(--text); font-family:var(--sans); font-size:1.05em; line-height:1.5; }
+
+/* ── night strip ──────────────────────────────────────────── */
+.strip { display:grid; grid-template-columns:repeat(auto-fit,minmax(8.5rem,1fr)); gap:1px;
+         background:var(--line-soft); border:1px solid var(--line-soft); border-radius:6px; overflow:hidden; }
+.tick { background:var(--surface); padding:clamp(.75rem,1.8vw,1.05rem); display:flex; flex-direction:column; gap:.28rem; }
+.tick .t { font-family:var(--mono); font-size:clamp(.78rem,1.45vw,.95rem); font-weight:700; color:var(--amber); }
+.tick .w { font-size:clamp(.73rem,1.28vw,.86rem); color:var(--dim); line-height:1.4; }
+
+/* ── loop ─────────────────────────────────────────────────── */
+.cycle { display:flex; flex-wrap:wrap; align-items:stretch; gap:.55rem; }
+.cyc { flex:1 1 10.5rem; border:1px dashed var(--line); border-radius:5px;
+       padding:.85rem 1rem; display:flex; flex-direction:column; gap:.32rem; }
+.cyc b { font-family:var(--mono); font-size:.8rem; color:var(--amber); }
+.cyc span { font-size:.81rem; color:var(--dim); line-height:1.45; }
+.arrow { align-self:center; color:var(--faint); font-size:1.05rem; }
+@media (max-width:760px){ .arrow { display:none; } }
+
+/* ── numbers ──────────────────────────────────────────────── */
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(8.5rem,1fr)); gap:1px;
+        background:var(--line-soft); border:1px solid var(--line-soft); border-radius:6px; overflow:hidden; }
+.cell { background:var(--surface); padding:clamp(.85rem,2vw,1.25rem); display:flex; flex-direction:column; gap:.12rem; }
+.cell .n { font-family:var(--mono); font-weight:700; letter-spacing:-.045em; line-height:1;
+           font-size:clamp(1.5rem,3.4vw,2.3rem); font-variant-numeric:tabular-nums; }
+.cell .n.hot { color:var(--amber); }
+.cell .l { font-size:clamp(.69rem,1.2vw,.79rem); color:var(--dim); line-height:1.38; }
+
+/* ── lists ────────────────────────────────────────────────── */
+.plain { margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:.7rem; }
+.plain li { display:flex; gap:.8rem; align-items:baseline;
+            font-size:clamp(.88rem,1.5vw,1.05rem); color:var(--dim); line-height:1.45; max-width:54ch; }
+.plain li b { color:var(--text); font-weight:600; }
+.plain .mark { font-family:var(--mono); color:var(--fail); flex:none; }
+
+pre { font-family:var(--mono); background:var(--surface); border:1px solid var(--line);
+      border-radius:6px; padding:clamp(.9rem,2vw,1.2rem); margin:0; overflow-x:auto;
+      font-size:clamp(.74rem,1.35vw,.9rem); line-height:1.9; }
+pre .c { color:var(--faint); }
+pre .p { color:var(--amber); }
+.warnbox { border:1px solid var(--fail); border-left-width:3px; border-radius:5px;
+           background:color-mix(in srgb,var(--fail) 8%,transparent);
+           padding:clamp(.9rem,2vw,1.2rem); }
+.warnbox p { margin:0; font-size:clamp(.85rem,1.4vw,1rem); color:var(--text); line-height:1.5; max-width:58ch; }
+</style>
+</head>
+<body>
+
+<nav class="rail" aria-label="slides"></nav>
+<div class="hint" id="hint">← → to move</div>
+
+<!-- 1 ───────────────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <div class="title-row"><span class="lamp" aria-hidden="true"></span><p class="kicker">a board-driven AI dev team for a Python repo</p></div>
+    <h1>nightshift</h1>
+    <p class="say" style="max-width:38ch">One set of guardrails. <b>Two ways to work</b> — at the keyboard, or overnight.</p>
+  </div>
+  <div class="num">01</div>
+</section>
+
+<!-- 2 ───────────────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">why</p>
+    <h2>Rules grow.<br>Recall doesn't.</h2>
+    <div class="duo">
+      <div class="panel">
+        <div class="big">65 rules</div>
+        <p>written down in this project — prose an agent must recall in full, every session</p>
+      </div>
+      <div class="panel q">
+        <div class="big">40% enforced</div>
+        <p>by a test or a gate. The rest still depend on someone remembering</p>
+      </div>
+    </div>
+  </div>
+  <div class="num">02</div>
+</section>
+
+<!-- 3 ───────────────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">the cost of a defect</p>
+    <h2>Not a bad commit.<br>Your&nbsp;attention.</h2>
+    <p class="say">Caught by a gate at 3&nbsp;AM, or by you over coffee — <b>identical defect, wildly different cost.</b></p>
+  </div>
+  <div class="num">03</div>
+</section>
+
+<!-- 4 ───────────────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">two rules everything follows from</p>
+    <div class="duo">
+      <div class="panel">
+        <div class="big">What Python can do,<br>Python should do.</div>
+        <p>A rule a script can check is never a charter bullet. The orchestrator makes zero LLM calls.</p>
+      </div>
+      <div class="panel">
+        <div class="big">No gate,<br>no delegation.</div>
+        <p>Unattended work is safe only where a machine can judge it. Gates first, workers second.</p>
+      </div>
+    </div>
+  </div>
+  <div class="num">04</div>
+</section>
+
+<!-- 5 ── THE MAP ─────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">the whole idea, in one picture</p>
+    <div class="map">
+      <div class="map-top">
+        <div class="mode">
+          <h3>INLINE — me, at the keyboard</h3>
+          <ul>
+            <li>an ordinary session</li>
+            <li>no board required</li>
+            <li>exactly as it worked before</li>
+          </ul>
+        </div>
+        <div class="mode night">
+          <h3>OVERNIGHT — the runner</h3>
+          <ul>
+            <li>a card, its own git worktree</li>
+            <li>I start it. It is not a daemon</li>
+            <li>I read the result in the morning</li>
+          </ul>
+        </div>
+      </div>
+      <div class="funnel" aria-hidden="true">
+        <svg viewBox="0 0 400 60" preserveAspectRatio="none">
+          <path d="M100 0 V24 Q100 33 109 33 H191 Q200 33 200 42 V60"
+                fill="none" stroke="currentColor" stroke-width="1.4"/>
+          <path d="M300 0 V24 Q300 33 291 33 H209 Q200 33 200 42 V60"
+                fill="none" stroke="currentColor" stroke-width="1.4"/>
+        </svg>
+      </div>
+      <div class="shared">
+        <div class="lab">the same guardrails, either way</div>
+        <div class="items">
+          <span class="chip">skills</span>
+          <span class="chip">34 gates, on save</span>
+          <span class="chip">2,065 tests</span>
+          <span class="chip">preflight before push</span>
+          <span class="chip">corrections log</span>
+          <span class="chip">memory</span>
+        </div>
+      </div>
+    </div>
+    <p class="say" style="margin:0 auto; text-align:center; max-width:48ch">The board is an <em>addition</em>, not a replacement.</p>
+  </div>
+  <div class="num">05</div>
+</section>
+
+<!-- 6 ───────────────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">the board — eight directories of markdown</p>
+    <h2 style="font-size:clamp(1.3rem,3vw,1.9rem)">No database. No daemon. A card is a file.</h2>
+    <div class="lanes">
+      <div class="lane you"><span class="who">mine</span><b>ideas/</b><span class="d">private. no script reads it</span></div>
+      <div class="lane you"><span class="who">mine</span><b>inbox/</b><span class="d">a rough note, no schema</span></div>
+      <div class="lane you"><span class="who">i approve</span><b>tasks/</b><span class="d">ready — waiting for my nod</span></div>
+      <div class="lane ask"><span class="who">i answer</span><b>needs-decision/</b><span class="d">a question only I can settle</span></div>
+      <div class="lane bot"><span class="who">machine</span><b>review/</b><span class="d">gates green</span></div>
+      <div class="lane bot"><span class="who">i test</span><b>testing/</b><span class="d">merged, waiting on me</span></div>
+      <div class="lane bot"><span class="who">archive</span><b>done/</b><span class="d">kept as evidence</span></div>
+      <div class="lane dead"><span class="who">archive</span><b>failed/</b><span class="d">kept too</span></div>
+    </div>
+    <p class="say">A card's state is which folder it sits in. That is what survives a 3&nbsp;AM reboot.</p>
+  </div>
+  <div class="num">06</div>
+</section>
+
+<!-- 7 ───────────────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">nothing runs itself</p>
+    <h2>Four things I do by hand.</h2>
+    <div class="hands">
+      <div class="hand">
+        <span class="tag">1 · capture</span>
+        <span class="cmd">drop a note</span>
+        <p>Into <code>inbox/</code>, from the phone. No frontmatter — refining it is the system's job.</p>
+      </div>
+      <div class="hand">
+        <span class="tag">2 · scope</span>
+        <span class="cmd">run triage</span>
+        <p>One note at a time, when I ask. It writes a card — or parks a question rather than guess.</p>
+      </div>
+      <div class="hand">
+        <span class="tag">3 · approve</span>
+        <span class="cmd">read the card</span>
+        <p>I read its <code>## Approach</code>. Nothing dispatches that I have not agreed with.</p>
+      </div>
+      <div class="hand">
+        <span class="tag">4 · dispatch</span>
+        <span class="cmd">start the runner</span>
+        <p>By hand, or on a schedule I set. Stops on a wall, a budget, or <code>.ai/STOP</code>.</p>
+      </div>
+    </div>
+  </div>
+  <div class="num">07</div>
+</section>
+
+<!-- 8 ───────────────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">step 3 — the approval point</p>
+    <h2 style="font-size:clamp(1.3rem,3vw,1.9rem)">One paragraph decides whether it runs.</h2>
+    <div class="card-mock">
+      <div class="fm">
+        <i>id:</i> heavy-guard-should-bleed<br>
+        <i>tier:</i> worker &nbsp; <i>worker:</i> code-thread &nbsp; <i>unattended:</i> true
+      </div>
+      <div class="sec">## Intent</div>
+      <div class="hl">
+        <b>## Approach</b>
+        <span><code>is_drone</code> did double duty — AI and crit-DoT flavour. Add an independent
+        <code>is_mechanical</code> flag for the flavour, and leave <code>is_drone</code> to the AI.</span>
+      </div>
+      <div class="sec">## Steps &nbsp;·&nbsp; ## Acceptance &nbsp;·&nbsp; ## Open Questions → none</div>
+    </div>
+    <p class="say">The principle, not the diff. A gate refuses a <code>tasks/</code> card that has no such paragraph.</p>
+  </div>
+  <div class="num">08</div>
+</section>
+
+<!-- 9 ───────────────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">what the night does with an approved card</p>
+    <div class="strip">
+      <div class="tick"><span class="t">worktree</span><span class="w">its own branch — the integration branch is untouched</span></div>
+      <div class="tick"><span class="t">dispatch</span><span class="w">one worker, one card, at the tier the card declares</span></div>
+      <div class="tick"><span class="t">gates + tests</span><span class="w">the machine judges first — I never read failed work</span></div>
+      <div class="tick"><span class="t">review</span><span class="w">an agent that sees the diff, never the prompt</span></div>
+      <div class="tick"><span class="t">merge</span><span class="w">rebased, re-verified, then merged</span></div>
+      <div class="tick"><span class="t">digest</span><span class="w">what landed, what failed, what needs me</span></div>
+    </div>
+    <p class="say">Every branch in the runner is a file check or an exit code. <b>Zero LLM calls in the orchestrator</b> — that is what makes 3&nbsp;AM predictable.</p>
+  </div>
+  <div class="num">09</div>
+</section>
+
+<!-- 10 ──────────────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">when it cannot decide</p>
+    <h2>"I need to ask you<br>something" is a <em style="font-style:normal;color:var(--amber)">success</em>.</h2>
+    <p class="say">A parked card carries what was tried, what is ambiguous, the options, and what each implies. <b>A decision I can make in 15 seconds from my phone.</b></p>
+    <p class="say">Ambiguity resolved by invention is the worst overnight outcome there is.</p>
+  </div>
+  <div class="num">10</div>
+</section>
+
+<!-- 11 ──────────────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">how the rules get earned</p>
+    <div class="cycle">
+      <div class="cyc"><b>1 · log it</b><span>one line per correction — and <em style="font-style:normal;color:var(--amber)">why it was believed</em></span></div>
+      <span class="arrow">→</span>
+      <div class="cyc"><b>2 · cluster</b><span>the shape of an error repeats, not its subject</span></div>
+      <span class="arrow">→</span>
+      <div class="cyc"><b>3 · earn a gate</b><span>or refuse one and say so — judgment stays human</span></div>
+      <span class="arrow">→</span>
+      <div class="cyc"><b>4 · audit</b><span>every rule against what actually enforces it</span></div>
+    </div>
+    <p class="say"><b>You get the machinery for earning gates — not our gate suite.</b> A new repo starts with the generic ones and an empty log.</p>
+  </div>
+  <div class="num">11</div>
+</section>
+
+<!-- 12 ──────────────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">the least flattering evidence</p>
+    <h2>We pointed it at itself.<br>It found seven blind spots.</h2>
+    <p class="say">Gates still scanning a folder the code had moved out of. One whose target file was deleted three steps earlier — <b>green while reading nothing.</b></p>
+    <p class="say">All silent. All the same class the log had already recorded 17 times.</p>
+  </div>
+  <div class="num">12</div>
+</section>
+
+<!-- 13 ──────────────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">where it stands — measured today</p>
+    <div class="grid">
+      <div class="cell"><span class="n hot">34</span><span class="l">gates, ~7&nbsp;s, on every save</span></div>
+      <div class="cell"><span class="n">2,065</span><span class="l">tests, green</span></div>
+      <div class="cell"><span class="n">36</span><span class="l">cards taken to merged or done</span></div>
+      <div class="cell"><span class="n">129</span><span class="l">corrections, 12 classes</span></div>
+      <div class="cell"><span class="n">65</span><span class="l">rules audited for enforcement</span></div>
+      <div class="cell"><span class="n">17.7k</span><span class="l">lines of framework</span></div>
+      <div class="cell"><span class="n">465</span><span class="l">tests on the framework itself</span></div>
+      <div class="cell"><span class="n">41.8k</span><span class="l">lines of game it grew from</span></div>
+    </div>
+    <p class="say">One developer, one repo. Directional instruments, not a study.</p>
+  </div>
+  <div class="num">13</div>
+</section>
+
+<!-- 14 ──────────────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">before you get excited</p>
+    <h2>What you don't get.</h2>
+    <ul class="plain">
+      <li><span class="mark">✕</span><span><b>A pre-earned gate suite.</b> Week one is generic gates and an empty log.</span></li>
+      <li><span class="mark">✕</span><span><b>Non-Python support.</b> The AST gates assume Python underneath.</span></li>
+      <li><span class="mark">✕</span><span><b>Local models.</b> Costed against real telemetry, then parked. Nothing depends on them.</span></li>
+      <li><span class="mark">✕</span><span><b>A sandbox.</b> The permission mode a code card needs is the whole machine.</span></li>
+    </ul>
+  </div>
+  <div class="num">14</div>
+</section>
+
+<!-- 15 ──────────────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">try it</p>
+    <h2 style="font-size:clamp(1.3rem,3vw,2rem)">Two commands to stand it up.</h2>
+    <pre>pip install -e path/to/nightshift
+nightshift init <span class="p">--integration</span> &lt;your-branch&gt;
+
+<span class="c"># then, whenever you want it</span>
+python -m nightshift.runner <span class="p">--dry-run</span>
+python -m nightshift.runner <span class="p">--card</span> &lt;id&gt; <span class="p">--max-cards</span> 1</pre>
+    <div class="warnbox">
+      <p><b><code>permission_mode: bypassPermissions</code> is what a code card needs — and it is the whole machine, not a sandbox.</b> <code>init</code> will never set it for you.</p>
+    </div>
+  </div>
+  <div class="num">15</div>
+</section>
+
+<script>
+(function () {
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  const rail = document.querySelector('.rail');
+  const hint = document.getElementById('hint');
+
+  slides.forEach((s, i) => {
+    s.id = 's' + (i + 1);
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.setAttribute('aria-label', 'Slide ' + (i + 1));
+    b.addEventListener('click', () => go(i));
+    rail.appendChild(b);
+  });
+  const dots = Array.from(rail.children);
+
+  let current = 0;
+  function mark(i) {
+    current = i;
+    dots.forEach((d, j) => d.setAttribute('aria-current', String(j === i)));
+  }
+  function go(i) {
+    const n = Math.max(0, Math.min(slides.length - 1, i));
+    const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+    slides[n].scrollIntoView({ behavior: smooth ? 'smooth' : 'auto' });
+    mark(n);
+  }
+
+  // Which slide is on screen. An observer rather than a scroll handler: steadier,
+  // and it stays correct however the slide was reached (key, dot, trackpad).
+  const io = new IntersectionObserver(
+    entries => entries.forEach(e => { if (e.isIntersecting) mark(slides.indexOf(e.target)); }),
+    { threshold: 0.55 }
+  );
+  slides.forEach(s => io.observe(s));
+
+  addEventListener('keydown', e => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const k = e.key;
+    if (k === 'ArrowRight' || k === 'ArrowDown' || k === 'PageDown' || k === ' ') { e.preventDefault(); go(current + 1); }
+    else if (k === 'ArrowLeft' || k === 'ArrowUp' || k === 'PageUp') { e.preventDefault(); go(current - 1); }
+    else if (k === 'Home') { e.preventDefault(); go(0); }
+    else if (k === 'End') { e.preventDefault(); go(slides.length - 1); }
+  });
+
+  mark(0);
+  setTimeout(() => { hint.style.opacity = '0'; }, 4500);
+})();
+</script>
+</body>
+</html>

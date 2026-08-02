@@ -46,6 +46,7 @@ from pathlib import Path
 
 from nightshift import board  # the single card model (`board-parser-convergence`)
 from nightshift import textio  # cards are committed; write_text would CRLF them on Windows
+from nightshift.manifest import find_root
 
 # Where the board sits is `board.board_rel`'s answer since 07_portability.md §8
 # step 4 put it behind `[board].root`. This module used to carry its own
@@ -187,16 +188,28 @@ def apply(root: Path, actions: list[Action], commit: bool) -> int:
     return moved
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--apply", action="store_true", help="perform the changes (default: report only)")
-    parser.add_argument("--commit", action="store_true", help="with --apply, commit the result")
-    args = parser.parse_args()
-
+def main(argv: list[str] | None = None) -> int:
+    # Before `parse_args`, not after: `--help` prints this module's docstring, which
+    # contains `≠`, and Windows' cp1252 console cannot encode it — so `--help` died
+    # with a UnicodeEncodeError instead of printing help.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
-    root = Path(__file__).resolve().parent.parent
+    parser = argparse.ArgumentParser(
+        prog="python -m nightshift.reconcile", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--apply", action="store_true", help="perform the changes (default: report only)")
+    parser.add_argument("--commit", action="store_true", help="with --apply, commit the result")
+    parser.add_argument("--root", type=Path, default=None,
+                        help="repo to reconcile (default: found from the working directory)")
+    args = parser.parse_args(argv)
+
+    # **Not `Path(__file__).parent.parent`.** Installed as a package that is the
+    # framework's own checkout, which has no board — so this reported "Board is
+    # consistent" from inside every consuming project, whatever their board said.
+    # It fails *open*, which is the worst direction for the one tool whose job is
+    # to notice a half-finished move.
+    root = (args.root or find_root()).resolve()
     actions = plan(root)
     if not actions:
         print("Board is consistent — every card's `state:` matches its lane.")

@@ -62,13 +62,14 @@ from pathlib import Path
 
 import appeal_markers
 from nightshift.gates import corpus
+from nightshift.gates import scope
 from nightshift.gates.base import Violation
 
 NAME = "write_newline"
 FAST = True
-DESCRIPTION = "no text-mode write under .ai/ leaves newline translation unpinned"
+DESCRIPTION = "no text-mode write in the tooling leaves newline translation unpinned"
 
-_ROOT = Path(".ai")
+# Scope: `.ai/` plus `[project].tooling_dirs` — see `gates/scope.py`.
 
 
 def _has_newline_kwarg(node: ast.Call) -> bool:
@@ -140,13 +141,7 @@ def _offence(node: ast.Call) -> str | None:
 def check(repo_root: Path) -> list[Violation]:
     appeals = appeal_markers.scan(repo_root)
     violations: list[Violation] = []
-    base = repo_root / _ROOT
-    if not base.is_dir():
-        return violations
-
-    for path in sorted(base.rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
+    for path in scope.tooling_files(repo_root):
         rel = path.relative_to(repo_root).as_posix()
         tree = corpus.tree(path)
         if tree is None:

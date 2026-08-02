@@ -15,8 +15,8 @@ framework repo can serve N projects instead of being forked per project.
   alone, so its table has to be an *override* and never a prerequisite.
 * A table whose absence *disables a feature* returns `None`, never a default.
   `[i18n]` is the case §4 names explicitly: a project with no localisation omits
-  the table, the three i18n gates never register, and nothing is lost. A default
-  here would register three gates against a `core/i18n.py` that does not exist.
+  the table, the three i18n gates find nothing to check, and nothing is lost. A
+  default here would point three gates at a string catalogue that does not exist.
 * A field that bounds behaviour is **never defaulted and never guessed**.
   `branches.integration` is the one: `forbidden_bases()` depends on it and a wrong
   answer means the runner builds on a branch nobody wanted. Dungeoneer is the
@@ -59,7 +59,7 @@ __all__ = [
 #
 # It cannot be a Python package: a leading dot is not an identifier, so `import ai`
 # will never find a folder literally named `.ai`. That is why the modules still
-# living there are imported flat after a `sys.path` insert (see `bridge.py`) rather
+# living there are imported flat after a `sys.path` insert (see `gates/run.py`) rather
 # than as `ai.suite`, and why this package is `nightshift` rather than `ai`.
 AI_DIR = ".ai"
 MANIFEST_NAME = "manifest.toml"
@@ -86,10 +86,19 @@ class Project:
 
     `extra_source_dirs` are scanned for symbols (so a doc naming `tests/conftest.py`
     resolves) but are not part of the code slice.
+
+    `tooling_dirs` are directories holding code that *runs the machinery* rather
+    than code under test — the scope of the five discipline gates, alongside `.ai/`,
+    which is always in it. Empty for almost every project: a consuming repo's
+    tooling is its `.ai/`, and that needs no declaration. It exists because this
+    package's own checkout is the exception, and pointing those gates at
+    `source_dirs` instead would quietly adopt "no subprocess result may be
+    discarded" as a rule about a project's application code. See `gates/scope.py`.
     """
     name: str = ""
     source_dirs: tuple[str, ...] = ()
     extra_source_dirs: tuple[str, ...] = ()
+    tooling_dirs: tuple[str, ...] = ()
     doc_files: tuple[str, ...] = ("CLAUDE.md",)
 
 
@@ -142,10 +151,27 @@ class Worker:
 
 @dataclass(frozen=True)
 class FreshnessRule:
-    """"Touching `touches` means `requires` should have been updated." One row of
-    what is currently `memory_freshness._RULES`."""
+    """"Touching `touches` means `requires` should have been updated." One row read
+    by `gates.memory_freshness`.
+
+    `touches` is a **prefix**, not necessarily a whole path: a trailing `/` names a
+    directory and a bare stem names a filename prefix
+    (`.claude/memory/feedback_`), which is what lets an index rule be expressed at
+    all. It is therefore not existence-checked by `validate()`.
+
+    Rows sharing a `touches` are *alternatives*: any one of their `requires` files
+    satisfies the rule. A memory doc split into an orientation file plus
+    detail/history companions is the case that needs it — logging a change in the
+    history file is a real update, and demanding the orientation file every time
+    teaches people to make a no-op edit to it.
+
+    `when` is `"touched"` (any change) or `"added"` (only files new in this diff).
+    `"added"` is the index shape: adding a `feedback_<topic>.md` must update the
+    index that lists them, while editing one need not.
+    """
     touches: str
     requires: str
+    when: str = "touched"
 
 
 @dataclass(frozen=True)
@@ -165,15 +191,37 @@ class Memory:
 
 @dataclass(frozen=True)
 class LayeringRule:
-    """`importer` must not import `imports`. Import paths, not directories."""
+    """`importer` must not import `imports`. Import paths, not directories.
+
+    Both are dotted prefixes, so `importer = "myapp"` covers the whole package.
+    `exempt` carves sub-packages back out, which is what makes the common shape —
+    *everything except the presentation layer must not import the presentation
+    layer* — one row instead of one row per package:
+
+        importer = "myapp"
+        imports  = "myapp.ui"
+        exempt   = ["myapp.ui", "myapp.screens"]
+
+    Written this way rather than as an explicit list of importers on purpose: a
+    list has to be extended by hand the day a new sub-package is added, and the
+    package that gets forgotten is exactly the new one nobody has thought about
+    yet. The exemption list is short, stable, and names the layer rather than its
+    complement.
+    """
     importer: str
     imports: str
+    exempt: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class I18n:
     """Present only if the project has localisation; `Manifest.i18n` is `None`
-    otherwise and the three i18n gates never register.
+    otherwise and the three i18n gates find nothing to check.
+
+    They still *register* — every gate in the package always does — and return no
+    violations. Three summaries used to say "never register", which is the kind of
+    almost-true that costs an afternoon the day someone greps the gate list and
+    finds all three in it.
 
     `adapter` points at a project module supplying the three functions
     `i18n_common` already exposes — `load_strings() -> {lang: {key: value}}`,
@@ -247,13 +295,19 @@ class Tiers:
     ever names a model. A `[tiers]` table listing models here would be a second
     place, which is the rule's own failure mode.
 
-    The default is this project's plan doc, which a second project will not have —
-    §7 is explicit that the plan docs do not port. `tiers.binding()` therefore fails
-    loudly and names this key, rather than guessing a model. Guessing is the one
-    behaviour §16 forbids outright: the 2026-07-22 bug was a correct table nothing
-    read, and a dispatcher that silently defaulted would recreate it invisibly.
+    The default is what `nightshift init` writes when no document already carries a
+    ```tier-binding``` block — a real path in the repo being configured. It used to
+    be Dungeoneer's plan doc, which is a path *no other project has*: the same
+    coupling `deferral-note-nobody-collected` recorded for the error message, left
+    in the value it was complaining about. Every consuming project's manifest either
+    declares its own or gets a file that exists.
+
+    Either way `tiers.binding()` fails loudly and names this key rather than guessing
+    a model. Guessing is the one behaviour §16 forbids outright: the 2026-07-22 bug
+    was a correct table nothing read, and a dispatcher that silently defaulted would
+    recreate it invisibly.
     """
-    binding_doc: str = ".claude/plans/ai_team/00_architecture.md"
+    binding_doc: str = "docs/tier-binding.md"
 
 
 @dataclass(frozen=True)
@@ -381,7 +435,7 @@ def _unknown(table: dict, known: tuple[str, ...], where: str) -> list[Problem]:
 _KNOWN_TABLES = ("project", "tests", "branches", "board", "worker", "memory",
                  "layering", "i18n", "dead_code", "audit", "tiers")
 _KNOWN: dict[str, tuple[str, ...]] = {
-    "project": ("name", "source_dirs", "extra_source_dirs", "doc_files"),
+    "project": ("name", "source_dirs", "extra_source_dirs", "tooling_dirs", "doc_files"),
     "tests": ("dir", "parallel"),
     "branches": ("integration", "stable", "forbidden_extra"),
     "board": ("root",),
@@ -421,13 +475,29 @@ def parse(data: dict, root: Path) -> Manifest:
     for row in memory_t.get("freshness", []):
         if not isinstance(row, dict) or "touches" not in row or "requires" not in row:
             raise ManifestError("memory.freshness rows must be { touches = ..., requires = ... }")
-        freshness.append(FreshnessRule(str(row["touches"]), str(row["requires"])))
+        unknown = sorted(set(row) - {"touches", "requires", "when"})
+        if unknown:
+            raise ManifestError(
+                f"memory.freshness row has unknown key(s) {', '.join(unknown)} — "
+                f"known keys are touches, requires, when")
+        when = str(row.get("when", "touched"))
+        if when not in ("touched", "added"):
+            raise ManifestError(
+                f"memory.freshness `when` must be \"touched\" or \"added\", not {when!r}")
+        freshness.append(FreshnessRule(str(row["touches"]), str(row["requires"]), when))
 
     layering = []
     for row in layering_t.get("forbid", []):
         if not isinstance(row, dict) or "importer" not in row or "imports" not in row:
             raise ManifestError("layering.forbid rows must be { importer = ..., imports = ... }")
-        layering.append(LayeringRule(str(row["importer"]), str(row["imports"])))
+        unknown = sorted(set(row) - {"importer", "imports", "exempt"})
+        if unknown:
+            raise ManifestError(
+                f"layering.forbid row has unknown key(s) {', '.join(unknown)} — "
+                f"known keys are importer, imports, exempt")
+        layering.append(LayeringRule(
+            str(row["importer"]), str(row["imports"]),
+            _as_str_tuple(row.get("exempt", []), "layering.forbid.exempt")))
 
     # `[i18n]` absent means "this project has no localisation", which is a real and
     # supported answer — not a table to fill with defaults. See the class docstring.
@@ -475,6 +545,8 @@ def parse(data: dict, root: Path) -> Manifest:
             source_dirs=_as_str_tuple(project_t.get("source_dirs", []), "project.source_dirs"),
             extra_source_dirs=_as_str_tuple(project_t.get("extra_source_dirs", []),
                                             "project.extra_source_dirs"),
+            tooling_dirs=_as_str_tuple(project_t.get("tooling_dirs", []),
+                                       "project.tooling_dirs"),
             doc_files=_as_str_tuple(project_t.get("doc_files", ["CLAUDE.md"]),
                                     "project.doc_files"),
         ),
@@ -582,6 +654,8 @@ def validate(manifest: Manifest, data: dict | None = None) -> list[Problem]:
         check_path(rel, f"project.source_dirs[{i}]", must_exist=True, kind="source dir")
     for i, rel in enumerate(manifest.project.extra_source_dirs):
         check_path(rel, f"project.extra_source_dirs[{i}]", must_exist=True, kind="source dir")
+    for i, rel in enumerate(manifest.project.tooling_dirs):
+        check_path(rel, f"project.tooling_dirs[{i}]", must_exist=True, kind="tooling dir")
     for i, rel in enumerate(manifest.project.doc_files):
         check_path(rel, f"project.doc_files[{i}]", must_exist=True, kind="doc")
     check_path(manifest.tests.dir, "tests.dir", must_exist=True, kind="test dir")
@@ -591,7 +665,10 @@ def validate(manifest: Manifest, data: dict | None = None) -> list[Problem]:
     for i, rel in enumerate(manifest.memory.orientation):
         check_path(rel, f"memory.orientation[{i}]", must_exist=True, kind="orientation doc")
     for i, rule in enumerate(manifest.memory.freshness):
-        check_path(rule.touches, f"memory.freshness[{i}].touches", must_exist=True)
+        # `touches` is a prefix, not a path (see `FreshnessRule`) — a rule keyed on
+        # `.claude/memory/feedback_` names no file and must not warn about it. Shape
+        # is still checked: it has to stay inside the repo.
+        check_path(rule.touches, f"memory.freshness[{i}].touches", must_exist=False)
         check_path(rule.requires, f"memory.freshness[{i}].requires", must_exist=True)
     if manifest.i18n is not None:
         check_path(manifest.i18n.adapter, "i18n.adapter", must_exist=True, kind="adapter module")

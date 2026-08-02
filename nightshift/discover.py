@@ -9,10 +9,19 @@ Three confidence levels, and they are not decoration — `init` treats each one
 differently:
 
 * `HIGH` — a fact read off the tree. Accepted unless the operator objects.
-* `CONFIRM` — a guess that would be expensive to get wrong. `init` stops and asks,
-  every time, even in `--yes` mode. Exactly one field is here (`branches.integration`),
-  and this repo is the cautionary case: `dev` is *stable* in Dungeoneer and is a
-  forbidden base, which no heuristic would ever guess.
+* `CONFIRM` — a guess. `init` never writes one without being told to. Three fields
+  are here, and they split into two kinds:
+
+  - **`branches.integration` is required and is asked every time**, including under
+    `--yes`, because nothing downstream works without it and a plausible wrong
+    answer is worse than none. Dungeoneer is the cautionary case: `dev` is *stable*
+    there and is a forbidden base, which no heuristic would ever guess.
+  - **`memory.orientation` and `layering.forbid` are optional**, so the honest
+    non-interactive answer is to omit them. Each is a *claim* — "these are the files
+    every session loads", "this dependency runs one way" — and a claim nobody made
+    is not a default. Until 2026-08-02 both were written silently: `init` on a fresh
+    repo emitted a `[[layering.forbid]]` rule its operator had never seen, and this
+    docstring said there was only one field in this class.
 * `NEVER` — proposed empty or not at all, on purpose. `hosts.capabilities` and
   `hosts.permission_mode`. A probe answers "is the stack present?", and the honest
   response to "no" from an agent with initiative is to install it — 20 GB of
@@ -279,6 +288,8 @@ def worker_config(root: Path, name: str | None = None) -> list[Proposal]:
 
 
 _TIER_BLOCK = re.compile(r"^```tier-binding[ \t]*$", re.MULTILINE)
+# `init`'s substitution tokens. Their presence means the file is a template.
+_UNRENDERED = re.compile(r"\{\{[a-z_]+\}\}")
 
 
 def tier_binding_doc(root: Path) -> Proposal:
@@ -294,12 +305,25 @@ def tier_binding_doc(root: Path) -> Proposal:
         # other dot-directory is a virtualenv or a cache and searching it is a waste.
         if any(p.startswith(".") and p not in (".ai", ".claude") for p in parts):
             continue
+        # A file under `templates/` is a document *for another repo*, waiting to be
+        # copied or substituted — not this repo's own. `nightshift`'s own checkout
+        # is the case that found this: `nightshift/templates/tier-binding.md`
+        # carries the block by design, and proposing it made `doctor` report
+        # permanent drift against a file nothing in this repo reads. Skipping is the
+        # safe direction for a *proposal*: worst case `init` writes a new one.
+        if "templates" in parts:
+            continue
         try:
-            if _TIER_BLOCK.search(doc.read_text(encoding="utf-8")):
-                return Proposal("tiers.binding_doc", doc.relative_to(root).as_posix(), HIGH,
-                                "already carries a ```tier-binding block")
+            text = doc.read_text(encoding="utf-8")
         except OSError:
             continue
+        # Belt and braces: an unrendered substitution token means the same thing
+        # wherever the file happens to sit.
+        if _UNRENDERED.search(text):
+            continue
+        if _TIER_BLOCK.search(text):
+            return Proposal("tiers.binding_doc", doc.relative_to(root).as_posix(), HIGH,
+                            "already carries a ```tier-binding block")
     return Proposal("tiers.binding_doc", None, HIGH,
                     "no document carries a ```tier-binding block yet — init writes one")
 

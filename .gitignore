@@ -5,3 +5,17 @@ build/
 dist/
 .pytest_cache/
 .venv/
+
+# nightshift's own run artefacts. This package is gated by itself (`.ai/manifest.toml`),
+# so it grows the same per-run, per-machine files a consuming project does, and ignores
+# them for the same reasons. Comments are on their own lines: in .gitignore a `#` only
+# starts a comment at the start of a line, so a trailing one becomes part of the pattern.
+
+# per-run logs and the preflight's pytest cache
+.ai/runs/
+# a receipt for one commit on one box; never syncs
+.ai/.preflight
+# per-machine override of hosts.json
+.ai/host.json
+# the kill switch, dropped by hand
+.ai/STOP

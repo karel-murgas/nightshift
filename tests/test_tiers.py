@@ -44,12 +44,18 @@ def _repo(tmp_path: Path, *, doc: str | None = None, body: str = _BLOCK) -> Path
     return tmp_path
 
 
-def test_the_default_is_this_projects_plan_doc(tmp_path):
-    """Unchanged behaviour for a project that declares nothing — step 4's first
-    checklist item, which fired four times when it was ignored."""
+def test_the_default_is_a_path_the_installing_repo_will_actually_have(tmp_path):
+    """A project that declares nothing gets `docs/tier-binding.md` — the file
+    `nightshift init` writes when no document already carries the block.
+
+    It used to be `.claude/plans/ai_team/00_architecture.md`, a path that exists in
+    exactly one repo on earth. That is the `deferral-note-nobody-collected`
+    coupling: the *message* naming another project's plan doc was fixed at step 5
+    and the *default value* naming it was not, so every consuming project's manifest
+    table still pointed at a file it had never had."""
     _repo(tmp_path)
-    assert tiers.binding_doc(tmp_path) == Path(".claude/plans/ai_team/00_architecture.md")
-    assert tiers.ARCHITECTURE == Path(".claude/plans/ai_team/00_architecture.md")
+    assert tiers.binding_doc(tmp_path) == Path("docs/tier-binding.md")
+    assert tiers.ARCHITECTURE == Path("docs/tier-binding.md")
 
 
 def test_no_manifest_at_all_still_gives_the_default(tmp_path):

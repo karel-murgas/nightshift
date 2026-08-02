@@ -239,12 +239,26 @@ def select(repo_root: Path, n: int, ledger: dict[str, str] | None = None) -> lis
 
 def _main(argv: list[str] | None = None) -> int:
     import argparse
+    import sys
 
-    parser = argparse.ArgumentParser(description="Change-ordered staleness selection (deterministic).")
+    from nightshift.manifest import find_root
+
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
+    parser = argparse.ArgumentParser(
+        prog="python -m nightshift.stale_sweep",
+        description="Change-ordered staleness selection (deterministic).")
     parser.add_argument("--pick", type=int, default=0,
                         help="show the top N churned docs (0 = all eligible)")
+    parser.add_argument("--root", type=Path, default=None,
+                        help="repo to survey (default: found from the working directory)")
     args = parser.parse_args(argv)
-    repo_root = _HERE.parent
+    # Was `_HERE.parent` — a name deleted with the `__file__`-derived roots, whose
+    # one remaining use was here, so this entry point raised `NameError` on every
+    # invocation. The runner's `--stale` path passes an explicit root and was
+    # unaffected, which is exactly why nothing noticed.
+    repo_root = (args.root or find_root()).resolve()
     chosen = select(repo_root, args.pick or 10_000)
     if not chosen:
         print("nothing to check — every in-scope doc is verified at its named source's current state")

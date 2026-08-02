@@ -1,0 +1,58 @@
+# nightshift's own nightshift manifest.
+#
+# The framework gating itself. Until 2026-08-02 it did not, and that single gap
+# produced most of the review findings of that day: five gates scoped to `.ai/`
+# kept pointing at a directory the code had left, `run_stop_recorded` targeted a
+# file deleted three steps earlier, and two module entry points derived the repo
+# root from `__file__`. Every one of those is `check-stopped-checking`, and every
+# one would have been caught the moment this file existed.
+#
+# What is deliberately absent is as load-bearing as what is here:
+#
+#   [branches].integration  — there isn't one; work lands on `main`. The field is
+#                             never guessed, and `merge_base_candidates()` falls
+#                             back to `stable` for exactly this case.
+#   Board/                  — nothing dispatches here. A card whose deliverable is
+#                             this package is filed on the consuming project's
+#                             board and carries `unattended: false`, because the
+#                             runner cannot cut a worktree for a repo it is
+#                             running out of. `doctor` skips the three dispatch
+#                             preconditions on that basis.
+#   [audit].matrix          — no rule matrix. `nightshift.audit` reports "nothing
+#                             to count", which §7 says is the correct starting
+#                             state for any repo.
+#   [i18n], [memory]        — no localisation, no agent memory tree.
+
+[project]
+name = "nightshift"
+source_dirs = ["nightshift"]
+extra_source_dirs = ["tests"]
+doc_files = ["README.md"]
+
+# The whole package is tooling — that is what this repo is. This is the field that
+# finally puts the orchestrator back inside the five discipline gates it wrote for
+# itself. See `nightshift/gates/scope.py`.
+tooling_dirs = ["nightshift"]
+
+[tests]
+dir = "tests"
+parallel = true
+
+[branches]
+stable = "main"
+
+# `templates/` is data rendered into other repos, not code this package runs, and
+# `nightshift init` is its only consumer — vulture cannot see that a template is
+# used, and neither can it see the CLI entry points. Confidence 80 keeps the scan
+# on the band that finds real orphans without arguing about entry points.
+[dead_code]
+paths = ["nightshift"]
+min_confidence = 80
+
+# One row, and it is the layering the extraction is *for*: nothing in the package
+# may import from a consuming project. There is no such import today and there must
+# never be one — the whole claim of 07_portability.md is that core reaches a project
+# only through the manifest and the paths it declares.
+[[layering.forbid]]
+importer = "nightshift"
+imports = "nightshift.templates"

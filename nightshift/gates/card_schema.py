@@ -30,13 +30,25 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from nightshift import board as _board
 from nightshift.gates.base import Violation
 
 NAME = "card_schema"
 FAST = True
-DESCRIPTION = "cards on the board match 03_board.md's schema"
+DESCRIPTION = "cards on the board match the card schema, and `state:` agrees with the lane"
 
-_QUEUE = Path("Board")
+# Where the board sits comes from `[board].root`, via the module that owns the
+# fact. It was `Path("Board")` — a second home for a manifest field `board.py`,
+# `reconcile.py`, the runner and `ideas_fence` all already honoured. A project that
+# renamed its board therefore got a gate scanning a directory that was not there,
+# and `check()` opens with "no board → no violations": measured 2026-08-02, a card
+# with an invalid `tier:` and a missing required section reported **All clear**
+# while the runner, reading the real board, called the same card dispatchable. The
+# gate guarding the dispatcher went quiet and the dispatcher did not.
+#
+# `LANES` below stays an independent copy on purpose — that reasoning is in the
+# module docstring and is unaffected: the lane *names* are framework config no
+# project may redefine, whereas the board's *location* is a declared project fact.
 
 # `ideas/` is the maintainer's and is absent on purpose — see the module docstring.
 LANES: tuple[str, ...] = (
@@ -198,7 +210,7 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
     if lane not in _UNTRIAGED:
         for key in _AUTHOR_FIELDS:
             if key not in fields:
-                bad(key, f"missing required field `{key}` (03_board.md §2)")
+                bad(key, f"missing required field `{key}`")
 
     known = set(_AUTHOR_FIELDS) | _OPTIONAL_FIELDS | _RUNNER_FIELDS | _TOOL_FIELDS
     for key in fields:
@@ -210,7 +222,7 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
     if "state" in fields and fields["state"] != lane:
         bad("state", f"`state: {fields['state']}` but the card is in `{lane}/` — half-done move")
     if "tier" in fields and fields["tier"] not in _TIERS:
-        bad("tier", f"`tier: {fields['tier']}` — must be one of {sorted(_TIERS)} (00_architecture.md §16)")
+        bad("tier", f"`tier: {fields['tier']}` — must be one of {sorted(_TIERS)}; the dispatcher resolves the tier to a model and never guesses one")
     if "unattended" in fields and fields["unattended"].lower() not in _BOOLS:
         bad("unattended", f"`unattended: {fields['unattended']}` — must be true or false")
     tags = _tags(fields)
@@ -234,7 +246,7 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
                 rel, line_no,
                 f"card_schema: body says `unattended: {claimed}` but the frontmatter says "
                 f"`unattended: {fields['unattended']}` — one of the two is wrong, and the "
-                f"runner reads the frontmatter (03_board.md §2)",
+                f"runner reads the frontmatter",
             ))
     if "created" in fields and not _DATE.match(fields["created"]):
         bad("created", f"`created: {fields['created']}` — must be an ISO date (YYYY-MM-DD)")
@@ -265,7 +277,8 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
     if lane in _ACTIONABLE:
         for required in ("acceptance", "open questions"):
             if not _has_section(sections, required):
-                out.append(Violation(rel, 1, f"card_schema: missing `## {required.title()}` (03_board.md §3)"))
+                out.append(Violation(rel, 1, f"card_schema: a `{lane}/` card must carry a "
+                                         f"`## {required.title()}` section"))
         # A card must say how the work decomposes, but it may do that by naming
         # a recipe or a worker charter that already carries the decomposition.
         if recipe == "none" and worker == "none" and not _has_section(sections, "steps"):
@@ -274,7 +287,7 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
                     rel,
                     1,
                     "card_schema: missing `## Steps` — a card with neither `recipe:` nor "
-                    "`worker:` has nothing else carrying the decomposition (03_board.md §3)",
+                    "`worker:` has nothing else carrying the decomposition",
                 )
             )
 
@@ -291,7 +304,7 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
                 1,
                 "card_schema: missing `## Approach` — a `tasks/` code card must state the "
                 "core of how the change works in one paragraph (or `## Subject` for an "
-                "art/audio card); it is what the digest shows the maintainer (03_board.md §12b)",
+                "art/audio card); it is what the digest shows the maintainer",
             )
         )
 
@@ -333,7 +346,7 @@ def _orphans(repo_root: Path) -> list[Violation]:
     absent from the digest, and silently not-done. A drag that lands slightly
     wrong produces exactly this, so it will recur.
     """
-    board = repo_root / _QUEUE
+    board = _board.board_dir(repo_root)
     if not board.is_dir():
         return []
     known = set(LANES) | {"ideas"}
@@ -351,7 +364,7 @@ def _orphans(repo_root: Path) -> list[Violation]:
                 rel,
                 1,
                 f"card_schema: card sits in {where} — it has no state, so the runner "
-                f"cannot see it and the digest will not report it (03_board.md §1)",
+                f"cannot see it and the digest will not report it — one state means one lane",
             )
         )
     return out
@@ -360,7 +373,7 @@ def _orphans(repo_root: Path) -> list[Violation]:
 def cards(repo_root: Path) -> list[tuple[Path, str]]:
     found: list[tuple[Path, str]] = []
     for lane in LANES:
-        lane_dir = repo_root / _QUEUE / lane
+        lane_dir = _board.board_dir(repo_root) / lane
         if not lane_dir.is_dir():
             continue
         for path in sorted(lane_dir.glob("*.md")):

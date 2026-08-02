@@ -235,10 +235,16 @@ def report(repo_root: Path | None = None) -> str:
         f"  partially enforced   {counts['partial']:>3}",
         f"  prose only           {counts['prose']:>3}  ({100 * counts['prose'] / total:.0f}%)",
         "",
+        # Two disjoint counts and one total, stated as three numbers rather than as
+        # "N core (M of them infrastructure)" — which read as a subset while adding
+        # the project's own infra gates to the core count, and so printed "18 core
+        # (20 of them …)". Every core gate is infrastructure by definition; the only
+        # question the reader has is how many of the *project's* gates also are.
         f"  gates in .ai/gates/  {len(local_gate_files(repo_root)):>3}",
         f"  gates from nightshift core {len(core_gate_names(repo_root)):>3}"
-        f"   ({len(core_gate_names(repo_root)) + len(project_infra_gates(repo_root))} of them AI-team "
-        f"infrastructure, out of §A's scope)",
+        f"   (all infrastructure, out of §A's scope)",
+        f"  ...plus project gates the matrix exempts as infrastructure: "
+        f"{len(project_infra_gates(repo_root))}",
         f"  gates cited by a row {len({g for r in table for g in r.gates}):>3}",
     ]
     starred_prose = [r.number for r in table if r.starred and r.state == "prose"]
@@ -262,7 +268,7 @@ def report(repo_root: Path | None = None) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Re-run the enforcement audit (00_architecture.md §14b).")
+    parser = argparse.ArgumentParser(description="Re-run the enforcement audit: every normative rule in the matrix, against what actually enforces it.")
     parser.add_argument("--check", action="store_true",
                         help="exit 1 if the matrix and the tree disagree")
     parser.add_argument("--root", type=Path, default=None,

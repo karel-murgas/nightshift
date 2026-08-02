@@ -47,21 +47,21 @@ the queue" is `--max-cards 1`, and the dry run already prints them in the order 
 
 ### Where the runner works (topology, runner-hardening #3)
 
-The runner keeps `development_team` in its **own** sibling checkout
+The runner keeps `{{integration}}` in its **own** sibling checkout
 (`../.{{package}}-integration`) so {{maintainer}} can keep coding on their own branch while it runs. It
 is created automatically the first time. So:
 
-- **{{maintainer}} codes off `development_team`** (on a `karel/<x>` branch): the runner uses the
+- **{{maintainer}} codes off `{{integration}}`** (on a `<you>/<x>` branch): the runner uses the
   dedicated checkout, commits the board and merges reviewed cards there, and **never touches
-  their working copy**. Their board view lags until they `git merge development_team` (accepted).
-- **{{maintainer}} is still on `development_team`**: git forbids a second checkout of it, so the runner
+  their working copy**. Their board view lags until they `git merge {{integration}}` (accepted).
+- **{{maintainer}} is still on `{{integration}}`**: git forbids a second checkout of it, so the runner
   works **in-place** as before and logs a nudge to switch. Nothing breaks.
 - **Card intake is committed-only**: the runner reads the dedicated checkout, so a card must be
-  **committed to `development_team`** to be dispatched. Ready + commit the board on
-  `development_team`, *then* switch to `karel/<x>` and run.
+  **committed to `{{integration}}`** to be dispatched. Ready + commit the board on
+  `{{integration}}`, *then* switch to `<you>/<x>` and run.
 - **`--status`, `.ai/STOP`, the lock and the log stay in the launch checkout** — unchanged.
   The kill switch is honoured whether it lands there or in the dedicated checkout.
-- Reviewed-ok cards are **rebased onto the current `development_team` tip, re-verified, then
+- Reviewed-ok cards are **rebased onto the current `{{integration}}` tip, re-verified, then
   merged** automatically. A rebase conflict or a re-verify failure leaves the card in
   `review/` with a `## Merge` note for a human — never a guessed resolution.
 
@@ -116,8 +116,8 @@ Five checks, each exiting 1 before anything is dispatched:
 |---|---|
 | kill switch: `.ai/STOP` exists | Delete the file. It is gitignored — a local, per-machine off switch |
 | base branch is forbidden / missing | You passed `--base`. Don't; stable branches are refused by design |
-| working tree is dirty outside `Board/` (only when on `development_team`, the in-place case) | Commit or stash first — or switch to your own branch, where a dirty launch checkout no longer blocks. `--dry-run` only warns |
-| the dedicated `development_team` checkout is dirty | It is runner-owned; commit or discard changes in `../.{{package}}-integration` and re-run |
+| working tree is dirty outside `Board/` (only when on `{{integration}}`, the in-place case) | Commit or stash first — or switch to your own branch, where a dirty launch checkout no longer blocks. `--dry-run` only warns |
+| the dedicated `{{integration}}` checkout is dirty | It is runner-owned; commit or discard changes in `../.{{package}}-integration` and re-run |
 | the `claude` CLI was not found | Set `CLAUDE_BIN`, or put it on PATH. It lives in `%USERPROFILE%\.local\bin` on this box |
 | tier binding unreadable | The ` ```tier-binding ` block in §16 is broken |
 | another runner holds the lock | One at a time. A *stale* lock (dead PID) is taken over automatically |
@@ -140,7 +140,7 @@ Each card ends in exactly one lane, and the run log says which:
 
 | Outcome | Lane | Means |
 |---|---|---|
-| reviewed ok | `testing/` | Gates + tests passed and the diff reviewer said `ok`; the runner **rebased `ai/<id>` onto `development_team`, re-verified and merged it**. {{maintainer}} tests it |
+| reviewed ok | `testing/` | Gates + tests passed and the diff reviewer said `ok`; the runner **rebased `ai/<id>` onto `{{integration}}`, re-verified and merged it**. {{maintainer}} tests it |
 | reviewer flagged a choice | `needs-decision/` | Gates + tests passed but the reviewer needs {{maintainer}}'s judgment; the question is on the card |
 | `review` | `review/` | Fell back to a human review — an artefact-only card (art), or the reviewer/rebase-merge could not decide (a wall, a conflict). The `## Merge` note says why |
 | `parked` | `needs-decision/` | The worker hit a real ambiguity and wrote a `## Question`. **A success state**, not a failure |

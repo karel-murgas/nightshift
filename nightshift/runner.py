@@ -20,10 +20,10 @@ incremented and committed *before* dispatch, so a crash loop is bounded even if
 the crash happens mid-worker.
 
 Usage:
-    python .ai/runner.py --dry-run          # what would be dispatched, and why not
-    python .ai/runner.py --max-cards 1      # one card, then stop
-    python .ai/runner.py --until 06:30      # overnight; stop before Karel wakes
-    python .ai/runner.py --sessions 2 --until 07:00   # spend two session windows
+    python -m nightshift.runner --dry-run       # what would be dispatched, and why not
+    python -m nightshift.runner --max-cards 1   # one card, then stop
+    python -m nightshift.runner --until 06:30   # overnight; stop before the morning
+    python -m nightshift.runner --sessions 2 --until 07:00   # spend two session windows
 
 **What ends a night is the plan's session window, not a dollar figure**
 (`limits.py`). `--sessions 1`, the default, works until the usage limit is
@@ -712,7 +712,7 @@ def select(root: Path, capabilities: set[str], bad_schema: dict[str, list[str]],
         if card.id in bad_schema:
             no(f"card_schema: {len(bad_schema[card.id])} violation(s) — not a finished card")
         elif not card.unattended and not forced_now:
-            no("unattended: false — declared as needing a human (03_board.md §2)")
+            no("unattended: false — declared as needing a human")
         elif card.worker == "none":
             no("worker: none — nothing to dispatch to")
         elif not (root / ".claude" / "agents" / f"{card.worker}.md").is_file():

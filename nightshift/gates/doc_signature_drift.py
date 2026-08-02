@@ -55,7 +55,12 @@ def _source_signatures(repo_root: Path) -> tuple[dict[str, list[str]], dict[str,
     qualified: dict[str, list[str]] = {}
     by_name: dict[str, list[list[str]]] = defaultdict(list)
 
-    for root in ("dungeoneer",):
+    # Was the literal `("dungeoneer",)`, which built an *empty* symbol table in every
+    # other repo and so made the gate a silent no-op there — measured 2026-08-02, on a
+    # doc that documented `draw(count, style)` against a real `draw(n)`. `doc_scan` is
+    # the table the rest of this family reads, and `doc_reference_liveness` was already
+    # reading it, so two of the three doc gates agreed and this one did not.
+    for root in doc_scan.source_dirs(repo_root):
         base = repo_root / root
         if not base.is_dir():
             continue

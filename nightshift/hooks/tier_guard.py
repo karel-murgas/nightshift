@@ -37,10 +37,11 @@ _TIER_STATED = re.compile(r"\btier\s*[:=]\s*(worker|lead)\b|\b(worker|lead)\s+ti
 
 _DENY = (
     "This spawn names a card under Board/ but does not state a resolved tier.\n"
-    "00_architecture.md §16: card execution runs at the tier the card declares, and a "
-    "subagent with no explicit model silently inherits the lead's.\n"
-    "Read `tier:` from the card's frontmatter, resolve it to a model via §16's table "
-    "(that table is the only place the binding lives), pass it as the Agent call's `model`, "
+    "Card execution runs at the tier the card declares, and a subagent with no explicit "
+    "model silently inherits the lead's.\n"
+    "Read `tier:` from the card's frontmatter, resolve it to a model via the "
+    "```tier-binding``` block in the document `[tiers].binding_doc` names — the only "
+    "place that binding lives — pass it as the Agent call's `model`, "
     "and say so in the prompt, e.g. \"Execute this card at tier: worker.\""
 )
 

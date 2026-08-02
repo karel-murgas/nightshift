@@ -44,6 +44,12 @@ def _project(tmp_path: Path, *, hosts: dict | None = None, name: str = "repo") -
     entries = {"some-other-box": {"capabilities": []}} if hosts is None else hosts
     (repo / ".ai" / "hosts.json").write_text(json.dumps(entries, indent=2) + "\n",
                                              encoding="utf-8", newline="")
+    # A board, because three of the five checks are about *dispatching* and are
+    # skipped where nothing dispatches (`doctor._dispatches`). A fixture testing
+    # those checks has to be a repo they apply to — see
+    # `test_a_repo_with_no_board_skips_the_three_dispatch_checks` for the other side.
+    (repo / "Board" / "tasks").mkdir(parents=True)
+    (repo / "Board" / "tasks" / ".gitkeep").write_text("", encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "fixture")
     return repo
@@ -268,3 +274,37 @@ def test_the_preflight_runs_the_doctor_checks_before_the_gates(tmp_path, monkeyp
     assert names[:5] == ["lf-worktree", "claude-bin", "hosts-json", "preflight-config",
                          "nightshift"]
     assert names.index("gates") == 5
+
+
+def test_a_repo_with_no_board_skips_the_three_dispatch_checks(tmp_path):
+    """`claude`, the host entry and the integration branch are dispatch
+    preconditions, and a repo with no board never dispatches.
+
+    Reporting them as passes would be a lie in the reassuring direction; reporting
+    them as failures makes the framework's own checkout permanently red for not
+    being configured as its own consumer, which is how a report gets skimmed. So
+    they are skipped, and a skip does not count against the verdict.
+    """
+    repo = _project(tmp_path)
+    (repo / "Board" / "tasks" / ".gitkeep").unlink()
+    (repo / "Board" / "tasks").rmdir()
+    (repo / "Board").rmdir()
+
+    by_name = {c.name: c for c in doctor.checks(repo)}
+    for name in ("claude-bin", "hosts-json", "preflight-config"):
+        assert by_name[name].skipped, name
+        assert by_name[name].ok, f"{name}: a skip must not fail the run"
+        assert "no board" in by_name[name].detail
+    # The two that are about the checkout rather than about dispatch still run.
+    assert not by_name["lf-worktree"].skipped
+    assert not by_name["nightshift"].skipped
+
+
+def test_a_repo_with_a_board_still_runs_the_dispatch_checks(tmp_path):
+    """The other direction, so the skip cannot silently swallow a real failure."""
+    repo = _project(tmp_path)  # `_project` gives it a board
+    by_name = {c.name: c for c in doctor.checks(repo)}
+    for name in ("claude-bin", "hosts-json", "preflight-config"):
+        assert not by_name[name].skipped, name
+    # This host is not in the fixture's hosts.json, so that check must really fail.
+    assert not by_name["hosts-json"].ok

@@ -89,6 +89,21 @@ def lf_worktree(root: Path) -> Check:
                  f"{len(violations)} line-ending violation(s) — first: {violations[0]}")
 
 
+def _dispatches(root: Path) -> bool:
+    """Does anything ever get dispatched in this repo?
+
+    A board is the signal, and it is the honest one: the runner takes cards from
+    `Board/<lane>/`, so a repo with no board has no cards, spawns no workers and
+    needs no `claude`, no host entry and no branch to build on. The alternative —
+    asking every repo those three questions — makes `nightshift`'s own checkout
+    permanently red for failing to be configured as its own consumer, which is the
+    kind of noise that teaches people to skim a report.
+    """
+    from nightshift import board
+
+    return board.board_dir(root).is_dir()
+
+
 def claude_on_path(root: Path) -> Check:
     """The runner can find the `claude` binary it dispatches every worker with.
 
@@ -97,6 +112,9 @@ def claude_on_path(root: Path) -> Check:
     answers to "where is claude" is exactly the drift worth not having. A night
     that discovers this at 03:00 has already moved a card and spent an attempt.
     """
+    if not _dispatches(root):
+        return Check("claude-bin", True, "no board here — nothing dispatches, so the "
+                                         "worker CLI is not needed", skipped=True)
     found = runner.claude_binary()
     if found:
         return Check("claude-bin", True, found)
@@ -121,6 +139,9 @@ def hosts_entry(root: Path) -> Check:
     is empty. Only the first is a problem, so the question has to be asked of the
     file. The paths still come from the runner, so there is one home for them.
     """
+    if not _dispatches(root):
+        return Check("hosts-json", True, "no board here — nothing dispatches, so no "
+                                         "per-machine dispatch config is needed", skipped=True)
     hostname = socket.gethostname()
     if (root / runner.HOST_FILE).is_file():
         return Check("hosts-json", True,
@@ -159,8 +180,19 @@ def preflight_config(root: Path) -> Check:
     now verifies. `bridge` is gone entirely: step 4 moved the last module it
     reached for.
     """
+    if not _dispatches(root):
+        return Check("preflight-config", True,
+                     "no board here — nothing builds on an integration branch. Gates and "
+                     "tests still run; `merge_base_candidates()` falls back to stable",
+                     skipped=True)
+    # `branches.integration` directly, not `preflight.integration_base`: that one
+    # now falls back to `stable` so a non-dispatching repo can still preflight, and
+    # a check whose subject is "is this field declared" must not be satisfied by the
+    # fallback it exists to warn about.
     try:
-        preflight.integration_base(root)
+        from nightshift import branches
+
+        branches.integration(root)
     except ManifestError as exc:
         return Check("preflight-config", False, str(exc))
     return Check("preflight-config", True, "[branches].integration is declared")
@@ -299,7 +331,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"doctor for {root}\n")
     results = checks(root)
     for check in results:
-        print(f"  [{'OK  ' if check.ok else 'FAIL'}] {check.name:<12} {check.detail}")
+        mark = "SKIP" if check.skipped else ("OK  " if check.ok else "FAIL")
+        print(f"  [{mark}] {check.name:<12} {check.detail}")
 
     if not args.no_drift:
         found = drift(root)
