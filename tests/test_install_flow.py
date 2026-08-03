@@ -524,6 +524,77 @@ def test_the_board_readme_names_the_lanes_that_exist(tmp_path):
         assert f"{lane}/" in readme, f"{lane}/ exists on disk but the README never says so"
 
 
+def test_init_writes_an_obsidian_view_of_the_board(tmp_path):
+    """The lanes are directories, which is the whole design — but a directory tree is
+    not a board. The origin project has had an Obsidian Bases view since long before the
+    extraction, so no run there could notice `init` never produced one. Reported by the
+    maintainer, 2026-08-03, who opened a freshly installed repo in Obsidian and found no
+    kanban."""
+    repo = _repo(tmp_path)
+    _install(repo)
+
+    view = repo / "Board.base"
+    assert view.is_file()
+    text = view.read_text(encoding="utf-8")
+    assert "{{" not in text, "an unrendered token"
+    assert "type: kanban" in text
+
+
+def test_the_board_view_columns_are_generated_from_the_lane_list(tmp_path):
+    """A hand-written column list is a second copy of the lane set that nothing checks,
+    and a view silently missing a lane is worse than no view: a card in the missing
+    column is invisible rather than obviously absent."""
+    repo = _repo(tmp_path)
+    _install(repo)
+
+    lines = (repo / "Board.base").read_text(encoding="utf-8").splitlines()
+    start = lines.index("    boardColumns:") + 1
+    columns = []
+    for line in lines[start:]:
+        if not line.startswith("      - "):
+            break
+        columns.append(line.removeprefix("      - "))
+    assert tuple(columns) == board.LANES
+
+
+def test_the_board_view_hides_the_private_lane_unless_a_note_is_flagged(tmp_path):
+    """Filtered out, with one exception: a note carrying a `state:` is asking to leave
+    the lane, and seeing that on the board is the whole point of flagging it."""
+    repo = _repo(tmp_path)
+    _install(repo)
+
+    text = (repo / "Board.base").read_text(encoding="utf-8")
+    assert f'!file.inFolder("Board/{board.PRIVATE_LANE}")' in text
+    assert "!state.isEmpty()" in text
+
+
+def test_the_board_view_follows_a_relocated_board(tmp_path):
+    """`[board].root` is configurable, so every path inside the view is rendered rather
+    than assumed — including the private-lane exclusion, which is the one that fails
+    silently if it goes stale."""
+    values = init.tokens(tmp_path, {"board": {"root": "kanban"}})
+    rendered = init.render(
+        (init.TEMPLATES / "board.base").read_text(encoding="utf-8"), values)
+
+    assert 'file.inFolder("kanban")' in rendered
+    assert f'!file.inFolder("kanban/{board.PRIVATE_LANE}")' in rendered
+    assert "Board" not in rendered, "no path hardcoded to the default"
+
+
+def test_an_existing_board_view_is_kept_and_reported(tmp_path):
+    """Not a merge: a `.base` is YAML config, and appending a marked block to it would
+    corrupt the file. So it is kept — and said out loud, because "kept, untouched" with
+    no note is how a stale column list survives an install."""
+    repo = _repo(tmp_path)
+    (repo / "Board.base").write_text("views: []\n", encoding="utf-8")
+
+    plan = _install(repo)
+
+    assert "Board.base" in plan.kept
+    assert (repo / "Board.base").read_text(encoding="utf-8") == "views: []\n"
+    assert any("boardColumns" in note for note in plan.notes)
+
+
 def test_a_fresh_install_ignores_its_own_runtime_output(tmp_path):
     """Without these entries a consuming project commits its run logs, its preflight
     receipt and its per-machine `host.json` — and a committed receipt unblocks a push on

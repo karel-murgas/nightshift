@@ -210,12 +210,21 @@ def tokens(root: Path, tables: dict[str, dict]) -> dict[str, str]:
     project = tables.get("project", {})
     packages = project.get("source_dirs") or []
     name = project.get("name") or root.name
+    board_root = tables.get("board", {}).get("root", "Board")
     return {
         "{{package}}": str(packages[0]) if packages else name,
         "{{project}}": str(name),
         "{{integration}}": str(tables.get("branches", {}).get("integration") or "the integration branch"),
         "{{maintainer}}": _git_user(root),
         "{{hostname}}": socket.gethostname(),
+        "{{board}}": board_root,
+        "{{private_lane}}": PRIVATE_LANE,
+        # Generated from `board.LANES` rather than typed into the template, and in that
+        # tuple's order, which is the flow order. A hand-written column list is a second
+        # copy of the lane set that nothing checks — and the board view silently missing
+        # a lane is worse than not having the view, because a card in the missing column
+        # is invisible rather than obviously absent.
+        "{{board_columns}}": "\n".join(f"      - {lane}" for lane in LANES),
     }
 
 
@@ -482,6 +491,19 @@ def build_plan(root: Path, *, integration: str | None,
     # the only one the installer never made, and a `reconcile` run against a missing
     # directory finds no notes, which reads exactly like having none.
     stage(f"{board_root}/{PRIVATE_LANE}/.gitkeep", "")
+
+    # The board as something you can look at. The lanes are directories, which is the
+    # whole design — but a directory tree is not a board, and the origin project has had
+    # an Obsidian Bases view of it since long before the extraction, so no run there
+    # could notice that `init` never produced one. Reported by the maintainer, who opened
+    # a freshly installed repo in Obsidian and found no kanban.
+    board_view = f"{board_root}.base"
+    stage(board_view, render((TEMPLATES / "board.base").read_text(encoding="utf-8"), values))
+    if board_view in plan.kept:
+        plan.notes.append(
+            f"{board_view} already exists, so it was left alone. Check its "
+            f"`boardColumns` still lists every lane — a column missing there makes the "
+            f"cards in it invisible rather than obviously absent.")
 
     # Memory stubs, so `CLAUDE.md`'s table points at files that exist. A table naming
     # four missing files is the first thing a session learns to ignore.

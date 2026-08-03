@@ -1,0 +1,82 @@
+# An Obsidian Bases view of the board. Open this repo as a vault; this file gives
+# you a Kanban of the lanes plus two tables. Nothing reads it but Obsidian — the
+# board's state is the directory a card is in, never this file.
+#
+# `{{board}}/ideas` is the maintainer's private lane and is filtered out, EXCEPT for a
+# note that has a `state:` — flagging one is how a note asks to leave the lane, and
+# seeing that on the board is the whole point of the flag.
+filters:
+  and:
+    - file.inFolder("{{board}}")
+    - file.name != "README"
+    - or:
+        - '!file.inFolder("{{board}}/{{private_lane}}")'
+        - "!state.isEmpty()"
+properties:
+  note.state:
+    displayName: Lane
+  note.title:
+    displayName: Title
+  note.tier:
+    displayName: Tier
+  note.worker:
+    displayName: Worker
+  note.unattended:
+    displayName: Unattended
+  note.requires:
+    displayName: Requires
+  note.tags:
+    displayName: Tags
+  note.created:
+    displayName: Created
+  note.attempts:
+    displayName: Attempts
+views:
+  - type: kanban
+    name: Kanban
+    groupBy:
+      property: state
+      direction: ASC
+    order:
+      - unattended
+      - requires
+      - tags
+      - attempts
+    boardColumns:
+{{board_columns}}
+    cardTitleProperty: title
+  - type: table
+    name: Live
+    filters:
+      and:
+        - '!file.inFolder("{{board}}/done")'
+        - '!file.inFolder("{{board}}/failed")'
+    groupBy:
+      property: state
+      direction: ASC
+    order:
+      - file.name
+      - title
+      - state
+      - unattended
+      - tags
+      - worker
+      - tier
+      - created
+    sort:
+      - property: state
+        direction: DESC
+    columnSize:
+      note.worker: 126
+      note.tier: 93
+  - type: table
+    name: Archive
+    filters:
+      or:
+        - file.inFolder("{{board}}/done")
+        - file.inFolder("{{board}}/failed")
+    order:
+      - file.name
+      - title
+      - state
+      - created

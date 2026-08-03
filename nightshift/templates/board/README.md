@@ -9,6 +9,28 @@ ideas/ → inbox/ → tasks/ → review/ → testing/ → done/
 {{maintainer}}'s      needs-decision/
 ```
 
+## Seeing it
+
+Open this repository as an **Obsidian vault** (Obsidian → *Open folder as vault*, and
+point it at the repo root). `{{board}}.base` — written by `nightshift init` — gives you
+three views of these directories:
+
+| View | What it shows |
+|---|---|
+| **Kanban** | one column per lane, cards draggable between them |
+| **Live** | everything except `done/` and `failed/`, grouped by lane |
+| **Archive** | only `done/` and `failed/` |
+
+It needs the **Bases** core plugin, which ships with Obsidian 1.9 and later; on an older
+version the file will not render and the board still works exactly as well without it.
+
+**The directory is the state, not the view.** Dragging a card in the Kanban rewrites its
+`state:` field, and the reconciler moves the file to match — see the mismatch table
+below. Nothing in the framework reads `{{board}}.base`, so you can restyle it freely.
+`{{board}}/{{private_lane}}` is filtered out of every view, with one exception: a note
+you have flagged with a `state:` appears, because that flag is how a note asks to leave
+the lane.
+
 ## The three input lanes, and who owns each
 
 | Lane | Owner | What it means |
