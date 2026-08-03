@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""The `nightshift` command — `init` and `doctor`, and deliberately nothing else.
+"""The `nightshift` command — the five things you reach for before you know the repo.
 
-**Why only these three.** Every other entry point is already `python -m nightshift.<module>`,
+**Why only these.** Every other entry point is already `python -m nightshift.<module>`,
 and adding `nightshift gates` beside `python -m nightshift.gates.run` would give each
 command two names. Two names is how a doc, a hook and a habit end up citing three
 different spellings of the same thing, and it is the D4 duplication this framework
@@ -10,7 +10,11 @@ reason: `init` runs in a repo that does not have the package configured yet,
 `uninstall` is what you reach for when `init` went wrong (and a half-configured repo
 cannot be fixed by re-running `init`, because it never overwrites), and `doctor` is
 the thing you reach for when you do not yet know what is wrong. All three are worse
-to have to remember a module path for.
+to have to remember a module path for. `bootstrap` and `fix` earn it for a sharper
+reason: they are the two halves of an install that a *human* should not have to drive.
+`bootstrap` writes one skill file and nothing else, so the next thing that happens is
+`/install-nightshift` inside Claude; `fix` is the loop that reads the checks and repairs
+what they report, which is the job the closing checklist used to delegate to a person.
 
 Each subcommand delegates to the module that owns it and passes the remaining
 argv straight through, so `nightshift init --help` and `python -m nightshift.init
@@ -23,7 +27,9 @@ import sys
 _USAGE = """\
 usage: nightshift <command> [options]
 
+  bootstrap  write just the install skill, then run /install-nightshift in Claude
   init       stand nightshift up in this repo — asks four questions, then writes
+  fix        run every check and dispatch an agent to fix what failed
   doctor     per-machine preconditions, plus drift between the manifest and the tree
   uninstall  remove what init wrote, so a first install can be retried
 
@@ -61,6 +67,14 @@ def main(argv: list[str] | None = None) -> int:
         from nightshift import doctor
 
         return doctor.main(rest)
+    if command == "bootstrap":
+        from nightshift import init
+
+        return init.bootstrap_main(rest)
+    if command == "fix":
+        from nightshift import fix
+
+        return fix.main(rest)
     if command == "uninstall":
         from nightshift import uninstall
 

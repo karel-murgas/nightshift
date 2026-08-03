@@ -152,31 +152,36 @@ def test_no_budget_means_no_key_at_all(tmp_path):
 # --- the closing screen --------------------------------------------------------
 
 
-def test_next_steps_is_a_numbered_list_of_commands(tmp_path, capsys):
-    """What replaced `your call:`. The test is about shape rather than wording:
-    numbered, and every item carries a runnable command."""
+def test_next_steps_ends_with_two_commands_the_second_being_an_agent(tmp_path, capsys):
+    """First this printed decisions with no way to act on them; then a five-step
+    checklist of gate-reading and repair — which is precisely the job this framework
+    exists to hand to an agent. The maintainer, 2026-08-03: *"It's not meant to be used
+    by a human, but used by AI... Not human, who checks gates manually now."* So: commit,
+    then `nightshift fix`."""
     repo = _repo(tmp_path)
     plan = init.build_plan(repo, integration="dev-work")
-    init.next_steps(plan, integration="dev-work", permission_mode="default")
+    init.next_steps(plan, integration="dev-work", permission_mode="bypassPermissions")
 
     out = capsys.readouterr().out
-    for n in ("1.", "2.", "3.", "4.", "5."):
-        assert n in out
-    assert "nightshift doctor" in out
-    assert "python -m nightshift.gates.run" in out
-    assert "python -m nightshift.preflight" in out
+    assert "1." in out and "2." in out
+    assert "3." not in out, "five steps of homework is what this replaced"
+    assert "git commit" in out
+    assert "nightshift fix" in out
     assert "your call" not in out.lower()
 
 
-def test_next_steps_says_dispatch_is_off_when_it_is(tmp_path, capsys):
-    """The commonest first-install confusion: a card that will not run because the
-    safe permission mode cannot execute Bash. Say so on the closing screen rather
-    than letting them find out by burning an attempt."""
+def test_next_steps_names_the_flag_that_lets_the_fix_pass_run(tmp_path, capsys):
+    """Under the safe default a fix pass cannot run Bash, so it cannot run a gate. Say
+    so with the flag attached, and say that the elevation is for that pass only —
+    otherwise the honest answer looks like a dead end."""
     repo = _repo(tmp_path)
     plan = init.build_plan(repo, integration="dev-work")
     init.next_steps(plan, integration="dev-work", permission_mode="default")
+
     out = capsys.readouterr().out
-    assert "bypassPermissions" in out and "dispatch is off" in out
+    assert "nightshift fix --permission-mode bypassPermissions" in out
+    assert "that pass only" in out
+    assert "stays `default`" in out
 
 
 def test_next_steps_refuses_to_pretend_without_an_integration_branch(tmp_path, capsys):

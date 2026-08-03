@@ -12,7 +12,42 @@ if you want unattended runs. That is all.
 <!-- stale-ok: `.ai/hosts.json` and the other paths below are files `nightshift
      init` writes into a CONSUMING project. This package is not its own consumer,
      so none of them resolve here. -->
-## Install — six steps, about five minutes
+## Install — three commands, and an agent does the rest
+
+The framework is meant to be operated by an agent, so the install is too. There are
+three things a human types, and then Claude drives.
+
+```
+git clone https://github.com/karel-murgas/nightshift.git   # next to your project
+cd your-project && pip install -e ../nightshift
+nightshift bootstrap
+```
+
+`bootstrap` writes exactly one file — `.claude/skills/install-nightshift/SKILL.md` —
+and nothing else. Then, inside Claude Code in your project:
+
+```
+/install-nightshift
+```
+
+It establishes the four facts that have to hold, asks you **two questions** (the
+integration branch, and what a worker may do on this machine), runs the installer,
+commits, then **runs the checks and fixes what they report** — and files a card in
+`Board/needs-decision/` for anything that needs your judgment instead of guessing. You
+read a diff at the end.
+
+That last part is the point. A first install is usually red in a place or two: a
+`source_dirs` that discovery could not infer, a corrections check that wants an honest
+zero. Reading gate output and repairing what it names is the job this whole framework
+exists to give to an agent, and an install that ends by printing that work as homework
+is the framework declining to use itself.
+
+> **No `claude` on this machine?** The manual path below still works, and
+> `nightshift fix --dry-run` prints the diagnosis and exactly what would have been
+> asked — including the list of things a fix pass may not do.
+
+<details>
+<summary><b>The manual install, step by step</b> — same thing, typed by hand</summary>
 
 ### 1. Get the code
 
@@ -65,13 +100,8 @@ Then it writes ~27 files: the manifest, the board, four agent charters, three
 operator skills, the hook wiring, a `CLAUDE.md`, memory stubs, an empty
 corrections log and `.gitattributes`. **Nothing existing is ever overwritten.**
 
-It finishes by printing a numbered list of the next commands to run. Follow it
-in order — that list is the rest of the setup.
-
-> **Prefer to have Claude do it?** Point it at
-> [`docs/INSTALL.md`](docs/INSTALL.md): *"Read `../nightshift/docs/INSTALL.md`
-> and install nightshift in this repo."* Same steps, written for an agent, with
-> the failure modes and what to tell you at each one.
+It finishes with two commands: commit, then `nightshift fix`. Step 6 is that
+second one.
 
 ### 5. Commit it
 
@@ -82,16 +112,32 @@ git add -A && git commit -m "nightshift init"
 The board and the manifest are meant to be tracked, and the next steps assume a
 clean tree.
 
-### 6. Check it
+<!-- stale-ok: `.ai/hosts.json` is a consuming project's per-machine config, written by
+     `init` into the repo being configured. This package is not its own consumer. -->
+### 6. Commission it
+
+```
+nightshift fix --permission-mode bypassPermissions
+```
+
+Runs the doctor, the gates, the audit matrix and your test suite, then dispatches an
+agent to fix what failed — up to three rounds, stopping early if a round changes
+nothing. It never commits, never weakens a check to make it pass, and files a card in
+`Board/needs-decision/` for what needs your judgment. `--dry-run` shows the diagnosis
+and the prompt without dispatching.
+
+The elevation is for that pass only; your standing `permission_mode` in
+`.ai/hosts.json` is unchanged.
+
+If you would rather do it yourself, that is the same three commands the fix pass runs:
 
 ```
 nightshift doctor                  # this machine: line endings, claude on PATH, host config
-python -m nightshift.gates.run     # should be green on a fresh repo
+python -m nightshift.gates.run     # the gate suite
 python -m nightshift.preflight     # gates + your tests + a receipt
 ```
 
-All three should pass. If `doctor` reports something, it names the exact command
-that fixes it.
+</details>
 
 <!-- stale-ok: `.claude/settings.json` is the consuming project's own settings file,
      which `init` merges hook entries into and `uninstall` merges them out of. Not a

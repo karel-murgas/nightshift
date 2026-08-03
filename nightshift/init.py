@@ -562,6 +562,67 @@ def build_plan(root: Path, *, integration: str | None,
     return plan
 
 
+INSTALL_SKILL = ".claude/skills/install-nightshift/SKILL.md"
+
+
+def bootstrap_plan(root: Path) -> Plan:
+    """One file: the skill that drives the install.
+
+    **Why this is a separate command.** The install is meant to be driven by an agent,
+    not read off a checklist by a person — but a skill is discovered from the project,
+    and the project does not have one yet. That is the whole chicken-and-egg: `init`
+    installs skills, and you want a skill to run `init`. So this writes exactly the one
+    file that breaks the cycle and touches nothing else, which makes
+    `pip install -e … && nightshift bootstrap` the entire manual part of an install.
+
+    It stages through the same `Plan`, so the receipt records it and `uninstall` takes it
+    back like anything else.
+    """
+    plan = Plan(root=root)
+    content = (TEMPLATES / "skills" / "install-nightshift" / "SKILL.md").read_text(
+        encoding="utf-8")
+    plan.staged[INSTALL_SKILL] = content
+    if (root / INSTALL_SKILL).exists():
+        plan.kept.append(INSTALL_SKILL)
+    else:
+        plan.writes[INSTALL_SKILL] = content
+    return plan
+
+
+def bootstrap_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="nightshift bootstrap",
+        description="Write the install skill and nothing else, so an agent can do the "
+                    "rest. Run this, then `/install-nightshift` inside Claude Code.")
+    parser.add_argument("--root", type=Path, default=None,
+                        help="repo to bootstrap (default: the working directory)")
+    args = parser.parse_args(argv)
+
+    root = (args.root or Path.cwd()).resolve()
+    if not (root / ".git").exists():
+        print(f"  {root} is not a git repository — nothing here works without one.",
+              file=sys.stderr)
+        return 2
+
+    plan = bootstrap_plan(root)
+    apply(plan)
+    if plan.kept:
+        print(f"\n  {INSTALL_SKILL} was already here; left as it is.")
+    else:
+        print(f"\n  wrote {INSTALL_SKILL}")
+
+    print("\n  Next, inside Claude Code in this repo:")
+    print("\n      /install-nightshift")
+    print("\n  It establishes the facts, asks you the two questions that are genuinely")
+    print("  yours (the integration branch, and what a worker may do on this machine),")
+    print("  runs the install, then diagnoses and fixes what the checks report and")
+    print("  files cards for anything needing your decision.")
+    print("\n  If the skill is not offered, start the session again — skills are read")
+    print("  at startup — or just say: read .claude/skills/install-nightshift/SKILL.md")
+    print("  and do it.\n")
+    return 0
+
+
 def receipt_text(plan: Plan) -> str:
     """The record of what this run created, for `uninstall` to read back.
 
@@ -911,47 +972,32 @@ def next_steps(plan: Plan, *, integration: str | None, permission_mode: str) -> 
         print("    ...then re-run `nightshift init`.")
         return
 
-    steps = [
-        ("Commit what init wrote",
-         "git add -A && git commit -m \"nightshift init\"",
-         "The board and the manifest are meant to be tracked. Do this first so\n"
-         "     the next steps have a clean tree to talk about."),
-        ("Check this machine",
-         "nightshift doctor",
-         "Line-endings, whether `claude` is on PATH, whether this host is\n"
-         "     configured. Everything should be [OK] or [SKIP]."),
-        ("Run the gates",
-         "python -m nightshift.gates.run",
-         "Should be green on a fresh repo. This also runs automatically after\n"
-         "     every edit Claude makes, via the hooks init just wired."),
-        ("Run the mandatory pre-push check",
-         "python -m nightshift.preflight",
-         "Gates + your test suite + a receipt. A hook refuses `git push`\n"
-         "     without one, so this is the command you will type most."),
-    ]
-    if permission_mode == "bypassPermissions":
-        steps.append((
-            "Try one card end to end",
-            "python -m nightshift.runner --dry-run",
-            "Reports what would dispatch and why not. Write a card into\n"
-            "     Board/tasks/ first — `Board/README.md` has the shape. Then:\n"
-            "     python -m nightshift.runner --card <id> --max-cards 1"))
-    else:
-        steps.append((
-            "Explore the board (dispatch is off for now)",
-            "python -m nightshift.runner --dry-run",
-            f"Safe: it writes nothing. Real dispatch needs permission_mode\n"
-            f"     `bypassPermissions` — you chose `{permission_mode}`. Change it in\n"
-            f"     .ai/hosts.json when you want to try a code card."))
+    # Two commands, not five, and the second one is an agent rather than a person.
+    # The five-step version was correct and still wrong: reading gate output and
+    # repairing what it names is the job this framework exists to give to an agent, and
+    # printing it as homework was the framework declining to use itself.
+    print("\n  Two commands left. The second one does the rest:\n")
+    print("  1. Commit what init wrote")
+    print("     $ git add -A && git commit -m \"nightshift init\"")
+    print("     The manifest, the board and the gates are meant to be tracked, and")
+    print("     the fix pass wants a clean tree to diff against.\n")
+    print("  2. Commission it — diagnose, and fix what the checks report")
+    print("     $ nightshift fix" + ("" if permission_mode == "bypassPermissions"
+                                     else " --permission-mode bypassPermissions"))
+    print("     Runs the doctor, the gates, the audit matrix and your test suite,")
+    print("     then dispatches an agent to fix what failed, up to three rounds.")
+    print("     It never weakens a check to pass it, never commits, and files a")
+    print("     card in Board/needs-decision/ for anything needing your judgment.")
+    if permission_mode != "bypassPermissions":
+        print(f"     The flag elevates that pass only — your standing permission_mode")
+        print(f"     stays `{permission_mode}` in {AI_DIR}/hosts.json.")
+    print("     `--dry-run` shows the diagnosis and the exact prompt, dispatching")
+    print("     nothing.\n")
 
-    print("\n  Do these in order:\n")
-    for i, (title, command, why) in enumerate(steps, start=1):
-        print(f"  {i}. {title}")
-        print(f"     $ {command}")
-        print(f"     {why}\n")
-
-    print("  Read next: Board/README.md (what a card looks like) and the")
-    print("  `manage-board` / `run-the-runner` skills init put in .claude/skills/.")
+    print("  A first install is usually red in a place or two; that is what step 2")
+    print("  is for. If you would rather have an agent drive the whole thing next")
+    print("  time — including these two commands — that is `nightshift bootstrap`")
+    print("  followed by `/install-nightshift` in Claude Code.")
 
 
 def main(argv: list[str] | None = None) -> int:
