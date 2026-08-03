@@ -75,6 +75,20 @@ LANES: tuple[str, ...] = (
     "failed",
 )
 
+# The private lane's name, owned here because the board's vocabulary is owned here —
+# `reconcile` and `card_schema` each used to carry their own copy of the string.
+#
+# **Absent from `LANES` and it must stay absent**: `ideas_fence` derives "private" from a
+# board subdirectory not being in that tuple, which is how the rule gets written down
+# once instead of twice. This constant is for the code that has to NAME the directory
+# (create it, or permit the one reader), never for deciding whether it is private.
+#
+# Absent from the list is not the same as absent from disk, and `init` conflated the two
+# until 2026-08-03: it made lanes by iterating `LANES`, so the one lane belonging to the
+# maintainer was the one lane nobody created for them — while `Board/README.md`,
+# `CLAUDE.md` and `reconcile` all named it as the first step of the flow.
+PRIVATE_LANE = "ideas"
+
 # 03_board.md §2. Appended in this order when absent.
 RUNNER_FIELDS: tuple[str, ...] = ("attempts", "branch", "started", "finished")
 

@@ -349,7 +349,7 @@ def _orphans(repo_root: Path) -> list[Violation]:
     board = _board.board_dir(repo_root)
     if not board.is_dir():
         return []
-    known = set(LANES) | {"ideas"}
+    known = set(LANES) | {_board.PRIVATE_LANE}
     out: list[Violation] = []
     for path in sorted(board.rglob("*.md")):
         if path.name.upper() == "README.MD":

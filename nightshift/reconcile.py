@@ -52,7 +52,8 @@ from nightshift.manifest import find_root
 # step 4 put it behind `[board].root`. This module used to carry its own
 # `Path("Board")` — a second home for the same fact, in a file whose entire job
 # is to make the board agree with itself.
-PRIVATE = "ideas"
+# Re-exported under this module's own name; the string is `board`'s.
+PRIVATE = board.PRIVATE_LANE
 
 # The lanes a card may be moved into. `ideas/` is deliberately absent: this
 # script moves notes *out* of it when flagged, and never into it. Promoting a

@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import discover, init, tiers, uninstall
+from nightshift import board, discover, init, tiers, uninstall
 from nightshift.manifest import AI_DIR
 
 
@@ -485,6 +485,43 @@ def test_a_second_init_does_not_append_a_second_block(tmp_path):
 
 
 # --- taking a block back out ---------------------------------------------------
+
+
+def test_init_creates_every_lane_including_the_private_one(tmp_path):
+    """`ideas/` is deliberately absent from `board.LANES` — `ideas_fence` derives
+    "private" from a board subdirectory not being in that tuple, which writes the rule
+    down once instead of twice. `init` made lanes by iterating `LANES`, so the one lane
+    belonging to the maintainer was the one lane nobody created for them, while
+    `Board/README.md`, `CLAUDE.md` and `reconcile` all named it as the first step of the
+    flow. Reported by the maintainer, 2026-08-03: *"It does not install `ideas` folder,
+    is that true?"* It was.
+
+    Asserted as a set equality rather than "ideas exists", so the next lane added to the
+    board fails here too if the installer is not taught about it.
+    """
+    repo = _repo(tmp_path)
+    _install(repo)
+
+    made = {p.name for p in (repo / "Board").iterdir() if p.is_dir()}
+    assert made == set(board.LANES) | {board.PRIVATE_LANE}
+
+
+def test_the_private_lane_is_still_absent_from_lanes(tmp_path):
+    """The fix must not be "add ideas to LANES". That tuple is what the fence reads to
+    decide what is private, and what `reconcile` reads to decide where a card may be
+    moved — putting `ideas` in it would open the lane rather than create it."""
+    assert board.PRIVATE_LANE not in board.LANES
+
+
+def test_the_board_readme_names_the_lanes_that_exist(tmp_path):
+    """Doc and installer, checked against each other: a lane documented as part of the
+    flow and never created is exactly the failure above."""
+    repo = _repo(tmp_path)
+    _install(repo)
+    readme = (repo / "Board" / "README.md").read_text(encoding="utf-8")
+
+    for lane in (*board.LANES, board.PRIVATE_LANE):
+        assert f"{lane}/" in readme, f"{lane}/ exists on disk but the README never says so"
 
 
 def test_a_fresh_install_ignores_its_own_runtime_output(tmp_path):

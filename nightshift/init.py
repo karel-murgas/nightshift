@@ -167,7 +167,7 @@ def strip_block(text: str) -> str:
     return result if not result or result.endswith("\n") else result + "\n"
 
 # Board lanes come from the one place that owns them, never a list retyped here.
-from nightshift.board import LANES  # noqa: E402
+from nightshift.board import LANES, PRIVATE_LANE  # noqa: E402
 
 
 @dataclass
@@ -477,6 +477,11 @@ def build_plan(root: Path, *, integration: str | None,
           render((TEMPLATES / "board" / "README.md").read_text(encoding="utf-8"), values))
     for lane in LANES:
         stage(f"{board_root}/{lane}/.gitkeep", "")
+    # Named explicitly, because `ideas/` is not in `LANES` and must not be — see
+    # `board.PRIVATE_LANE`. Iterating the list alone meant the maintainer's own lane was
+    # the only one the installer never made, and a `reconcile` run against a missing
+    # directory finds no notes, which reads exactly like having none.
+    stage(f"{board_root}/{PRIVATE_LANE}/.gitkeep", "")
 
     # Memory stubs, so `CLAUDE.md`'s table points at files that exist. A table naming
     # four missing files is the first thing a session learns to ignore.
