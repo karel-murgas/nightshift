@@ -18,8 +18,12 @@
     "checked, so they ship filled in. Do not edit them to make a run pass; that is",
     "the appeal path's job."
   ],
-  "class": {},
-  "channel": {},
+  "class": {
+    "derived-what-only-the-act-knew": "a fact recomputed from the current state that only the original action could know -- the recomputation is indistinguishable from the truth until the two diverge"
+  },
+  "channel": {
+    "maintainer": "the framework's maintainer, reading or running it"
+  },
   "gate": {
     "yes": "an existing gate would have failed on this",
     "yes-now": "a gate built or fixed as a result of this correction now catches it",

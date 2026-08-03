@@ -8,11 +8,20 @@ retry loop is "delete about eight paths by hand, and remember which of the hook
 entries in `settings.json` were mine", which is exactly the sort of instruction
 nobody follows correctly at the end of a frustrating evening.
 
-**It removes what `init` would write, and nothing else.** The list is not
-hardcoded: `init.build_plan` already computes every path for this repo, so this
-asks that same function and intersects with what is on disk. A file `init` has no
-opinion about is invisible here, which is the property that makes it safe to run in
-a repo that also has real work in it.
+**It removes what this repo's `init` run actually created, and nothing else.** The
+authority is `.ai/install.json`, the receipt `init` writes naming every file it
+created. The first version of this module asked `init.build_plan` instead and deleted
+the intersection with the disk, which is wrong in a way that only shows up in a repo
+worth caring about: after a run, our files exist, so `build_plan` reports them as
+`kept` — the *same list* as the `CLAUDE.md`, `.gitattributes` or
+`.claude/memory/arch.md` the project already had and `init` deliberately left alone.
+Uninstalling would have deleted the operator's own documents. Only the run that wrote
+a file knows it wrote one; recomputing the list cannot recover that.
+
+**Installs made before the receipt existed** still uninstall, by a narrower route: a
+path is removed only if its bytes are exactly what `init` writes. That declines to
+delete anything the operator wrote or has since edited, and says which and why —
+conservative in the one direction that matters.
 
 **Two things it deliberately will not do.**
 
@@ -35,7 +44,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import discover, init
+from nightshift import discover, init, manifest
 from nightshift.manifest import AI_DIR
 
 for _stream in (sys.stdout, sys.stderr):
@@ -52,6 +61,7 @@ RUNTIME_PATHS = (
     f"{AI_DIR}/STOP",
     f"{AI_DIR}/stale_status.json",
     "Digest.md",
+    init.RECEIPT,          # ours by definition, and removed last of all
 )
 
 
@@ -64,6 +74,7 @@ class Removal:
     hooks_removed: int = 0
     settings: str | None = None          # new settings.json content, if it changes
     kept: list[str] = field(default_factory=list)   # ours, but not ours to delete
+    receipted: bool = False              # False = pre-receipt install, matched by content
 
     @property
     def empty(self) -> bool:
@@ -121,27 +132,87 @@ def strip_hooks(existing: dict) -> tuple[dict, int]:
     return out, removed
 
 
+def _installed_branch(root: Path) -> str:
+    """The integration branch this install was configured with, if it can be read.
+
+    A best effort by design: it only affects how faithfully the content fallback can
+    re-render, and the receipt path does not consult it at all. An unreadable or
+    hand-broken manifest degrades to keeping a few more files than necessary, which is
+    the correct direction to fail in.
+    """
+    try:
+        return manifest.load(root).branches.integration or "placeholder"
+    except Exception:
+        return "placeholder"
+
+
+def _receipt(root: Path) -> dict | None:
+    """The install receipt, or None if this install predates receipts."""
+    try:
+        data = json.loads((root / init.RECEIPT).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _ours_by_content(root: Path, rel: str, staged: str) -> bool:
+    """Whether the file on disk is byte-for-byte what `init` writes.
+
+    Compared after normalising line endings, because `init` writes LF through
+    `textio.write_text_lf` and a checkout on Windows can hand the same content back
+    with CRLF. Comparing raw bytes would call every file on a Windows clone the
+    operator's and refuse to remove any of it.
+    """
+    try:
+        actual = (root / rel).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return actual.replace("\r\n", "\n") == staged.replace("\r\n", "\n")
+
+
 def plan(root: Path) -> Removal:
-    """Everything an uninstall would touch, from `init`'s own file list."""
+    """Everything an uninstall would touch, from the receipt `init` left behind."""
     out = Removal(root=root)
 
-    # `init`'s plan for a *fresh* repo names every path it is responsible for. The
-    # answers do not matter — only the paths — so the cheapest correct survey is a
-    # non-interactive build with a placeholder branch.
+    # `init`'s plan for this repo names every path it is *capable* of writing, with the
+    # content it would give each one. Used two ways: as a whitelist the receipt is
+    # checked against, and — when there is no receipt — as the content to compare.
+    #
+    # Rebuilt with the branch the *installed* manifest records, not a placeholder. Six
+    # templates interpolate `{{integration}}`, so a placeholder makes every one of them
+    # differ from its own output and the content fallback keeps files it should remove.
     proposals = discover.survey(root)
-    written = init.build_plan(root, integration="placeholder", proposals=proposals)
-    candidates = set(written.writes) | set(written.kept)
+    written = init.build_plan(root, integration=_installed_branch(root), proposals=proposals)
+    owned = written.staged
 
-    for rel in sorted(candidates):
-        if rel == ".claude/settings.json":
-            continue                      # merged out below, never deleted
-        path = root / rel
-        if not path.exists():
-            continue
-        if rel.endswith("corrections.log") and _has_real_entries(path):
+    receipt = _receipt(root)
+    if receipt is not None:
+        out.receipted = True
+        claimed = [rel for rel in receipt.get("created", []) if isinstance(rel, str)]
+        # Intersected with `owned` rather than trusted: the receipt is a committed file
+        # like any other, and a hand-edited one naming `src/` must not turn this into an
+        # arbitrary delete. A claim outside what `init` can write is reported, not obeyed.
+        for rel in sorted(set(claimed)):
+            if rel not in owned:
+                out.kept.append(f"{rel} — claimed by the receipt but not a path `init` "
+                                f"writes; left alone")
+                continue
+            if (root / rel).is_file():
+                out.files.append(rel)
+    else:
+        for rel, content in sorted(owned.items()):
+            if rel == ".claude/settings.json" or not (root / rel).is_file():
+                continue
+            if _ours_by_content(root, rel, content):
+                out.files.append(rel)
+            else:
+                out.kept.append(f"{rel} — differs from what `init` writes, so it is "
+                                f"yours or you have edited it")
+
+    for rel in list(out.files):
+        if rel.endswith("corrections.log") and _has_real_entries(root / rel):
+            out.files.remove(rel)
             out.kept.append(f"{rel} — has real entries; earned evidence, not deleted")
-            continue
-        out.files.append(rel)
 
     for rel in RUNTIME_PATHS:
         path = root / rel
@@ -175,13 +246,14 @@ def plan(root: Path) -> Removal:
             merged, removed = strip_hooks(existing)
             if removed:
                 out.hooks_removed = removed
-                if merged:
-                    out.settings = json.dumps(merged, indent=2) + "\n"
-                else:
-                    # Nothing but our hooks was in it, so `init` created it and an
-                    # empty `{}` carries no information. Delete rather than leave a
-                    # file whose only content is that something used to be here.
+                # Deleted only when the receipt says `init` created the file and nothing
+                # but our hooks is left in it. Emptiness alone is not enough evidence: a
+                # project whose settings held only hooks of its own, or a bare `{}`
+                # somebody committed, would look identical from here.
+                if not merged and receipt is not None and receipt.get("settings_created"):
                     out.files.append(".claude/settings.json")
+                else:
+                    out.settings = json.dumps(merged, indent=2) + "\n"
     return out
 
 
@@ -213,6 +285,12 @@ def report(removal: Removal) -> None:
     if removal.empty:
         print("\n  Nothing to remove — this repo has no nightshift install.")
         return
+    if removal.receipted:
+        print(f"  Reading {init.RECEIPT} — the list of files that install created.")
+    else:
+        print(f"  No {init.RECEIPT}: this install predates the receipt. Falling back to")
+        print("  removing only files whose content is exactly what `init` writes, so")
+        print("  anything you wrote or edited is kept and listed below.")
     if removal.files:
         print(f"\n  delete {len(removal.files)} file(s):")
         for rel in removal.files:
@@ -224,7 +302,8 @@ def report(removal: Removal) -> None:
     if removal.hooks_removed:
         print(f"\n  unmerge {removal.hooks_removed} hook entr"
               f"{'y' if removal.hooks_removed == 1 else 'ies'} from "
-              f".claude/settings.json (every other key untouched)")
+              f".claude/settings.json (every other key kept; the file is "
+              f"re-serialised, so its formatting may change)")
     if removal.kept:
         print("\n  kept on purpose:")
         for note in removal.kept:

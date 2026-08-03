@@ -311,6 +311,182 @@ def test_strip_hooks_leaves_a_projects_own_hook_under_the_same_matcher(tmp_path)
         {"type": "command", "command": "npm run lint"}]
 
 
+# --- uninstall in a repo that was not empty ------------------------------------
+#
+# The regression this section exists for. `uninstall.plan` used to ask `build_plan`
+# what `init` writes and delete the intersection with the disk — but after a run our
+# files exist, so they come back as `kept`, the same list as the documents the project
+# already had and `init` deliberately left alone. It deleted the operator's CLAUDE.md.
+# Reported by the origin project's maintainer, 2026-08-03, before he ran it: *"the
+# uninstall deletes claude.md? And architecture? This doesn't sound right."*
+
+
+OWN_DOCS = {
+    "CLAUDE.md": "# My project\n\nMy own hand-written rules.\n",
+    ".gitattributes": "* text=auto eol=lf\n*.png binary\n",
+    ".claude/memory/arch.md": "# Architecture\n\nMy own notes.\n",
+    "docs/tier-binding.md": "# Tiers\n\nMy own document.\n",
+}
+
+
+def _with_own_docs(repo: Path) -> None:
+    """Every path `init` also has a template for, written by the project first."""
+    for rel, text in OWN_DOCS.items():
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "the project's own documents")
+
+
+def test_uninstall_never_deletes_a_document_the_project_already_had(tmp_path):
+    repo = _repo(tmp_path)
+    _with_own_docs(repo)
+    plan = _install(repo)
+    assert set(OWN_DOCS) <= set(plan.kept), "init must have kept these, not written them"
+
+    removal = uninstall.plan(repo)
+    assert not (set(OWN_DOCS) & set(removal.files)), removal.files
+    uninstall.apply(removal)
+
+    for rel, text in OWN_DOCS.items():
+        assert (repo / rel).read_text(encoding="utf-8") == text, rel
+
+
+def test_the_receipt_records_what_the_run_created_and_not_what_it_kept(tmp_path):
+    repo = _repo(tmp_path)
+    _with_own_docs(repo)
+    _install(repo)
+
+    receipt = json.loads((repo / init.RECEIPT).read_text(encoding="utf-8"))
+    created = set(receipt["created"])
+    assert ".ai/manifest.toml" in created
+    assert not (set(OWN_DOCS) & created)
+
+
+def test_a_second_init_accumulates_the_receipt_rather_than_emptying_it(tmp_path):
+    """A re-run has almost nothing left to write. Replacing the receipt with that
+    would leave one that truthfully says this run created nothing — and an uninstall
+    with nothing to remove."""
+    repo = _repo(tmp_path)
+    _install(repo)
+    first = set(json.loads((repo / init.RECEIPT).read_text(encoding="utf-8"))["created"])
+    assert first
+
+    _install(repo)                    # writes nothing; must not forget anything either
+
+    again = json.loads((repo / init.RECEIPT).read_text(encoding="utf-8"))
+    assert set(again["created"]) == first
+    assert again["settings_created"] is True
+    assert ".ai/manifest.toml" in uninstall.plan(repo).files
+
+
+def test_a_crash_before_the_receipt_leaves_no_receipt(tmp_path):
+    """Written last, so it never claims a file that was not created."""
+    repo = _repo(tmp_path)
+    plan = init.build_plan(repo, integration="dev-work")
+    assert not (repo / init.RECEIPT).exists()
+    init.apply(plan)
+    assert (repo / init.RECEIPT).is_file()
+
+
+# --- installs made before receipts existed -------------------------------------
+
+
+def _forget_receipt(repo: Path) -> None:
+    (repo / init.RECEIPT).unlink()
+
+
+def test_without_a_receipt_our_files_are_still_removed(tmp_path):
+    """The fallback: bytes exactly as `init` writes them are ours to remove. This is
+    the state of any install made before the receipt existed, including the one the
+    maintainer was about to redo."""
+    repo = _repo(tmp_path)
+    _with_own_docs(repo)
+    _install(repo)
+    _forget_receipt(repo)
+
+    removal = uninstall.plan(repo)
+    assert not removal.receipted
+    assert ".ai/manifest.toml" in removal.files
+    assert ".claude/skills/manage-board/SKILL.md" in removal.files
+    assert not (set(OWN_DOCS) & set(removal.files))
+
+
+def test_the_fallback_re_renders_with_the_installed_branch(tmp_path):
+    """Six templates interpolate the integration branch. Rebuilding the comparison
+    with a placeholder made every one of them differ from its own output, so the
+    fallback kept files it had written itself — found by running it, not reading it."""
+    repo = _repo(tmp_path)
+    _install(repo)
+    _forget_receipt(repo)
+
+    removal = uninstall.plan(repo)
+    branded = ".claude/skills/run-the-runner/SKILL.md"
+    assert "dev-work" in (repo / branded).read_text(encoding="utf-8")
+    assert branded in removal.files, removal.kept
+
+
+def test_the_fallback_keeps_a_file_the_operator_edited_after_installing(tmp_path):
+    repo = _repo(tmp_path)
+    _install(repo)
+    _forget_receipt(repo)
+    board = repo / "Board" / "README.md"
+    board.write_text(board.read_text(encoding="utf-8") + "\n- a lane rule of my own\n",
+                     encoding="utf-8")
+
+    removal = uninstall.plan(repo)
+
+    assert "Board/README.md" not in removal.files
+    assert any("Board/README.md" in note for note in removal.kept)
+
+
+def test_the_fallback_will_not_delete_a_settings_file_it_cannot_prove_it_made(tmp_path):
+    """With a receipt, `settings_created` licenses the delete. Without one, emptiness
+    is not evidence — a project's own bare `{}` looks identical from here."""
+    repo = _repo(tmp_path)
+    _install(repo)
+    _forget_receipt(repo)
+
+    uninstall.apply(uninstall.plan(repo))
+
+    settings = repo / ".claude" / "settings.json"
+    assert settings.is_file()
+    assert json.loads(settings.read_text(encoding="utf-8")) == {}
+
+
+def test_a_receipt_claiming_a_path_init_never_writes_is_not_obeyed(tmp_path):
+    """The receipt is a committed file like any other. A hand-edited one must not
+    turn this into an arbitrary delete."""
+    repo = _repo(tmp_path)
+    _install(repo)
+    path = repo / init.RECEIPT
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    receipt["created"].append("pkg/core.py")
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    removal = uninstall.plan(repo)
+
+    assert "pkg/core.py" not in removal.files
+    assert any("pkg/core.py" in note for note in removal.kept)
+    uninstall.apply(removal)
+    assert (repo / "pkg" / "core.py").is_file()
+
+
+def test_init_works_again_after_uninstalling_a_repo_that_had_its_own_docs(tmp_path):
+    """The whole point, in the shape the maintainer will meet it: retry an install in
+    a project that already had a CLAUDE.md."""
+    repo = _repo(tmp_path)
+    _with_own_docs(repo)
+    _install(repo, permission_mode="default")
+    uninstall.apply(uninstall.plan(repo))
+
+    plan = _install(repo, permission_mode="bypassPermissions")
+
+    assert ".ai/manifest.toml" in plan.writes
+    assert "CLAUDE.md" in plan.kept, "still theirs, still not overwritten"
+
+
 # --- the interview is reachable the way a person reaches it --------------------
 
 

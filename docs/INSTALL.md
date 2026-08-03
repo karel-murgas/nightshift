@@ -133,10 +133,15 @@ nightshift uninstall          # lists what it would remove; changes nothing
 nightshift uninstall --yes    # performs it
 ```
 
-It removes only paths `init` is responsible for, refuses to delete a corrections
-log with real entries, and un-merges the hook entries from
-`.claude/settings.json` while leaving every other key alone. The package stays
-installed; `pip uninstall nightshift` is a separate and usually unnecessary step.
+It removes only what the install created, from `.ai/install.json` — the receipt
+`init` writes naming its own files. A document the project already had (`CLAUDE.md`,
+`.gitattributes`, `.claude/memory/arch.md`, `docs/tier-binding.md` are the four that
+collide) was kept by `init`, is not in the receipt, and cannot be removed by this.
+With no receipt it falls back to content comparison and keeps anything that differs.
+
+It also refuses to delete a corrections log with real entries, and un-merges the hook
+entries from `.claude/settings.json` while leaving every other key alone. The package
+stays installed; `pip uninstall nightshift` is a separate and usually unnecessary step.
 
 **Before running it with `--yes` in a repo with real work in it**, run it without
 `--yes` and read the list to the operator. It is scoped, but it is still a delete.

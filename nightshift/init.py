@@ -51,6 +51,11 @@ for _stream in (sys.stdout, sys.stderr):
 
 TEMPLATES = Path(__file__).resolve().parent / "templates"
 
+# What a run wrote, so `uninstall` can take back our files without touching the
+# project's. Committed on purpose: the install is a property of the repo, not of the
+# machine that ran it, and the operator who undoes it need not be the one who did it.
+RECEIPT = f"{AI_DIR}/install.json"
+
 # Board lanes come from the one place that owns them, never a list retyped here.
 from nightshift.board import LANES  # noqa: E402
 
@@ -67,6 +72,15 @@ class Plan:
     tables: dict[str, dict] = field(default_factory=dict)
     writes: dict[str, str] = field(default_factory=dict)
     kept: list[str] = field(default_factory=list)
+    # Every path `init` has an opinion about, with the content it would give it —
+    # `writes` plus `kept`, and the reason it is a separate field is `uninstall`. Once
+    # a run has happened, everything `init` wrote *exists*, so a second `build_plan`
+    # files it under `kept` alongside the operator's own pre-existing files. Anything
+    # deciding what to delete needs the content to tell those two apart.
+    staged: dict[str, str] = field(default_factory=dict)
+    # `.claude/settings.json` is the one merge, so "did we write it" and "did we create
+    # it" are different questions and only the second licenses a delete.
+    settings_created: bool = False
     # Two lists, because conflating them is what put "11 hook entries wired" under a
     # heading reading "your call:". `notes` is work the operator still owes; `info` is
     # work `init` already did that they should know about.
@@ -247,6 +261,7 @@ def build_plan(root: Path, *, integration: str | None,
     by_key = {p.key: p for p in proposals}
 
     def stage(rel: str, content: str) -> None:
+        plan.staged[rel] = content
         if (root / rel).exists():
             plan.kept.append(rel)
         else:
@@ -303,6 +318,7 @@ def build_plan(root: Path, *, integration: str | None,
     fragment.pop("_comment", None)
     settings_path = root / ".claude" / "settings.json"
     existing: dict = {}
+    plan.settings_created = not settings_path.is_file()
     if settings_path.is_file():
         try:
             existing = json.loads(settings_path.read_text(encoding="utf-8"))
@@ -349,8 +365,51 @@ def build_plan(root: Path, *, integration: str | None,
     return plan
 
 
+def receipt_text(plan: Plan) -> str:
+    """The record of what this run created, for `uninstall` to read back.
+
+    **Why a file rather than a recomputation.** `uninstall` used to ask `build_plan`
+    what `init` writes and delete the intersection with the disk. That is wrong in one
+    specific and destructive way: after a run, our own files exist, so they arrive as
+    `kept` — the same list as a `CLAUDE.md`, `.gitattributes` or `.claude/memory/arch.md`
+    the project already had and `init` deliberately left alone. Deleting that
+    intersection deletes the operator's work. Only the run that wrote a file knows it
+    wrote it, so the run says so.
+
+    `settings_created` is separate because that path is a merge, not a write: if the
+    file was already there, uninstall takes its hook entries back out and leaves the
+    rest, and only a file `init` itself created may be removed outright.
+
+    A second `init` on the same repo has almost nothing left to write, so the receipt
+    *accumulates* rather than replacing: it records every file nightshift ever created
+    here. Overwriting would leave a repo whose receipt truthfully says this run created
+    nothing, and therefore an uninstall with nothing to remove.
+    """
+    settings = ".claude/settings.json"
+    created = {rel for rel in plan.writes if rel != settings}
+    settings_created = settings in plan.writes and plan.settings_created
+    try:
+        before = json.loads((plan.root / RECEIPT).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pass
+    else:
+        if isinstance(before, dict):
+            created |= {rel for rel in before.get("created", []) if isinstance(rel, str)}
+            settings_created = settings_created or bool(before.get("settings_created"))
+    return json.dumps({
+        "tool": "nightshift",
+        "version": 1,
+        "created": sorted(created),
+        "settings_created": settings_created,
+    }, indent=2) + "\n"
+
+
 def apply(plan: Plan) -> None:
-    """Write the plan. Creates parents; never touches a path in `kept`."""
+    """Write the plan. Creates parents; never touches a path in `kept`.
+
+    The receipt is written last and describes the rest, so a crash halfway through
+    leaves no receipt claiming files that were never created.
+    """
     for rel, content in sorted(plan.writes.items()):
         path = plan.root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -358,6 +417,9 @@ def apply(plan: Plan) -> None:
             path.touch()
         else:
             textio.write_text_lf(path, content)
+    path = plan.root / RECEIPT
+    path.parent.mkdir(parents=True, exist_ok=True)
+    textio.write_text_lf(path, receipt_text(plan))
 
 
 # --- the interview -----------------------------------------------------------
@@ -591,6 +653,12 @@ def report(plan: Plan, proposals: list[discover.Proposal]) -> None:
         print("\nwrite:")
         for rel in sorted(plan.writes):
             print(f"    + {rel}")
+        # Derived from that list rather than staged in it, so it needs its own line or
+        # `--dry-run` under-reports by exactly one file — and a dry run that does not
+        # name every path it will write is the one thing it must not be.
+        print(f"    + {RECEIPT}")
+        print(f"      (the list above, so `nightshift uninstall` can take back these "
+              f"files and nothing else)")
     if plan.kept:
         print("\nkeep (already present, untouched):")
         for rel in sorted(plan.kept):
@@ -613,7 +681,7 @@ def next_steps(plan: Plan, *, integration: str | None, permission_mode: str) -> 
     *"there are some 'your calls' in the console and I have no idea how to make
     these calls."* A closing screen should leave exactly one obvious next command.
     """
-    print(f"\n{'═' * 66}\n  DONE — wrote {len(plan.writes)} file(s)\n{'═' * 66}")
+    print(f"\n{'═' * 66}\n  DONE — wrote {len(plan.writes) + 1} file(s)\n{'═' * 66}")
 
     if not integration:
         print("\n  ⚠ STOP. [branches].integration is not set, and nothing can")
@@ -689,10 +757,7 @@ def main(argv: list[str] | None = None) -> int:
                         choices=[m[0] for m in PERMISSION_MODES],
                         help="state it rather than being asked. `bypassPermissions` is "
                              "the whole machine, not a sandbox — see the prompt text")
-    args = parser.parse_args(argv)
-
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
+    args = parser.parse_args(argv)   # stdout is already UTF-8: reconfigured at import
 
     root = (args.root or Path.cwd()).resolve()
     if not root.is_dir():

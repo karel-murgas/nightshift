@@ -520,13 +520,24 @@ nightshift uninstall          # lists what it would remove; changes nothing
 nightshift uninstall --yes    # performs it
 ```
 
-Scoped by construction: the list of paths comes from `init.build_plan`, the same
-function that decides what to write, so a file `init` has no opinion about is
-invisible to it. Three deliberate refusals — it will not delete a
-`.ai/corrections.log` that has real entries (earned evidence, and the one thing
-here that cannot be regenerated), it will not remove a directory that still has
-your own work in it, and it un-merges its hook entries from
-`.claude/settings.json` rather than replacing the file.
+**It removes files this install created, and only those.** `init` writes
+`.ai/install.json` naming every file it created; `uninstall` reads that list back.
+This matters most in a repo that was not empty: if your project already had a
+`CLAUDE.md`, a `.gitattributes`, a `.claude/memory/arch.md` or a
+`docs/tier-binding.md`, `init` kept yours and never wrote its own — and the receipt
+does not name them, so uninstall cannot touch them.
+
+If the receipt is missing — an install predating it, or a deleted file — it falls
+back to removing only files whose content is *exactly* what `init` writes, and
+prints everything it declined and why. Conservative in the one direction that
+matters: a file you wrote or have since edited is kept.
+
+Three further refusals — it will not delete a `.ai/corrections.log` that has real
+entries (earned evidence, and the one thing here that cannot be regenerated), it
+will not remove a directory that still has your own work in it, and it un-merges
+its hook entries from `.claude/settings.json` rather than replacing the file.
+
+It is dry-run by default. In a repo with real work in it, read the list first.
 
 The package itself stays installed, which is what you want: `init` never
 overwrites, so `uninstall` then `init` is the supported way to redo a first
