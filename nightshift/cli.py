@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """The `nightshift` command — `init` and `doctor`, and deliberately nothing else.
 
-**Why only two.** Every other entry point is already `python -m nightshift.<module>`,
+**Why only these three.** Every other entry point is already `python -m nightshift.<module>`,
 and adding `nightshift gates` beside `python -m nightshift.gates.run` would give each
 command two names. Two names is how a doc, a hook and a habit end up citing three
 different spellings of the same thing, and it is the D4 duplication this framework
-spends most of its gates preventing. These two earn the exception for the same
-reason: `init` runs in a repo that does not have the package configured yet, and
-`doctor` is the thing you reach for when you do not yet know what is wrong — both
-are worse to have to remember a module path for.
+spends most of its gates preventing. These three earn the exception for the same
+reason: `init` runs in a repo that does not have the package configured yet,
+`uninstall` is what you reach for when `init` went wrong (and a half-configured repo
+cannot be fixed by re-running `init`, because it never overwrites), and `doctor` is
+the thing you reach for when you do not yet know what is wrong. All three are worse
+to have to remember a module path for.
 
 Each subcommand delegates to the module that owns it and passes the remaining
 argv straight through, so `nightshift init --help` and `python -m nightshift.init
@@ -21,8 +23,9 @@ import sys
 _USAGE = """\
 usage: nightshift <command> [options]
 
-  init      stand nightshift up in this repo — discovers, asks, then writes
-  doctor    per-machine preconditions, plus drift between the manifest and the tree
+  init       stand nightshift up in this repo — asks four questions, then writes
+  doctor     per-machine preconditions, plus drift between the manifest and the tree
+  uninstall  remove what init wrote, so a first install can be retried
 
 Everything else is a module, and stays one:
 
@@ -58,6 +61,10 @@ def main(argv: list[str] | None = None) -> int:
         from nightshift import doctor
 
         return doctor.main(rest)
+    if command == "uninstall":
+        from nightshift import uninstall
+
+        return uninstall.main(rest)
 
     print(f"unknown command: {command}\n", file=sys.stderr)
     print(_USAGE, end="", file=sys.stderr)

@@ -39,6 +39,16 @@ from nightshift import discover
 from nightshift import textio
 from nightshift.manifest import AI_DIR, MANIFEST_NAME
 
+# At import, not inside `main()`. The interview's headings and prompts carry box
+# drawing and arrows, and Windows' console is cp1252 — so any caller that reaches a
+# prompt without going through `main()` (a test, a skill driving one question, the
+# `nightshift` console script before it dispatches) used to die with a
+# UnicodeEncodeError about its own help text. Same trap as `reconcile --help`,
+# found the same way: by running it rather than reading it.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 TEMPLATES = Path(__file__).resolve().parent / "templates"
 
 # Board lanes come from the one place that owns them, never a list retyped here.
@@ -57,7 +67,11 @@ class Plan:
     tables: dict[str, dict] = field(default_factory=dict)
     writes: dict[str, str] = field(default_factory=dict)
     kept: list[str] = field(default_factory=list)
+    # Two lists, because conflating them is what put "11 hook entries wired" under a
+    # heading reading "your call:". `notes` is work the operator still owes; `info` is
+    # work `init` already did that they should know about.
     notes: list[str] = field(default_factory=list)
+    info: list[str] = field(default_factory=list)
 
 
 # --- rendering ---------------------------------------------------------------
@@ -211,14 +225,23 @@ def _accept(root: Path, proposals: list[discover.Proposal],
 
 def build_plan(root: Path, *, integration: str | None,
                proposals: list[discover.Proposal] | None = None,
-               optional: set[str] | None = None) -> Plan:
+               optional: set[str] | None = None,
+               permission_mode: str = "default",
+               capabilities: list[str] | None = None,
+               budget_bytes: int | None = None) -> Plan:
     """Every file `init` would create, with its final content. Writes nothing.
 
     `optional` is the set of non-required `CONFIRM` keys the operator accepted.
     Omitted means none, which is the correct non-interactive answer.
+
+    The last three are the interview's answers to the questions that used to be
+    printed as advice: they land in `.ai/hosts.json` and `[memory].budget_bytes`
+    rather than in a note telling the operator to edit a file.
     """
     proposals = proposals if proposals is not None else discover.survey(root)
     tables = _accept(root, proposals, integration, optional)
+    if budget_bytes is not None:
+        tables.setdefault("memory", {})["budget_bytes"] = budget_bytes
     plan = Plan(root=root, tables=tables)
     values = tokens(root, tables)
     by_key = {p.key: p for p in proposals}
@@ -240,7 +263,7 @@ def build_plan(root: Path, *, integration: str | None,
     stage(f"{AI_DIR}/gates/data/corrections_vocab.json",
           (TEMPLATES / "ai" / "gates" / "data" / "corrections_vocab.json").read_text(encoding="utf-8"))
     stage(f"{AI_DIR}/hosts.json",
-          render((TEMPLATES / "ai" / "hosts.json").read_text(encoding="utf-8"), values))
+          hosts_text(values, permission_mode, list(capabilities or [])))
 
     board_root = tables.get("board", {}).get("root", "Board")
     stage(f"{board_root}/README.md",
@@ -293,8 +316,8 @@ def build_plan(root: Path, *, integration: str | None,
         merged, added = merge_hooks(existing, fragment)
         if added:
             plan.writes[".claude/settings.json"] = json.dumps(merged, indent=2) + "\n"
-            plan.notes.append(f"{added} hook entr{'y' if added == 1 else 'ies'} wired into "
-                              f".claude/settings.json (existing keys untouched)")
+            plan.info.append(f"{added} hook entr{'y' if added == 1 else 'ies'} wired into "
+                             f".claude/settings.json (existing keys untouched)")
         else:
             plan.kept.append(".claude/settings.json")
 
@@ -315,14 +338,14 @@ def build_plan(root: Path, *, integration: str | None,
             f"{AI_DIR}/{MANIFEST_NAME} by hand if you agree. Until then the gate "
             f"that reads it does not run, which is a fine day-one state.")
 
-    # The two environment problems that fix nothing by being written down.
+    # The one environment problem that writing a file does not fix — it needs a
+    # command run on this box, so it is a note rather than a decision.
     crlf = by_key.get("crlf_worktree")
     if crlf and crlf.value:
-        plan.notes.append(f"CRLF working tree: {crlf.why}")
-    for key in ("hosts.capabilities", "hosts.permission_mode", "memory.budget_bytes"):
-        proposal = by_key.get(key)
-        if proposal:
-            plan.notes.append(f"{key}: {proposal.why}")
+        plan.notes.append(
+            f"{len(crlf.value)} file(s) are CRLF on disk and invisible to `git status`. "
+            f"Fix this checkout with `python -m nightshift.normalize_worktree` — there "
+            f"is nothing to commit afterwards, and it is per-machine.")
     return plan
 
 
@@ -347,6 +370,42 @@ def _ask(prompt: str, default: str | None) -> str | None:
     except EOFError:
         return default
     return answer or default
+
+
+def _step(n: int, total: int, title: str) -> None:
+    """A numbered heading, so the interview reads as a finite sequence.
+
+    The first version of this printed the same decisions as loose paragraphs and
+    the operator could not tell how many were left, or which of them still needed
+    an answer versus which were being reported. Numbering is the cheapest fix for
+    both (the origin project's maintainer, 2026-08-02: *"I have no idea how to make these calls"*).
+    """
+    print(f"\n{'─' * 66}\n  STEP {n}/{total} — {title}\n{'─' * 66}")
+
+
+def _choose(prompt: str, options: list[tuple[str, str, str]], default: str) -> str:
+    """A numbered menu. `options` is `(value, label, consequence)`; returns a value.
+
+    Menus rather than free text wherever the answer is one of a known few. A prompt
+    that asks for a *value* assumes the operator already knows the vocabulary, which
+    is exactly what a first install does not.
+    """
+    for i, (value, label, why) in enumerate(options, start=1):
+        mark = "  ← default" if value == default else ""
+        print(f"    {i}. {label}{mark}")
+        print(f"       {why}")
+    valid = {str(i): opt[0] for i, opt in enumerate(options, start=1)}
+    valid.update({opt[0]: opt[0] for opt in options})
+    while True:
+        answer = _ask(prompt, default)
+        if answer is None:
+            return default
+        answer = answer.strip()
+        if answer in valid:
+            return valid[answer]
+        if not sys.stdin.isatty():
+            return default
+        print(f"    ? not one of {', '.join(str(i) for i in range(1, len(options) + 1))} — try again")
 
 
 def confirm_integration(root: Path, proposal: discover.Proposal,
@@ -411,6 +470,100 @@ def _describe(value: object) -> list[str]:
     return [str(value)]
 
 
+# --- the hosts.json interview -------------------------------------------------
+#
+# These two were printed as advice and never asked, which is the gap that made a
+# first install stall: `init` said "permission_mode: never inferred" and left the
+# operator to find the file, guess the key and guess the value. **Asking is not a
+# weakening of the never-inferred rule.** That rule exists so the answer is a
+# decision rather than a probe — and an answer typed at a prompt that quotes the
+# consequence is a better declaration than a JSON edit made three days later,
+# because the warning is on screen at the moment of choosing. What must not
+# change, and does not: the *safe* option is the default, so pressing Enter can
+# never arm the machine.
+
+PERMISSION_MODES = [
+    ("default", "default — ask before anything",
+     "Safest, and cannot run Bash. Code cards will stall: no pytest, no git.\n"
+     "       Right for a first look at the board and the gates."),
+    ("acceptEdits", "acceptEdits — file edits without asking, still no Bash",
+     "Fine for docs and board work. A code card still cannot run its tests."),
+    ("bypassPermissions", "bypassPermissions — what a code card actually needs",
+     "THE WHOLE MACHINE, NOT A SANDBOX. A dispatched worker can do anything\n"
+     "       you can. What contains it: a throwaway worktree on its own branch, and\n"
+     "       a runner that refuses to build on your stable branch. Nothing else."),
+]
+
+
+def ask_permission_mode(*, interactive: bool) -> str:
+    if not interactive:
+        return "default"
+    print("\n  How much may a dispatched worker do on this machine?")
+    print("  (`.ai/hosts.json` → permission_mode. Change it any time.)\n")
+    return _choose("  choose 1-3", PERMISSION_MODES, "default")
+
+
+def ask_capabilities(*, interactive: bool) -> list[str]:
+    """Hardware/stack slugs this box is *allowed* to be used for. Empty is normal.
+
+    Only meaningful once cards carry `requires:`, so a first install should leave it
+    empty — and the prompt says so rather than implying a gap.
+    """
+    if not interactive:
+        return []
+    print("\n  Does this machine have special hardware a card might require?")
+    print("  Slugs like `gpu-box` or `audio-stack`, matched against a card's")
+    print("  `requires:`. Almost every install starts with none — leave it blank.")
+    answer = _ask("  capabilities (comma-separated, blank for none)", "")
+    return [s.strip() for s in (answer or "").split(",") if s.strip()]
+
+
+def ask_budget(*, interactive: bool) -> int | None:
+    """`[memory].budget_bytes` — a *round* number or off. Never the current total.
+
+    The rule it protects is doc 10 §4's: a budget measured off the tree as found is
+    the move the gate exists to stop, because it can only ever be satisfied. The
+    rule does **not** require refusing to propose anything, which is how this read
+    before — "set it to a number you are willing to defend out loud" is a correct
+    principle and useless instruction. A round 100 KB is defensible precisely
+    because it is arbitrary: it was not derived from what happens to be there.
+    """
+    if not interactive:
+        return None
+    print("\n  Cap the size of the docs an agent loads at the start of every")
+    print("  session? Over the cap, the gate tells you to move detail into an")
+    print("  on-demand file. The number is deliberately NOT measured from your")
+    print("  repo — a budget that fits what is already there can never fail.\n")
+    choice = _choose("  choose 1-3", [
+        ("100000", "100 KB — a round number, recommended",
+         "Roughly 25k words of orientation. Generous for a new repo."),
+        ("50000", "50 KB — tighter",
+         "Sensible if you want the pressure on from day one."),
+        ("off", "off — no cap",
+         "The gate does not run. Turn it on later by setting the key."),
+    ], "100000")
+    return None if choice == "off" else int(choice)
+
+
+def hosts_text(values: dict[str, str], permission_mode: str,
+               capabilities: list[str]) -> str:
+    """`.ai/hosts.json` with the interview's answers actually in it.
+
+    The template used to be copied verbatim, so every install got
+    `permission_mode: "default"` and a note telling the operator to go and change
+    it. Rendering the answer is the difference between a decision and a homework
+    assignment.
+    """
+    raw = json.loads(render((TEMPLATES / "ai" / "hosts.json").read_text(encoding="utf-8"),
+                            values))
+    host = values["{{hostname}}"]
+    entry = raw.get(host)
+    if isinstance(entry, dict):
+        entry["capabilities"] = capabilities
+        entry["permission_mode"] = permission_mode
+    return json.dumps(raw, indent=2) + "\n"
+
+
 def report(plan: Plan, proposals: list[discover.Proposal]) -> None:
     print("\ndiscovered:")
     for proposal in proposals:
@@ -442,10 +595,75 @@ def report(plan: Plan, proposals: list[discover.Proposal]) -> None:
         print("\nkeep (already present, untouched):")
         for rel in sorted(plan.kept):
             print(f"    = {rel}")
+    if plan.info:
+        print("\nalso done:")
+        for note in plan.info:
+            print(f"    * {note}")
     if plan.notes:
-        print("\nyour call:")
+        print("\nneeds a command from you:")
         for note in plan.notes:
             print(f"    ! {note}")
+
+
+def next_steps(plan: Plan, *, integration: str | None, permission_mode: str) -> None:
+    """A numbered checklist of the next commands, in order, with what each proves.
+
+    This replaced a section headed "your call:" that listed decisions without
+    saying how to act on any of them. The origin project's maintainer, first install, 2026-08-02:
+    *"there are some 'your calls' in the console and I have no idea how to make
+    these calls."* A closing screen should leave exactly one obvious next command.
+    """
+    print(f"\n{'═' * 66}\n  DONE — wrote {len(plan.writes)} file(s)\n{'═' * 66}")
+
+    if not integration:
+        print("\n  ⚠ STOP. [branches].integration is not set, and nothing can")
+        print("    dispatch without it. Open .ai/manifest.toml, add:")
+        print("\n        [branches]")
+        print('        integration = "your-branch-name"\n')
+        print("    ...then re-run `nightshift init`.")
+        return
+
+    steps = [
+        ("Commit what init wrote",
+         "git add -A && git commit -m \"nightshift init\"",
+         "The board and the manifest are meant to be tracked. Do this first so\n"
+         "     the next steps have a clean tree to talk about."),
+        ("Check this machine",
+         "nightshift doctor",
+         "Line-endings, whether `claude` is on PATH, whether this host is\n"
+         "     configured. Everything should be [OK] or [SKIP]."),
+        ("Run the gates",
+         "python -m nightshift.gates.run",
+         "Should be green on a fresh repo. This also runs automatically after\n"
+         "     every edit Claude makes, via the hooks init just wired."),
+        ("Run the mandatory pre-push check",
+         "python -m nightshift.preflight",
+         "Gates + your test suite + a receipt. A hook refuses `git push`\n"
+         "     without one, so this is the command you will type most."),
+    ]
+    if permission_mode == "bypassPermissions":
+        steps.append((
+            "Try one card end to end",
+            "python -m nightshift.runner --dry-run",
+            "Reports what would dispatch and why not. Write a card into\n"
+            "     Board/tasks/ first — `Board/README.md` has the shape. Then:\n"
+            "     python -m nightshift.runner --card <id> --max-cards 1"))
+    else:
+        steps.append((
+            "Explore the board (dispatch is off for now)",
+            "python -m nightshift.runner --dry-run",
+            f"Safe: it writes nothing. Real dispatch needs permission_mode\n"
+            f"     `bypassPermissions` — you chose `{permission_mode}`. Change it in\n"
+            f"     .ai/hosts.json when you want to try a code card."))
+
+    print("\n  Do these in order:\n")
+    for i, (title, command, why) in enumerate(steps, start=1):
+        print(f"  {i}. {title}")
+        print(f"     $ {command}")
+        print(f"     {why}\n")
+
+    print("  Read next: Board/README.md (what a card looks like) and the")
+    print("  `manage-board` / `run-the-runner` skills init put in .claude/skills/.")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -464,6 +682,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--layering", action="store_true",
                         help="print the one-way dependencies discovery found and exit, "
                              "so layering rules can be chosen rather than accepted")
+    parser.add_argument("--non-interactive", action="store_true",
+                        help="ask nothing. Every optional decision is left unmade and "
+                             "reported; permission_mode stays `default`. For scripts")
+    parser.add_argument("--permission-mode", default=None,
+                        choices=[m[0] for m in PERMISSION_MODES],
+                        help="state it rather than being asked. `bypassPermissions` is "
+                             "the whole machine, not a sandbox — see the prompt text")
     args = parser.parse_args(argv)
 
     if hasattr(sys.stdout, "reconfigure"):
@@ -485,33 +710,64 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {rule['importer']} must not import {rule['imports']}")
         return 0
 
-    print(f"nightshift init — {root}")
+    interactive = (not args.non_interactive and not args.dry_run
+                   and sys.stdin.isatty())
+
+    print(f"\n{'═' * 66}")
+    print("  nightshift init")
+    print(f"  {root}")
+    print(f"{'═' * 66}")
+    print("\n  Four questions, then it writes. Every answer goes in a file you")
+    print("  own and can edit afterwards; nothing here is permanent.")
+    if not interactive:
+        print("\n  (non-interactive: defaults everywhere, and it says what it skipped)")
+
     proposals = discover.survey(root)
     by_key = {p.key: p for p in proposals}
 
+    _step(1, 4, "which branch does work merge into?")
     integration = confirm_integration(
         root, by_key["branches.integration"],
         assume_yes=args.yes, given=args.integration)
-    optional = confirm_optional(
-        proposals, assume_yes=args.yes,
-        interactive=not args.dry_run and sys.stdin.isatty())
+    if args.integration:
+        # `confirm_integration` returns early when the answer was given, so without
+        # this the step prints a heading and nothing at all — which reads as broken.
+        print(f"  Using `{args.integration}`, as given on the command line.")
+        print("  Work is cut from it and merged back into it; the runner refuses to")
+        print("  build on anything else.")
+
+    _step(2, 4, "what may a worker do on this machine?")
+    permission_mode = (args.permission_mode
+                       or ask_permission_mode(interactive=interactive))
+    capabilities = ask_capabilities(interactive=interactive)
+
+    _step(3, 4, "cap the size of the always-loaded docs?")
+    budget = ask_budget(interactive=interactive)
+
+    _step(4, 4, "pin any architecture rules discovery found?")
+    offerable = [p for p in proposals
+                 if p.needs_confirmation and p.key != "branches.integration"
+                 and p.value is not None]
+    optional = confirm_optional(proposals, assume_yes=args.yes, interactive=interactive)
+    if not offerable:
+        print("  Nothing to offer — discovery found no one-way dependency worth")
+        print("  pinning, and no memory files named by your docs. Both are normal on a")
+        print("  fresh repo; `nightshift init --layering` can show the list later.")
+    elif not interactive:
+        print(f"  {len(offerable)} suggestion(s) skipped — nothing is written that was")
+        print("  not asked for. Re-run in a terminal, or see `nightshift init --layering`.")
 
     plan = build_plan(root, integration=integration, proposals=proposals,
-                      optional=optional)
+                      optional=optional, permission_mode=permission_mode,
+                      capabilities=capabilities, budget_bytes=budget)
     report(plan, proposals)
 
     if args.dry_run:
         print("\ndry run — nothing written")
         return 0
     apply(plan)
-    print(f"\nwrote {len(plan.writes)} file(s). Next:")
-    print("    python -m nightshift.doctor        # the per-machine preconditions")
-    print("    python -m nightshift.gates.run     # should be green on an empty repo")
-    if not integration:
-        print("\n  [branches].integration is UNSET — nothing can dispatch until you")
-        print("  declare it in .ai/manifest.toml.")
-        return 1
-    return 0
+    next_steps(plan, integration=integration, permission_mode=permission_mode)
+    return 0 if integration else 1
 
 
 if __name__ == "__main__":

@@ -263,15 +263,34 @@ def test_the_manifest_explains_why_integration_has_no_default(repo):
         "line to make an error go away")
 
 
-# --- what init refuses to decide ---------------------------------------------
+# --- what init decides, and what it only reports ------------------------------
 
 
-def test_the_three_undecidable_things_are_surfaced_as_notes(repo):
+def test_the_undecidable_things_are_asked_rather_than_noted(repo):
+    """**This test used to assert the opposite**, and the opposite was the defect.
+
+    `permission_mode`, `capabilities` and `budget_bytes` were reported as notes
+    under a heading reading `your call:`, on the grounds that a field which bounds
+    behaviour must be declared rather than probed. That rule is right; the
+    conclusion was wrong. The first person to install this from scratch got as far
+    as the notes and stopped — *"I have no idea how to make these calls"* — because
+    a note names a decision without offering a way to take it.
+
+    Asking satisfies the rule better than a note does: the consequence is on screen
+    at the moment of choosing, and `test_install_flow` locks that the *safe* answer
+    is what Enter selects. So the three are now interview questions whose answers
+    land in files, and `plan.notes` is reserved for the one thing writing a file
+    cannot fix — a CRLF working tree, which needs a command run on this box.
+    """
     plan = init.build_plan(repo, integration="main")
     notes = " ".join(plan.notes)
-    assert "hosts.capabilities" in notes
-    assert "hosts.permission_mode" in notes
-    assert "memory.budget_bytes" in notes
+    for asked in ("hosts.capabilities", "hosts.permission_mode", "memory.budget_bytes"):
+        assert asked not in notes, f"{asked} is an interview question now, not a note"
+
+    hosts = json.loads(plan.writes[".ai/hosts.json"])
+    entry = next(v for k, v in hosts.items() if not k.startswith("_"))
+    assert "permission_mode" in entry and "capabilities" in entry, (
+        "whatever was answered has to land in the file, or the question was theatre")
 
 
 def test_the_seed_vocabulary_is_empty(repo):

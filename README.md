@@ -6,36 +6,124 @@ dispatcher. **You get the machinery for earning gates, not an earned gate suite*
 — a new repo starts with the generic gates, an empty audit matrix and an empty
 corrections log, and adds rules as its own failures earn them.
 
-<!-- stale-ok: `.ai/hosts.json` below is a file `nightshift init` writes into a
-     CONSUMING project. This package is not its own consumer, so it has none. -->
-## Install
+**Requirements:** Python 3.11+, a git repo, and the `claude` CLI on your `PATH`
+if you want unattended runs. That is all.
+
+<!-- stale-ok: `.ai/hosts.json` and the other paths below are files `nightshift
+     init` writes into a CONSUMING project. This package is not its own consumer,
+     so none of them resolve here. -->
+## Install — six steps, about five minutes
+
+### 1. Get the code
 
 ```
-pip install -e path/to/nightshift
-nightshift init --integration <your-integration-branch>
+git clone https://github.com/karel-murgas/nightshift.git
 ```
 
-`init` discovers what it can — package name, test dir, whether xdist is
-installed, the stable branch — and writes the rest: the manifest, the board, the
-four core charters, the three operator skills, the hook wiring, `CLAUDE.md`,
-memory stubs, an empty corrections log and `.gitattributes`. `--integration` is
-the one thing it will never guess; `capabilities` and `permission_mode` in
-`.ai/hosts.json` are the other two, and it always proposes them empty. Nothing
-existing is overwritten, so running it again is how a half-configured repo gets
-what it is missing. `nightshift doctor` re-runs the same survey afterwards, for
-drift and for the per-machine checks git cannot carry.
+Put it next to the project you want to use it in, not inside it. It stays a
+separate repo so a fix you make while using it is a fix for every project.
 
-## Use
-
-The whole daily loop is three commands: gates run themselves on save, via the
-hooks. `python -m nightshift.preflight` before every push or merge. `python -m
-nightshift.runner` for a night of unattended work.
-
-## First real run
+### 2. Install it into the same Python your project uses
 
 ```
-python -m nightshift.runner --dry-run                  # what would dispatch, and why not
-python -m nightshift.runner --card <id> --max-cards 1   # one named card, then stop
+cd your-project
+pip install -e ../nightshift
+```
+
+`-e` is deliberate: while this is still changing, an editable install means a
+`git pull` in `../nightshift` is live in every project at once, with no
+reinstall. Check it worked:
+
+```
+nightshift --help
+```
+
+### 3. Decide one thing before you start
+
+**Which branch does finished work merge into?** Not your stable branch — the
+one you cut feature branches from and merge them back to. `dev`,
+`development`, `integration`, whatever you call it. If you only have `main`,
+make one now; `init` will not invent it, and nothing can dispatch without it.
+
+### 4. Run the installer
+
+```
+nightshift init --integration your-branch-name
+```
+
+It asks **four questions**, each with a recommended answer you can accept by
+pressing Enter:
+
+| # | It asks | Say this if unsure |
+|---|---|---|
+| 1 | Which branch does work merge into? | the one from step 3 |
+| 2 | What may a dispatched worker do on this machine? | **`default`** — safe, and lets you look around before anything can run commands |
+| 3 | Cap the size of the always-loaded docs? | **100 KB** — a round number, not measured from your repo |
+| 4 | Pin any architecture rules it found? | **no** — read them later, adopt them when you agree |
+
+Then it writes ~27 files: the manifest, the board, four agent charters, three
+operator skills, the hook wiring, a `CLAUDE.md`, memory stubs, an empty
+corrections log and `.gitattributes`. **Nothing existing is ever overwritten.**
+
+It finishes by printing a numbered list of the next commands to run. Follow it
+in order — that list is the rest of the setup.
+
+> **Prefer to have Claude do it?** Point it at
+> [`docs/INSTALL.md`](docs/INSTALL.md): *"Read `../nightshift/docs/INSTALL.md`
+> and install nightshift in this repo."* Same steps, written for an agent, with
+> the failure modes and what to tell you at each one.
+
+### 5. Commit it
+
+```
+git add -A && git commit -m "nightshift init"
+```
+
+The board and the manifest are meant to be tracked, and the next steps assume a
+clean tree.
+
+### 6. Check it
+
+```
+nightshift doctor                  # this machine: line endings, claude on PATH, host config
+python -m nightshift.gates.run     # should be green on a fresh repo
+python -m nightshift.preflight     # gates + your tests + a receipt
+```
+
+All three should pass. If `doctor` reports something, it names the exact command
+that fixes it.
+
+<!-- stale-ok: `.claude/settings.json` is the consuming project's own settings file,
+     which `init` merges hook entries into and `uninstall` merges them out of. Not a
+     file of this package's. -->
+### Starting over
+
+`init` never overwrites, so a half-configured repo cannot be fixed by running it
+again. Undo it instead:
+
+```
+nightshift uninstall          # lists what it would remove, changes nothing
+nightshift uninstall --yes    # does it
+```
+
+It removes only what `init` wrote, leaves your own files alone, keeps a
+corrections log that has real entries in it, and un-merges its hook entries from
+`.claude/settings.json` without touching your other settings. The package stays
+installed — you do not need to `pip uninstall` to try again.
+
+<!-- stale-ok: `Board/README.md` is written into the CONSUMING project by `init`
+     (from `templates/board/README.md`). This package has no board. -->
+## Then what?
+
+Gates now run themselves after every edit Claude makes. That is the whole of the
+inline half, and you can stop here and still be better off.
+
+For the overnight half: write a card into `Board/tasks/` (`Board/README.md` has
+the shape), then
+
+```
+python -m nightshift.runner --dry-run                   # what would dispatch, and why not
+python -m nightshift.runner --card <id> --max-cards 1    # one named card, then stop
 ```
 
 `--dry-run` first, always — it changes nothing and does not mind a dirty tree.
@@ -48,8 +136,9 @@ tokens, not time.
 
 **`permission_mode: bypassPermissions` in `.ai/hosts.json` is what a code card
 needs to run, and it is the whole machine, not a sandbox.** A dispatched worker
-under it can do anything you can. `init` will never set it for you — you state it,
-on the machine you mean it for, having read this paragraph.
+under it can do anything you can. `init` asks before setting it and defaults to
+the safe answer, so you only get it by choosing it — on the machine you meant it
+for, having read this paragraph.
 
 ---
 
@@ -68,6 +157,7 @@ on the machine you mean it for, having read this paragraph.
 - [The staleness sweep](#the-staleness-sweep)
 - [What you do not get](#what-you-do-not-get)
 - [Troubleshooting](#troubleshooting)
+- [Removing it](#removing-it)
 
 ### What is here
 
@@ -420,3 +510,24 @@ changing daily is an editable install shared live across every consumer.
 * **The runner refuses to build, citing a forbidden base.** `stable` and any
   `forbidden_extra` branches are refused as a base on purpose; check them
   against `[branches]` before assuming the tooling is wrong.
+
+<!-- stale-ok: `.ai/corrections.log` and `.claude/settings.json` here are the
+     consuming project's files — the ones `uninstall` is careful with. -->
+### Removing it
+
+```
+nightshift uninstall          # lists what it would remove; changes nothing
+nightshift uninstall --yes    # performs it
+```
+
+Scoped by construction: the list of paths comes from `init.build_plan`, the same
+function that decides what to write, so a file `init` has no opinion about is
+invisible to it. Three deliberate refusals — it will not delete a
+`.ai/corrections.log` that has real entries (earned evidence, and the one thing
+here that cannot be regenerated), it will not remove a directory that still has
+your own work in it, and it un-merges its hook entries from
+`.claude/settings.json` rather than replacing the file.
+
+The package itself stays installed, which is what you want: `init` never
+overwrites, so `uninstall` then `init` is the supported way to redo a first
+install that went wrong.
