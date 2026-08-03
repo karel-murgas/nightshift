@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from nightshift import manifest as _manifest
+from nightshift import tiers
 
 HIGH = "high"
 CONFIRM = "confirm"
@@ -287,7 +288,7 @@ def worker_config(root: Path, name: str | None = None) -> list[Proposal]:
 # --- [tiers] ----------------------------------------------------------------
 
 
-_TIER_BLOCK = re.compile(r"^```tier-binding[ \t]*$", re.MULTILINE)
+_TIER_BLOCK = re.compile(rf"^```{tiers.FENCE}[ \t]*$", re.MULTILINE)
 # `init`'s substitution tokens. Their presence means the file is a template.
 _UNRENDERED = re.compile(r"\{\{[a-z_]+\}\}")
 

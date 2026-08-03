@@ -29,14 +29,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import socket
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from nightshift import discover
 from nightshift import textio
+from nightshift import tiers
+from nightshift.gates import line_endings
 from nightshift.manifest import AI_DIR, MANIFEST_NAME
 
 # At import, not inside `main()`. The interview's headings and prompts carry box
@@ -55,6 +59,112 @@ TEMPLATES = Path(__file__).resolve().parent / "templates"
 # project's. Committed on purpose: the install is a property of the repo, not of the
 # machine that ran it, and the operator who undoes it need not be the one who did it.
 RECEIPT = f"{AI_DIR}/install.json"
+
+# Markers around a block appended to a file the project already had. Written into the
+# file rather than only into the receipt, so `uninstall` can find and remove the block
+# even in a repo whose receipt is missing — the marker is the record.
+BLOCK_BEGIN = "nightshift:begin"
+BLOCK_END = "nightshift:end"
+
+# Appended to an existing CLAUDE.md instead of the framework's own text. The substance
+# goes in `.ai/CLAUDE.md`, a file `init` creates and `uninstall` deletes outright, and
+# the project's file gets a pointer. Two reasons: appending five `##` sections into
+# somebody's instruction file collides with the headings they already have, and a rule
+# should be written in one place — which is the framework's own doctrine.
+POINTER = f"""## nightshift
+
+This repo is checked by nightshift, and a session must follow
+[`{AI_DIR}/CLAUDE.md`]({AI_DIR}/CLAUDE.md) as part of this file: how to run the gates,
+the preflight requirement before any push, the branch-role source of truth, and the
+board and corrections contracts.
+
+Project rules stay here. The framework has no opinion about them."""
+
+
+# The one line `.gitattributes` must carry, and the fence `nightshift.tiers` parses.
+# Both are quoted from the checker that enforces them rather than retyped: the string is
+# the contract, and two copies of a contract is one copy and one guess.
+LF_ATTRIBUTE = line_endings.REQUIRED_ATTRIBUTE
+TIER_FENCE = tiers.FENCE
+
+
+def _comment(rel: str, text: str) -> str:
+    """`text` as a comment in the syntax of the file it is going into."""
+    return f"<!-- {text} -->" if rel.endswith(".md") else f"# {text}"
+
+
+def _exists_and_differs(path: Path, content: str) -> bool:
+    """Whether the file is there and is not simply our own output.
+
+    Compared LF-normalised, because our writes are LF and a Windows checkout can hand
+    the same content back with CRLF — which would read as "the project wrote this".
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return path.exists()
+    return text.replace("\r\n", "\n") != content.replace("\r\n", "\n")
+
+
+def framework_half(instructions: str) -> str:
+    """`.ai/CLAUDE.md`: the rules that are the same in every project, standing alone.
+
+    Written only when the project already has a `CLAUDE.md` of its own. The template
+    marks the seam itself with a rule comment above `## Project rules`, so this reads
+    that marker rather than a line number — and then replaces the template's own title
+    and preamble, which describe a split ("everything below the line is yours") that
+    does not exist once the halves are two files.
+    """
+    head, sep, _ = instructions.partition("\n<!-- ---")
+    body = head if sep else instructions
+    first_section = body.find("\n## ")
+    body = body[first_section + 1:] if first_section != -1 else body
+    return (
+        "# nightshift — the framework's half of the rules\n"
+        "\n"
+        "<!-- Written by `nightshift init`, because this project already had a CLAUDE.md of\n"
+        "     its own. That file points here inside a marked block; these rules apply as\n"
+        "     though they were in it. `nightshift uninstall` deletes this file and removes\n"
+        "     the block. Project rules belong in CLAUDE.md, not here — this half is the\n"
+        "     same in every repo that installs the framework. -->\n"
+        "\n"
+        f"{body.strip()}\n")
+
+
+def fenced_binding(doc: str) -> str:
+    """The ```tier-binding block out of the template, fence included."""
+    match = re.search(rf"```{TIER_FENCE}\n.*?```", doc, re.DOTALL)
+    return match.group(0) if match else f"```{TIER_FENCE}\nworker = sonnet\nlead = opus\n```"
+
+
+def wrap_block(rel: str, body: str) -> str:
+    """`body` fenced by markers, ready to append to an existing file."""
+    begin = _comment(rel, f"{BLOCK_BEGIN} — added by `nightshift init`. "
+                          f"`nightshift uninstall` removes exactly this block.")
+    return f"\n{begin}\n\n{body.strip()}\n\n{_comment(rel, BLOCK_END)}\n"
+
+
+def strip_block(text: str) -> str:
+    """`text` with every marked block removed, and the blank line that preceded it.
+
+    Lives here rather than in `uninstall` because the marker format has exactly one
+    owner: a writer and a remover that each know half of it is how the halves drift.
+    """
+    out: list[str] = []
+    skipping = False
+    for line in text.splitlines(keepends=True):
+        if BLOCK_BEGIN in line:
+            skipping = True
+            while out and not out[-1].strip():
+                out.pop()
+            continue
+        if BLOCK_END in line:
+            skipping = False
+            continue
+        if not skipping:
+            out.append(line)
+    result = "".join(out)
+    return result if not result or result.endswith("\n") else result + "\n"
 
 # Board lanes come from the one place that owns them, never a list retyped here.
 from nightshift.board import LANES  # noqa: E402
@@ -78,6 +188,10 @@ class Plan:
     # files it under `kept` alongside the operator's own pre-existing files. Anything
     # deciding what to delete needs the content to tell those two apart.
     staged: dict[str, str] = field(default_factory=dict)
+    # Files the project already had, to which a marked block gets appended — the four
+    # where the *content* is the requirement and the file existing is not. Separate from
+    # `writes` because the file is not ours and only the block may ever be taken back.
+    appends: dict[str, str] = field(default_factory=dict)
     # `.claude/settings.json` is the one merge, so "did we write it" and "did we create
     # it" are different questions and only the second licenses a delete.
     settings_created: bool = False
@@ -267,12 +381,90 @@ def build_plan(root: Path, *, integration: str | None,
         else:
             plan.writes[rel] = content
 
-    stage(".gitattributes", (TEMPLATES / "gitattributes").read_text(encoding="utf-8"))
+    def merge(rel: str, whole: str, *, body: str | None = None,
+              satisfied: Callable[[str], bool] | None = None) -> None:
+        """Write `whole` if the file is absent; append a marked `body` if it is not.
+
+        For four files, "it already exists" is not the same as "there is nothing to do",
+        because what the framework needs from them is *content*: `CLAUDE.md` carries the
+        rules a session must follow, `.gitattributes` needs one line or `line_endings`
+        fires on every file a tool writes, the `[tiers].binding_doc` needs the fenced
+        block `nightshift.tiers` parses, and `Board/README.md` is the lane contract.
+
+        `init` used to `stage()` all four, so a project that already had any of them got
+        it reported as "keep (already present, untouched)" and the requirement was
+        silently never installed. Reported by the maintainer, 2026-08-03, who asked the
+        question from the other end: *"don't some instructions that are written in
+        claude.md need to be removed too on uninstall?"* — there was nothing to remove
+        because there had been nothing added.
+
+        `satisfied` lets a file that already meets the requirement its own way say so,
+        rather than being given a redundant block.
+        """
+        plan.staged[rel] = whole
+        path = root / rel
+        if not path.exists():
+            plan.writes[rel] = whole
+            return
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            plan.notes.append(f"{rel} exists but could not be read ({exc}), so the "
+                              f"nightshift block was NOT added. Fix the file and re-run.")
+            plan.kept.append(rel)
+            return
+        # Three ways the requirement is already met, and each has to be checked or a
+        # re-run makes things worse rather than doing nothing. The middle one is the
+        # subtle case: on a second `init`, a file THIS TOOL wrote is simply a file that
+        # exists, so without it `Board/README.md` gets the board README appended to
+        # itself. Same shape as the receipt that forgot what an earlier run created.
+        same = text.replace("\r\n", "\n") == whole.replace("\r\n", "\n")
+        if BLOCK_BEGIN in text or same or (satisfied is not None and satisfied(text)):
+            plan.kept.append(rel)
+            return
+        plan.appends[rel] = wrap_block(rel, body if body is not None else whole)
+
+    # Without this, a consuming project commits its run logs, its preflight receipt and
+    # its per-machine `host.json` — and a committed receipt unblocks a push on a machine
+    # that never ran the checks. The framework's own repo had these entries from the
+    # start, which is exactly why nothing noticed that `init` never wrote them.
+    ignores = (TEMPLATES / "gitignore").read_text(encoding="utf-8")
+    merge(".gitignore", ignores,
+          body="\n".join(["# nightshift runtime output — see the framework's README",
+                          f"{AI_DIR}/runs/", f"{AI_DIR}/.preflight",
+                          f"{AI_DIR}/host.json", f"{AI_DIR}/STOP"]),
+          satisfied=lambda text: f"{AI_DIR}/runs/" in text)
+
+    attributes = (TEMPLATES / "gitattributes").read_text(encoding="utf-8")
+    # Every prose line here carries its own `#`. A `.gitattributes` has no non-comment
+    # prose: an unprefixed sentence is parsed as a pattern with attributes, so the first
+    # draft of this block quietly declared `text` on files named `Normalise`.
+    merge(".gitattributes", attributes,
+          body="# Normalise every text file to LF, in the index and in the working tree.\n"
+               "# Without it, a Windows clone gets CRLF files that are invisible to\n"
+               "# `git status`, and one `line_endings` violation per file a tool writes.\n"
+               f"{LF_ATTRIBUTE}",
+          satisfied=lambda text: LF_ATTRIBUTE in text)
+
     # CLAUDE.md carries the framework's half of the rules — how to run, the branch-role
     # source of truth, the board and corrections contracts. `branch_role_prose` reads it,
     # the charters point at it, and `project.doc_files` defaults to it, so a repo without
     # one has three things quietly pointing at nothing.
-    stage("CLAUDE.md", render((TEMPLATES / "CLAUDE.md").read_text(encoding="utf-8"), values))
+    #
+    # If the project has its own, the substance goes to `.ai/CLAUDE.md` — ours outright,
+    # so `uninstall` deletes it — and theirs gets the pointer block. `branch_role_prose`
+    # checks both paths, so the branch-role rule is gated wherever it landed.
+    #
+    # The branch turns on whether the file is *theirs*, not on whether it exists. After
+    # one install it exists — and keying on existence made a second `init` split the
+    # rules in two: an orphan `.ai/CLAUDE.md` duplicating what was already in the file
+    # it wrote itself, with nothing pointing at either. Found by the re-run test.
+    instructions = render((TEMPLATES / "CLAUDE.md").read_text(encoding="utf-8"), values)
+    if _exists_and_differs(root / "CLAUDE.md", instructions):
+        stage(f"{AI_DIR}/CLAUDE.md", framework_half(instructions))
+        merge("CLAUDE.md", instructions, body=POINTER)
+    else:
+        merge("CLAUDE.md", instructions)
     stage(f"{AI_DIR}/corrections.log",
           (TEMPLATES / "ai" / "corrections.log").read_text(encoding="utf-8"))
     stage(f"{AI_DIR}/gates/data/corrections_vocab.json",
@@ -281,7 +473,7 @@ def build_plan(root: Path, *, integration: str | None,
           hosts_text(values, permission_mode, list(capabilities or [])))
 
     board_root = tables.get("board", {}).get("root", "Board")
-    stage(f"{board_root}/README.md",
+    merge(f"{board_root}/README.md",
           render((TEMPLATES / "board" / "README.md").read_text(encoding="utf-8"), values))
     for lane in LANES:
         stage(f"{board_root}/{lane}/.gitkeep", "")
@@ -303,7 +495,12 @@ def build_plan(root: Path, *, integration: str | None,
     # block. Writing a second one would create the exact duplicate §16 forbids.
     binding = tables.get("tiers", {}).get("binding_doc") or "docs/tier-binding.md"
     tables.setdefault("tiers", {})["binding_doc"] = binding
-    stage(binding, render((TEMPLATES / "tier-binding.md").read_text(encoding="utf-8"), values))
+    binding_doc = render((TEMPLATES / "tier-binding.md").read_text(encoding="utf-8"), values)
+    merge(binding, binding_doc,
+          body=f"## Tier binding\n\n`nightshift.tiers` parses the fenced block below, and "
+               f"`[tiers].binding_doc`\nin {AI_DIR}/{MANIFEST_NAME} points here. Edit the "
+               f"block, not the prose.\n\n{fenced_binding(binding_doc)}",
+          satisfied=lambda text: f"```{TIER_FENCE}" in text)
 
     # The manifest is staged LAST, because `binding_doc` above is decided during the
     # pass and the file has to record the decision. Staged through `stage()` like
@@ -387,6 +584,7 @@ def receipt_text(plan: Plan) -> str:
     """
     settings = ".claude/settings.json"
     created = {rel for rel in plan.writes if rel != settings}
+    appended = set(plan.appends)
     settings_created = settings in plan.writes and plan.settings_created
     try:
         before = json.loads((plan.root / RECEIPT).read_text(encoding="utf-8"))
@@ -395,11 +593,15 @@ def receipt_text(plan: Plan) -> str:
     else:
         if isinstance(before, dict):
             created |= {rel for rel in before.get("created", []) if isinstance(rel, str)}
+            appended |= {rel for rel in before.get("appended", []) if isinstance(rel, str)}
             settings_created = settings_created or bool(before.get("settings_created"))
     return json.dumps({
         "tool": "nightshift",
         "version": 1,
         "created": sorted(created),
+        # Files that were the project's before we touched them. Listed separately
+        # because they may never be deleted — only the marked block comes back out.
+        "appended": sorted(appended - created),
         "settings_created": settings_created,
     }, indent=2) + "\n"
 
@@ -417,6 +619,16 @@ def apply(plan: Plan) -> None:
             path.touch()
         else:
             textio.write_text_lf(path, content)
+
+    # Appends come after writes and never create: the file was the project's already,
+    # and the only thing this run may claim afterwards is the block between the markers.
+    for rel, block in sorted(plan.appends.items()):
+        path = plan.root / rel
+        text = path.read_text(encoding="utf-8")
+        if text and not text.endswith("\n"):
+            text += "\n"
+        textio.write_text_lf(path, text + block)
+
     path = plan.root / RECEIPT
     path.parent.mkdir(parents=True, exist_ok=True)
     textio.write_text_lf(path, receipt_text(plan))
@@ -659,6 +871,12 @@ def report(plan: Plan, proposals: list[discover.Proposal]) -> None:
         print(f"    + {RECEIPT}")
         print(f"      (the list above, so `nightshift uninstall` can take back these "
               f"files and nothing else)")
+    if plan.appends:
+        print("\nappend to (yours; a marked block, removable by `nightshift uninstall`):")
+        for rel in sorted(plan.appends):
+            first = next((line for line in plan.appends[rel].splitlines()
+                          if line.strip() and BLOCK_BEGIN not in line), "")
+            print(f"    » {rel}  —  {first.strip().lstrip('#').strip() or 'the block'}")
     if plan.kept:
         print("\nkeep (already present, untouched):")
         for rel in sorted(plan.kept):
@@ -681,7 +899,9 @@ def next_steps(plan: Plan, *, integration: str | None, permission_mode: str) -> 
     *"there are some 'your calls' in the console and I have no idea how to make
     these calls."* A closing screen should leave exactly one obvious next command.
     """
-    print(f"\n{'═' * 66}\n  DONE — wrote {len(plan.writes) + 1} file(s)\n{'═' * 66}")
+    appended = (f", appended a marked block to {len(plan.appends)}"
+                if plan.appends else "")
+    print(f"\n{'═' * 66}\n  DONE — wrote {len(plan.writes) + 1} file(s){appended}\n{'═' * 66}")
 
     if not integration:
         print("\n  ⚠ STOP. [branches].integration is not set, and nothing can")

@@ -57,7 +57,10 @@ from pathlib import Path
 
 from nightshift.gates.base import Violation
 
-_RULE_LINE = "* text=auto eol=lf"
+# Public: `init` quotes it when appending the rule to a project's own
+# `.gitattributes`, and the string IS the contract — a second copy would be one
+# copy and one guess.
+REQUIRED_ATTRIBUTE = "* text=auto eol=lf"
 
 # A tracked file may legitimately hold CRLF as *test data* — a fixture that
 # exists precisely to exercise line-ending handling. Nothing needs it today;
@@ -128,15 +131,15 @@ def check(repo_root: Path) -> list[Violation]:
     if not attributes.is_file():
         return [Violation(
             ".gitattributes", 0,
-            f"missing — the tree needs `{_RULE_LINE}` or Windows' system-wide "
+            f"missing — the tree needs `{REQUIRED_ATTRIBUTE}` or Windows' system-wide "
             "core.autocrlf=true makes every tool-written file permanently dirty",
         )]
 
     text = attributes.read_text(encoding="utf-8", errors="replace")
-    if not any(line.strip() == _RULE_LINE for line in text.splitlines()):
+    if not any(line.strip() == REQUIRED_ATTRIBUTE for line in text.splitlines()):
         violations.append(Violation(
             ".gitattributes", 0,
-            f"does not declare `{_RULE_LINE}` — without it the working-tree "
+            f"does not declare `{REQUIRED_ATTRIBUTE}` — without it the working-tree "
             "representation follows each machine's core.eol and tool-written "
             "files go phantom-dirty",
         ))

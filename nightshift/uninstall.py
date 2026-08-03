@@ -23,6 +23,13 @@ path is removed only if its bytes are exactly what `init` writes. That declines 
 delete anything the operator wrote or has since edited, and says which and why —
 conservative in the one direction that matters.
 
+**Files the project already had get their block stripped, not deleted.** Four files
+are ones `init` appends to rather than writes — `CLAUDE.md`, `.gitattributes`, the
+tier-binding doc and `Board/README.md` — because for those the *content* is the
+requirement. The appended block is fenced by `nightshift:begin` / `nightshift:end`
+markers, and those markers are the record: this finds and removes the block by reading
+them, so it works whether or not there is a receipt. The file itself is never deleted.
+
 **Two things it deliberately will not do.**
 
 * `.claude/settings.json` is a *merge* on the way in, so it is a merge on the way
@@ -75,10 +82,17 @@ class Removal:
     settings: str | None = None          # new settings.json content, if it changes
     kept: list[str] = field(default_factory=list)   # ours, but not ours to delete
     receipted: bool = False              # False = pre-receipt install, matched by content
+    # Directories holding nothing but our run output — removed with their contents,
+    # unlike `dirs`, which are removed only if they end up empty.
+    trees: list[str] = field(default_factory=list)
+    # path -> its content with our marked block removed. The file itself is the
+    # project's and is never deleted; only the block between the markers is ours.
+    blocks: dict[str, str] = field(default_factory=dict)
 
     @property
     def empty(self) -> bool:
-        return not (self.files or self.dirs or self.hooks_removed)
+        return not (self.files or self.dirs or self.trees
+                    or self.hooks_removed or self.blocks)
 
 
 def _has_real_entries(path: Path) -> bool:
@@ -214,10 +228,38 @@ def plan(root: Path) -> Removal:
             out.files.remove(rel)
             out.kept.append(f"{rel} — has real entries; earned evidence, not deleted")
 
+    # Files the project already had, to which `init` appended a marked block. The file
+    # stays; the block comes out. Driven by the markers in the file rather than by the
+    # receipt, so it works on a pre-receipt install too — writing the marker into the
+    # file is what makes the append self-describing.
+    claimed_appends = set(receipt.get("appended", [])) if receipt else set()
+    for rel in sorted(set(owned) | claimed_appends):
+        if rel in out.files or rel == ".claude/settings.json":
+            continue
+        path = root / rel
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if init.BLOCK_BEGIN not in text:
+            continue
+        if init.BLOCK_END not in text:
+            # A truncated block: stripping to end-of-file would take the operator's
+            # content with it. Reported, so they can look rather than be surprised.
+            out.kept.append(f"{rel} — has a nightshift:begin marker with no matching "
+                            f"end; remove the block by hand")
+            continue
+        out.blocks[rel] = init.strip_block(text)
+
     for rel in RUNTIME_PATHS:
         path = root / rel
         if path.is_dir():
-            out.dirs.append(rel)
+            # Contents and all. These hold run logs and transcripts we wrote, so the
+            # remove-only-if-empty rule does not apply — it left `.ai/runs/` behind after
+            # every uninstall that followed a preflight, which is most of them.
+            out.trees.append(rel)
         elif path.exists():
             out.files.append(rel)
 
@@ -259,7 +301,12 @@ def plan(root: Path) -> Removal:
 
 def apply(removal: Removal) -> None:
     """Perform it. Files first, then directories, deepest first so they are empty."""
+    import shutil
+
     from nightshift import textio
+
+    for rel in removal.trees:
+        shutil.rmtree(removal.root / rel, ignore_errors=True)
 
     for rel in removal.files:
         path = removal.root / rel
@@ -268,6 +315,9 @@ def apply(removal: Removal) -> None:
 
     if removal.settings is not None:
         textio.write_text_lf(removal.root / ".claude" / "settings.json", removal.settings)
+
+    for rel, content in sorted(removal.blocks.items()):
+        textio.write_text_lf(removal.root / rel, content)
 
     # Deepest first, and only when empty: a directory the operator has put their own
     # work in is theirs, and an uninstall that took it out with the rest would be
@@ -295,10 +345,19 @@ def report(removal: Removal) -> None:
         print(f"\n  delete {len(removal.files)} file(s):")
         for rel in removal.files:
             print(f"    - {rel}")
+    if removal.trees:
+        print("\n  delete these directories and their contents (our run output):")
+        for rel in removal.trees:
+            print(f"    - {rel}/")
     if removal.dirs:
         print("\n  remove these directories, if empty afterwards:")
         for rel in sorted(set(removal.dirs)):
             print(f"    - {rel}/")
+    if removal.blocks:
+        print(f"\n  strip nightshift's marked block from {len(removal.blocks)} file(s) "
+              f"of yours\n  (the file stays; the rest of it is untouched):")
+        for rel in sorted(removal.blocks):
+            print(f"    ~ {rel}")
     if removal.hooks_removed:
         print(f"\n  unmerge {removal.hooks_removed} hook entr"
               f"{'y' if removal.hooks_removed == 1 else 'ies'} from "

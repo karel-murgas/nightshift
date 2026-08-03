@@ -30,7 +30,7 @@ def _git(repo: Path, *args: str) -> None:
     )
 
 
-def _repo(tmp_path: Path, files: dict[str, bytes], *, attributes: str | None = line_endings._RULE_LINE) -> Path:
+def _repo(tmp_path: Path, files: dict[str, bytes], *, attributes: str | None = line_endings.REQUIRED_ATTRIBUTE) -> Path:
     """A real git repo with `files` committed byte-for-byte as given.
 
     `core.autocrlf=false` locally so the fixture's *stored* bytes are the ones
@@ -84,7 +84,7 @@ def test_crlf_in_the_committed_blob_fails(tmp_path):
     holding CRLF needs `git add --renormalize`, and the gate has to say so.
     """
     repo = _repo(tmp_path, {"a.py": b"x = 1\r\ny = 2\r\n"}, attributes=None)
-    (repo / ".gitattributes").write_bytes(line_endings._RULE_LINE.encode("utf-8") + b"\n")
+    (repo / ".gitattributes").write_bytes(line_endings.REQUIRED_ATTRIBUTE.encode("utf-8") + b"\n")
     violations = line_endings.check(repo)
     assert any(v.file == "a.py" and "committed blob" in v.rule for v in violations)
 

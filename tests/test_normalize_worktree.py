@@ -61,7 +61,7 @@ def _repo(tmp_path: Path, files: dict[str, bytes]) -> Path:
     _git(repo, "config", "user.name", "t")
     # Matching the real tree: LF-pinned attributes.
     (repo / ".gitattributes").write_bytes(
-        (line_endings._RULE_LINE + "\n").encode("utf-8")
+        (line_endings.REQUIRED_ATTRIBUTE + "\n").encode("utf-8")
     )
     for name, data in files.items():
         path = repo / name

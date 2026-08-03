@@ -29,7 +29,8 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import discover, init, uninstall
+from nightshift import discover, init, tiers, uninstall
+from nightshift.manifest import AI_DIR
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -323,7 +324,9 @@ def test_strip_hooks_leaves_a_projects_own_hook_under_the_same_matcher(tmp_path)
 
 OWN_DOCS = {
     "CLAUDE.md": "# My project\n\nMy own hand-written rules.\n",
-    ".gitattributes": "* text=auto eol=lf\n*.png binary\n",
+    # No LF rule: a project that has never heard of it is the realistic case, and it
+    # exercises append-then-strip rather than the `satisfied` shortcut.
+    ".gitattributes": "*.png binary\n",
     ".claude/memory/arch.md": "# Architecture\n\nMy own notes.\n",
     "docs/tier-binding.md": "# Tiers\n\nMy own document.\n",
 }
@@ -343,7 +346,7 @@ def test_uninstall_never_deletes_a_document_the_project_already_had(tmp_path):
     repo = _repo(tmp_path)
     _with_own_docs(repo)
     plan = _install(repo)
-    assert set(OWN_DOCS) <= set(plan.kept), "init must have kept these, not written them"
+    assert not (set(OWN_DOCS) & set(plan.writes)), "these are theirs; never overwritten"
 
     removal = uninstall.plan(repo)
     assert not (set(OWN_DOCS) & set(removal.files)), removal.files
@@ -362,6 +365,235 @@ def test_the_receipt_records_what_the_run_created_and_not_what_it_kept(tmp_path)
     created = set(receipt["created"])
     assert ".ai/manifest.toml" in created
     assert not (set(OWN_DOCS) & created)
+    # Theirs, appended to — a distinct list, because these may never be deleted.
+    assert set(receipt["appended"]) == set(OWN_DOCS) - {".claude/memory/arch.md"}
+
+
+# --- four files where the content is the requirement ----------------------------
+#
+# The other half of the same report. `init` used to `stage()` these, so a project that
+# already had one got "keep (already present, untouched)" and the requirement was never
+# installed: no rules in CLAUDE.md, no LF line in `.gitattributes`, no fenced block for
+# `nightshift.tiers`. Measured 2026-08-03 in a repo with three of them: two gate
+# violations on the first run, and a tier binding nothing could parse.
+
+
+def test_an_existing_claude_md_gets_the_rules_rather_than_being_skipped(tmp_path):
+    repo = _repo(tmp_path)
+    theirs = "# My project\n\n## How to run\n\npython -m src.app\n"
+    (repo / "CLAUDE.md").write_text(theirs, encoding="utf-8")
+
+    plan = _install(repo)
+
+    assert "CLAUDE.md" in plan.appends
+    assert f"{AI_DIR}/CLAUDE.md" in plan.writes, "the substance goes in a file we own"
+    after = (repo / "CLAUDE.md").read_text(encoding="utf-8")
+    assert after.startswith(theirs), "their file is prefix-preserved"
+    assert init.BLOCK_BEGIN in after and init.BLOCK_END in after
+    assert f"{AI_DIR}/CLAUDE.md" in after, "and it points at the rules"
+
+
+def test_the_framework_half_stands_alone_when_it_is_its_own_file(tmp_path):
+    """It carries the rules that matter, and not the template's description of a
+    two-halves-in-one-file split that no longer exists."""
+    repo = _repo(tmp_path)
+    (repo / "CLAUDE.md").write_text("# Mine\n", encoding="utf-8")
+    _install(repo)
+
+    half = (repo / AI_DIR / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "nightshift.preflight" in half
+    assert "[branches].integration" in half
+    assert "## Project rules" not in half
+    assert "below the line is yours" not in half
+
+
+def test_an_existing_gitattributes_keeps_its_rules_and_gains_the_lf_line(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / ".gitattributes").write_text("*.png binary\n", encoding="utf-8")
+
+    _install(repo)
+
+    text = (repo / ".gitattributes").read_text(encoding="utf-8")
+    assert "*.png binary" in text
+    assert any(line.strip() == init.LF_ATTRIBUTE for line in text.splitlines()), \
+        "the line `line_endings` requires"
+
+
+def test_the_gitattributes_block_has_no_uncommented_prose(tmp_path):
+    """A `.gitattributes` has no prose. An unprefixed sentence is a PATTERN with
+    attributes — the first draft of this block declared `text` on files named
+    `Normalise`, which git parsed without complaint."""
+    repo = _repo(tmp_path)
+    (repo / ".gitattributes").write_text("*.png binary\n", encoding="utf-8")
+    plan = _install(repo)
+
+    for line in plan.appends[".gitattributes"].splitlines():
+        if not line.strip():
+            continue
+        assert line.startswith("#") or line.strip() == init.LF_ATTRIBUTE, line
+
+
+def test_a_gitattributes_that_already_has_the_rule_is_left_alone(tmp_path):
+    """`satisfied`: a file already meeting the requirement its own way gets no block."""
+    repo = _repo(tmp_path)
+    (repo / ".gitattributes").write_text(f"{init.LF_ATTRIBUTE}\n*.png binary\n",
+                                         encoding="utf-8")
+    plan = _install(repo)
+
+    assert ".gitattributes" not in plan.appends
+    assert ".gitattributes" in plan.kept
+
+
+def test_an_existing_binding_doc_gains_the_block_tiers_actually_parses(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "tier-binding.md").write_text(
+        "# Tier binding\n\nI already had a doc here.\n", encoding="utf-8")
+
+    plan = _install(repo)
+
+    assert "docs/tier-binding.md" in plan.appends
+    binding = tiers.binding(repo)
+    assert binding["worker"] and binding["lead"], binding
+
+
+def test_a_second_init_appends_nothing_to_the_files_it_wrote_itself(tmp_path):
+    """On a re-run, a file THIS TOOL wrote is simply a file that exists. Without the
+    identical-content check, `Board/README.md` got the board README appended to itself."""
+    repo = _repo(tmp_path)
+    _install(repo)
+
+    plan = init.build_plan(repo, integration="dev-work")
+
+    assert not plan.appends, plan.appends
+    assert not plan.writes, plan.writes
+
+
+def test_a_second_init_does_not_append_a_second_block(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "CLAUDE.md").write_text("# Mine\n", encoding="utf-8")
+    _install(repo)
+    _install(repo)
+
+    text = (repo / "CLAUDE.md").read_text(encoding="utf-8")
+    assert text.count(init.BLOCK_BEGIN) == 1
+
+
+# --- taking a block back out ---------------------------------------------------
+
+
+def test_a_fresh_install_ignores_its_own_runtime_output(tmp_path):
+    """Without these entries a consuming project commits its run logs, its preflight
+    receipt and its per-machine `host.json` — and a committed receipt unblocks a push on
+    a machine that never ran the checks. The framework's own repo had the entries from
+    the start, which is why nothing noticed `init` never wrote them."""
+    repo = _repo(tmp_path)
+    _install(repo)
+
+    text = (repo / ".gitignore").read_text(encoding="utf-8")
+    for pattern in (f"{AI_DIR}/runs/", f"{AI_DIR}/.preflight",
+                    f"{AI_DIR}/host.json", f"{AI_DIR}/STOP"):
+        assert pattern in text, pattern
+
+
+def test_the_gitignore_block_puts_comments_on_their_own_line(tmp_path):
+    """In a `.gitignore` a `#` only starts a comment at the beginning of a line — one
+    appended after a pattern becomes part of the pattern."""
+    repo = _repo(tmp_path)
+    (repo / ".gitignore").write_text("*.pyc\n", encoding="utf-8")
+    plan = _install(repo)
+
+    for line in plan.appends[".gitignore"].splitlines():
+        assert "#" not in line.lstrip("#"), line
+
+
+def test_an_existing_gitignore_keeps_its_own_patterns(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / ".gitignore").write_text("*.pyc\nbuild/\n", encoding="utf-8")
+    _install(repo)
+
+    text = (repo / ".gitignore").read_text(encoding="utf-8")
+    assert "*.pyc" in text and "build/" in text
+    assert f"{AI_DIR}/runs/" in text
+
+
+def test_uninstall_deletes_run_output_it_wrote(tmp_path):
+    """`.ai/runs/` is unambiguously ours, so remove-only-if-empty does not apply — it
+    left the directory behind after every uninstall that followed a preflight."""
+    repo = _repo(tmp_path)
+    _install(repo)
+    runs = repo / AI_DIR / "runs" / "card-1"
+    runs.mkdir(parents=True)
+    (runs / "transcript.jsonl").write_text('{"x": 1}\n', encoding="utf-8")
+
+    removal = uninstall.plan(repo)
+    assert f"{AI_DIR}/runs" in removal.trees
+    uninstall.apply(removal)
+
+    assert not (repo / AI_DIR / "runs").exists()
+    assert not (repo / AI_DIR).exists(), "and the parent goes with it, being empty"
+
+
+def test_uninstall_strips_the_block_and_leaves_the_file(tmp_path):
+    repo = _repo(tmp_path)
+    theirs = "# My project\n\nMy own rules.\n"
+    (repo / "CLAUDE.md").write_text(theirs, encoding="utf-8")
+    _install(repo)
+
+    removal = uninstall.plan(repo)
+    assert "CLAUDE.md" in removal.blocks
+    assert "CLAUDE.md" not in removal.files
+    uninstall.apply(removal)
+
+    assert (repo / "CLAUDE.md").read_text(encoding="utf-8") == theirs
+    assert not (repo / AI_DIR / "CLAUDE.md").exists(), "ours outright, so deleted"
+
+
+def test_the_block_comes_out_even_with_no_receipt(tmp_path):
+    """Marker-driven, not receipt-driven: writing the marker into the file is what
+    makes the append self-describing."""
+    repo = _repo(tmp_path)
+    theirs = "# My project\n\nMy own rules.\n"
+    (repo / "CLAUDE.md").write_text(theirs, encoding="utf-8")
+    _install(repo)
+    _forget_receipt(repo)
+
+    uninstall.apply(uninstall.plan(repo))
+
+    assert (repo / "CLAUDE.md").read_text(encoding="utf-8") == theirs
+
+
+def test_a_block_with_no_end_marker_is_reported_not_stripped(tmp_path):
+    """Stripping to end-of-file would take their content with it."""
+    repo = _repo(tmp_path)
+    (repo / "CLAUDE.md").write_text("# Mine\n", encoding="utf-8")
+    _install(repo)
+    path = repo / "CLAUDE.md"
+    path.write_text(path.read_text(encoding="utf-8").replace(init.BLOCK_END, "truncated"),
+                    encoding="utf-8")
+
+    removal = uninstall.plan(repo)
+
+    assert "CLAUDE.md" not in removal.blocks
+    assert any("CLAUDE.md" in note and "by hand" in note for note in removal.kept)
+
+
+def test_strip_block_removes_the_block_and_the_blank_line_before_it():
+    text = ("# Mine\n"
+            "\n"
+            "My own rules.\n"
+            "\n"
+            "<!-- nightshift:begin — added by init -->\n"
+            "\n"
+            "## nightshift\n"
+            "\n"
+            "<!-- nightshift:end -->\n")
+    assert init.strip_block(text) == "# Mine\n\nMy own rules.\n"
+
+
+def test_strip_block_leaves_a_file_without_one_untouched():
+    text = "# Mine\n\nNothing of ours here.\n"
+    assert init.strip_block(text) == text
 
 
 def test_a_second_init_accumulates_the_receipt_rather_than_emptying_it(tmp_path):
@@ -484,7 +716,8 @@ def test_init_works_again_after_uninstalling_a_repo_that_had_its_own_docs(tmp_pa
     plan = _install(repo, permission_mode="bypassPermissions")
 
     assert ".ai/manifest.toml" in plan.writes
-    assert "CLAUDE.md" in plan.kept, "still theirs, still not overwritten"
+    assert "CLAUDE.md" not in plan.writes, "still theirs, still never overwritten"
+    assert "CLAUDE.md" in plan.appends, "and it gets the pointer block back"
 
 
 # --- the interview is reachable the way a person reaches it --------------------

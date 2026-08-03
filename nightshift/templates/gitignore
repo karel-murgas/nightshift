@@ -1,0 +1,19 @@
+# nightshift's runtime output. Everything else it writes is committed on purpose —
+# the manifest, the gates, the board, the corrections log and the install receipt are
+# all properties of the repo. These four are not.
+#
+# Comments live on their own line: a `#` after a pattern is part of the pattern.
+
+# Per-run worker logs and transcripts. Large, and meaningful only on the machine
+# that produced them.
+.ai/runs/
+
+# The preflight receipt. Names a commit SHA on one machine; a committed one would
+# unblock a push somebody else never checked.
+.ai/.preflight
+
+# Per-machine dispatch config, resolved from the committed .ai/hosts.json.
+.ai/host.json
+
+# The stop file. Its presence halts the runner, so it must never arrive by pull.
+.ai/STOP

@@ -49,7 +49,10 @@ def binding_doc(repo_root: Path) -> Path:
     except _manifest.ManifestError:
         return ARCHITECTURE
 
-_BLOCK = re.compile(r"^```tier-binding[ \t]*\r?\n(.*?)^```", re.MULTILINE | re.DOTALL)
+# Public for the same reason as `line_endings.REQUIRED_ATTRIBUTE`: `discover` looks for
+# this fence and `init` writes it, so the literal gets one owner rather than three.
+FENCE = "tier-binding"
+_BLOCK = re.compile(rf"^```{FENCE}[ \t]*\r?\n(.*?)^```", re.MULTILINE | re.DOTALL)
 _LINE = re.compile(r"^[ \t]*([a-z][a-z0-9_-]*)[ \t]*=[ \t]*(\S+)[ \t]*$", re.MULTILINE)
 
 # The tiers `card_schema` accepts. Kept here so a binding block that grows a

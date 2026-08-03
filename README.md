@@ -521,11 +521,20 @@ nightshift uninstall --yes    # performs it
 ```
 
 **It removes files this install created, and only those.** `init` writes
-`.ai/install.json` naming every file it created; `uninstall` reads that list back.
-This matters most in a repo that was not empty: if your project already had a
-`CLAUDE.md`, a `.gitattributes`, a `.claude/memory/arch.md` or a
-`docs/tier-binding.md`, `init` kept yours and never wrote its own — and the receipt
-does not name them, so uninstall cannot touch them.
+`.ai/install.json` naming every file it created; `uninstall` reads that list back. A
+file your project already had is not on it and cannot be deleted here.
+
+**Five files get a block appended rather than being written**, because for those the
+content is the requirement and not the file: `CLAUDE.md` (the rules a session follows),
+`.gitattributes` (one line, or `line_endings` fires on everything a tool writes),
+`.gitignore` (four patterns, or your run logs and preflight receipts get committed),
+the `[tiers].binding_doc` (the fenced block `nightshift.tiers` parses) and
+`Board/README.md` (the lane contract). If you already have one, `init` appends a block
+fenced by `nightshift:begin` / `nightshift:end` markers and leaves every byte you wrote
+in place — for `CLAUDE.md` the block is a short pointer, and the framework's rules go
+in `.ai/CLAUDE.md`, a file init owns outright. **`uninstall` strips exactly those
+blocks** and keeps the files. The markers are the record, so this works with or without
+a receipt.
 
 If the receipt is missing — an install predating it, or a deleted file — it falls
 back to removing only files whose content is *exactly* what `init` writes, and

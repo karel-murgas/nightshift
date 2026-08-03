@@ -40,7 +40,7 @@ from pathlib import Path
 
 from nightshift import branches
 from nightshift.gates.base import Violation
-from nightshift.manifest import ManifestError
+from nightshift.manifest import AI_DIR, ManifestError
 
 NAME = "branch_role_prose"
 FAST = True
@@ -49,6 +49,11 @@ DESCRIPTION = "docs naming the integration branch must agree with .ai/manifest.t
 _SOURCE = ".ai/manifest.toml [branches].integration"
 _DOCS = (
     Path("CLAUDE.md"),
+    # Where the rule lands when the project already had a CLAUDE.md: `init` puts the
+    # framework's half here and appends a pointer to theirs. Checking only the root file
+    # would leave the branch-role paragraph ungated in exactly the repos that keep it
+    # somewhere else.
+    Path(AI_DIR) / "CLAUDE.md",
     Path(".claude") / "plans" / "ai_team" / "SESSIONS.md",
 )
 

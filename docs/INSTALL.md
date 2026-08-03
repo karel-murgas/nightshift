@@ -134,10 +134,15 @@ nightshift uninstall --yes    # performs it
 ```
 
 It removes only what the install created, from `.ai/install.json` — the receipt
-`init` writes naming its own files. A document the project already had (`CLAUDE.md`,
-`.gitattributes`, `.claude/memory/arch.md`, `docs/tier-binding.md` are the four that
-collide) was kept by `init`, is not in the receipt, and cannot be removed by this.
-With no receipt it falls back to content comparison and keeps anything that differs.
+`init` writes naming its own files. A file the project already had is not in it and
+cannot be deleted here. With no receipt it falls back to content comparison and keeps
+anything that differs.
+
+Five files — `CLAUDE.md`, `.gitattributes`, `.gitignore`, the tier-binding doc and
+`Board/README.md` — are appended to rather than written when they already exist,
+because for those the content is the requirement. Uninstall strips the marked block and keeps the file. If
+the operator asks what happened to their `CLAUDE.md`: their bytes are untouched, the
+framework's rules are in `.ai/CLAUDE.md`, and the block in their file points there.
 
 It also refuses to delete a corrections log with real entries, and un-merges the hook
 entries from `.claude/settings.json` while leaving every other key alone. The package

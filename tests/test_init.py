@@ -155,10 +155,28 @@ def test_a_second_run_writes_nothing_and_keeps_everything(repo):
 
 
 def test_an_existing_file_is_kept_verbatim(repo):
+    """A memory stub the project already wrote is left exactly alone — `init` has an
+    opinion about the file existing and none about its contents."""
+    memory = repo / ".claude" / "memory"
+    memory.mkdir(parents=True)
+    (memory / "arch.md").write_text("# my own module map\n", encoding="utf-8")
+    plan = _init(repo)
+    assert ".claude/memory/arch.md" in plan.kept
+    assert (memory / "arch.md").read_text(encoding="utf-8") == "# my own module map\n"
+
+
+def test_an_existing_claude_md_keeps_every_byte_it_had(repo):
+    """The four files where the *content* is the requirement are appended to rather
+    than skipped (see `build_plan.merge`), so "verbatim" becomes "prefix-preserved":
+    their bytes are still there, unchanged, with a marked block after them."""
     (repo / "CLAUDE.md").write_text("# my own rules\n", encoding="utf-8")
     plan = _init(repo)
-    assert "CLAUDE.md" in plan.kept
-    assert (repo / "CLAUDE.md").read_text(encoding="utf-8") == "# my own rules\n"
+
+    assert "CLAUDE.md" not in plan.writes, "never overwritten — that rule is unchanged"
+    assert "CLAUDE.md" in plan.appends
+    text = (repo / "CLAUDE.md").read_text(encoding="utf-8")
+    assert text.startswith("# my own rules\n")
+    assert init.strip_block(text) == "# my own rules\n", "and the block lifts back out"
 
 
 def test_an_existing_manifest_is_never_rewritten(repo):
