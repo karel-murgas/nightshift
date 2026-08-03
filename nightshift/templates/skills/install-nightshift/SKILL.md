@@ -105,7 +105,70 @@ you should expect:
 Never make a check pass by weakening it. `nightshift fix --dry-run` prints the full
 list of forbidden moves and why each one has been made before.
 
-## 5. Analyse the repo and file cards
+## 5. Offer to restructure the project's documents
+
+**Ask first, and do nothing if they decline.** These are their documents. Say what you
+would change and roughly how much moves, then wait.
+
+The structure below was arrived at by measurement in the origin project, not taste. Its
+`state.md` reached **196 KB** by accumulating one reasonable dated section per session,
+until reading it cost more than re-reading the code — at which point nobody read either.
+Everything here follows from that.
+
+**The rule: a document a session always loads says what is true *now*. Dated narrative
+goes in a companion loaded only on demand.**
+
+Applied:
+
+| Always loaded | Loaded when a question sends you there |
+|---|---|
+| `CLAUDE.md` — rules, how to run, what must not be violated | — |
+| `.claude/memory/MEMORY.md` — the index, one line per file | — |
+| `arch.md` — module map, one row each | `arch_detail.md` — full per-module notes |
+| `state.md` — current phase, current state | `state_history.md` — the per-session shipped/fixed log |
+| `design.md` — decisions in force | `design_detail.md` — the reasoning and tuning records |
+
+What this means in practice, and each of these is a mistake worth naming to them:
+
+- **`CLAUDE.md` is rules, not history.** No changelog, no "we tried X and it did not
+  work", no session notes. A rule with its reason attached, one per line. If it has
+  accumulated narrative, that narrative goes to a memory companion or gets deleted.
+- **`CLAUDE.md` is not the architecture document either.** A module map belongs in
+  `arch.md`, which is loaded from `MEMORY.md`.
+- **One line per shipped thing in `state.md`; the story in `state_history.md`.** The
+  moment a section starts with a date, it belongs in the companion.
+- **`MEMORY.md` is an index, never content.** One line per file with a hook, so a session
+  can decide what to open. Content in the index means the index is loaded content.
+- **A rule the maintainer gave you gets its own `feedback_<topic>.md`**, listed in
+  `MEMORY.md`, with the reason it exists.
+
+Do the work in this order:
+
+1. **Read what is there.** `CLAUDE.md` and every file in `.claude/memory/`, plus any
+   `docs/`, `ARCHITECTURE.md`, `NOTES.md` the repo already has.
+2. **Say what you propose**, with sizes: what moves where, what gets deleted, what stays.
+   Deleting is allowed and often right — a note that was true two refactors ago is worse
+   than no note. Ask before deleting anything you are not certain about.
+3. **Move, do not rewrite.** Their words, relocated. Rewriting someone's notes loses the
+   thing only they knew, and it is not your call to make prose decisions about their
+   project while reorganising it.
+4. **Update `MEMORY.md`** so every file is indexed, and `CLAUDE.md`'s memory table so it
+   names files that exist.
+5. **Check the budget binds.** `.ai/manifest.toml` should declare `[memory].orientation`
+   (the always-loaded set) and `[memory].budget_bytes`. `init` declares the stubs it
+   wrote; add any of *their* orientation documents you just identified. Then run
+   `python -m nightshift.gates.run` — `orientation_budget` and `orientation_shape` are
+   the two that enforce all of the above.
+
+**If `orientation_budget` fires, trim the documents. Never raise the budget.** A budget
+raised to fit what is there can only ever be satisfied, which is the failure it exists to
+prevent.
+
+**Do not invent memory files with nothing in them.** A `design.md` that says "decisions
+go here" is worse than no file: it costs a read and teaches a session that memory files
+are empty. Leave the stub as the stub until there is something true to put in it.
+
+## 6. Analyse the repo and file cards
 
 The install is done; the useful part is what the repo needs. Read it — the module
 layout, the test suite, `CLAUDE.md`, the obvious rough edges — and file what you find as
@@ -131,12 +194,12 @@ Rules for this pass:
 Then run `python -m nightshift.gates.run` once more — `card_schema` validates what you
 just wrote — and commit the cards.
 
-## 6. Hand over in four sentences
+## 7. Hand over in four sentences
 
 1. What you installed, and which files got a block appended rather than written.
 2. What the checks say now, naming anything still red and why.
-3. What is in `needs-decision/` waiting on them, and what is in `tasks/` with an
-   approach to review.
+3. What you restructured, if anything, and what is in `needs-decision/` waiting on
+   them versus in `tasks/` with an approach to review.
 4. That gates now run after every edit, that `python -m nightshift.preflight` is
    required before any push, and that the board is optional — the inline half works
    without it.

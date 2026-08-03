@@ -431,6 +431,7 @@ project's one.
 | `line_endings` | Line endings stay LF, in the index and in the working tree. |
 | `memory_freshness` | a diff touching a declared source area must also touch its memory doc |
 | `orientation_budget` | the declared orientation files stay under [memory].budget_bytes |
+| `orientation_shape` | declared orientation docs hold current state, not dated history |
 | `pytest_invocation` | only suite.py may spell pytest's parallel flags; callers use parallel_args() |
 | `readme_generated` | README.md's generated blocks (gate list, runner flags, manifest fields) match a fresh generation |
 | `run_stop_recorded` | runner.py logs a stop reason only via _stop(), which also records it |

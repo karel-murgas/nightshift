@@ -507,9 +507,27 @@ def build_plan(root: Path, *, integration: str | None,
 
     # Memory stubs, so `CLAUDE.md`'s table points at files that exist. A table naming
     # four missing files is the first thing a session learns to ignore.
+    stubs: list[str] = []
     for memory in sorted((TEMPLATES / "memory").glob("*.md")):
-        stage(f".claude/memory/{memory.name}",
-              render(memory.read_text(encoding="utf-8"), values))
+        rel = f".claude/memory/{memory.name}"
+        stubs.append(rel)
+        stage(rel, render(memory.read_text(encoding="utf-8"), values))
+
+    # Declare them as the orientation set, or the budget the interview just asked about
+    # measures nothing: `[memory].budget_bytes` was written, `[memory].orientation` was
+    # left to a CONFIRM the operator declines by default, and `orientation_budget` reads
+    # both — so the answer was inert and the question looked answered. Third time this
+    # exact shape has bitten (`schema-field-nothing-read`); a field written without the
+    # field that gives it a subject is a field nothing reads.
+    #
+    # Not a guess: the CLAUDE.md this same run writes says a session reads
+    # `.claude/memory/MEMORY.md` and loads what it points at, so these files ARE the
+    # always-loaded set by construction. Discovery's CONFIRM proposal is about the
+    # project's *own* documents, which is a different and genuinely unguessable claim —
+    # so whatever the operator accepted there is kept and merged, never replaced.
+    memory_table = tables.setdefault("memory", {})
+    declared = list(memory_table.get("orientation") or [])
+    memory_table["orientation"] = declared + [s for s in stubs if s not in declared]
 
     for charter in sorted((TEMPLATES / "agents").glob("*.md")):
         stage(f".claude/agents/{charter.name}",
