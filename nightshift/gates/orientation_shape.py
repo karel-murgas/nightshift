@@ -16,14 +16,40 @@ question sends you there. That is the rule this gate enforces:
 
 ## What it checks
 
-For each file in `[memory].orientation`, headings whose text carries a date. Three or
-more of them is a log, and the gate says so.
+For each file in `[memory].orientation`, headings that **begin** with a date. Three or
+more of them is a log.
 
-Three, not one, and headings only. A design document recording *"decided 2026-07-24,
-because…"* inline is doing exactly the right thing, and a single dated heading is a
-note. What repeats is the pattern of a heading per session, and that is what the
-threshold names. A gate that fired on any date in an orientation file would be muted
-within a week, which is worse than not having it.
+That distinction is the whole gate, and the first version got it wrong. A log has
+headings that *are* dates — `## 2026-08-01 — session one` — because the session is the
+subject. A **register** has headings that are subjects with a date attached —
+`## Traps (decided 2026-07-17)`, `## Skills System (decided 2026-07-18)` — and is
+exactly what an orientation document should look like: one entry per subsystem, saying
+what was decided and when. The first version matched a date anywhere in the heading and
+fired on the origin project's `design.md`, which is a register of 40 KB doing its job.
+
+Caught the day it was written, by running it against a real corpus instead of the
+synthetic files it was tested with — those agreed with the rule because the same person
+wrote both. `.ai/recipes/verify-before-shipping-a-rule.md` step 3 says to run a new rule
+against every member of the corpus by hand; skipping it cost one false positive on the
+first real repo the gate met.
+
+Three, not one, and headings only. A single dated heading is a note, and prose recording
+*"decided 2026-07-24, because…"* is untouched at any count. A gate that fired on any date
+in an orientation file would be muted within a week, which is worse than not having it.
+
+## The corpus, counted
+
+Run against all 30 memory documents in the origin project, 2026-08-03:
+
+| Rule | Documents flagged | Which |
+|---|---|---|
+| date anywhere in the heading | **4 of 30** | `design.md` and `ref_minigame.md` (registers — wrong), `state_history.md` and `ref_i18n_history.md` (companions — out of scope) |
+| date at the start of the heading | **1 of 30** | `ref_i18n_history.md`, a companion, so the gate never reads it |
+
+Against that project's *declared orientation set* the rule rejects nothing, and that is
+the expected result rather than a hollow one: the restructure this gate exists to enforce
+happened there in July 2026, and the gate is preventive. It rejects the pre-restructure
+`state.md` shape, which is what it is for.
 
 **Absence disables it.** No `[memory].orientation` means no opinion — the same rule every
 other manifest-driven gate here follows. `init` declares the memory stubs it writes, so a
@@ -48,9 +74,14 @@ NAME = "orientation_shape"
 FAST = True
 DESCRIPTION = "declared orientation docs hold current state, not dated history"
 
-# A heading, at any level, whose text carries an ISO date. Matched on the heading rather
-# than the line so that prose mentioning a date is untouched.
-_DATED_HEADING = re.compile(r"^#{1,6}[ \t]+.*\b\d{4}-\d{2}-\d{2}\b", re.MULTILINE)
+# A heading whose text BEGINS with a date — the session-log shape. Leading decoration is
+# allowed (`## **2026-08-01**`, `## [2026-08-01]`) because that is styling, not subject;
+# a word before the date means the heading is about the word.
+#
+# `(?!\d)` rather than `\b` to close the date: `## _2026-08-03_ notes` has no word
+# boundary between the `3` and the `_`, so `\b` made underscore styling invisible to a
+# gate whose whole claim is that styling is not subject.
+_DATED_HEADING = re.compile(r"^#{1,6}[ \t]+[\W_]*\d{4}-\d{2}-\d{2}(?!\d)")
 
 # Below this, it is a note. At and above it, it is a log.
 THRESHOLD = 3
@@ -76,7 +107,14 @@ def check(repo_root: Path) -> list[Violation]:
                  if _DATED_HEADING.match(line)]
         if len(dated) < THRESHOLD:
             continue
-        companion = Path(rel).stem + "_history" + Path(rel).suffix
+        # Name the companion the project already has, if it has one. Suggesting
+        # `design_history.md` to a repo whose convention is `design_detail.md` invents a
+        # second home for the same content — from the gate that exists to prevent exactly
+        # that kind of sprawl.
+        stem, suffix = Path(rel).stem, Path(rel).suffix
+        existing = [f"{stem}{s}{suffix}" for s in ("_history", "_detail", "_log")
+                    if (path.parent / f"{stem}{s}{suffix}").is_file()]
+        companion = existing[0] if existing else f"{stem}_history{suffix}"
         out.append(Violation(
             rel, dated[0],
             f"orientation_shape: {len(dated)} dated headings in a file every session "

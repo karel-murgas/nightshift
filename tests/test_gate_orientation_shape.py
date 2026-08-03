@@ -91,3 +91,56 @@ def test_no_declaration_means_no_opinion(tmp_path):
 def test_a_missing_orientation_file_is_not_this_gates_problem(tmp_path):
     repo = _repo(tmp_path, {"state.md": LOG}, declared=["state.md", "gone.md"])
     assert len(orientation_shape.check(repo)) == 1
+
+
+REGISTER = """\
+# Design
+
+## Traps (decided 2026-07-17)
+
+Pressure plates, 3 kinds.
+
+## Secret passages (2026-07-17)
+
+Revealed by search.
+
+## Skills System (decided 2026-07-18, IMPLEMENTED WP1-WP8)
+
+Six trees.
+
+## Hack ICE (decided 2026-07-16)
+
+Four ICE types.
+"""
+
+
+def test_a_decision_register_is_not_a_log(tmp_path):
+    """The distinction the first version of this gate got wrong, and the reason it is
+    worth having tests taken from a real repo rather than invented.
+
+    A log has headings that *are* dates — the session is the subject. A register has
+    headings that are subjects with a date attached, and is exactly what an orientation
+    document should look like. Shipped matching a date anywhere in the heading, this
+    fired on the origin project's 40 KB `design.md`, which is a register doing its job.
+    Verbatim from that file.
+    """
+    assert orientation_shape.check(_repo(tmp_path, {"design.md": REGISTER})) == []
+
+
+def test_leading_decoration_around_a_date_is_still_a_log(tmp_path):
+    """`## **2026-08-01**` is styling, not a subject."""
+    styled = ("# State\n\n## **2026-08-01** notes\n\na\n\n## [2026-08-02] notes\n\nb\n\n"
+              "## _2026-08-03_ notes\n\nc\n")
+    assert len(orientation_shape.check(_repo(tmp_path, {"state.md": styled}))) == 1
+
+
+def test_the_companion_named_is_one_the_project_already_has(tmp_path):
+    """Suggesting `design_history.md` to a repo whose convention is `design_detail.md`
+    invents a second home for the same content — from the gate that exists to stop
+    exactly that sprawl."""
+    repo = _repo(tmp_path,
+                 {"design.md": LOG, "design_detail.md": "# Detail\n"},
+                 declared=["design.md"])
+    found = orientation_shape.check(repo)
+    assert len(found) == 1
+    assert "design_detail.md" in found[0].rule
