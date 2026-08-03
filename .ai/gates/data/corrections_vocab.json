@@ -21,7 +21,8 @@
   "class": {
     "derived-what-only-the-act-knew": "a fact recomputed from the current state that only the original action could know -- the recomputation is indistinguishable from the truth until the two diverge",
     "origin-repo-had-it-by-hand": "the framework's own checkout satisfied a requirement by hand, so the install step that was supposed to produce it in a consuming project was never noticed missing",
-    "work-printed-instead-of-done": "a tool that ends by printing the work it should have performed -- correct as a list of next actions, wrong about who acts"
+    "work-printed-instead-of-done": "a tool that ends by printing the work it should have performed -- correct as a list of next actions, wrong about who acts",
+    "schema-field-nothing-read": "a config field written, validated and documented while no code path consumes it -- acceptance by the schema is the evidence a maintainer uses to conclude it is wired up"
   },
   "channel": {
     "maintainer": "the framework's maintainer, reading or running it"
