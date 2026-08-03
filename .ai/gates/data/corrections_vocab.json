@@ -26,7 +26,8 @@
     "derived-not-verified": "a rule reasoned out carefully, written down confidently, and wrong the first time reality touched it -- the code implementing it correct in every case"
   },
   "channel": {
-    "maintainer": "the framework's maintainer, reading or running it"
+    "maintainer": "the framework's maintainer, reading or running it",
+    "gate": "a gate in this repo caught it, on a real tree rather than a fixture"
   },
   "gate": {
     "yes": "an existing gate would have failed on this",
