@@ -288,3 +288,17 @@ def test_the_install_skill_drives_the_whole_install(repo):
     assert "bypassPermissions" in text
     assert "Board/inbox/" in text, "an unscopeable finding becomes a note, not a card"
     assert "Do not write gates" in text, "a gate is earned, never imported"
+
+
+def test_the_install_skill_sweeps_existing_code_into_cards(repo):
+    """The shipped gates are tuned to stop new mess, not to report the accumulated kind:
+    `dead_code` runs at confidence 80, where vulture reports unused imports but not
+    unused functions. A repo that existed before the install has never had that list
+    shown to it. The maintainer's call, 2026-08-03: *"New install should create the
+    cards, so owner can check what is happening."*"""
+    text = (repo / init.INSTALL_SKILL).read_text(encoding="utf-8")
+
+    assert "--min-confidence 60" in text, "lower than the gate's, on purpose"
+    assert "Do not fix them now" in text
+    assert "One card per cluster" in text
+    assert "unused imports" in text, "the one thing safe to fix in place"

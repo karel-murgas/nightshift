@@ -168,7 +168,50 @@ prevent.
 go here" is worse than no file: it costs a read and teaches a session that memory files
 are empty. Leave the stub as the stub until there is something true to put in it.
 
-## 6. Analyse the repo and file cards
+## 6. Sweep the code for what is already stale, and file it as cards
+
+The gates that ship are tuned for a repo that is already clean — they are there to stop
+new mess, not to report the accumulated kind. A repo that existed before this install has
+accumulated some, and nobody has ever been shown it in one list.
+
+**Findings become cards. Do not fix them now.** Two reasons, and the second is the real
+one: a cleanup diff mixed into an install diff is unreviewable, and the maintainer has
+not agreed to any of this yet. The one exception is below.
+
+Run these and read the output yourself:
+
+```bash
+# Unused functions, classes, methods, imports and variables. Confidence 60, NOT the
+# gate's 80 — the gate runs high to stay actionable day to day; this pass runs low
+# on purpose, because it is the one time anybody looks at the whole list.
+python -m vulture <source_dirs> <entry-point.py> --min-confidence 60
+
+python -m nightshift.gates.run          # what the shipped rules already object to
+```
+
+Pass the entry point (`main.py`, `cli.py`, whatever constructs the app) alongside the
+package. Leaving it out reports everything only it uses as dead — the application class,
+the logging setup, every `if TYPE_CHECKING:` import — and produces a list nobody believes.
+Leave `tests/` out: pytest injects fixtures by decorator and no static tool can see it.
+
+**One card per cluster, never one per finding.** Thirty unused symbols in one legacy
+module is one card ("retire or revive `legacy/exporter.py`"), not thirty. A card the
+maintainer cannot decide in one sitting is a card that sits.
+
+Each card needs a real `## Approach` — what you would actually do, and what you are
+unsure of. "Remove the dead code" is not an approach. Say which symbols, whether anything
+reaches them dynamically (`getattr`, a registry, a plugin entry point, a template), and
+what you would check before deleting.
+
+**The one thing you may fix in place: unused imports.** They are unambiguous, vulture
+rates them at 90%+, and the test suite proves it. Say how many you removed. Anything that
+could be reached dynamically — an unused function, a class, a method — is a card, because
+a static tool cannot see a registry and you have not read this codebase before today.
+
+If the sweep finds nothing, say so plainly. A clean repo is a real result and worth one
+sentence; inventing work to look thorough is worse than reporting zero.
+
+## 7. Analyse the repo and file cards
 
 The install is done; the useful part is what the repo needs. Read it — the module
 layout, the test suite, `CLAUDE.md`, the obvious rough edges — and file what you find as
@@ -194,7 +237,7 @@ Rules for this pass:
 Then run `python -m nightshift.gates.run` once more — `card_schema` validates what you
 just wrote — and commit the cards.
 
-## 7. Hand over in four sentences
+## 8. Hand over in four sentences
 
 1. What you installed, and which files got a block appended rather than written.
 2. What the checks say now, naming anything still red and why.
