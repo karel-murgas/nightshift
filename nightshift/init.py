@@ -478,6 +478,23 @@ def build_plan(root: Path, *, integration: str | None,
           (TEMPLATES / "ai" / "corrections.log").read_text(encoding="utf-8"))
     stage(f"{AI_DIR}/gates/data/corrections_vocab.json",
           (TEMPLATES / "ai" / "gates" / "data" / "corrections_vocab.json").read_text(encoding="utf-8"))
+
+    # The third step of the earning loop, which no install had. A fresh repo got the
+    # corrections log and its vocabulary (something goes wrong, it gets written down) and
+    # `gate_appeals` (a gate is wrong, say so on the record) — and nothing at all about
+    # how a written-down failure becomes a gate, which is the step the whole framework
+    # exists for. Measured 2026-08-03 on a fresh install: no `.ai/recipes/` directory,
+    # no recipe, and `card_schema` validating a `recipe:` field against a directory that
+    # could not exist, so the field could only ever be `none` — the third schema field
+    # nothing could read (`schema-field-nothing-read`).
+    #
+    # Only spines that are about *writing rules* ship. A recipe for a project's own
+    # subject matter is that project's, and copying one here would be the framework
+    # shipping an earned rule instead of the machinery for earning one.
+    for spine in sorted((TEMPLATES / "ai" / "recipes").glob("*.md")):
+        stage(f"{AI_DIR}/recipes/{spine.name}",
+              render(spine.read_text(encoding="utf-8"), values))
+
     stage(f"{AI_DIR}/hosts.json",
           hosts_text(values, permission_mode, list(capabilities or [])))
 

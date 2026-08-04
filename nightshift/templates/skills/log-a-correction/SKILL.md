@@ -66,7 +66,7 @@ DATE | SLUG | CLASS | CHANNEL | GATE | NOTE
 | `SLUG` | short kebab-case handle, the human name for this entry. Reuse an existing slug only if it is literally the same recurring problem |
 | `CLASS` | from `.ai/gates/data/corrections_vocab.json`. **Read the definitions** — do not guess from the name |
 | `CHANNEL` | who found it: `karel`, `claude`, `gate`, `test`, `audit`, `none` |
-| `GATE` | `yes` / `yes-now` / `no-judgment` / `no-gap` / `n/a` |
+| `GATE` | `yes` / `yes-now` / `no-judgment` / `no-gap` / `n/a`. Answering `yes-now` commits you to writing one: the spine is `.ai/recipes/turn-a-correction-into-a-gate.md`, and step 0 there is the honest `no-judgment` / `no-gap` split |
 | `NOTE` | the evidence. See below |
 
 Validated by `nightshift/gates/corrections_log.py`, which runs on every edit. A malformed line

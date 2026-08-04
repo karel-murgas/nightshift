@@ -16,6 +16,7 @@ These templates are what closes that gap.
 | `settings.hooks.json` | merged into `.claude/settings.json` | seven hook entries. Merged, never overwritten — a project's `permissions` block is its own |
 | `ai/corrections.log` | `.ai/corrections.log` | header only |
 | `ai/gates/data/corrections_vocab.json` | same path | **`class` and `channel` ship empty.** See the file's own comment; this is enforcement, not omission |
+| `ai/recipes/*.md` | `.ai/recipes/` | the two framework spines, both about *writing rules* rather than about any project's subject. They are what makes `recipe:` on a card resolvable at all on a fresh install |
 | `ai/hosts.json` | `.ai/hosts.json` | the reasoning travels; the capabilities do not |
 | `board/README.md` | `Board/README.md` | the lane contract |
 | `gitattributes` | `.gitattributes` | `* text=auto eol=lf`, written only if absent |

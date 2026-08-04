@@ -70,9 +70,15 @@ A gate is earned by an observed failure *in this repo*, never adopted because it
 prudent. `nightshift` ships the generic ones; yours go in `.ai/gates/` and never move.
 An empty `.ai/gates/` is the correct starting state.
 
-When a gate is wrong, appeal it rather than deleting it — the three-level process is in
-the `gate_appeals` gate's own docstring, and an appeal leaves a record where a deletion
-leaves a hole.
+Turning a logged correction into a gate is the third step of the loop and the one that
+goes wrong quietly: `.ai/recipes/turn-a-correction-into-a-gate.md` is the spine, with the
+four failure modes it exists to prevent. Its companion,
+`.ai/recipes/verify-before-shipping-a-rule.md`, covers the case where the thing you are
+shipping is a rule rather than a check.
+
+When a gate is wrong, appeal it rather than deleting it — a `# gate-ok(<gate>): <reason>`
+marker, which `gate_appeals` validates and counts. An appeal leaves a record where a
+deletion, or a quiet narrowing of the gate's scope, leaves a hole.
 
 <!-- ------------------------------------------------------------------------------- -->
 ## Project rules

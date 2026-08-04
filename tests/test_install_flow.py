@@ -484,6 +484,128 @@ def test_a_second_init_does_not_append_a_second_block(tmp_path):
     assert text.count(init.BLOCK_BEGIN) == 1
 
 
+# --- the third step of the earning loop ----------------------------------------
+#
+# `init` shipped the machinery for logging a correction and `gate_appeals` for saying a
+# gate is wrong, and nothing at all for turning a written-down failure into a gate — the
+# step the framework exists for. `.ai/recipes/` was never created, so `card_schema`
+# validated a `recipe:` field against a directory that could not exist and the field
+# could only ever be `none`. Measured on a fresh install, 2026-08-03.
+
+
+SPINES = ("turn-a-correction-into-a-gate", "verify-before-shipping-a-rule")
+
+
+def test_init_creates_the_recipes_directory_with_every_shipped_spine(tmp_path):
+    """Asserted as a set equality against the template directory rather than as "the
+    directory exists", so adding a template spine that `init` is not taught to install
+    fails here — the same shape as the private lane, which `init` did not create because
+    it iterated a list built for a different purpose."""
+    repo = _repo(tmp_path)
+    _install(repo)
+
+    shipped = {p.stem for p in (init.TEMPLATES / "ai" / "recipes").glob("*.md")}
+    landed = {p.stem for p in (repo / AI_DIR / "recipes").glob("*.md")}
+    assert landed == shipped
+    assert landed == set(SPINES), "the two spines this repo is allowed to ship"
+
+
+def test_a_fresh_install_can_write_a_card_that_names_a_real_recipe(tmp_path):
+    """The acceptance criterion. `card_schema` resolves `recipe:` against
+    `.ai/recipes/<name>.md`, so before the spines shipped the only value that could ever
+    pass validation was `none` — a schema field nothing could use, which is the shape
+    this project has now logged three times (`schema-field-nothing-read`)."""
+    from nightshift.gates import card_schema
+
+    repo = _repo(tmp_path)
+    _install(repo)
+    card = repo / "Board" / "tasks" / "harden-a-rule.md"
+    card.write_text(
+        "---\nid: harden-a-rule\ntitle: Gate the thing the log caught twice\n"
+        "state: tasks\ntier: worker\nworker: none\n"
+        "recipe: turn-a-correction-into-a-gate\nunattended: true\ncreated: 2026-08-04\n"
+        "---\n\n"
+        "## Intent\n\nThe same correction has been logged twice.\n\n"
+        "## Approach\n\nFollow the spine; the shape is mechanically detectable.\n\n"
+        "## Acceptance\n\n- the gate goes red on the original artefact\n\n"
+        "## Open Questions\n\nNone.\n", encoding="utf-8", newline="\n")
+
+    assert card_schema.check(repo) == []
+
+
+def test_a_card_naming_a_recipe_that_does_not_exist_is_still_refused(tmp_path):
+    """The other half: shipping the directory must not turn the check into a rubber
+    stamp. A field that accepts anything is the same defect as a field that accepts
+    only `none`, one direction over."""
+    from nightshift.gates import card_schema
+
+    repo = _repo(tmp_path)
+    _install(repo)
+    card = repo / "Board" / "tasks" / "invented.md"
+    card.write_text(
+        "---\nid: invented\ntitle: Names a spine nobody wrote\nstate: tasks\n"
+        "tier: worker\nworker: none\nrecipe: ship-a-subsystem\nunattended: true\n"
+        "created: 2026-08-04\n---\n\n"
+        "## Intent\n\nx\n\n## Approach\n\ny\n\n## Acceptance\n\n- z\n\n"
+        "## Open Questions\n\nNone.\n", encoding="utf-8", newline="\n")
+
+    violations = card_schema.check(repo)
+    assert any("ship-a-subsystem" in v.rule for v in violations), violations
+
+
+def test_uninstall_takes_back_the_spines_and_leaves_a_projects_own_recipe(tmp_path):
+    """`.ai/recipes/` is where a project writes its own spines, so uninstall must be able
+    to tell the two apart. The receipt names what `init` created; the directory is removed
+    only if it ends up empty, which is what keeps a recipe the project wrote — and the
+    directory holding it — alive."""
+    repo = _repo(tmp_path)
+    _install(repo)
+    mine = repo / AI_DIR / "recipes" / "add-a-perk.md"
+    mine.write_text("# Mine\n", encoding="utf-8")
+
+    uninstall.apply(uninstall.plan(repo))
+
+    assert mine.is_file(), "a recipe the project wrote is not ours to delete"
+    for spine in SPINES:
+        assert not (repo / AI_DIR / "recipes" / f"{spine}.md").exists(), spine
+
+
+def test_uninstall_removes_the_recipes_directory_when_only_ours_was_in_it(tmp_path):
+    """The mirror case, and the one `test_uninstall_removes_exactly_what_init_wrote`
+    covers implicitly — named here because an empty directory left behind is what makes
+    a second `init` report a state nobody chose."""
+    repo = _repo(tmp_path)
+    _install(repo)
+    uninstall.apply(uninstall.plan(repo))
+    assert not (repo / AI_DIR / "recipes").exists()
+
+
+def test_the_gate_spine_lists_every_value_the_corrections_vocabulary_defines(tmp_path):
+    """The spine opens by triaging on the `GATE` field, and that table is a second copy
+    of a closed vocabulary. Read back from the shipped JSON rather than retyped, so a
+    value added to the vocabulary cannot leave the triage silently incomplete — which is
+    the failure the vocabulary file's own comment is about."""
+    vocab = json.loads(
+        (init.TEMPLATES / "ai" / "gates" / "data" / "corrections_vocab.json")
+        .read_text(encoding="utf-8"))
+    spine = (init.TEMPLATES / "ai" / "recipes"
+             / "turn-a-correction-into-a-gate.md").read_text(encoding="utf-8")
+
+    for value in vocab["gate"]:
+        assert f"`{value}`" in spine, f"the GATE value {value!r} is triaged nowhere"
+
+
+def test_the_shipped_spines_carry_no_trace_of_the_project_they_came_from(tmp_path):
+    """These two were ported out of the origin project, where every incident in them has
+    a name, a repo and a person attached. The templates carry the origin project's
+    *reasoning* and none of its *identity* — a spine that names somebody else's package
+    reads as a file that was copied rather than written."""
+    for spine in (init.TEMPLATES / "ai" / "recipes").glob("*.md"):
+        text = spine.read_text(encoding="utf-8").lower()
+        for name in ("dungeoneer", "karel"):
+            assert name not in text, f"{spine.name} names {name}"
+
+
 # --- taking a block back out ---------------------------------------------------
 
 

@@ -266,7 +266,11 @@ def plan(root: Path) -> Removal:
     # Directories that exist only to hold what we are removing. `apply` removes one
     # only when it is empty afterwards, so listing a directory the operator also
     # keeps their own work in costs nothing.
-    dirs = [f"{AI_DIR}/gates/data", f"{AI_DIR}/gates", AI_DIR,
+    # `.ai/recipes` is listed like every other directory here — removed only if empty
+    # afterwards — which is exactly what leaves a project's own recipes, and the
+    # directory holding them, alone. The shipped spines are named in the receipt and go
+    # with the rest; anything the project wrote is not, and keeps the directory alive.
+    dirs = [f"{AI_DIR}/gates/data", f"{AI_DIR}/gates", f"{AI_DIR}/recipes", AI_DIR,
             written.tables.get("board", {}).get("root", "Board"),
             ".claude/agents", ".claude/skills", ".claude/memory", ".claude"]
     # The tier-binding document's own directory, derived rather than assumed: the
