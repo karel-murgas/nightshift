@@ -27,7 +27,8 @@
   },
   "channel": {
     "maintainer": "the framework's maintainer, reading or running it",
-    "gate": "a gate in this repo caught it, on a real tree rather than a fixture"
+    "gate": "a gate in this repo caught it, on a real tree rather than a fixture",
+    "claude": "an agent found it while doing something else, usually by running it"
   },
   "gate": {
     "yes": "an existing gate would have failed on this",
