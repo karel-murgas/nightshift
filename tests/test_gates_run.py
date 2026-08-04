@@ -142,9 +142,10 @@ def test_a_clean_project_reports_all_clear(tmp_path, capsys):
 
 
 def test_a_module_without_a_check_is_a_helper_not_a_gate(tmp_path):
-    """`doc_scan`, `i18n_common` and `appeal_markers` are all this shape. Skipping
-    by "has no check" rather than by name is why adding a helper has never
-    required editing the runner."""
+    """`doc_scan` and `appeal_markers` here, and a project's own helpers (e.g.
+    Dungeoneer's `i18n_adapter_loader`) are all this shape. Skipping by "has no
+    check" rather than by name is why adding a helper has never required editing
+    the runner."""
     root = _project(tmp_path, doc_scan=HELPER, real_gate="def check(root):\n    return []\n")
     found = gates_run.discover(root)
     assert "real_gate" in found and "doc_scan" not in found

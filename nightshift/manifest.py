@@ -15,8 +15,11 @@ framework repo can serve N projects instead of being forked per project.
   alone, so its table has to be an *override* and never a prerequisite.
 * A table whose absence *disables a feature* returns `None`, never a default.
   `[i18n]` is the case §4 names explicitly: a project with no localisation omits
-  the table, the three i18n gates find nothing to check, and nothing is lost. A
-  default here would point three gates at a string catalogue that does not exist.
+  the table, its own i18n gates find nothing to check, and nothing is lost. A
+  default here would point them at a string catalogue that does not exist. The
+  gates themselves are no longer core — they are a localised project's own, under
+  its `.ai/gates/` — but the *schema* for what they read stays here, because a
+  manifest table is this package's vocabulary whoever consumes it.
 * A field that bounds behaviour is **never defaulted and never guessed**.
   `branches.integration` is the one: `forbidden_bases()` depends on it and a wrong
   answer means the runner builds on a branch nobody wanted. Dungeoneer is the
@@ -216,20 +219,26 @@ class LayeringRule:
 @dataclass(frozen=True)
 class I18n:
     """Present only if the project has localisation; `Manifest.i18n` is `None`
-    otherwise and the three i18n gates find nothing to check.
+    otherwise and a project's i18n gates find nothing to check.
 
-    They still *register* — every gate in the package always does — and return no
-    violations. Three summaries used to say "never register", which is the kind of
-    almost-true that costs an afternoon the day someone greps the gate list and
-    finds all three in it.
+    **Schema without a core consumer, on purpose.** No gate in this package reads
+    this table: `i18n_parity`, `i18n_untranslated` and `i18n_loanwords` left core
+    on 2026-08-03 for Dungeoneer's `.ai/gates/`, because "generic" was decided to
+    mean *broadly applicable*, not merely domain-free — most repos have no
+    translations, and reading three inapplicable gate names in every run said the
+    framework was game-shaped. What stays is the vocabulary those gates speak:
+    they load it through `manifest.load(root).i18n` from outside the package, so
+    the field is read, and `validate()` still checks its paths and its
+    base-in-targets error. Deleting it as `schema-field-nothing-read` would break
+    a live consumer silently, which is the worse half of that pair.
 
-    `adapter` points at a project module supplying the three functions
-    `i18n_common` already exposes — `load_strings() -> {lang: {key: value}}`,
-    `zone_key_lines() -> {lang: {key: line}}` for `file:line` reporting, and
-    `i18n_path()`. That interface is the only place in the whole system where a
-    project's *data model* differs rather than its paths, which is why it is an
-    adapter rather than another table (§2b). A project storing strings in gettext,
-    `.po` files or JSON-per-language writes ~30 lines and gets all three gates.
+    `adapter` points at a project module supplying three functions —
+    `load_strings() -> {lang: {key: value}}`, `zone_key_lines() -> {lang: {key:
+    line}}` for `file:line` reporting, and `i18n_path()`. That interface is the
+    only place in the whole system where a project's *data model* differs rather
+    than its paths, which is why it is an adapter rather than another table (§2b).
+    A localised project storing strings in gettext, `.po` files or
+    JSON-per-language writes ~30 lines of adapter and the same three gates work.
     """
     adapter: str
     base: str = "en"
@@ -508,9 +517,9 @@ def parse(data: dict, root: Path) -> Manifest:
             raise ManifestError("[i18n] must be a table")
         if not i18n_t.get("adapter"):
             raise ManifestError(
-                "[i18n] declares no `adapter` — the three i18n gates cannot read a "
-                "project's strings without one. Omit the whole table if this project "
-                "has no localisation."
+                "[i18n] declares no `adapter` — an i18n gate cannot read a project's "
+                "strings without one. Omit the whole table if this project has no "
+                "localisation."
             )
         i18n = I18n(
             adapter=str(i18n_t["adapter"]),

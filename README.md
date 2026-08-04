@@ -425,9 +425,6 @@ project's one.
 | `doc_reference_liveness` | docs must not name files or symbols that no longer exist |
 | `doc_signature_drift` | a signature written into a doc must match the real parameter names, in order |
 | `gate_appeals` | every `# gate-ok(...)` appeal names a real gate and carries a written reason |
-| `i18n_loanwords` | denylisted base-language terms must not appear (case-sensitive, whole-word) in target values |
-| `i18n_parity` | every declared target language's key set must match the base language's exactly |
-| `i18n_untranslated` | a target-language value identical to the base must be allowlisted, or it's untranslated |
 | `import_layering` | a declared one-way dependency between packages stays one-way |
 | `line_endings` | Line endings stay LF, in the index and in the working tree. |
 | `memory_freshness` | a diff touching a declared source area must also touch its memory doc |
@@ -442,9 +439,9 @@ project's one.
 <!-- /generated:gate-list -->
 
 Several gates are inert until the manifest gives them something to read, and
-that is a supported state rather than a gap: the three `i18n_*` gates need
-`[i18n]`, `orientation_budget` needs `[memory].budget_bytes`, `memory_freshness`
-needs `[memory].freshness`, and `import_layering` needs `[layering].forbid`.
+that is a supported state rather than a gap: `orientation_budget` needs
+`[memory].budget_bytes`, `memory_freshness` needs `[memory].freshness`, and
+`import_layering` needs `[layering].forbid`.
 Without those they run and report nothing. `dead_code` and the doc-scan family
 (`doc_reference_liveness`, `doc_signature_drift`, `deletion_sweep`) read
 `[project]`; the five discipline gates read `[project].tooling_dirs` on top of
@@ -507,18 +504,29 @@ marker for the same purpose.
 | `[worker]` | `harvest_dirs=()`, `fence_env=''`, `integration_checkout_dir=''` | The three constants that were the entire project-specific content of `runner.py`'s 3,597 lines. |
 | `[memory]` | `orientation=()`, `budget_bytes=None`, `freshness=()` | `budget_bytes = None` means **the orientation-budget gate does not run**, and that is the recommended starting value. |
 | `[layering]` | `forbid = [{importer, imports, exempt}]` | `importer` must not import `imports`. |
-| `[i18n]` | `adapter` (required), `base='en'`, `targets=()`, `untranslated_allowlist=''`, `loanwords_denylist=''` | Present only if the project has localisation; `Manifest.i18n` is `None` otherwise and the three i18n gates find nothing to check. |
+| `[i18n]` | `adapter` (required), `base='en'`, `targets=()`, `untranslated_allowlist=''`, `loanwords_denylist=''` | Present only if the project has localisation; `Manifest.i18n` is `None` otherwise and a project's i18n gates find nothing to check. |
 | `[dead_code]` | `paths=()`, `min_confidence=80` | What `nightshift.gates.dead_code` points `vulture` at, and how sure it must be before it speaks. |
 | `[audit]` | `matrix=''`, `infra_gates=()` | Where this project keeps its rule-enforcement matrix, and which of its own gates that matrix is not expected to have a row for. |
 | `[tiers]` | `binding_doc='docs/tier-binding.md'` | Which document carries the `tier: → model` binding block. |
 <!-- /generated:manifest-fields -->
 
-Absence is meaningful and is not the same as a default: `[i18n]` omitted
-disables the three i18n gates rather than defaulting them against strings that
-are not there; `branches.integration` has no default at all and is never
-guessed, because `forbidden_bases()` depends on it and a plausible-looking
-wrong answer means the runner builds on a branch nobody chose. An unknown key
-anywhere in the file is an error, not a silent no-op.
+Absence is meaningful and is not the same as a default: `[i18n]` omitted leaves
+a localised project's own i18n gates with nothing to check, rather than
+defaulting them against strings that are not there; `branches.integration` has
+no default at all and is never guessed, because `forbidden_bases()` depends on
+it and a plausible-looking wrong answer means the runner builds on a branch
+nobody chose. An unknown key anywhere in the file is an error, not a silent
+no-op.
+
+`[i18n]` is the one table with no consumer inside this package. `i18n_parity`,
+`i18n_untranslated` and `i18n_loanwords` shipped as core gates until 2026-08-03
+and are now Dungeoneer's, under its own `.ai/gates/` — "generic" was decided to
+mean *broadly applicable*, not merely domain-free, and most repos have no
+translations to check. The table stays because those gates still read it, from
+outside, through `manifest.load(root).i18n`: it is the vocabulary any localised
+project's gates speak, and `validate()` still checks it. A project adopting the
+same three gates copies them out of Dungeoneer's `.ai/gates/` and writes an
+adapter.
 
 ### The staleness sweep
 

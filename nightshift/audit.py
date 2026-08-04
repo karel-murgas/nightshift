@@ -57,11 +57,6 @@ if hasattr(sys.stdout, "reconfigure"):
 GATES_DIR = Path(AI_DIR) / "gates"
 FEEDBACK_DIR = Path(".claude/memory")
 
-# Modules under .ai/gates/ that are machinery, not gates. Mirrors run.py's own
-# skip list plus the shared helpers; kept here rather than imported because a
-# gate must stay independently runnable with no siblings on the path.
-_NOT_GATES = frozenset({"run", "base", "doc_scan"})
-
 def matrix_path(repo_root: Path) -> Path | None:
     """The rule matrix this project keeps, or `None` if it keeps none.
 
@@ -173,12 +168,23 @@ def rows(repo_root: Path) -> list[Row]:
 
 
 def local_gate_files(repo_root: Path) -> set[str]:
-    """Gates in this project's own `.ai/gates/` — unchanged meaning."""
-    return {
-        path.stem
-        for path in (repo_root / GATES_DIR).glob("*.py")
-        if path.stem not in _NOT_GATES
-    }
+    """Gates in this project's own `.ai/gates/`.
+
+    A `*.py` there is not automatically a gate: the directory also holds shared
+    helpers, which `nightshift.gates.run` identifies by their having no `check`
+    rather than by name. This used to keep its own hand-written skip list of
+    those, which was wrong in the direction a list is always wrong — it named
+    core's helpers (`doc_scan`) and could not name a *project's*. Dungeoneer's
+    `i18n_adapter_loader` arrived on 2026-08-03 with the three i18n gates it
+    serves and was counted as a seventeenth gate in a report whose whole job is
+    to be the honest number. Intersecting with `discover` asks the runner what a
+    gate is instead of re-deciding it here, so a project may add a helper without
+    this file knowing its name.
+    """
+    from nightshift.gates.run import discover
+
+    stems = {path.stem for path in (repo_root / GATES_DIR).glob("*.py")}
+    return stems & set(discover(repo_root))
 
 
 def gate_files(repo_root: Path) -> set[str]:
