@@ -287,6 +287,13 @@ which reads as a drag-in-progress and gets pulled back. `python -m
 nightshift.reconcile` is what makes the folder catch up with a `state:` edit;
 it reports by default, `--apply` performs, `--commit` commits.
 
+`init` writes `Board.base`, an Obsidian view of those lanes: a Kanban plus a
+Live and an Archive table. It needs **two** plugins and the split trips people
+up — *Bases* is core (Obsidian 1.9+) and renders the tables, while the Kanban
+view type comes from the **Base Board** community plugin. With only the first,
+Obsidian reports `Unknown view type: kanban`. Nothing in the framework reads
+that file, so this is purely so a human can see the board.
+
 ### Triage by hand
 
 A note dropped in `inbox/` does not need frontmatter — that is what triage adds.

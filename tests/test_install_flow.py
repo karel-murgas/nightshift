@@ -620,6 +620,34 @@ def test_no_shipped_template_carries_a_trace_of_the_project_it_came_from():
     assert offenders == []
 
 
+def test_every_doc_that_offers_the_kanban_names_the_plugin_that_provides_it():
+    """`type: kanban` is not a core Bases view type — it comes from the **Base Board**
+    community plugin, and with only Bases installed Obsidian says `Unknown view type:
+    kanban` on a file `init` just told the operator it wrote.
+
+    Reported by the origin project's maintainer, 2026-08-04, on their second install:
+    they enabled Bases, opened the board, and got exactly that. The shipped README had
+    said "It needs the **Bases** core plugin", which is true and not sufficient — the
+    origin checkout has had Base Board enabled since before the extraction, so the doc
+    written from it recorded only the half its author had to think about. Fourth
+    instance of `origin-repo-had-it-by-hand`, and the second one about this same view.
+
+    Asserted on the error string too, because that is what someone pastes into a search
+    box, and a doc that explains the fix without naming the symptom is not found by the
+    person who has the symptom.
+    """
+    docs = {
+        "board README": init.TEMPLATES / "board" / "README.md",
+        "the .base file": init.TEMPLATES / "board.base",
+        "the install skill": init.TEMPLATES / "skills" / "install-nightshift" / "SKILL.md",
+    }
+    for label, path in docs.items():
+        text = path.read_text(encoding="utf-8")
+        assert "Base Board" in text, f"{label} offers the Kanban without naming Base Board"
+        assert "Unknown view type: kanban" in text, (
+            f"{label} does not name the error the operator actually sees")
+
+
 # --- taking a block back out ---------------------------------------------------
 
 
@@ -714,7 +742,14 @@ def test_the_board_view_follows_a_relocated_board(tmp_path):
 
     assert 'file.inFolder("kanban")' in rendered
     assert f'!file.inFolder("kanban/{board.PRIVATE_LANE}")' in rendered
-    assert "Board" not in rendered, "no path hardcoded to the default"
+
+    # Scoped to the YAML body, not the whole file: the header comment names the
+    # **Base Board** plugin, and that `Board` is a product name rather than a path.
+    # Asserting over the comments too would make the file's prose unwritable — and
+    # this test is about *paths* that were hardcoded to the default root.
+    config = "\n".join(line for line in rendered.splitlines()
+                       if not line.lstrip().startswith("#"))
+    assert "Board" not in config, "no path hardcoded to the default"
 
 
 def test_an_existing_board_view_is_kept_and_reported(tmp_path):

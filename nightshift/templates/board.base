@@ -2,6 +2,11 @@
 # you a Kanban of the lanes plus two tables. Nothing reads it but Obsidian — the
 # board's state is the directory a card is in, never this file.
 #
+# `type: kanban` below is NOT a core Bases view type. It comes from the **Base
+# Board** community plugin; without it Obsidian says `Unknown view type: kanban`
+# and shows only the two tables. Bases (core, Obsidian 1.9+) is not enough on its
+# own — install Base Board from Settings → Community plugins → Browse.
+#
 # `{{board}}/ideas` is the maintainer's private lane and is filtered out, EXCEPT for a
 # note that has a `state:` — flagging one is how a note asks to leave the lane, and
 # seeing that on the board is the whole point of the flag.

@@ -21,8 +21,17 @@ three views of these directories:
 | **Live** | everything except `done/` and `failed/`, grouped by lane |
 | **Archive** | only `done/` and `failed/` |
 
-It needs the **Bases** core plugin, which ships with Obsidian 1.9 and later; on an older
-version the file will not render and the board still works exactly as well without it.
+**Two plugins, and the Kanban needs the second one.** *Bases* is core (ships with Obsidian
+1.9+) and gives you the two tables. The Kanban view type is **not** core — it comes from
+the **Base Board** community plugin (Settings → Community plugins → Browse → *Base Board*).
+
+If you see **`Unknown view type: kanban`** when you open `{{board}}.base`, that is exactly
+this: Bases is on, Base Board is not. Install and enable it and the column view appears;
+the Live and Archive tables render either way.
+
+Neither is required for anything to *work* — nothing in the framework reads this file, so
+on an older Obsidian, or with no plugins at all, the board behaves identically and you
+read it as directories.
 
 **The directory is the state, not the view.** Dragging a card in the Kanban rewrites its
 `state:` field, and the reconciler moves the file to match — see the mismatch table

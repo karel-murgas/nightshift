@@ -1070,6 +1070,17 @@ def next_steps(plan: Plan, *, integration: str | None, permission_mode: str) -> 
     print("     `--dry-run` shows the diagnosis and the exact prompt, dispatching")
     print("     nothing.\n")
 
+    # Deliberately not a third numbered step: the two commands above are the
+    # install, and this is the one piece neither of them can do, because it is a
+    # click in another application. Called out anyway because the failure is
+    # silent-looking and self-inflicted — you open the board you were just told
+    # you have, and Obsidian says `Unknown view type: kanban`.
+    print("  To LOOK at the board: open this repo as an Obsidian vault, then install")
+    print("  the Base Board community plugin (Settings → Community plugins → Browse).")
+    print("  Bases is core and gives the tables; the Kanban view type is Base Board's,")
+    print("  and without it Obsidian reports `Unknown view type: kanban`. Nothing in")
+    print("  the framework reads that view, so this is for you, not for it.\n")
+
     print("  A first install is usually red in a place or two; that is what step 2")
     print("  is for. If you would rather have an agent drive the whole thing next")
     print("  time — including these two commands — that is `nightshift bootstrap`")

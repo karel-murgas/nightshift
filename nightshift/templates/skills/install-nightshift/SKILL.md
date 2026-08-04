@@ -247,4 +247,12 @@ just wrote — and commit the cards.
    required before any push, and that the board is optional — the inline half works
    without it.
 
+**The one thing to tell them to do by hand**, because it is a click in another
+application and no command you can run will do it: to *see* the board, open the repo
+as an Obsidian vault and install the **Base Board** community plugin. *Bases* is core
+and renders the two tables; the Kanban view type is Base Board's, and with only Bases
+installed Obsidian reports **`Unknown view type: kanban`** on `Board.base`. Say the
+error string — it is what they will otherwise search for. Nothing in the framework
+reads that view, so a project that never installs it loses nothing but the picture.
+
 Do not close by listing commands for them to run. If something needs running, run it.
