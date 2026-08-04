@@ -130,7 +130,7 @@ current card to finish first. Killing the process instead is safe but leaves `st
 no `finished:`; the next run recovers that card and the attempt still counts.
 
 ```bash
-echo "karel stopped it" > .ai/STOP     # stop
+echo "stopped by hand" > .ai/STOP      # stop
 rm .ai/STOP                            # re-enable
 ```
 

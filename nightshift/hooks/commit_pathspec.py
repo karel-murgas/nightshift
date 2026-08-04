@@ -230,11 +230,10 @@ def _deny_index(staged: list[str]) -> str:
         f"The index currently holds {len(staged)} path(s):\n{shown}{more}\n\n"
         f"If that list is exactly what you mean to commit, say so explicitly:\n"
         f"    git commit -m \"...\" -- <the paths you want>\n"
-        f"Anything in the list you did not stage is someone else's work in progress — on "
-        f"this repo that is normally Karel editing the board in Obsidian while a session "
-        f"runs. Committing it produced seven card_schema violations on 2026-07-28 "
-        f"(`commit-swept-staged-index`), which is why this is refused rather than "
-        f"suggested.\n"
+        f"Anything in the list you did not stage is someone else's work in progress — "
+        f"typically the maintainer editing the board in their editor while a session "
+        f"runs. Committing it swept up seven half-edited cards once, which is why this is "
+        f"refused rather than suggested.\n"
         f"(nightshift.hooks.commit_pathspec)"
     )
 

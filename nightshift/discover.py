@@ -232,8 +232,8 @@ def integration_branch(root: Path, stable: str | None = None) -> Proposal:
     if named:
         return Proposal("branches.integration", named[0], CONFIRM,
                         f"a branch called {named[0]} exists — but this is a GUESS from the "
-                        f"name, and in Dungeoneer the same guess is wrong: `dev` is stable "
-                        f"there")
+                        f"name, and there are real repos where it is wrong: a `dev` that is "
+                        f"the *stable* branch, with integration happening elsewhere")
 
     ahead: list[tuple[int, str]] = []
     for name in branches:
@@ -327,6 +327,36 @@ def tier_binding_doc(root: Path) -> Proposal:
                             "already carries a ```tier-binding block")
     return Proposal("tiers.binding_doc", None, HIGH,
                     "no document carries a ```tier-binding block yet — init writes one")
+
+
+# --- [board] ----------------------------------------------------------------
+
+
+def decision_attributor(root: Path) -> Proposal:
+    """The handle the maintainer signs a board decision with — always CONFIRM.
+
+    Proposed from `git config user.name`'s first word, lowercased, because that is
+    the only handle this tool can see. It is a *guess about a convention*, not a
+    fact about the repo: the digest matches this token literally against
+    `### <date> · <token>` headings, and the same token distinguishes a recorded
+    human decision from an agent's own note (`digest._ATTRIBUTED_ANSWER`).
+
+    Never HIGH, and never silently defaulted. Getting it wrong is invisible — the
+    advisory simply never fires and the digest reports a clean board — which is
+    exactly the failure that made it a manifest field on 2026-08-04, when it had
+    been the literal `karel` since the digest was written.
+    """
+    name = _git(root, "config", "user.name")
+    if not name:
+        return Proposal("board.decision_attributor", None, CONFIRM,
+                        "no git user.name to guess a handle from — declare the token you "
+                        "sign board decisions with, or leave it out to disable the "
+                        "answered-but-not-moved nudge")
+    handle = name.split()[0].lower()
+    return Proposal("board.decision_attributor", handle, CONFIRM,
+                    f"guessed from git user.name — the digest matches `### <date> · "
+                    f"{handle}` literally, so confirm it is how you actually sign a "
+                    f"decision in a card's ## Thread")
 
 
 # --- [memory] ---------------------------------------------------------------
@@ -558,6 +588,7 @@ def survey(root: Path) -> list[Proposal]:
         integration_branch(root, stable_name),
         *worker_config(root, str(name.value) if name.value else None),
         tier_binding_doc(root),
+        decision_attributor(root),
         memory_orientation(root, doc_list),
         budget(root),
         layering(root, dir_list),

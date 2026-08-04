@@ -596,15 +596,28 @@ def test_the_gate_spine_lists_every_value_the_corrections_vocabulary_defines(tmp
         assert f"`{value}`" in spine, f"the GATE value {value!r} is triaged nowhere"
 
 
-def test_the_shipped_spines_carry_no_trace_of_the_project_they_came_from(tmp_path):
+def test_no_shipped_template_carries_a_trace_of_the_project_it_came_from():
     """Every one of these was ported out of the origin project, where each incident has
     a name, a repo and a person attached. The templates carry the origin project's
-    *reasoning* and none of its *identity* — a spine that names somebody else's package
-    reads as a file that was copied rather than written."""
-    for spine in (init.TEMPLATES / "ai" / "recipes").glob("*.md"):
-        text = spine.read_text(encoding="utf-8").lower()
+    *reasoning* and none of its *identity* — a file that names somebody else's package
+    reads as one that was copied rather than written.
+
+    Widened from `ai/recipes/` to the whole template tree on 2026-08-04, because the
+    narrow version was green while `skills/manage-board/SKILL.md` told every project to
+    sign its board answers `### <date> · karel`. That one was not cosmetic: it is the
+    *write* side of the convention `digest` reads, so a project following the skill
+    literally would sign with a handle its own manifest does not declare, and the
+    answered-but-not-moved nudge would never fire.
+    """
+    offenders = []
+    for path in sorted(init.TEMPLATES.rglob("*")):
+        if not path.is_file() or path.suffix.lower() in {".png", ".ico"}:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace").lower()
         for name in ("dungeoneer", "karel"):
-            assert name not in text, f"{spine.name} names {name}"
+            if name in text:
+                offenders.append(f"{path.relative_to(init.TEMPLATES).as_posix()} names {name}")
+    assert offenders == []
 
 
 # --- taking a block back out ---------------------------------------------------

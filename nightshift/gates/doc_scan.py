@@ -127,7 +127,7 @@ def source_dirs(repo_root: Path) -> tuple[str, ...]:
 # exists and that this project imports by name.
 #
 # Indexed as a source root and as a path prefix, so `nightshift/preflight.py` resolves
-# the same way `dungeoneer/core/i18n.py` does.
+# the same way a module under one of the project's own source roots does.
 #
 # **This is not the `sources/` bug in a new coat** (see `_path_suffixes`). That bug
 # was an *ignored, machine-local* directory silently satisfying references; this is
@@ -189,10 +189,11 @@ def _strip_code_spans(line: str) -> str:
 # otherwise — the safe direction, per §3.1.
 #
 #   history  — dated narrative. Naming dead things is its job.
-#   external — the doc's SUBJECT is a toolchain outside this repo (the ComfyUI
-#              stack on E:\, `sources/`, third-party library internals). Not a
-#              loophole for stale game-code claims: it says "resolving these
-#              names against dungeoneer/ is a category error", which is true of
+#   external — the doc's SUBJECT is a toolchain outside this repo (a generator
+#              stack on another drive, an unversioned scratch directory,
+#              third-party library internals). Not a loophole for stale claims
+#              about the project's own code: it says "resolving these names
+#              against our source roots is a category error", which is true of
 #              the whole file or it is true of none of it. Prefer per-section
 #              `<!-- stale-ok: -->` markers whenever a doc is only partly external.
 EXEMPT_SCOPES = frozenset({"history", "external"})
@@ -393,7 +394,7 @@ _NOT_A_SYMBOL = frozenset(
 # should not resolve stdlib or third-party attributes (`json.dump`,
 # `scipy.ndimage.label`). This is a set of *foreign namespaces*, which is a
 # bounded shape rule; it is not the per-project-symbol allowlist §3.1 rejects,
-# and nothing that is ever deleted from `dungeoneer/` can hide behind it.
+# and nothing ever deleted from the project's own source roots can hide behind it.
 _EXTERNAL_ROOTS = frozenset(
     {
         "json", "os", "sys", "re", "math", "random", "pathlib", "subprocess",

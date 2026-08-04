@@ -211,6 +211,15 @@ def tokens(root: Path, tables: dict[str, dict]) -> dict[str, str]:
     packages = project.get("source_dirs") or []
     name = project.get("name") or root.name
     board_root = tables.get("board", {}).get("root", "Board")
+    # The handle the skill tells a session to sign an answer with MUST be the one
+    # `digest` matches, or the answered-but-not-moved advisory silently never fires
+    # — the two are the write side and the read side of one convention. Falls back
+    # to the git handle when the field was declined, so the skill still shows a
+    # concrete example rather than a bare placeholder; the manifest key is named
+    # alongside it in the template, so a reader can see where the real answer lives.
+    declared = str(tables.get("board", {}).get("decision_attributor") or "")
+    git_handle = _git_user(root).split()[0].lower() if _git_user(root).split() else ""
+    attributor = declared or git_handle or "you"
     return {
         "{{package}}": str(packages[0]) if packages else name,
         "{{project}}": str(name),
@@ -219,6 +228,7 @@ def tokens(root: Path, tables: dict[str, dict]) -> dict[str, str]:
         "{{hostname}}": socket.gethostname(),
         "{{board}}": board_root,
         "{{private_lane}}": PRIVATE_LANE,
+        "{{decision_attributor}}": attributor,
         # Generated from `board.LANES` rather than typed into the template, and in that
         # tuple's order, which is the flow order. A hand-written column list is a second
         # copy of the lane set that nothing checks — and the board view silently missing
@@ -614,8 +624,8 @@ def build_plan(root: Path, *, integration: str | None,
         plan.notes.append(
             f"{proposal.key}: not written. Discovery suggests "
             f"{'; '.join(_describe(proposal.value))} — add it to "
-            f"{AI_DIR}/{MANIFEST_NAME} by hand if you agree. Until then the gate "
-            f"that reads it does not run, which is a fine day-one state.")
+            f"{AI_DIR}/{MANIFEST_NAME} by hand if you agree. Until then whatever "
+            f"reads it stays switched off, which is a fine day-one state.")
 
     # The one environment problem that writing a file does not fix — it needs a
     # command run on this box, so it is a note rather than a decision.

@@ -278,9 +278,15 @@ def test_declining_a_guess_is_reported_rather_than_silent(tmp_path):
     assert any("layering.forbid: not written" in note for note in plan.notes), plan.notes
 
 
-def test_confirm_is_three_fields_and_init_asks_about_each(tmp_path, monkeypatch):
-    """`discover`'s docstring said "exactly one field is here". There are three,
-    and two of them were being written unasked."""
+def test_confirm_is_four_fields_and_init_asks_about_each(tmp_path, monkeypatch):
+    """`discover`'s docstring said "exactly one field is here". There are four,
+    and two of them were being written unasked.
+
+    Set equality on purpose: a new CONFIRM field must fail here, because the whole
+    point of the class is that it is *asked*, and adding one silently is how it
+    stops being. `board.decision_attributor` joined on 2026-08-04 and did fail
+    here first.
+    """
     repo = _project(tmp_path, board=False)
     (repo / "pkg" / "core").mkdir()
     (repo / "pkg" / "core" / "__init__.py").write_text("", encoding="utf-8")
@@ -295,7 +301,8 @@ def test_confirm_is_three_fields_and_init_asks_about_each(tmp_path, monkeypatch)
 
     proposals = discover.survey(repo)
     confirm = {p.key for p in proposals if p.needs_confirmation}
-    assert confirm == {"branches.integration", "memory.orientation", "layering.forbid"}
+    assert confirm == {"branches.integration", "memory.orientation", "layering.forbid",
+                       "board.decision_attributor"}
 
     monkeypatch.setattr("builtins.input", lambda _="": "y")
     accepted = init.confirm_optional(proposals, assume_yes=False, interactive=True)

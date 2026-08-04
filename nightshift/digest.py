@@ -54,6 +54,7 @@ run** — nothing typed into it survives, which is why answers go in a card's
 from __future__ import annotations
 
 import datetime as _dt
+import functools
 import re
 import subprocess
 from pathlib import Path
@@ -99,24 +100,32 @@ _BOLD = re.compile(r"\*\*(.+?)\*\*")
 _INLINE_CODE = re.compile(r"`([^`]*)`")
 _LIST_ITEM = re.compile(r"^[ \t]*[-*][ \t]+(\S.*)$")
 
-# A dated Karel answer inside a card's `## Thread`, in the exact attributor shape
-# `manage-board` mandates for recording one: `### <ISO date> · karel`, optionally
-# with a ` — note` tail. The whole point of that convention is that an answer is
-# written into the Thread and *then* the card is re-triaged and moved out of
-# needs-decision/; a parked card that already carries one is a half-done
+# A dated maintainer answer inside a card's `## Thread`, in the exact attributor
+# shape `manage-board` mandates for recording one: `### <ISO date> · <attributor>`,
+# optionally with a ` — note` tail. The whole point of that convention is that an
+# answer is written into the Thread and *then* the card is re-triaged and moved out
+# of needs-decision/; a parked card that already carries one is a half-done
 # transition — the answer landed but the move never happened (the 2026-07-24
 # `needs-decision-card-not-moved-after-answer` correction).
 #
-# Matched narrowly on purpose. The attributor token immediately after the `·`
-# must be `karel`, so a discussion-style entry like
-# `### <date> · interactive session (Karel + Claude)` does NOT trip it: that is a
+# **The token is `[board].decision_attributor`, not a literal.** It was the literal
+# `karel` until 2026-08-04, which made this a permanent silent no-op in every repo
+# but the origin's: the advisory ran, matched nothing, and reported a clean board.
+#
+# It cannot be replaced by a shape rule. Counted over the origin project's 62
+# `· <token>` headings: the bare single-word attributors are `karel` (24),
+# `triage` (10), `code-thread` and `claude` — so "a single bare word" reads three
+# agents' own notes as a human decision. The name is doing the work.
+#
+# Matched narrowly on purpose beyond that: the token must be followed by a word
+# boundary, so a discussion-style entry like
+# `### <date> · interactive session (Karel + Claude)` does NOT trip it — that is a
 # conversation, not a recorded decision, and this is advisory, so the guidance is
 # to under-flag rather than over-flag. `·` is U+00B7, the separator the real
 # corpus and the skill both use.
-_KAREL_ANSWER = re.compile(
-    r"^#{3,6}[ \t]+\d{4}-\d{2}-\d{2}[ \t]*·[ \t]*karel\b",
-    re.IGNORECASE | re.MULTILINE,
-)
+# Concatenated, never `.format()`ed: the pattern's own `{3,6}` and `{4}` are
+# format placeholders to `str.format` and it raises `KeyError: '3,6'`.
+_ATTRIBUTED_ANSWER_PREFIX = r"^#{3,6}[ \t]+\d{4}-\d{2}-\d{2}[ \t]*·[ \t]*"
 
 
 def _plain(s: str) -> str:
@@ -306,18 +315,48 @@ def _decision_lines(card: Card, indent: str = "    ") -> list[str]:
     return out
 
 
-def _has_karel_answer(card: Card) -> bool:
-    """True when the card's `## Thread` already carries a dated Karel answer.
+def _decision_attributor(root: Path) -> str:
+    """`[board].decision_attributor`, or `""` when the manifest cannot be read.
+
+    A digest that cannot find a manifest still has a board to report on, so this
+    degrades to "no advisory" rather than raising — the advisory is a nudge, not a
+    number anyone counts on.
+    """
+    try:
+        from nightshift import manifest as _manifest
+        return _manifest.load(root).board.decision_attributor
+    except Exception:
+        return ""
+
+
+@functools.lru_cache(maxsize=8)
+def _answer_pattern(attributor: str) -> re.Pattern[str] | None:
+    """The compiled `### <date> · <attributor>` matcher, or `None` if undeclared.
+
+    `None` disables the advisory rather than falling back to a guess: a project
+    that never adopted the convention has no token to match, and inventing one
+    would report a check that cannot fire (see `[board].decision_attributor`).
+    """
+    if not attributor.strip():
+        return None
+    return re.compile(_ATTRIBUTED_ANSWER_PREFIX + re.escape(attributor.strip()) + r"\b",
+                      re.IGNORECASE | re.MULTILINE)
+
+
+def _has_maintainer_answer(card: Card, attributor: str) -> bool:
+    """True when the card's `## Thread` already carries a dated maintainer answer.
 
     Scoped to the `## Thread` section only, never the whole card: the
-    `### Decision N — DECIDED (Karel, …)` headers a picker uses live in
-    `## Question`, and those are the card *asking*, not Karel having answered in
-    the recorded shape. A hit here means the close-out flow stalled after the
-    answer went in — re-triage, `Open questions: none`, and the move never
-    happened — so the Decide entry is flagged rather than silently listed as
-    still-open.
+    `### Decision N — DECIDED (…)` headers a picker uses live in `## Question`,
+    and those are the card *asking*, not the maintainer having answered in the
+    recorded shape. A hit here means the close-out flow stalled after the answer
+    went in — re-triage, `Open questions: none`, and the move never happened — so
+    the Decide entry is flagged rather than silently listed as still-open.
     """
-    return bool(_KAREL_ANSWER.search(_section(card.text, "Thread")))
+    pattern = _answer_pattern(attributor)
+    if pattern is None:
+        return False
+    return bool(pattern.search(_section(card.text, "Thread")))
 
 
 def _last_error(card: Card) -> str:
@@ -802,6 +841,10 @@ def render(root: Path) -> str:
     day = _dt.date.today()
     today = day.isoformat()
 
+    # Empty when the project never declared one, which disables the answered-but-
+    # not-moved advisory rather than guessing a token that would match nothing.
+    attributor = _decision_attributor(root)
+
     prev_sha, prev_date = _previous_digest(root)
     since = _commit_time(root, prev_sha) if prev_sha else None
     records = run_record.records_since(root, since)
@@ -820,7 +863,7 @@ def render(root: Path) -> str:
     stale_unattended = sorted(
         (c for c in tasks_all
          if str(c.fields.get("unattended", "")).strip().lower().startswith("false")
-         and _has_karel_answer(c)),
+         and _has_maintainer_answer(c, attributor)),
         key=lambda c: c.id,
     )
 
@@ -921,7 +964,7 @@ def render(root: Path) -> str:
             # Advisory nudge: a parked card that already carries a dated Karel
             # answer in its `## Thread` is a stalled close-out — the answer
             # landed but the card never moved out of needs-decision/.
-            if _has_karel_answer(c):
+            if _has_maintainer_answer(c, attributor):
                 L.append("    - **⚠ answered in `## Thread` — should this have "
                          "moved? Re-check `Open questions`, then move it.**")
             # The one place in the standing half that keeps its detail inline.
@@ -989,7 +1032,7 @@ def render(root: Path) -> str:
     # automatic: a dated answer is strong evidence the question closed, not proof.
     if stale_unattended:
         L.append(f"**Flag may be stale:** {len(stale_unattended)} card(s) in `tasks/` are "
-                 f"`unattended: false` but already carry a dated Karel answer in "
+                 f"`unattended: false` but already carry a dated answer from you in "
                  f"`## Thread` — so every run skips them for a question that looks "
                  f"answered: " + ", ".join(f"`{c.id}`" for c in stale_unattended) +
                  ". Clear the flag to let them run, or say what is still open.")

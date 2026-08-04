@@ -23,12 +23,14 @@
     "origin-repo-had-it-by-hand": "the framework's own checkout satisfied a requirement by hand, so the install step that was supposed to produce it in a consuming project was never noticed missing",
     "work-printed-instead-of-done": "a tool that ends by printing the work it should have performed -- correct as a list of next actions, wrong about who acts",
     "schema-field-nothing-read": "a config field written, validated and documented while no code path consumes it -- acceptance by the schema is the evidence a maintainer uses to conclude it is wired up",
-    "derived-not-verified": "a rule reasoned out carefully, written down confidently, and wrong the first time reality touched it -- the code implementing it correct in every case"
+    "derived-not-verified": "a rule reasoned out carefully, written down confidently, and wrong the first time reality touched it -- the code implementing it correct in every case",
+    "origin-identity-baked-in": "the framework hardcodes something that is TRUE OF THE REPO IT WAS EXTRACTED FROM and false everywhere else -- a name, a handle, a path, a citation. The inverse of origin-repo-had-it-by-hand: not a property the origin repo satisfies so the tool was never asked to produce it, but the origin repo's identity carried inside the tool. Structurally invisible from the origin checkout, where every such string reads as correct, so no gate, test or reviewer that runs there can see it"
   },
   "channel": {
     "maintainer": "the framework's maintainer, reading or running it",
     "gate": "a gate in this repo caught it, on a real tree rather than a fixture",
-    "claude": "an agent found it while doing something else, usually by running it"
+    "claude": "an agent found it while doing something else, usually by running it",
+    "test": "a test caught it -- and the entries that use this are worth reading together, because a test finding a defect it was not written for is the strongest evidence the test earned its place"
   },
   "gate": {
     "yes": "an existing gate would have failed on this",

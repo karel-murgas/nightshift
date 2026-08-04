@@ -501,7 +501,7 @@ marker for the same purpose.
 | `[project]` | `name=''`, `source_dirs=()`, `extra_source_dirs=()`, `tooling_dirs=()`, `doc_files=('CLAUDE.md',)` | What the code under test is called and where it lives. |
 | `[tests]` | `dir='tests'`, `parallel=True` | `dir` is where pytest is pointed. |
 | `[branches]` | `integration=None`, `stable='main'`, `forbidden_extra=()` | `integration` has no default on purpose (module docstring). |
-| `[board]` | `root='Board'` | Lane names are framework config, not project facts (D5), so they are not here — only where the board lives. |
+| `[board]` | `root='Board'` | Lane names are framework config, not project facts (D5), so they are not here — only where the board lives, and who signs a decision on it. |
 | `[worker]` | `harvest_dirs=()`, `fence_env=''`, `integration_checkout_dir=''` | The three constants that were the entire project-specific content of `runner.py`'s 3,597 lines. |
 | `[memory]` | `orientation=()`, `budget_bytes=None`, `freshness=()` | `budget_bytes = None` means **the orientation-budget gate does not run**, and that is the recommended starting value. |
 | `[layering]` | `forbid = [{importer, imports, exempt}]` | `importer` must not import `imports`. |

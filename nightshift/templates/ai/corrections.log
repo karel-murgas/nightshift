@@ -6,7 +6,10 @@
 # SLUG     short kebab-case handle; reuse one only for a literally recurring problem
 # CLASS    from .ai/gates/data/corrections_vocab.json -- which ships EMPTY, so the
 #          first entry you write also adds its class to that file
-# CHANNEL  who found it: karel-style maintainer name, claude, gate, test, audit, none
+# CHANNEL  who found it -- your own handle or `maintainer`, claude, gate, test,
+#          audit, none. Same rule as CLASS: the vocabulary ships empty and a value
+#          arrives with the first entry that uses it, so pick the words you will
+#          still recognise in fifty entries' time
 # GATE     yes | yes-now | no-judgment | no-gap | n/a
 # NOTE     >=40 chars, and length is not the point. Three things earn the entry:
 #          what was wrong concretely, WHY IT WAS BELIEVED, and what generalises.

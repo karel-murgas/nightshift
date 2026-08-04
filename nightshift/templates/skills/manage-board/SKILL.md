@@ -90,8 +90,18 @@ bookkeeping can quietly corrupt the board, so:
 1. **Match each reply to its card.** If a reply is ambiguous between two cards, **ask** —
    do not guess. Park-over-invent applies to bookkeeping exactly as to implementation.
 2. **Write the answer verbatim into that card's `## Thread`**, dated and attributed
-   (`### <date> · karel`). The worker reads your record at 3 AM; a lossy paraphrase is how
-   "pick 3 EP" becomes "around 3, tune to taste."
+   (`### <date> · {{decision_attributor}}`). The worker reads your record at 3 AM; a lossy
+   paraphrase is how "pick 3 EP" becomes "around 3, tune to taste."
+
+   **The handle is not decoration.** `digest` matches `[board].decision_attributor` from
+   `.ai/manifest.toml` literally, to spot a card that was answered but never moved out of
+   `needs-decision/` — it cannot tell your answer from an agent's own `### <date> · triage`
+   note any other way, which is why the token is declared rather than guessed.
+
+   So the two have to agree, in both directions: sign with a different handle and the nudge
+   goes quiet, and **if that key is absent from the manifest the nudge is off entirely** —
+   `init` only writes it when you confirm it, and silence there is a real answer, not a
+   default. Add the key to switch it on.
 3. **Re-triage the card — do not mechanically promote it.** An answer is not automatically
    a ticket to `tasks/`. Getting the answer can *open* a question that could not be asked
    until now, or reshape the card. So after recording it, judge the card as triage would:

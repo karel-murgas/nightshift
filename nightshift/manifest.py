@@ -133,8 +133,30 @@ class Branches:
 @dataclass(frozen=True)
 class Board:
     """Lane names are framework config, not project facts (D5), so they are not
-    here — only where the board lives."""
+    here — only where the board lives, and who signs a decision on it."""
     root: str = "Board"
+
+    #: The attributor token that means "the maintainer decided this", as it appears
+    #: after the `·` in a `## Thread` heading: `### 2026-08-04 · karel`.
+    #:
+    #: Declared rather than guessed, and this is not a style preference. The digest
+    #: uses it to spot a card that was answered but never moved out of
+    #: `needs-decision/`, and the token is the ONLY thing separating that from an
+    #: agent's own note — counted over the origin project's 62-entry board corpus
+    #: on 2026-08-04, the bare single-token attributors are `karel` (24), `triage`
+    #: (10), `code-thread` and `claude`. A "single bare word" rule would read every
+    #: one of those as a human answer, so the shape cannot carry the meaning; the
+    #: name has to.
+    #:
+    #: Nor can it be derived from git: `user.name` is `Firstname Lastname`, while
+    #: the convention this matches is a lowercase handle, and the two agree in no
+    #: repo by accident.
+    #:
+    #: **Empty disables the advisory** — absence is meaningful, not a default. A
+    #: project that never adopted the `·` convention gets no nudge, which is
+    #: honest; a guessed token would get a permanent silent no-op instead, which
+    #: reports a check that never ran.
+    decision_attributor: str = ""
 
 
 @dataclass(frozen=True)
@@ -570,7 +592,8 @@ def parse(data: dict, root: Path) -> Manifest:
             forbidden_extra=_as_str_tuple(branches_t.get("forbidden_extra", []),
                                           "branches.forbidden_extra"),
         ),
-        board=Board(root=str(board_t.get("root", "Board"))),
+        board=Board(root=str(board_t.get("root", "Board")),
+                    decision_attributor=str(board_t.get("decision_attributor", ""))),
         worker=Worker(
             harvest_dirs=_as_str_tuple(worker_t.get("harvest_dirs", []), "worker.harvest_dirs"),
             fence_env=str(worker_t.get("fence_env", "")),

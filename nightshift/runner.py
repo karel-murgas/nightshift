@@ -1236,9 +1236,9 @@ def sweep_terminal_cards(root: Path) -> list[str]:
 # --------------------------------------------------------------------------
 
 _PROMPT = """\
-Execute one card from the Dungeoneer board, at **tier: {tier}** (resolved to model \
-`{model}` from 00_architecture.md §16 — this is the tier the card declares, and running \
-above it is a defect, not a favour).
+Execute one card from this project's board, at **tier: {tier}** (resolved to model \
+`{model}` — this is the tier the card declares, and running above it is a defect, not a \
+favour).
 
 Your working directory is a git worktree on branch `{branch}`, checked out from `{base}`.
 Do all code work here. **Commit your work on this branch.** Do not merge, do not push, \
@@ -1268,13 +1268,15 @@ When you are finished, write your outcome to:
 as JSON, exactly these keys:
   {{"outcome": "done" | "parked", "summary": "<2-4 short lines>"}}
 `summary` is written verbatim onto the card as its `## Summary` section — the first thing \
-Karel reads at `testing/`, before the verbose `## Thread` prose if you wrote one. Make it \
-concrete: what changed, what you tested, gate/test status — not "implemented the card".
-Use `"parked"` when the card cannot be finished without an answer from Karel — that is a \
-**success state** (00_architecture.md §13), not a failure, and it requires a `## Question` \
-section on the card carrying what you attempted, what is ambiguous, the candidate answers \
-and what each would imply. Guessing at an ambiguity is the worst possible overnight \
-outcome; parking is better than inventing.
+the maintainer reads at `testing/`, before the verbose `## Thread` prose if you wrote one. \
+Make it concrete: what changed, what you tested, gate/test status — not "implemented the \
+card".
+Use `"parked"` when the card cannot be finished without an answer from the maintainer. \
+**Parking is a success state, not a failure**, and it requires a `## Question` section on \
+the card carrying what you attempted, what is ambiguous, the candidate answers and what \
+each would imply — a question they can answer in fifteen seconds without opening the repo. \
+Guessing at an ambiguity is the worst possible overnight outcome; parking is better than \
+inventing.
 
 The runner will run `nightshift.gates.run` and the test slice your change touches over your \
 branch (in parallel, judged by its JUnit report). Do not \
@@ -1342,7 +1344,7 @@ Change **one thing** this round, and do not repeat a change from that list.
 
 _CHECKER_PROMPT = """\
 Judge the artefacts below against the acceptance criteria, at **tier: {tier}** (resolved to \
-model `{model}` from 00_architecture.md §16).
+model `{model}`).
 
 The artefacts are in:
   {artefacts}
@@ -1376,7 +1378,7 @@ whoever picks this up wants a ranking, not a tie.
 # was made (§16). The verdict is a two-way ROUTING decision, not a quality score.
 _REVIEW_PROMPT = """\
 Review the finished diff below against the card's acceptance criteria and the surrounding \
-code, at **tier: lead** (resolved to model `{model}` from 00_architecture.md §16).
+code, at **tier: lead** (resolved to model `{model}`).
 
 The change is on branch `{branch}`. Its diff against the integration branch — what this \
 branch added since it forked — is in:
@@ -1388,29 +1390,30 @@ does what the card asked and touched nothing it should not have.
 
 You are **not** told how this was made, and you must not go looking: no worker prompt, no \
 transcript, no reasoning. The gates and the full test suite have **already passed** on this \
-exact branch — do not re-check parity, imports, help-catalog overflow, asset hygiene or that \
-the tests pass. Spend your attention only on what no script can see.
+exact branch — do not re-check anything they cover, and run `python -m nightshift.gates.run` \
+once to see what that is rather than assuming, since the gate list is this project's and \
+grows as it earns rules. Spend your attention only on what no script can see.
 
 Your verdict is exactly two-way, and it is a routing decision:
-- `needs_decision` — merging this needs Karel's judgment first: an ambiguity in the card the \
-worker resolved by guessing, a design judgment call, a behaviour that may not be what he \
-wants, or a value/name/rule the card left open and the worker picked.
-- `ok` — nothing needs his judgment before it merges. This is the common case. `ok` does not \
-mean perfect; every `ok` card is still tested by Karel at testing/. Style you dislike or a \
-cleaner refactor you can imagine is not `needs_decision`.
+- `needs_decision` — merging this needs the maintainer's judgment first: an ambiguity in the \
+card the worker resolved by guessing, a design judgment call, a behaviour that may not be \
+what they want, or a value/name/rule the card left open and the worker picked.
+- `ok` — nothing needs their judgment before it merges. This is the common case. `ok` does \
+not mean perfect; every `ok` card is still tested by the maintainer at testing/. Style you \
+dislike or a cleaner refactor you can imagine is not `needs_decision`.
 
 Write your verdict to:
   {verdict_path}
 as JSON, exactly these keys:
   {{"verdict": "ok" | "needs_decision",
     "question": "<if needs_decision: what was attempted, what is ambiguous, the candidate \
-answers, and what each would imply — the four parts of a well-formed question (§13). Empty \
-string if ok.>",
+answers, and what each would imply — those four parts are what makes the question \
+answerable. Empty string if ok.>",
     "notes": "<one or two sentences of reasoning the runner can log>"}}
 
-On `needs_decision` the `question` is put in front of Karel verbatim, with no human in \
-between, so it must stand alone and be answerable in fifteen seconds. You never edit, fix \
-or merge — you report, the runner routes.
+On `needs_decision` the `question` is put in front of the maintainer verbatim, with no human \
+in between, so it must stand alone and be answerable in fifteen seconds from a phone. You \
+never edit, fix or merge — you report, the runner routes.
 
 --- acceptance criteria, verbatim from the card ---
 {criteria}
@@ -1821,9 +1824,9 @@ def run_reviewer(root: Path, card: board.Card, out_dir: Path, model: str, base: 
 
 
 _STALE_PROMPT = """\
-Check exactly ONE document for staleness, at **tier: worker** (resolved to model `{model}` \
-from 00_architecture.md §16). Follow your charter: quote-or-drop, cite a real `file:line`, \
-never edit, `unverifiable` is a success.
+Check exactly ONE document for staleness, at **tier: worker** (resolved to model `{model}`). \
+Follow your charter: quote-or-drop, cite a real `file:line`, never edit, `unverifiable` is a \
+success.
 
 The document:
   {doc}
@@ -3484,7 +3487,7 @@ def run(root: Path, args: argparse.Namespace) -> int:
         elif on_base:
             work = ctrl
             _log(f"note — the launch checkout is on `{base}`, so the runner is operating in "
-                 f"it directly. Move it to your own branch (e.g. `git switch -c karel/work`) "
+                 f"it directly. Move it to your own branch (e.g. `git switch -c my/work`) "
                  f"to keep coding during a run — the runner will then use a dedicated `{base}` "
                  f"checkout and leave your working copy alone (runner-hardening #3).")
         else:
@@ -3866,9 +3869,9 @@ def _parser(root: Path | None = None) -> argparse.ArgumentParser:
                              "so the next run's digest still reaches back to the last one "
                              "written *without* this flag — for a stretch of runs (a "
                              "scheduled weekend) nobody is there to read each one. "
-                             "night.py's unattended path defaults to this; a run Karel "
-                             "starts by hand defaults to the opposite (baseline advances) "
-                             "on the assumption he is about to look")
+                             "night.py's unattended path defaults to this; a run started "
+                             "by hand defaults to the opposite (baseline advances) on the "
+                             "assumption someone is about to look")
     return parser
 
 

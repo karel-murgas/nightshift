@@ -6,8 +6,9 @@ module is the policy on top of them:
 
   * every extracted path must exist on disk;
   * every extracted backticked symbol must appear in the source tree, either
-    as an AST definition or as a token/string-literal somewhere under
-    `dungeoneer/` or `tests/`;
+    as an AST definition or as a token/string-literal somewhere under the
+    project's declared source roots (`doc_scan.source_roots`, read from
+    `[project]` in the manifest — never a hardcoded package name);
   * a doc whose dangling ratio exceeds `_ORPHAN_RATIO` is reported as ONE
     orphan-candidate line instead of N violations (§3.3, S3) — the whole point
     being that "this file has no live referent" is one decision, not eleven.
