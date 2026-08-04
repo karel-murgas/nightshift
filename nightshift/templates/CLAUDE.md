@@ -74,7 +74,9 @@ Turning a logged correction into a gate is the third step of the loop and the on
 goes wrong quietly: `.ai/recipes/turn-a-correction-into-a-gate.md` is the spine, with the
 four failure modes it exists to prevent. Its companion,
 `.ai/recipes/verify-before-shipping-a-rule.md`, covers the case where the thing you are
-shipping is a rule rather than a check.
+shipping is a rule rather than a check. A third,
+`.ai/recipes/write-a-test-that-earns-its-place.md`, is about the tests the preflight
+receipt, the push guard and the runner all assume and none of them can inspect.
 
 When a gate is wrong, appeal it rather than deleting it — a `# gate-ok(<gate>): <reason>`
 marker, which `gate_appeals` validates and counts. An appeal leaves a record where a

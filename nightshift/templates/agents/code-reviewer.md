@@ -65,16 +65,26 @@ pipeline, no worker verdict.
 ## What the gates and tests already proved — do not re-check them
 
 `python -m nightshift.gates.run` and the full `pytest` suite have **already passed** on this exact
-branch — that is a precondition of your being run at all (§11). So do not spend attention
-re-verifying:
+branch — you are only run after they do. So do not spend attention re-verifying anything
+those cover, and **run the gate suite once to see what that is** rather than assuming: the
+list is this project's, it grows as this project earns rules, and a checker guessing at it
+will either re-do work or skip something nobody checked.
 
-- i18n key parity across en/cs/es, untranslated leftovers, hardcoded strings;
-- import layering (game logic not importing `rendering/`);
-- the help-catalog overflow budget, animation-speed guard, asset hygiene;
-- that the tests pass, or that the code runs.
+Nor: that the tests pass, or that the code runs.
+
+To show the *kind* of thing a mature gate suite takes off your plate — these are from the
+project this framework was extracted from, a game, and are examples rather than a
+checklist for yours:
+
+- i18n key parity across three languages, untranslated leftovers, hardcoded strings;
+- import layering — game logic not importing the rendering package;
+- a help-catalog overflow budget, an animation-speed guard, asset hygiene.
+
+None of those is likely to exist here. The point is that each is a *rule that repo wrote
+down and then mechanised*, and that once mechanised it is no longer a reviewer's problem.
 
 A checker spending attention on what a script proved is the waste this seam exists to
-remove (§12, §16). Spend your attention on what no gate can see:
+remove. Spend your attention on what no gate can see:
 
 - **Did the worker resolve an ambiguity by guessing?** The card's *Decisions locked* table
   and its criteria are the contract; a diff that quietly answers a question the card left

@@ -493,7 +493,8 @@ def test_a_second_init_does_not_append_a_second_block(tmp_path):
 # could only ever be `none`. Measured on a fresh install, 2026-08-03.
 
 
-SPINES = ("turn-a-correction-into-a-gate", "verify-before-shipping-a-rule")
+SPINES = ("turn-a-correction-into-a-gate", "verify-before-shipping-a-rule",
+          "write-a-test-that-earns-its-place")
 
 
 def test_init_creates_the_recipes_directory_with_every_shipped_spine(tmp_path):
@@ -507,7 +508,7 @@ def test_init_creates_the_recipes_directory_with_every_shipped_spine(tmp_path):
     shipped = {p.stem for p in (init.TEMPLATES / "ai" / "recipes").glob("*.md")}
     landed = {p.stem for p in (repo / AI_DIR / "recipes").glob("*.md")}
     assert landed == shipped
-    assert landed == set(SPINES), "the two spines this repo is allowed to ship"
+    assert landed == set(SPINES), "the spines this repo is allowed to ship"
 
 
 def test_a_fresh_install_can_write_a_card_that_names_a_real_recipe(tmp_path):
@@ -596,7 +597,7 @@ def test_the_gate_spine_lists_every_value_the_corrections_vocabulary_defines(tmp
 
 
 def test_the_shipped_spines_carry_no_trace_of_the_project_they_came_from(tmp_path):
-    """These two were ported out of the origin project, where every incident in them has
+    """Every one of these was ported out of the origin project, where each incident has
     a name, a repo and a person attached. The templates carry the origin project's
     *reasoning* and none of its *identity* — a spine that names somebody else's package
     reads as a file that was copied rather than written."""

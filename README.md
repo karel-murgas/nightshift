@@ -454,7 +454,7 @@ almost always one of a few recurring shapes rather than a new idea; read a
 shipped gate's own docstring before writing one, since the incident that
 earned it is usually the fastest way to see whether yours matches.
 
-<!-- stale-ok: the two recipe paths below are files in the repo being
+<!-- stale-ok: the three recipe paths below are files in the repo being
      configured, written there by `init` from `templates/ai/recipes/`. This
      package has no `.ai/recipes/` of its own — it consumes its own gates, not
      its own board. -->
@@ -463,12 +463,13 @@ mechanically catchable at all, and the four ways a new gate goes wrong (firing
 on the word rather than the claim, failing open, narrowing its own scope,
 being tested only against its author's examples) — ships as
 `.ai/recipes/turn-a-correction-into-a-gate.md`, written into the project by
-`init` alongside `.ai/recipes/verify-before-shipping-a-rule.md`. Those two are
-the only recipes that ship, because they are about writing rules rather than
-about any project's subject.
+`init` alongside `.ai/recipes/verify-before-shipping-a-rule.md` and
+`.ai/recipes/write-a-test-that-earns-its-place.md`. Those three are the only
+recipes that ship: two about writing rules, one about the tests every check
+here assumes, and none about any project's subject.
 <!-- /stale-ok -->
 
-Both are also the reason `recipe:` on a card is usable at all: `card_schema`
+They are also the reason `recipe:` on a card is usable at all: `card_schema`
 resolves the field against that directory, so before they shipped the only
 value that could pass validation was `none`.
 
@@ -545,7 +546,7 @@ one it did not finish.
 * **The gate suite as a value proposition.** A new repo starts with the
   generic gates above, an empty audit matrix and an empty corrections log.
   Rules get added the way this project's own were: by an observed failure,
-  never by import. The *method* does ship — the two recipes above — because
+  never by import. The *method* does ship — the three recipes above — because
   a loop whose third step is undocumented stops at the second one.
 * **Asset generation.** Any image, audio or other generation stack a project
   wires up is that project's own, in its own scope — nothing here assumes one

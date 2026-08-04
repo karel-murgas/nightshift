@@ -488,9 +488,13 @@ def build_plan(root: Path, *, integration: str | None,
     # could not exist, so the field could only ever be `none` — the third schema field
     # nothing could read (`schema-field-nothing-read`).
     #
-    # Only spines that are about *writing rules* ship. A recipe for a project's own
-    # subject matter is that project's, and copying one here would be the framework
-    # shipping an earned rule instead of the machinery for earning one.
+    # Only spines about the framework's own machinery ship: two about writing rules, and
+    # one about writing the tests that machinery rests on — `preflight` runs a slice and
+    # the push guard denies a push without the receipt, `suite` owns the invocation, the
+    # runner runs the suite in a worktree before a card may pass, and not one of them can
+    # ask whether passing meant anything. A recipe for a project's own subject matter is
+    # that project's, and copying one here would be the framework shipping an earned rule
+    # instead of the machinery for earning one.
     for spine in sorted((TEMPLATES / "ai" / "recipes").glob("*.md")):
         stage(f"{AI_DIR}/recipes/{spine.name}",
               render(spine.read_text(encoding="utf-8"), values))
