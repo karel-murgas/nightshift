@@ -1,11 +1,15 @@
-# An Obsidian Bases view of the board. Open this repo as a vault; this file gives
-# you a Kanban of the lanes plus two tables. Nothing reads it but Obsidian — the
-# board's state is the directory a card is in, never this file.
+# An Obsidian Bases view of the board: a Kanban of the lanes plus two tables.
+# Nothing reads it but Obsidian — the board's state is the directory a card is in,
+# never this file.
 #
-# `type: kanban` below is NOT a core Bases view type. It comes from the **Base
-# Board** community plugin; without it Obsidian says `Unknown view type: kanban`
-# and shows only the two tables. Bases (core, Obsidian 1.9+) is not enough on its
-# own — install Base Board from Settings → Community plugins → Browse.
+# THESE COMMENTS DO NOT SURVIVE. Bases rewrites this file whenever the vault opens
+# and its normalisation drops YAML comments, so everything below is gone from your
+# copy after the first launch. That is expected, it is not damage, and the diff it
+# produces should just be committed. Nothing here is load-bearing for that reason —
+# the durable copy of all of it is Board/README.md, which Obsidian does not touch.
+#
+# `type: kanban` needs the **Base Board** community plugin; the tables need
+# **Bases**, which is core. With only Bases you get `Unknown view type: kanban`.
 #
 # `{{board}}/ideas` is the maintainer's private lane and is filtered out, EXCEPT for a
 # note that has a `state:` — flagging one is how a note asks to leave the lane, and

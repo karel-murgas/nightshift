@@ -54,6 +54,12 @@ whole reason the skill exists.
   do not guess to fill the field.
 - **Never write code or touch `{{package}}/`** from this skill. Refining a card is planning;
   building it is a `code-thread` dispatch.
+- **Never treat an Obsidian rewrite as a finding.** Bases normalises `{{board}}.base` every
+  time the vault opens — reordered keys, and the comment header `init` wrote is gone.
+  That is expected. **Commit it along with whatever else you are committing**; do not
+  leave it uncommitted for {{maintainer}} to wonder about, do not report it as damage, and
+  do not try to restore the comments. `{{board}}/README.md` is the durable copy of what
+  they said, which is exactly why they are expendable.
 
 ## The operations
 

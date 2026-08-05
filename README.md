@@ -290,9 +290,18 @@ it reports by default, `--apply` performs, `--commit` commits.
 `init` writes `Board.base`, an Obsidian view of those lanes: a Kanban plus a
 Live and an Archive table. It needs **two** plugins and the split trips people
 up — *Bases* is core (Obsidian 1.9+) and renders the tables, while the Kanban
-view type comes from the **Base Board** community plugin. With only the first,
-Obsidian reports `Unknown view type: kanban`. Nothing in the framework reads
-that file, so this is purely so a human can see the board.
+view type comes from the **Base Board** community plugin. `init` enables both by
+appending to the two plugin lists under your vault's .obsidian directory, reading
+and writing back everything else you have in there; what it cannot do is
+download Base Board, so one trip through *Settings → Community plugins → Browse*
+finishes it. Until then Obsidian reports `Unknown view type: kanban`.
+
+Obsidian rewrites `Board.base` on every vault open and its normalisation drops
+YAML comments, so the header `init` puts there is gone after first launch. That
+is expected — commit the diff. The board's own README, which `init` also writes,
+is the durable copy.
+
+Nothing in the framework reads that file; it is purely so a human can see the board.
 
 ### Triage by hand
 

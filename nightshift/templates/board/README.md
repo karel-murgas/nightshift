@@ -23,15 +23,31 @@ three views of these directories:
 
 **Two plugins, and the Kanban needs the second one.** *Bases* is core (ships with Obsidian
 1.9+) and gives you the two tables. The Kanban view type is **not** core — it comes from
-the **Base Board** community plugin (Settings → Community plugins → Browse → *Base Board*).
+the **Base Board** community plugin.
+
+`nightshift init` switches both on for you, by *appending* to `.obsidian/core-plugins.json`
+and `.obsidian/community-plugins.json` — your themes, hotkeys and other plugins are read
+and written back untouched. What it cannot do is **fetch** Base Board: the id it enables
+names a directory only Obsidian's *Settings → Community plugins → Browse* can install. So
+one trip through Browse and the toggle is already flipped.
 
 If you see **`Unknown view type: kanban`** when you open `{{board}}.base`, that is exactly
-this: Bases is on, Base Board is not. Install and enable it and the column view appears;
-the Live and Archive tables render either way.
+this: Bases is on, Base Board is enabled but not downloaded. Install it and the column view
+appears; the Live and Archive tables render either way.
+
+If the repo was not yet an Obsidian vault when you installed, none of that happened — open
+it as a vault and re-run `nightshift init`, which will wire both.
 
 Neither is required for anything to *work* — nothing in the framework reads this file, so
 on an older Obsidian, or with no plugins at all, the board behaves identically and you
 read it as directories.
+
+**Obsidian rewrites `{{board}}.base`, and that is fine.** Bases normalises the file every
+time the vault opens, which reorders keys and drops the comment header `init` wrote into
+it. Nothing is lost — this README is the durable copy of what that header said, which is
+why the header itself says so. Treat the resulting diff as ordinary: **commit it with
+whatever else you are committing.** It is not damage, it does not need investigating, and
+a session that finds `{{board}}.base` modified should not stop to explain it.
 
 **The directory is the state, not the view.** Dragging a card in the Kanban rewrites its
 `state:` field, and the reconciler moves the file to match — see the mismatch table

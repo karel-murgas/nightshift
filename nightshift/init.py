@@ -345,6 +345,133 @@ def merge_hooks(existing: dict, fragment: dict) -> tuple[dict, int]:
     return merged, added
 
 
+# --- the Obsidian vault ------------------------------------------------------
+#
+# Writing `{{board}}.base` is not the same as being able to see it. The Kanban view
+# type comes from the **Base Board** community plugin and the tables from **Bases**,
+# a core one, and both are switched on in `.obsidian/` — so an install that produces
+# the view and not the toggles hands the operator `Unknown view type: kanban` and a
+# fifty-fifty guess about which of the two is missing (2026-08-04,
+# `kanban-needed-a-plugin-nobody-named`).
+#
+# **Merged, never written.** `.obsidian/` is the operator's, it long predates us in
+# any vault that has been opened once, and its files carry window layouts, themes,
+# hotkeys and every other plugin they run. So: read, add what is missing, keep the
+# rest verbatim.
+#
+# The asymmetry between the two files is deliberate and is the interesting part:
+#
+#   community-plugins.json  a flat list of *enabled* ids. An absent file means "none
+#                           enabled", so creating it with our one id adds and removes
+#                           nothing. Safe to create.
+#   core-plugins.json       a map of EVERY core plugin to a boolean. Obsidian writes
+#                           it in full on first launch. Creating a partial one is not
+#                           an append — it is a claim about plugins we never asked
+#                           about, and the failure mode is somebody's file explorer
+#                           silently turning off. Merged if present, never created.
+#
+# Enabling `base-board` does not *install* it: the id names a directory under
+# `.obsidian/plugins/` that only Obsidian's Browse can fetch. Doing it anyway is
+# still right — it means the plugin works the moment it is installed instead of
+# needing a second trip through settings — but it is reported honestly rather than
+# as "the board is ready".
+
+BASES_CORE_PLUGIN = "bases"
+BOARD_KANBAN_PLUGIN = "base-board"
+
+
+def merge_community_plugins(existing: list, plugin: str = BOARD_KANBAN_PLUGIN
+                            ) -> tuple[list, bool]:
+    """Append `plugin` to the enabled-community-plugins list. Returns (merged, added)."""
+    merged = [p for p in existing if isinstance(p, str)]
+    if plugin in merged:
+        return merged, False
+    return merged + [plugin], True
+
+
+def merge_core_plugins(existing: dict, plugin: str = BASES_CORE_PLUGIN
+                       ) -> tuple[dict, bool]:
+    """Switch `plugin` on in the core-plugin map, leaving every other key alone.
+
+    Only ever flips a `False`/missing key to `True`. There is no path here that
+    disables anything: this function's whole job is to add one capability to a file
+    describing a dozen the operator chose.
+    """
+    if existing.get(plugin) is True:
+        return dict(existing), False
+    return {**existing, plugin: True}, True
+
+
+def _plan_obsidian(plan: Plan, root: Path) -> None:
+    """Wire the two plugins the board view needs, if this repo is a vault."""
+    vault = root / ".obsidian"
+    if not vault.is_dir():
+        # Never created. An absent `.obsidian/` means the repo has not been opened in
+        # Obsidian, and manufacturing a vault for someone who may not use it — or may
+        # keep their vault rooted elsewhere — is deciding something that is theirs.
+        plan.notes.append(
+            "no .obsidian/ here, so the board view's plugins were not wired. Open the "
+            "repo as an Obsidian vault, then install Base Board (Settings → Community "
+            "plugins → Browse) and enable the core Bases plugin; or re-run `nightshift "
+            "init` afterwards and it will do both.")
+        return
+
+    community = vault / "community-plugins.json"
+    enabled: list = []
+    if community.is_file():
+        try:
+            loaded = json.loads(community.read_text(encoding="utf-8"))
+            enabled = loaded if isinstance(loaded, list) else []
+        except (OSError, json.JSONDecodeError) as exc:
+            plan.notes.append(
+                f".obsidian/community-plugins.json is unreadable ({exc}) — Base Board "
+                f"NOT enabled. Fix the file and re-run; rewriting it would take your "
+                f"other plugins with it.")
+            enabled = None  # type: ignore[assignment]
+    if enabled is not None:
+        merged_list, added = merge_community_plugins(enabled)
+        if added:
+            plan.writes[".obsidian/community-plugins.json"] = (
+                json.dumps(merged_list, indent=2) + "\n")
+            installed = (vault / "plugins" / BOARD_KANBAN_PLUGIN).is_dir()
+            plan.info.append(
+                f"{BOARD_KANBAN_PLUGIN} enabled in .obsidian/community-plugins.json"
+                + ("" if installed else
+                   " — but NOT installed: the plugin's code is not in .obsidian/plugins/, "
+                   "so fetch it from Settings → Community plugins → Browse and the Kanban "
+                   "appears. Until then Obsidian reports it as failed to load"))
+        else:
+            plan.kept.append(".obsidian/community-plugins.json")
+
+    core = vault / "core-plugins.json"
+    if core.is_file():
+        try:
+            loaded = json.loads(core.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            plan.notes.append(
+                f".obsidian/core-plugins.json is unreadable ({exc}) — the core Bases "
+                f"plugin was NOT enabled. Fix the file and re-run.")
+            return
+        if not isinstance(loaded, dict):
+            return
+        merged_map, added = merge_core_plugins(loaded)
+        if added:
+            plan.writes[".obsidian/core-plugins.json"] = (
+                json.dumps(merged_map, indent=2) + "\n")
+            plan.info.append("the core Bases plugin enabled in "
+                             ".obsidian/core-plugins.json (every other key untouched)")
+        else:
+            plan.kept.append(".obsidian/core-plugins.json")
+    else:
+        # Present vault, absent core map: Obsidian has not written one yet. Say so
+        # rather than inventing the file — see the module comment above.
+        plan.notes.append(
+            "no .obsidian/core-plugins.json yet, so the core Bases plugin was left "
+            "alone — writing a partial one would assert a state for every core plugin "
+            "you never chose. Obsidian writes it on launch; re-run `nightshift init` "
+            "after that, or enable Bases in Settings → Core plugins.")
+
+
 # --- planning ----------------------------------------------------------------
 
 
@@ -530,6 +657,7 @@ def build_plan(root: Path, *, integration: str | None,
     # a freshly installed repo in Obsidian and found no kanban.
     board_view = f"{board_root}.base"
     stage(board_view, render((TEMPLATES / "board.base").read_text(encoding="utf-8"), values))
+    _plan_obsidian(plan, root)
     if board_view in plan.kept:
         plan.notes.append(
             f"{board_view} already exists, so it was left alone. Check its "
@@ -720,7 +848,15 @@ def receipt_text(plan: Plan) -> str:
     nothing, and therefore an uninstall with nothing to remove.
     """
     settings = ".claude/settings.json"
-    created = {rel for rel in plan.writes if rel != settings}
+    # `.obsidian/` is excluded for the same reason as `settings.json`, one step
+    # further: those two files are merges into the operator's vault config, and
+    # unlike a hook entry there is nothing here worth taking back. A plugin toggle
+    # is not our artefact — by the time anyone uninstalls, "did nightshift enable
+    # Bases or did they" is unanswerable, and switching off a plugin somebody has
+    # been using for months to tidy up after ourselves is the worse error. So
+    # uninstall leaves the vault exactly as it found it.
+    created = {rel for rel in plan.writes
+               if rel != settings and not rel.startswith(".obsidian/")}
     appended = set(plan.appends)
     settings_created = settings in plan.writes and plan.settings_created
     try:

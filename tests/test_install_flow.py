@@ -638,7 +638,6 @@ def test_every_doc_that_offers_the_kanban_names_the_plugin_that_provides_it():
     """
     docs = {
         "board README": init.TEMPLATES / "board" / "README.md",
-        "the .base file": init.TEMPLATES / "board.base",
         "the install skill": init.TEMPLATES / "skills" / "install-nightshift" / "SKILL.md",
     }
     for label, path in docs.items():
@@ -646,6 +645,163 @@ def test_every_doc_that_offers_the_kanban_names_the_plugin_that_provides_it():
         assert "Base Board" in text, f"{label} offers the Kanban without naming Base Board"
         assert "Unknown view type: kanban" in text, (
             f"{label} does not name the error the operator actually sees")
+
+
+def test_the_base_file_is_not_counted_on_to_explain_itself():
+    """`board.base` carries the same explanation and is **not** in the list above, because
+    its comments do not reach the reader.
+
+    Bases rewrites the file every time the vault opens and its normalisation drops YAML
+    comments — measured 2026-08-04 in the origin project, whose live `Board.base` has 0
+    comment lines against this template's 12. So a test asserting the template explains
+    itself would be green while the delivered artifact explains nothing: the wrong
+    artifact verified.
+
+    The header is kept anyway (it is free, and true until first launch), and it now says
+    outright that it is expendable and names the durable copy — which is the only claim
+    worth pinning here.
+    """
+    text = (init.TEMPLATES / "board.base").read_text(encoding="utf-8")
+    assert "DO NOT SURVIVE" in text, "the header must warn that it is about to vanish"
+    assert "README.md" in text, "and name where the durable copy lives"
+
+
+# --- the Obsidian vault: merged, never overwritten -----------------------------
+
+
+def _vault(repo: Path, *, community=None, core=None, plugin_installed=False) -> Path:
+    vault = repo / ".obsidian"
+    vault.mkdir(parents=True, exist_ok=True)
+    if community is not None:
+        (vault / "community-plugins.json").write_text(
+            json.dumps(community, indent=2) + chr(10), encoding="utf-8")
+    if core is not None:
+        (vault / "core-plugins.json").write_text(
+            json.dumps(core, indent=2) + chr(10), encoding="utf-8")
+    if plugin_installed:
+        (vault / "plugins" / init.BOARD_KANBAN_PLUGIN).mkdir(parents=True)
+    return vault
+
+
+def test_the_kanban_plugin_is_appended_and_the_operators_plugins_survive(tmp_path):
+    """The whole ask, in one assertion: *"a user can already have Obsidian over the
+    folder, so we can't just overwrite, we need to append during install"* (the origin
+    project's maintainer, 2026-08-04)."""
+    repo = _repo(tmp_path)
+    _vault(repo, community=["dataview", "templater"])
+
+    plan = _install(repo)
+
+    written = json.loads(plan.writes[".obsidian/community-plugins.json"])
+    assert written == ["dataview", "templater", init.BOARD_KANBAN_PLUGIN]
+
+
+def test_enabling_it_twice_is_not_a_write_at_all(tmp_path):
+    """A second `init`, or a vault that already had it, must not churn the file."""
+    repo = _repo(tmp_path)
+    _vault(repo, community=[init.BOARD_KANBAN_PLUGIN])
+
+    plan = _install(repo)
+
+    assert ".obsidian/community-plugins.json" not in plan.writes
+    assert ".obsidian/community-plugins.json" in plan.kept
+
+
+def test_the_core_bases_plugin_is_switched_on_without_touching_the_others(tmp_path):
+    """`core-plugins.json` maps EVERY core plugin to a boolean, so a merge that is not
+    surgical here turns somebody's file explorer off."""
+    repo = _repo(tmp_path)
+    _vault(repo, core={"file-explorer": True, "graph": False, "bases": False})
+
+    plan = _install(repo)
+
+    written = json.loads(plan.writes[".obsidian/core-plugins.json"])
+    assert written == {"file-explorer": True, "graph": False, "bases": True}
+
+
+def test_a_core_plugin_map_is_never_invented(tmp_path):
+    """An absent `core-plugins.json` means Obsidian has not written one yet. Creating a
+    partial one is not an append — it asserts a state for every core plugin nobody asked
+    about — so it is refused, out loud."""
+    repo = _repo(tmp_path)
+    _vault(repo, community=[])
+
+    plan = _install(repo)
+
+    assert ".obsidian/core-plugins.json" not in plan.writes
+    assert any("core-plugins.json" in note for note in plan.notes), plan.notes
+
+
+def test_an_empty_community_list_is_safe_to_create(tmp_path):
+    """The asymmetry with `core-plugins.json`: this file is a list of what is ENABLED, so
+    an absent one means "none", and writing our single id adds without claiming anything
+    about plugins that are not named."""
+    repo = _repo(tmp_path)
+    _vault(repo)  # a vault, but no plugin files at all
+
+    plan = _install(repo)
+
+    assert json.loads(plan.writes[".obsidian/community-plugins.json"]) == [
+        init.BOARD_KANBAN_PLUGIN]
+
+
+def test_enabled_but_not_installed_is_reported_as_such(tmp_path):
+    """Enabling an id whose code is absent is still worth doing — it works the moment
+    they fetch it — but calling that "the board is ready" would be the lie."""
+    repo = _repo(tmp_path)
+    _vault(repo, community=[])
+
+    plan = _install(repo)
+
+    line = next(i for i in plan.info if init.BOARD_KANBAN_PLUGIN in i)
+    assert "NOT installed" in line and "Browse" in line
+
+
+def test_an_installed_plugin_is_enabled_without_the_scolding(tmp_path):
+    repo = _repo(tmp_path)
+    _vault(repo, community=[], plugin_installed=True)
+
+    plan = _install(repo)
+
+    line = next(i for i in plan.info if init.BOARD_KANBAN_PLUGIN in i)
+    assert "NOT installed" not in line
+
+
+def test_no_vault_means_no_vault_files_and_one_note(tmp_path):
+    """Manufacturing `.obsidian/` for someone who may keep their vault elsewhere — or may
+    not use Obsidian — is deciding something that is theirs."""
+    repo = _repo(tmp_path)
+
+    plan = _install(repo)
+
+    assert not [rel for rel in plan.writes if rel.startswith(".obsidian/")]
+    assert any(".obsidian/" in note for note in plan.notes), plan.notes
+
+
+def test_unreadable_vault_config_is_never_rewritten(tmp_path):
+    """Same rule as `settings.json`: overwriting a file we cannot parse would take the
+    operator's other plugins with it."""
+    repo = _repo(tmp_path)
+    vault = _vault(repo)
+    (vault / "community-plugins.json").write_text("{not json", encoding="utf-8")
+
+    plan = _install(repo)
+
+    assert ".obsidian/community-plugins.json" not in plan.writes
+    assert any("unreadable" in note for note in plan.notes), plan.notes
+
+
+def test_uninstall_never_touches_the_vault(tmp_path):
+    """By the time anyone uninstalls, "did nightshift enable Bases or did they" is
+    unanswerable — and switching off a plugin somebody has used for months to tidy up
+    after ourselves is the worse error. So the receipt does not claim these."""
+    repo = _repo(tmp_path)
+    _vault(repo, community=["dataview"], core={"bases": False})
+
+    plan = _install(repo)
+    receipt = json.loads(init.receipt_text(plan))
+
+    assert not [rel for rel in receipt["created"] if rel.startswith(".obsidian/")]
 
 
 # --- taking a block back out ---------------------------------------------------
