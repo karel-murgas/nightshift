@@ -804,6 +804,55 @@ def test_uninstall_never_touches_the_vault(tmp_path):
     assert not [rel for rel in receipt["created"] if rel.startswith(".obsidian/")]
 
 
+def test_obsidian_window_state_is_gitignored_but_the_plugin_config_is_not():
+    """The volatile files only, never `.obsidian/` wholesale.
+
+    `workspace.json` records which panes are open and where each is scrolled, and is
+    rewritten on nearly every interaction — so a tracked one is dirty again seconds
+    after you commit it, and the runner refuses to dispatch on a dirty tree. Reported
+    from a real install on 2026-08-04, three times in one day: opening the board to
+    read it is what stopped the board being worked.
+
+    The other half matters just as much. `init` writes community-plugins.json and
+    core-plugins.json precisely so a second machine does not redo the plugin setup by
+    hand; ignoring the whole directory would throw that away to fix the noisy file.
+    """
+    ignored = (init.TEMPLATES / "gitignore").read_text(encoding="utf-8")
+    lines = {line.strip() for line in ignored.splitlines()
+             if line.strip() and not line.strip().startswith("#")}
+
+    assert ".obsidian/workspace.json" in lines
+    assert ".obsidian/workspace-mobile.json" in lines
+    assert ".obsidian/" not in lines, "the plugin config must stay committable"
+    assert not any(l.startswith(".obsidian/") and "plugins" in l for l in lines)
+
+
+def test_a_tracked_workspace_file_is_reported_with_the_command_to_untrack_it(tmp_path):
+    """A `.gitignore` rule cannot untrack what is already tracked, and this is the
+    file a project most likely committed before that rule shipped — `init` itself
+    says `git add -A`, and it writes into `.obsidian/`, so the sweep was ours."""
+    repo = _repo(tmp_path)
+    _vault(repo, community=[])
+    (repo / ".obsidian" / "workspace.json").write_text("{}", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "swept the vault in")
+
+    plan = _install(repo)
+
+    note = next(n for n in plan.notes if "workspace.json" in n)
+    assert "git rm --cached" in note
+
+
+def test_a_repo_that_never_tracked_it_is_not_nagged(tmp_path):
+    repo = _repo(tmp_path)
+    _vault(repo, community=[])
+    (repo / ".obsidian" / "workspace.json").write_text("{}", encoding="utf-8")
+
+    plan = _install(repo)
+
+    assert not [n for n in plan.notes if "workspace.json" in n]
+
+
 # --- taking a block back out ---------------------------------------------------
 
 

@@ -250,14 +250,22 @@ def render(text: str, values: dict[str, str]) -> str:
     return text
 
 
-def _git_user(root: Path) -> str:
+def _git_out(root: Path, *args: str) -> str:
+    """git stdout, stripped — or `""` if git could not answer.
+
+    Never raises: `init` runs in repos that are half set up, and a discovery step
+    that dies on a missing git is a step nobody can run where it is most needed.
+    """
     try:
-        done = subprocess.run(["git", "-C", str(root), "config", "user.name"],
-                              capture_output=True, text=True,
-                              encoding="utf-8", errors="replace")
+        done = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                              text=True, encoding="utf-8", errors="replace")
     except (OSError, subprocess.SubprocessError):
-        return "the maintainer"
-    return done.stdout.strip() or "the maintainer"
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def _git_user(root: Path) -> str:
+    return _git_out(root, "config", "user.name") or "the maintainer"
 
 
 # --- the manifest ------------------------------------------------------------
@@ -415,6 +423,22 @@ def _plan_obsidian(plan: Plan, root: Path) -> None:
             "plugins → Browse) and enable the core Bases plugin; or re-run `nightshift "
             "init` afterwards and it will do both.")
         return
+
+    # A `workspace.json` that is already tracked cannot be fixed by a `.gitignore`
+    # rule, and it is the file that quietly stops a project dead: Obsidian rewrites
+    # it on nearly every interaction, so the tree is dirty again seconds after any
+    # commit. The runner now skips `.obsidian/` when judging dirtiness, so this is
+    # no longer blocking — but a file that changes every time you look at the board
+    # is noise in every diff forever, and untracking it is two commands.
+    tracked = _git_out(root, "ls-files", "--", ".obsidian/workspace.json",
+                       ".obsidian/workspace-mobile.json")
+    if tracked:
+        names = " ".join(tracked.split())
+        plan.notes.append(
+            f"{names} is tracked by git. Obsidian rewrites it whenever you open a "
+            f"pane or scroll, so it will show as modified in every diff from now on. "
+            f"Untrack it and keep the file: `git rm --cached {names}` then commit — "
+            f"the .gitignore entry init writes stops it coming back.")
 
     community = vault / "community-plugins.json"
     enabled: list = []

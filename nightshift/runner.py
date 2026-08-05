@@ -491,6 +491,20 @@ def dirty_outside_board(root: Path) -> list[str]:
         path = line[3:].strip().strip('"')
         if path.startswith("Board/") or path == "Digest.md":
             continue
+        if path.startswith(".obsidian/"):
+            # The editor's own state, and the same phenomenon as the `Board/`
+            # exemption one directory over: somebody looking at the board while a
+            # session runs. `workspace.json` in particular is rewritten on nearly
+            # every interaction, so a repo that committed it once is dirty forever
+            # and can never dispatch again — reported from a real install,
+            # 2026-08-04, three times in one day.
+            #
+            # Safe to skip because the reason for refusing does not apply: this is
+            # never "a half-finished change means HEAD is not what you left". No
+            # worktree, gate, test or card reads a byte of it. `templates/gitignore`
+            # keeps the volatile files out of git in the first place; this is what
+            # rescues a repo that tracked one before that shipped.
+            continue
         dirty.append(path)
     return dirty
 

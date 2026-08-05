@@ -17,3 +17,16 @@
 
 # The stop file. Its presence halts the runner, so it must never arrive by pull.
 .ai/STOP
+
+# Obsidian's window state: which panes are open, which tab is active, where each
+# one is scrolled. Rewritten on almost every interaction, including just looking at
+# the board -- so a tracked one is dirty again seconds after you commit it, and the
+# runner refuses to dispatch on a dirty tree. That is the whole failure: opening the
+# board to read it is what stops the board being worked.
+#
+# Deliberately NOT `.obsidian/` wholesale. `init` writes community-plugins.json and
+# core-plugins.json, and those are real shared config -- ignoring the directory would
+# mean every machine re-does the plugin setup by hand, which is the thing wiring them
+# was for. Only the volatile files are named.
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
