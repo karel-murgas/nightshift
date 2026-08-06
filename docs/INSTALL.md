@@ -34,8 +34,10 @@ Two questions, and only two. Everything else it answers itself with the recommen
 default.
 
 1. **The integration branch** — the branch feature work is cut from and merged back
-   into. Never guessed: in the origin project `dev` is *stable* and is a forbidden base,
-   which no heuristic would get right.
+   into. Never guessed, and the origin project is the proof: its integration branch has
+   been `dev`, then `development_team`, and is now `test` — while `dev` itself became a
+   *forbidden* base, so the branch whose name looks most like the answer is the one that
+   would break the runner.
 2. **`permission_mode`** — what a dispatched worker may do on this machine. `default` is
    safe and cannot run Bash; `bypassPermissions` is what a code card actually needs and
    is the whole machine, not a sandbox.
