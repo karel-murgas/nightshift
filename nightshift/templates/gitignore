@@ -1,6 +1,7 @@
-# nightshift's runtime output. Everything else it writes is committed on purpose —
-# the manifest, the gates, the board, the corrections log and the install receipt are
-# all properties of the repo. These four are not.
+# Generated files, of two kinds: Python's own bytecode cache, and nightshift's runtime
+# output. Everything else nightshift writes is committed on purpose — the manifest, the
+# gates, the board, the corrections log and the install receipt are all properties of
+# the repo. What is listed below is not.
 #
 # Comments live on their own line: a `#` after a pattern is part of the pattern.
 
