@@ -83,7 +83,19 @@ _AUTHOR_FIELDS: tuple[str, ...] = (
     "unattended",
     "created",
 )
-_OPTIONAL_FIELDS = frozenset({"requires", "checker"})
+_OPTIONAL_FIELDS = frozenset({"requires", "checker", "verify"})
+
+# How a finished card gets verified, and therefore where a `reviewed` verdict
+# lands it. Author-owned like `tier:`, decided at triage, consumed by `settle()`
+# — never inferred from a diff at the end.
+#
+#   play    a player-visible surface; Karel must see it run  → testing/
+#   review  nothing he can exercise; the reviewer's `ok` is the acceptance → done/
+#
+# Absent means `play` at every read site: the default has to fall toward his
+# desk, because a card reaching `done/` because somebody forgot a field is the
+# one direction nothing recovers from.
+_VERIFY = frozenset({"play", "review"})
 _RUNNER_FIELDS = frozenset({"attempts", "branch", "started", "finished"})
 # Written by Base Board when a card is dragged within a column, never by us.
 # It has to be allowed or the first reorder turns the whole board red, and a
@@ -101,10 +113,18 @@ _TAG = re.compile(r"^[a-z][a-z0-9-]*$")
 
 
 def _tags(fields: dict[str, str]) -> list[str]:
-    """The `tags` value as a list. Inline form only (`tags: [a, b]`), because
-    `_frontmatter` is a flat one-line-per-key parser and a YAML block list would
-    read as an empty value — silently tagging nothing. Returning [] for the empty
-    and absent cases keeps every caller a plain membership test."""
+    """The `tags` value as a list, in either YAML form.
+
+    It was inline-only until 2026-08-06, and its own docstring conceded the
+    consequence — *"a YAML block list would read as an empty value, silently
+    tagging nothing"*. That is not a parser limitation, it is every tag-keyed
+    rule silently disabled on the form **Obsidian writes by default**, with the
+    gate reporting green: `nightshift-worktrees-never-ignore-pycache` sat in
+    `tasks/` with a block-form `nightshift` tag and the unattended flag true,
+    dispatchable, 35 gates clean (`tag-parser-blind-to-block-form`). The block
+    form is now flattened by `_frontmatter` before it gets here, so this stays
+    one parse of one string. Returning [] for the empty and absent cases keeps
+    every caller a plain membership test."""
     raw = fields.get("tags", "").strip()
     if not raw:
         return []
@@ -119,23 +139,48 @@ _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _SECTION = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)
 
 
+_BLOCK_ITEM = re.compile(r"^\s+-\s*(.+?)\s*$")
+
+
 def _frontmatter(text: str) -> tuple[dict[str, str], dict[str, int]]:
     """Flat `key: value` frontmatter. Values are kept as raw strings — the
     schema has no nested fields and pulling in a YAML dependency for a gate
     that must stay fast and importable in isolation is not worth it.
+
+    **One nested shape is folded flat rather than ignored**: a key with an empty
+    value followed by indented `- item` lines (YAML's block list) becomes the
+    inline `[a, b]` string, so every reader downstream keeps its one-line parse.
+    Ignoring it was not neutral — `tags:` is written that way by Obsidian, and
+    an unparsed value reads as *absent*, which silently disabled every rule
+    keyed on tags while the gate stayed green (`tag-parser-blind-to-block-form`).
+    A parser that cannot see an input form does not report on it; it approves it.
     """
     fields: dict[str, str] = {}
     lines: dict[str, int] = {}
+    block: list[str] = []
+    key = ""
     if not text.startswith("---"):
         return fields, lines
+
+    def flush() -> None:
+        if key and block:
+            fields[key] = "[" + ", ".join(block) + "]"
+
     for number, line in enumerate(text.splitlines()[1:], start=2):
         if line.strip() == "---":
             break
+        item = _BLOCK_ITEM.match(line)
+        if item and key and not fields.get(key):
+            block.append(item.group(1).strip('"').strip("'"))
+            continue
         match = re.match(r"^([A-Za-z_][\w-]*):\s*(.*)$", line)
         if match:
+            flush()
             key, value = match.group(1), match.group(2).strip()
+            block = []
             fields[key] = value.strip('"').strip("'")
             lines[key] = number
+    flush()
     return fields, lines
 
 
@@ -225,6 +270,18 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
         bad("tier", f"`tier: {fields['tier']}` — must be one of {sorted(_TIERS)}; the dispatcher resolves the tier to a model and never guesses one")
     if "unattended" in fields and fields["unattended"].lower() not in _BOOLS:
         bad("unattended", f"`unattended: {fields['unattended']}` — must be true or false")
+    if "verify" in fields and fields["verify"] not in _VERIFY:
+        bad("verify", f"`verify: {fields['verify']}` — must be one of {sorted(_VERIFY)}; "
+                      f"`settle()` reads it to decide whether a finished card lands in "
+                      f"testing/ for you to play or in done/")
+    # Required in `tasks/` only — the lane where a decision is still ahead of the
+    # card. Requiring it everywhere would redden every archived card for a field
+    # that did not exist when they were written, which is the retroactive-schema
+    # shape `_DISPATCHED` already exists to avoid.
+    if lane == "tasks" and "verify" not in fields:
+        bad("verify", "missing `verify:` — a dispatchable card must declare whether it "
+                      "ends on your desk (`play`) or the reviewer's `ok` is the acceptance "
+                      "(`review`). When unsure, `play`")
     tags = _tags(fields)
     for tag in tags:
         if not _TAG.match(tag):
@@ -308,6 +365,27 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
                 "card_schema: missing `## Approach` — a `tasks/` code card must state the "
                 "core of how the change works in one paragraph (or `## Subject` for an "
                 "art/audio card); it is what the digest shows the maintainer",
+            )
+        )
+
+    # A `verify: play` card in `testing/` is a claim on Karel's time, so it has to
+    # say what to do with it. Checked in `testing/` and not in `tasks/`, because at
+    # triage nobody can write "start a run, take a shotgun, pick up a second one" —
+    # the work does not exist yet. The worker writes it; `settle()` lands it.
+    #
+    # Only a card that *declares* `play` is checked. Absent still means play at
+    # every read site, but not here: the sixteen cards already in `testing/` were
+    # written before the field existed, and reddening them would make the gate's
+    # first act a demand that history be rewritten.
+    if lane == "testing" and fields.get("verify") == "play" and not _has_section(
+            sections, "how to test"):
+        out.append(
+            Violation(
+                rel,
+                1,
+                "card_schema: a `verify: play` card in `testing/` must carry a "
+                "`## How to test` — the scenario in your terms (open the game, do X, "
+                "expect Y), written by the worker that finished it",
             )
         )
 

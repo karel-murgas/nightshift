@@ -1351,11 +1351,18 @@ based on whether the gates pass.
 When you are finished, write your outcome to:
   {verdict_path}
 as JSON, exactly these keys:
-  {{"outcome": "done" | "parked", "summary": "<2-4 short lines>"}}
+  {{"outcome": "done" | "parked", "summary": "<2-4 short lines>", \
+"how_to_test": "<a scenario, or "" >"}}
 `summary` is written verbatim onto the card as its `## Summary` section — the first thing \
 the maintainer reads at `testing/`, before the verbose `## Thread` prose if you wrote one. \
 Make it concrete: what changed, what you tested, gate/test status — not "implemented the \
 card".
+`how_to_test` is written onto the card as `## How to test`, and it is the **only** thing \
+telling the maintainer what to do with what you built. Write it as a scenario in their \
+terms — open the game, go here, do this, expect that — never as a description of the diff. \
+Name the door: which menu, which key, which enemy, what the screen should show. If the card \
+declares `verify: review` (no surface they can exercise), leave it empty — nobody has to \
+invent a scenario for a gate or a refactor, and inventing one is worse than none.
 Use `"parked"` when the card cannot be finished without an answer from the maintainer. \
 **Parking is a success state, not a failure**, and it requires a `## Question` section on \
 the card carrying what you attempted, what is ambiguous, the candidate answers and what \
@@ -1390,7 +1397,8 @@ Continue the card you were working on before this session was interrupted by a u
 Your worktree, your branch and your prior reasoning are intact — pick up exactly where you \
 left off. When finished, write the same verdict JSON to:
   {verdict_path}
-as before: {{"outcome": "done" | "parked", "summary": "<2-4 short lines>"}}. The runner \
+as before: {{"outcome": "done" | "parked", "summary": "<2-4 short lines>", \
+"how_to_test": "<a scenario in the maintainer's terms, or "" on a `verify: review` card>"}}. The runner \
 will run `nightshift.gates.run` and the full test suite over your branch; do not weaken either.
 """
 
@@ -1535,6 +1543,13 @@ class Dispatch:
     # block `settle` writes onto the card so the reason survives being read from
     # another machine, or after `prune_run_dir` has taken the attempt directory.
     evidence: str = ""
+    # The worker's scenario for Karel, written onto a `verify: play` card as
+    # `## How to test` when it merges. It rides from the worker's verdict through
+    # the review stage rather than being asked for at the end: only the worker
+    # that built the thing knows which door it is behind, and `## Summary` proved
+    # the shape — written deterministically by `settle()` from the verdict rather
+    # than left to agent discretion (menu-summary-on-card).
+    how_to_test: str = ""
 
 
 def _budget_argv(card_budget: float) -> list[str]:
@@ -2877,7 +2892,8 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
     made = f"{commits} commit(s) on {branch}" + (f", {rescued} artefact(s)" if rescued else "")
     if checked:
         made += f", {card.checker} passed it in {round_no} round(s)"
-    return Dispatch("review", str(verdict.get("summary", made))[:300], cost, round_no)
+    return Dispatch("review", str(verdict.get("summary", made))[:300], cost, round_no,
+                    how_to_test=str(verdict.get("how_to_test", "")).strip()[:1000])
 
 
 # --------------------------------------------------------------------------
@@ -3074,7 +3090,8 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
         # the card's fault — land it in review/ for a manual look rather than
         # spending the night's machinery re-deciding a card that is otherwise done.
         _log(f"    review hit a usage limit — leaving {card.id} in review/ for a manual look")
-        return Dispatch("review", result.detail, total, result.rounds)
+        return Dispatch("review", result.detail, total, result.rounds,
+                        how_to_test=result.how_to_test)
 
     called = str(verdict.get("verdict", "")).lower()
     _log(f"    {REVIEWER_AGENT}: {called or '(no verdict)'} — "
@@ -3088,10 +3105,11 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
                         total, result.rounds)
     if called == "ok":
         return Dispatch("reviewed", str(verdict.get("notes", "reviewed ok"))[:300],
-                        total, result.rounds)
+                        total, result.rounds, how_to_test=result.how_to_test)
     # No usable verdict — degrade to the old behaviour, a human review at review/.
     _log(f"    no usable review verdict for {card.id} — leaving it in review/")
-    return Dispatch("review", result.detail, total, result.rounds)
+    return Dispatch("review", result.detail, total, result.rounds,
+                    how_to_test=result.how_to_test)
 
 
 # --------------------------------------------------------------------------
@@ -3269,9 +3287,14 @@ def settle(root: Path, card_id: str, result: Dispatch) -> str:
         board.move(root, card, "needs-decision")
         return f"{card_id}: → needs-decision/ (parked)"
 
-    # The two outcomes the review stage produces (automate-review-step). Neither
-    # ever reaches done/: the only way there stays via testing/, where Karel looks
-    # — unchanged from before this stage existed.
+    # The two outcomes the review stage produces (automate-review-step). Where a
+    # `reviewed` one lands is the card's own declaration, `verify:` — `play` for a
+    # card with a surface Karel can exercise, `review` for one with none, where the
+    # reviewer's `ok` *is* the acceptance (unplayable-cards-still-land-in-testing).
+    # Until 2026-08-06 every finished card went to testing/ regardless, so eleven of
+    # the sixteen cards waiting there were waiting on a verification he had no way
+    # to perform, and the five he should actually play were buried among them.
+    # `needs_decision` still diverts to needs-decision/ from either value.
     if result.outcome == "needs_decision":
         card.write_section("Question", result.detail or
                            "The reviewer flagged this for your decision but recorded no "
@@ -3284,8 +3307,17 @@ def settle(root: Path, card_id: str, result: Dispatch) -> str:
         integration = default_base(root)
         merged, why = rebase_and_merge(root, card, branch, integration)
         if merged:
-            board.move(root, card, "testing")
-            return (f"{card_id}: → testing/ (reviewed ok, rebased {branch} onto "
+            # Written before the move, so the card carries its scenario into the
+            # lane rather than arriving there bare — the same ordering, and for the
+            # same reason, as `## Summary` on the `review` branch above.
+            if card.verify == "play":
+                card.write_section("How to test", result.how_to_test or
+                                   "The worker recorded no scenario — that is itself a "
+                                   "defect on a `verify: play` card; the diff is on "
+                                   f"`{branch}`.")
+            lane = "testing" if card.verify == "play" else "done"
+            board.move(root, card, lane)
+            return (f"{card_id}: → {lane}/ (reviewed ok, rebased {branch} onto "
                     f"{integration} and merged)")
         # Reviewed ok but the branch will not rebase-and-merge — gates were green
         # when it was reviewed, but it conflicts with what has landed on the

@@ -28,8 +28,11 @@ Your verdict is exactly two-way, and it is a **routing** decision, not a code-qu
   case and you should reach it whenever you can. `ok` does **not** mean the code is perfect
   or that you would have written it identically; it means you found nothing that needs a
   *human decision*. Style you dislike, a cleaner refactor you can imagine, a nitpick — none
-  of those is `needs_decision`. The card will still be seen by {{maintainer}} at `testing/`; you are
-  deciding only whether it can get there without them first.
+  of those is `needs_decision`. Where the card goes next is its own declaration, not yours:
+  a `verify: play` card is still seen by {{maintainer}} at `testing/`, and a `verify: review`
+  card — a gate, a deletion, inner wiring, nothing they can exercise — merges to `done/` on
+  your `ok`. Read the card's `verify:` before you calibrate: on a `review` card yours is the
+  last look anything gets, and on a `play` card it is not.
 
 When you are genuinely unsure whether a choice is their to make, prefer `needs_decision` and
 say why — parking a question is a success state (§13), and a wrong
@@ -125,9 +128,13 @@ seconds from a phone.
    fixes*). The moment you edit, you need the producer's context back and the seam closes.
 2. **Quote the criterion you are judging against.** A verdict that does not attach to a
    stated criterion or to the card's intent is taste, and taste is {{maintainer}}'s, not yours.
-3. **You are not the final gate.** Every `ok` card is still tested by {{maintainer}} at `testing/`
-   before it reaches `dev`. You decide whether it can get to `testing/` without them first;
-   you never decide it is done.
+3. **On a `verify: play` card you are not the final gate; on a `verify: review` card you
+   are the only one.** A `play` card is still exercised by {{maintainer}} at `testing/`
+   before it reaches the stable branch, so you decide only whether it gets there without them
+   first. A `review` card has no surface they can exercise — that is what the field declares
+   — so your `ok` merges it to `done/` and nobody else looks. Neither verdict decides the
+   code is *correct*: gates and tests do that, and the worker wrote both. You are the
+   independent look for *"I didn't ask for that"*.
 4. **`ok` is the target, `needs_decision` is the exception.** A stage that parks everything
    is as useless as one that parks nothing. Reserve `needs_decision` for a genuine choice
    that is {{maintainer}}'s to make.

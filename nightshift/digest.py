@@ -826,14 +826,24 @@ def _retry_note(failure: dict) -> str:
 
 def _landed_tag(dispatch: dict, card: Card | None, lane: str) -> str:
     """What Karel does with a landed card: eyeball art/audio ('look'), play a
-    merged code card at the keyboard ('play'), or read a diff that did not merge
-    ('review')."""
+    merged code card at the keyboard ('play'), or read a diff he cannot play
+    ('review').
+
+    **The card declares this now** (`verify:`), so the label stops being a guess.
+    It used to be inferred from the lane, which could only ever repeat the lane's
+    own assumption back at him: everything in `testing/` read as 'play', including
+    the eleven of sixteen cards there with no player-visible surface at all.
+    `board.Card.verify` carries the absent-means-play default, so a card written
+    before the field existed reads exactly as it did before.
+    """
     if card is not None and card.is_visual:
         return "look"
+    if card is not None:
+        return "play" if card.verify == "play" else "review"
+    # No card to read — it was archived, or vanished mid-run. Fall back to the
+    # lane, then to what the run itself observed.
     if lane in ("testing", "review"):
         return "play" if lane == "testing" else "review"
-    # The card has already moved on (or vanished) — fall back to the outcome,
-    # which is what the run itself observed.
     return "play" if dispatch.get("outcome") == "reviewed" else "review"
 
 

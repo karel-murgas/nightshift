@@ -190,6 +190,7 @@ worker: code-thread
 recipe: none
 unattended: true
 created: 2026-08-02
+verify: review
 ---
 
 ## Intent

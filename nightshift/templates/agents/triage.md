@@ -201,6 +201,14 @@ Frontmatter (§2) — **you write these; {{maintainer}} never does:**
   attempt from a finished one — *not* that no human needs to look. Set it `false` only when
   deciding whether the attempt even succeeded needs an eye, which in practice means art and
   audio. See below.
+- `verify`: `play` or `review` — **how the finished card gets checked, and therefore
+  where it lands.** `play` means it has a surface {{maintainer}} can exercise, so a reviewed
+  card goes to `testing/` carrying a `## How to test` the worker writes; `review` means it
+  has none — a gate, a deletion, inner wiring — so the reviewer's `ok` is the acceptance and
+  it goes straight to `done/`. **When unsure, `play`.** The asymmetry is the whole rule: a
+  card wrongly sent to `testing/` costs him ten seconds of reading, and a card wrongly sent
+  to `done/` was never looked at by anyone. You decide this up front, the same way you decide
+  `tier:`; you do **not** write the scenario — the work does not exist yet.
 - `created`: today, ISO.
 
 ### Deciding `unattended:` — the field that decides whether the card can ever run

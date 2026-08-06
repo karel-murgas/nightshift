@@ -76,7 +76,8 @@ def test_an_initialised_repo_can_hold_a_dispatchable_card(repo):
     card = repo / "Board" / "tasks" / "hello.md"
     card.write_text(
         "---\nid: hello\ntitle: Add a docstring\nrecipe: none\nstate: tasks\n"
-        "worker: code-thread\ntier: worker\nunattended: true\ncreated: 2026-08-02\n---\n\n"
+        "worker: code-thread\ntier: worker\nunattended: true\ncreated: 2026-08-02\n"
+        "verify: review\n---\n\n"
         "## Intent\n\nThe package has no docstring.\n\n"
         "## Goal\n\nAdd one.\n\n"
         "## Approach\n\nOne line at the top of the module.\n\n"

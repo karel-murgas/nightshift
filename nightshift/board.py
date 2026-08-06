@@ -213,6 +213,25 @@ class Card:
         return self.fields.get("unattended", "false").lower() == "true"
 
     @property
+    def verify(self) -> str:
+        """How this card gets verified once it is finished — `play` or `review`.
+
+        `play` means it has a surface Karel can exercise, so a reviewed card
+        lands in `testing/` carrying a `## How to test`. `review` means it has
+        none — a gate, a deletion, inner wiring — and the reviewer's `ok` is the
+        acceptance, so it lands in `done/`. The reviewer still runs on both:
+        its job is catching *"I didn't ask for that"*, and it is the only
+        independent look between a worker's self-assessment and `done/`.
+
+        **Anything unrecognised, including absent, reads as `play`.** The
+        default has to fall toward Karel's desk: a card that reaches `done/`
+        because a field was forgotten or misspelled is the one direction nothing
+        recovers from. `card_schema` is what stops a `tasks/` card from relying
+        on the default.
+        """
+        return "review" if self.fields.get("verify") == "review" else "play"
+
+    @property
     def requires(self) -> str:
         return self.fields.get("requires", "")
 

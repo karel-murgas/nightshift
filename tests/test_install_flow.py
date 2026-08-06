@@ -523,7 +523,7 @@ def test_a_fresh_install_can_write_a_card_that_names_a_real_recipe(tmp_path):
     card = repo / "Board" / "tasks" / "harden-a-rule.md"
     card.write_text(
         "---\nid: harden-a-rule\ntitle: Gate the thing the log caught twice\n"
-        "state: tasks\ntier: worker\nworker: none\n"
+        "state: tasks\ntier: worker\nworker: none\nverify: review\n"
         "recipe: turn-a-correction-into-a-gate\nunattended: true\ncreated: 2026-08-04\n"
         "---\n\n"
         "## Intent\n\nThe same correction has been logged twice.\n\n"
@@ -545,7 +545,7 @@ def test_a_card_naming_a_recipe_that_does_not_exist_is_still_refused(tmp_path):
     card = repo / "Board" / "tasks" / "invented.md"
     card.write_text(
         "---\nid: invented\ntitle: Names a spine nobody wrote\nstate: tasks\n"
-        "tier: worker\nworker: none\nrecipe: ship-a-subsystem\nunattended: true\n"
+        "tier: worker\nworker: none\nrecipe: ship-a-subsystem\nunattended: true\nverify: play\n"
         "created: 2026-08-04\n---\n\n"
         "## Intent\n\nx\n\n## Approach\n\ny\n\n## Acceptance\n\n- z\n\n"
         "## Open Questions\n\nNone.\n", encoding="utf-8", newline="\n")
