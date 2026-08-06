@@ -511,9 +511,18 @@ def select(changed: set[str], repo_root: Path | None = None) -> Selection:
     (NONE); one with no classifiable code at all runs everything (ALL, the safe
     default — the only unsafe direction is running too few).
 
+    An **empty** `changed` is answered before any of that: no paths at all is not
+    the same fact as "paths that classified as nothing" (`empty-diff-preflight-
+    runs-everything`). The former means nothing changed, so nothing needs testing
+    — NONE, with its own reason distinct from the `{NOTE}` case below. The latter
+    still falls through to the ALL default, untouched: "I saw paths and could not
+    classify them" is still the right cue to run everything.
+
     `repo_root` is passed through to `classify` so a changed test file is judged
     by its imports too, not only its name; omitted, the answer is name-only.
     """
+    if not changed:
+        return Selection(NONE, "nothing changed against the base")
     kinds = {classify(p, repo_root) for p in changed}
     if ALL in kinds:
         # A single test file that imports both halves — already the whole suite.

@@ -30,11 +30,15 @@ moment a session's lessons still exist in context (`10_self_improvement.md` §3,
    drifted. The script moved to the package at 07_portability.md §8 step 4; the
    matrix it reads is still the project's own earned evidence (§7 — "an *empty*
    audit matrix and an *empty* corrections log"), declared as `[audit].matrix`.
-3. **A correction was recorded, or a reasoned zero was.** The branch's diff
-   against the integration base must touch `.ai/corrections.log`, *or*
-   `--no-corrections "<reason>"` must be given. Without the escape, the gate
-   teaches you to invent entries; with it, an honest "nothing to learn here"
-   is a written, dated line rather than silence (`10_self_improvement.md` §4).
+3. **A correction was recorded, a reasoned zero was, or there was nothing that
+   could have warranted one.** The branch's diff against the integration base
+   must touch `.ai/corrections.log`, *or* `--no-corrections "<reason>"` must be
+   given, *or* the diff itself is empty — a branch already level with its base
+   has nothing to log a lesson against, which is a pass, not a formality to be
+   waved off with the escape hatch (`empty-diff-preflight-runs-everything`).
+   Without the escape, the gate teaches you to invent entries; with it, an
+   honest "nothing to learn here" is a written, dated line rather than silence
+   (`10_self_improvement.md` §4).
 4. **pytest — the slice this branch can affect, in parallel, judged by its own
    JUnit report.** Last because it is by far the most expensive, and there is no
    point running it if a gate is red.
@@ -243,8 +247,9 @@ def _corrections_touched(root: Path, base: str) -> tuple[bool, str]:
     return (".ai/corrections.log" in names, f"diff against {ref} ({mb[:8]})")
 
 
-def _changed_paths(root: Path, base: str) -> tuple[set[str], str]:
-    """Every path this branch changes relative to `base`, committed *and* not.
+def _changed_paths(root: Path, base: str) -> tuple[set[str] | None, str, str]:
+    """Every path this branch changes relative to `base`, committed *and* not,
+    and the resolved merge-base SHA behind that diff (`""` when none resolves).
 
     Two sources, unioned, because the preflight is the one caller of
     `suite.select` that runs pytest against a **live working tree** rather than a
@@ -258,10 +263,29 @@ def _changed_paths(root: Path, base: str) -> tuple[set[str], str]:
       commits are purely game-side. Selecting without it would narrow the slice
       on precisely the evidence that says to widen it.
 
-    Failing to resolve a merge-base returns the empty set, which `suite.select`
-    turns into ALL — the safe direction, and the same fallback `_corrections_touched`
-    takes for the same reason (a fresh clone that never fetched the integration
-    branch must not quietly validate against nothing).
+    Returns `None` for the changed set — **not** the empty set — when no
+    merge-base resolves at all (a fresh clone that never fetched the integration
+    branch): that is "cannot tell what changed", a different fact from "nothing
+    changed", and the two must not collapse to one value now that an empty set is
+    itself a real, distinct answer (`suite.select` reads it as NONE;
+    `empty-diff-preflight-runs-everything`). A caller that needs an iterable
+    coalesces `None` to `set()`; only the emptiness *check* has to tell them apart
+    — `run_checks` and `_run_pytest` both build the ALL selection directly when
+    they see `None`, the same safe direction this fallback has always taken.
+
+    The merge-base is returned, not just used locally, because it is resolved
+    through `_diff_base` — which redirects to `origin/<base>` when `HEAD` *is*
+    `base` (working directly on the integration branch, routine for board/plan
+    commits). A second, independent `git merge-base HEAD <base>` call — the shape
+    `_run_pytest`'s reuse cache used to make — skips that redirect: with `HEAD`
+    and `base` naming the same branch, it resolves to HEAD's own SHA, which is a
+    new value on *every* commit. That fed a fresh `env_tag` into every part's
+    fingerprint each time, so the per-part cache could never hit — confirmed by
+    measuring `.ai/manifest.toml`-driven examples of it directly (the 693-test
+    observation on this card): two consecutive preflights on `development_team`
+    itself, differing only in a Board-only commit, each computed a different
+    "merge-base" from that stray call and neither reused the other's system-part
+    verdict, even though `_changed_paths` itself agreed across both runs.
     """
     changed: set[str] = set()
 
@@ -282,8 +306,8 @@ def _changed_paths(root: Path, base: str) -> tuple[set[str], str]:
             changed.add(path)
 
     if not mb:
-        return set(), how  # force ALL rather than select on the working tree alone
-    return changed, how
+        return None, how, mb  # cannot tell what changed — not the same as nothing changed
+    return changed, how, mb
 
 
 # --- the per-part pytest reuse cache ------------------------------------------
@@ -427,41 +451,64 @@ def _pytest_detail(selection, reused: list[str], stale: list[str],
     return f"{selection.bucket} slice — {'; '.join(frags)} — {selection.reason}"
 
 
-def _run_pytest(root: Path, base: str, full: bool, fresh: bool = False) -> tuple[bool, str, str]:
+def _run_pytest(root: Path, base: str, changed: set[str] | None, how: str, merge_base: str,
+                full: bool, fresh: bool = False) -> tuple[bool, str, str]:
     """The pytest check: the slice this branch needs, reusing any part a prior run
     already proved against an identical tree. Returns `(ok, detail, slice)`.
+
+    `changed`/`how`/`merge_base` all come from `_changed_paths`, computed once by
+    the caller (`run_checks`) so the pytest slice and the corrections check read
+    the same diff rather than each recomputing their own —
+    `empty-diff-preflight-runs-everything`'s "one fact, two consumers" fix.
+    `changed is None` is that function's "cannot tell what changed" answer (no
+    merge-base resolves) and is built into the ALL selection directly here,
+    rather than handed to `suite.select` — an empty *set* now means something
+    different to that function (NONE), so the two must not be conflated.
+
+    `merge_base` in particular must be the one `_changed_paths` resolved — not a
+    second, independent `git merge-base HEAD <base>` call. That second call is
+    the confirmed cause of the card's 693-test observation: with `base` the
+    literal branch name rather than `_diff_base`'s `origin/<base>`-aware
+    redirect, working directly on the integration branch makes `HEAD` and `base`
+    the same ref, so the "merge-base" resolves to HEAD's own SHA — a new value
+    on every commit — and the env tag built from it invalidated the fingerprint
+    cache every single time, even for a diff `_changed_paths` itself agreed was
+    unchanged in substance.
 
     Reuse is on unless `full` (run the whole suite) or `fresh` (bypass the cache)
     is set — both force every target part to actually run. See the module
     docstring for the fingerprint contract that makes reuse provably safe.
     """
-    changed, how = _changed_paths(root, base)
     if full:
         selection = suite.Selection(suite.ALL, "--full-tests given")
         how = "forced (--full-tests)"
+    elif changed is None:
+        selection = suite.Selection(suite.ALL, f"no merge-base ({how}) — cannot tell what "
+                                    "changed, running everything to be safe")
     else:
         selection = suite.select(changed, root)
 
     if not selection.pytest_args(tests_dir(root)):
-        # `suite.NONE` — a board-notes-only diff (ideas/inbox). No pytest applies;
-        # card validity is the card_schema gate's job, already run above. Report a
-        # pass without inventing a 0-collected run (which `check_junit` would, and
-        # should, fail), and without touching the cache. The receipt records the
-        # `none` slice, so a narrowed validation is never later mistaken for a full one.
+        # `suite.NONE` — a board-notes-only diff (ideas/inbox) or an empty one
+        # (nothing changed against the base). No pytest applies; card validity,
+        # where relevant, is the card_schema gate's job, already run above.
+        # Report a pass without inventing a 0-collected run (which `check_junit`
+        # would, and should, fail), and without touching the cache. The receipt
+        # records the `none` slice, so a narrowed validation is never later
+        # mistaken for a full one.
         return True, f"no tests apply — {selection.reason}", selection.bucket
 
     # `selection.parts` is set for every `suite.select` result; the `--full-tests`
     # path builds a bare ALL selection with no parts, which stands for game+system.
     target_parts = frozenset(selection.parts) or frozenset({suite.GAME, suite.SYSTEM})
 
-    merge_base = _git(root, "merge-base", "HEAD", base).stdout.strip()
-    # Reuse needs a merge-base. Without one, `_changed_paths` returns the empty set
-    # and the selection is forced to ALL — and a fingerprint over "nothing changed"
+    # Reuse needs a merge-base. Without one, `changed` is `None` and the selection
+    # above is already forced to ALL — and a fingerprint over "nothing changed"
     # would match across genuinely different trees. Fall back to always-run there,
-    # the same safe direction `_changed_paths` itself takes.
+    # the same safe direction the selection itself just took.
     reuse = not (full or fresh) and bool(merge_base)
     env_tag = _env_tag(merge_base)
-    fps = {part: _part_fingerprint(root, changed, part, env_tag) for part in target_parts}
+    fps = {part: _part_fingerprint(root, changed or set(), part, env_tag) for part in target_parts}
 
     # Load even when not reusing, so an untouched part's entry is preserved rather
     # than wiped when this run repopulates only the parts it ran.
@@ -515,19 +562,37 @@ def run_checks(root: Path, base: str, no_corrections: str | None,
                "matrix and tree agree" if audit.returncode == 0
                else "drift — see `python -m nightshift.audit`")
 
+    # Computed once, here, and read by both consumers below — the diff itself is
+    # one fact (`_changed_paths`); the corrections check and the pytest slice
+    # each used to derive their own answer to "did anything change", which is how
+    # they disagreed (`empty-diff-preflight-runs-everything`). `None` means "no
+    # merge-base resolves, cannot tell"; `set()` means a confirmed-empty diff.
+    # `merge_base` is passed on to `_run_pytest` too, so its reuse-cache env tag
+    # is built from the same `origin/<base>`-aware resolution, not a second,
+    # independent call that self-diffs to HEAD's own SHA when working directly
+    # on the integration branch (the 693-test observation's confirmed cause).
+    changed, how, merge_base = _changed_paths(root, base)
+
     if no_corrections is not None:
         result.add("corrections", True, f"explicit zero: {no_corrections}")
+    elif changed is not None and not changed:
+        # A confirmed-empty diff: nothing changed, so there is nothing that could
+        # have warranted a correction. A pass, not a formality to wave off with
+        # `--no-corrections` — see the module docstring's point 3.
+        result.add("corrections", True,
+                   f"diff is empty — nothing that could have warranted a correction ({how})")
     else:
-        touched, how = _corrections_touched(root, base)
+        touched, chow = _corrections_touched(root, base)
         result.add("corrections", touched,
-                   f"log touched ({how})" if touched
-                   else f"no correction logged on this branch and no --no-corrections reason ({how})")
+                   f"log touched ({chow})" if touched
+                   else f"no correction logged on this branch and no --no-corrections reason ({chow})")
 
     if skip_tests:
         result.add("pytest", True, "SKIPPED (--skip-tests)")
         result.tests_slice = "skipped"
     else:
-        ok, detail, bucket = _run_pytest(root, base, full_tests, fresh_tests)
+        ok, detail, bucket = _run_pytest(root, base, changed, how, merge_base,
+                                         full_tests, fresh_tests)
         result.add("pytest", ok, detail)
         result.tests_slice = bucket
 

@@ -161,8 +161,23 @@ def test_a_docs_only_diff_selects_all_to_be_safe(repo):
     assert suite.select({".claude/memory/state.md"}, repo).bucket == suite.ALL
 
 
-def test_an_empty_diff_selects_all(repo):
-    assert suite.select(set(), repo).bucket == suite.ALL
+def test_an_empty_diff_selects_none(repo):
+    """No paths at all is a different fact than paths that classify as nothing:
+    nothing changed, so nothing needs testing (`empty-diff-preflight-runs-
+    everything`) — distinct from the unclassifiable-but-nonempty case below,
+    which still takes the ALL fallback."""
+    selection = suite.select(set(), repo)
+    assert selection.bucket == suite.NONE
+    assert "nothing changed" in selection.reason
+
+
+def test_an_unclassifiable_nonempty_diff_still_selects_all(repo):
+    """The ALL fallback this card leaves untouched: paths were seen and none of
+    them classified as project code, which is "I don't know" and must still run
+    everything — not to be confused with the empty-diff case above."""
+    selection = suite.select({"README.md"}, repo)
+    assert selection.bucket == suite.ALL
+    assert "nothing changed" not in selection.reason
 
 
 # --- the board slice: card content vs. freeform notes -------------------------
