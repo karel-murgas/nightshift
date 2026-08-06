@@ -132,7 +132,10 @@ def check_branch(root: Path, card_id: str, branch: str, base: str,
     if tree.exists():
         _git(root, "worktree", "remove", "--force", str(tree))
     tree.parent.mkdir(parents=True, exist_ok=True)
-    made = _git(root, "worktree", "add", "--detach", str(tree), base)
+    try:
+        made = runner._worktree_add(root, "--detach", str(tree), base)
+    except runner.WorktreePathTooLong as exc:
+        return MergeCheck(card_id, branch, CHECKOUT_FAILED, str(exc))
     if made.returncode != 0:
         return MergeCheck(card_id, branch, CHECKOUT_FAILED,
                           (made.stderr or made.stdout or "").strip()[:200])

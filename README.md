@@ -246,7 +246,7 @@ review: five gates were still scoped to `.ai/` — the directory 16,800 lines ha
 moved *out* of — and two of them had been reporting green while reading nothing
 at all. A scope is a question about the manifest here, never a literal, and
 `tests/test_self_gating.py` is what keeps it that way. A repo with no `Board/`
-never dispatches, so `doctor` skips the three preconditions that are about
+never dispatches, so `doctor` skips the four preconditions that are about
 dispatching rather than failing them; that is how the framework can be its own
 subject without being its own consumer.
 
@@ -579,13 +579,18 @@ one it did not finish.
 
 Run `nightshift doctor` first — it reports, in order: the working tree is LF
 (a CRLF file is invisible to `git status` but fails the line-endings gate on
-every affected file); `claude` is resolvable on `PATH` (or `CLAUDE_BIN` points
-at a real executable); this hostname has an entry in `.ai/hosts.json` (an
-unlisted host makes every `requires:` card silently undispatchable — no error,
-just nothing happening); `[branches].integration` is declared (the field that
-is never guessed); and which commit of `nightshift` is actually installed,
-reported but never enforced, since the intended mode while this is still
-changing daily is an editable install shared live across every consumer.
+every affected file); how much of Windows' 260-char `MAX_PATH` a worktree cut
+on this checkout would still have left, and "not applicable" on POSIX (a
+worktree is cut on every dispatch, review, merge-check and rebase, and this is
+the only warning before one fails mid-night — see
+`nightshift-worktree-paths-not-defensive-on-windows`); `claude` is resolvable
+on `PATH` (or `CLAUDE_BIN` points at a real executable); this hostname has an
+entry in `.ai/hosts.json` (an unlisted host makes every `requires:` card
+silently undispatchable — no error, just nothing happening);
+`[branches].integration` is declared (the field that is never guessed); and
+which commit of `nightshift` is actually installed, reported but never
+enforced, since the intended mode while this is still changing daily is an
+editable install shared live across every consumer.
 
 * **A fresh clone warns "LF will be replaced by CRLF" on the first commit.**
   `.gitattributes` is missing `* text=auto eol=lf` — `nightshift init` writes

@@ -785,6 +785,76 @@ def worktree_root(root: Path) -> Path:
 
 
 # --------------------------------------------------------------------------
+# The Windows long-path backstop (nightshift-worktree-paths-not-defensive-on-
+# windows) — every `git worktree add` call site in this module and in
+# `merge_check.check_branch` routes through `_worktree_add` below.
+# --------------------------------------------------------------------------
+
+# Quoted verbatim from the 2026-08-06 sweep recorded on the card. Both are
+# what `MAX_PATH` looks like from the outside: a git exit code and a message
+# that reads like a bug in git, not like "this path is 260 characters".
+_LONG_PATH_PATTERNS = (
+    re.compile(r"unable to create file .*: Filename too long"),
+    re.compile(r"'\$GIT_DIR' too big"),
+)
+
+
+class WorktreePathTooLong(RuntimeError):
+    """`git worktree add` failed in one of the two shapes the sweep on
+    `nightshift-worktree-paths-not-defensive-on-windows` produced — Windows'
+    260-char `MAX_PATH`, not a bug in git or in this checkout. Callers that
+    already raise on a worktree-add failure need no further handling: this is
+    already a `RuntimeError`. Callers that degrade gracefully (`run_reviewer`,
+    the rebase merge, `merge_check.check_branch`) catch this specifically and
+    fold its message into their existing failure path.
+    """
+
+
+def _worktree_add(root: Path, *args: str) -> subprocess.CompletedProcess:
+    """`git worktree add …`, with the Windows long-path failure re-reported.
+
+    On any *other* failure this is exactly `_git(root, "worktree", "add",
+    *args)` — the `CompletedProcess` comes back unexamined, and each caller
+    keeps its own existing handling (raise here, log-and-return there). Only
+    the two stderr shapes above raise, and they raise with the doctor's own
+    three numbers attached — `worktree_root`'s length, the worst worktree name
+    this framework generates today, and the worst relative path this checkout
+    can hold — plus the remedies, so the operator sees those instead of a bare
+    git exit code.
+
+    Deliberately not `core.longpaths`. `nightshift.doctor`'s module docstring
+    and `nightshift-worktree-paths-not-defensive-on-windows` record why: it
+    makes git succeed and then Python fail to open a file that visibly exists
+    on disk (`FileNotFoundError`), and at greater checkout depth git fails
+    anyway with a *worse* message (`'$GIT_DIR' too big`) — strictly worse than
+    doing nothing. Do not add it here; that is exactly the "obvious fix" a
+    future reader will want.
+    """
+    result = _git(root, "worktree", "add", *args)
+    if result.returncode == 0:
+        return result
+    stderr = f"{result.stderr or ''}\n{result.stdout or ''}"
+    if not any(pattern.search(stderr) for pattern in _LONG_PATH_PATTERNS):
+        return result
+
+    from nightshift import doctor  # deferred: doctor imports this module
+
+    wt_root_len = len(str(worktree_root(root)))
+    name_len, name = doctor.worst_worktree_name(root)
+    rel_len, rel = doctor.worst_relative(root)
+    slack, _ = doctor.headroom(wt_root_len, name_len, rel_len)
+    raise WorktreePathTooLong(
+        f"git worktree add hit what looks like Windows' MAX_PATH (260 chars): "
+        f"worktree root {wt_root_len} chars + worktree name {name_len} "
+        f"({name!r}) + longest path {rel_len} ({rel!r}) — {slack} chars of "
+        f"slack by `nightshift doctor`'s count. Remedies: enable "
+        f"LongPathsEnabled (admin, the real fix), move this checkout nearer "
+        f"the drive root, or `subst`/`mklink /J` a short alias for it — not "
+        f"`core.longpaths` (see this function's docstring). git said: "
+        f"{(result.stderr or result.stdout or '').strip()[:200]}")
+
+
+# --------------------------------------------------------------------------
 # The dedicated integration checkout (runner-hardening #3)
 # --------------------------------------------------------------------------
 
@@ -843,7 +913,7 @@ def ensure_integration_checkout(root: Path, base: str) -> Path:
             f"move it aside so the runner can cut its dedicated {base} checkout")
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    made = _git(root, "worktree", "add", str(path), base)
+    made = _worktree_add(root, str(path), base)
     if made.returncode != 0:
         raise RuntimeError(
             f"could not cut the dedicated {base} checkout at {path}: "
@@ -1007,7 +1077,7 @@ def prepare_worktree(root: Path, card: board.Card,
             _git(root, "worktree", "remove", "--force", str(path))
         _git(root, "worktree", "prune")
         path.parent.mkdir(parents=True, exist_ok=True)
-        made = _git(root, "worktree", "add", str(path), branch)
+        made = _worktree_add(root, str(path), branch)
         if made.returncode != 0:
             raise RuntimeError(f"git worktree add (from wip) failed: {made.stderr.strip()}")
         return path, branch, FROM_WIP
@@ -1020,7 +1090,7 @@ def prepare_worktree(root: Path, card: board.Card,
         _git(root, "branch", "-D", branch)
     clear_handover(root, card.id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    made = _git(root, "worktree", "add", "-b", branch, str(path), base)
+    made = _worktree_add(root, "-b", branch, str(path), base)
     if made.returncode != 0:
         raise RuntimeError(f"git worktree add failed: {made.stderr.strip()}")
     return path, branch, FRESH
@@ -1784,7 +1854,11 @@ def run_reviewer(root: Path, card: board.Card, out_dir: Path, model: str, base: 
         _git(root, "worktree", "remove", "--force", str(tree))
     _git(root, "worktree", "prune")
     tree.parent.mkdir(parents=True, exist_ok=True)
-    made = _git(root, "worktree", "add", "--detach", str(tree), branch)
+    try:
+        made = _worktree_add(root, "--detach", str(tree), branch)
+    except WorktreePathTooLong as exc:
+        _log(f"    review worktree for {card.id} would not cut — {exc}")
+        return {}, 0.0, None
     if made.returncode != 0:
         _log(f"    review worktree for {card.id} would not cut — {made.stderr.strip()[:120]}")
         return {}, 0.0, None
@@ -2896,7 +2970,10 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
         _git(root, "worktree", "remove", "--force", str(tree))
     _git(root, "worktree", "prune")
     tree.parent.mkdir(parents=True, exist_ok=True)
-    made = _git(root, "worktree", "add", "--detach", str(tree), branch)
+    try:
+        made = _worktree_add(root, "--detach", str(tree), branch)
+    except WorktreePathTooLong as exc:
+        return False, f"could not cut a rebase worktree for {branch}: {exc}"
     if made.returncode != 0:
         return False, (f"could not cut a rebase worktree for {branch}: "
                        f"{(made.stderr or made.stdout or '').strip()[:150]}")

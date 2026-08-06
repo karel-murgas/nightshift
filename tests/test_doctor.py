@@ -21,7 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import doctor, preflight
+from nightshift import doctor, preflight, runner
+
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args],
@@ -78,7 +79,8 @@ def test_a_clean_project_passes_every_check(tmp_path, monkeypatch):
     results = doctor.checks(repo)
 
     assert [check.name for check in results] == [
-        "lf-worktree", "claude-bin", "hosts-json", "preflight-config", "nightshift"]
+        "lf-worktree", "worktree-headroom", "claude-bin", "hosts-json",
+        "preflight-config", "nightshift"]
     assert all(check.ok for check in results), [
         (c.name, c.detail) for c in results if not c.ok]
 
@@ -271,14 +273,15 @@ def test_the_preflight_runs_the_doctor_checks_before_the_gates(tmp_path, monkeyp
                                   no_corrections="fixture", skip_tests=True)
 
     names = [check.name for check in result.checks]
-    assert names[:5] == ["lf-worktree", "claude-bin", "hosts-json", "preflight-config",
-                         "nightshift"]
-    assert names.index("gates") == 5
+    assert names[:6] == ["lf-worktree", "worktree-headroom", "claude-bin", "hosts-json",
+                         "preflight-config", "nightshift"]
+    assert names.index("gates") == 6
 
 
-def test_a_repo_with_no_board_skips_the_three_dispatch_checks(tmp_path):
-    """`claude`, the host entry and the integration branch are dispatch
-    preconditions, and a repo with no board never dispatches.
+def test_a_repo_with_no_board_skips_the_four_dispatch_checks(tmp_path):
+    """`claude`, the host entry, the integration branch and worktree headroom
+    are dispatch preconditions, and a repo with no board never dispatches — it
+    never cuts a worktree either, so the headroom check has nothing to measure.
 
     Reporting them as passes would be a lie in the reassuring direction; reporting
     them as failures makes the framework's own checkout permanently red for not
@@ -291,7 +294,7 @@ def test_a_repo_with_no_board_skips_the_three_dispatch_checks(tmp_path):
     (repo / "Board").rmdir()
 
     by_name = {c.name: c for c in doctor.checks(repo)}
-    for name in ("claude-bin", "hosts-json", "preflight-config"):
+    for name in ("worktree-headroom", "claude-bin", "hosts-json", "preflight-config"):
         assert by_name[name].skipped, name
         assert by_name[name].ok, f"{name}: a skip must not fail the run"
         assert "no board" in by_name[name].detail
@@ -304,7 +307,230 @@ def test_a_repo_with_a_board_still_runs_the_dispatch_checks(tmp_path):
     """The other direction, so the skip cannot silently swallow a real failure."""
     repo = _project(tmp_path)  # `_project` gives it a board
     by_name = {c.name: c for c in doctor.checks(repo)}
-    for name in ("claude-bin", "hosts-json", "preflight-config"):
+    for name in ("worktree-headroom", "claude-bin", "hosts-json", "preflight-config"):
         assert not by_name[name].skipped, name
     # This host is not in the fixture's hosts.json, so that check must really fail.
     assert not by_name["hosts-json"].ok
+
+
+# --- worktree headroom (nightshift-worktree-paths-not-defensive-on-windows) ---
+#
+# The Windows `MAX_PATH` (260 chars) check. `headroom()` is pure arithmetic and
+# is tested against synthetic ints, never against an actual long path — the
+# working `MAX_PATH` this check exists to report on would refuse to create one.
+# `worst_relative`/`worst_worktree_name` are tested against small real repos,
+# same reasoning as everywhere else in this file: the defect they exist to
+# catch is a disagreement between what git tracks and what a checkout would
+# actually generate, and a mock of `git ls-files` is a mock of the thing under
+# test.
+
+
+def _card(repo: Path, lane: str, card_id: str) -> None:
+    lane_dir = repo / "Board" / lane
+    lane_dir.mkdir(parents=True, exist_ok=True)
+    (lane_dir / f"{card_id}.md").write_text(
+        f"---\nid: {card_id}\ntitle: fixture\nstate: {lane}\n---\n\n## Intent\n\nfixture\n",
+        encoding="utf-8", newline="")
+
+
+def test_headroom_arithmetic_green_warn_fail():
+    """The 259/30 thresholds from the card's Approach: green above 30 chars of
+    slack, warn 0-30, fail below 0 — computed from three plain ints, so no
+    filesystem and no 300-character path is ever needed to exercise every
+    branch."""
+    # 259 - (10+1+10+1+10) = 227 of slack — comfortably green.
+    slack, status = doctor.headroom(10, 10, 10)
+    assert status == doctor.GREEN and slack == 227
+
+    # 259 - (235+1+1+1+1) = 20: inside the 0-30 warn band.
+    slack, status = doctor.headroom(235, 1, 1)
+    assert slack == 20
+    assert status == doctor.WARN
+
+    # 259 - (200+1+50+1+50) = -43: already over budget.
+    slack, status = doctor.headroom(200, 50, 50)
+    assert status == doctor.FAIL and slack < 0
+
+
+def test_worst_relative_prefers_the_pycache_equivalent_when_it_is_longer(tmp_path):
+    """The measurement that decided this function needs both halves: on the
+    real project the tracked maximum was 74 and the generated pytest-bytecode
+    equivalent was 85 — `git ls-files` alone under-reports by 11. This fixture
+    reproduces the same shape at a small scale: a short tracked `.py` file
+    whose `__pycache__` name (stem + cache tag + pytest version) is longer than
+    any tracked path in the repo.
+    """
+    repo = _project(tmp_path)
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8", newline="")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "add a.py")
+
+    worst_len, worst_path = doctor.worst_relative(repo)
+
+    tracked = subprocess.run(["git", "-C", str(repo), "ls-files"],
+                             capture_output=True, text=True, check=True).stdout.splitlines()
+    tracked_max = max(len(p) for p in tracked)
+    assert worst_len > tracked_max, "the generated cache path must beat every tracked path"
+    assert worst_path.startswith("__pycache__/a.")
+    assert worst_path.endswith(".pyc")
+
+
+def test_worst_relative_falls_back_to_the_tracked_maximum_without_pytest(tmp_path, monkeypatch):
+    """A box that has not installed the dev extra yet still gets a real answer
+    — under-reported, never a crash. `_pytest_version` is the one seam that
+    knows how to ask, so it is the one patched."""
+    repo = _project(tmp_path)
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8", newline="")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "add a.py")
+    monkeypatch.setattr(doctor, "_pytest_version", lambda: None)
+
+    worst_len, worst_path = doctor.worst_relative(repo)
+
+    assert "__pycache__" not in worst_path
+    tracked = subprocess.run(["git", "-C", str(repo), "ls-files"],
+                             capture_output=True, text=True, check=True).stdout.splitlines()
+    assert worst_len == max(len(p) for p in tracked)
+
+
+def test_worst_worktree_name_uses_the_longest_card_id_on_the_board(tmp_path):
+    repo = _project(tmp_path)
+    _card(repo, "tasks", "short")
+    _card(repo, "review", "a-considerably-longer-card-id-than-the-others")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "add cards")
+
+    name_len, name = doctor.worst_worktree_name(repo)
+
+    longest_id = "a-considerably-longer-card-id-than-the-others"
+    assert name == f"_review-{longest_id}"
+    assert name_len == len(f"_review-{longest_id}")
+
+
+def test_worst_worktree_name_falls_back_to_merge_check_with_an_empty_board(tmp_path):
+    """No cards at all: `_review-`/`_rebase-` collapse to their bare 8-char
+    prefixes, shorter than `_merge-check`'s fixed 12 — so the fixed name wins,
+    proving the max is really taken over all three candidates and not just
+    assumed to be `_review-`/`_rebase-`."""
+    repo = _project(tmp_path)  # a board with no cards in it
+
+    name_len, name = doctor.worst_worktree_name(repo)
+
+    assert name == "_merge-check"
+    assert name_len == len("_merge-check")
+
+
+def test_worktree_headroom_is_green_and_names_its_three_inputs(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor.os, "name", "nt")
+    repo = _project(tmp_path)
+
+    check = _named(doctor.checks(repo), "worktree-headroom")
+
+    assert check.ok and not check.skipped
+    assert "worktree root" in check.detail
+    assert "worktree name" in check.detail
+    assert "longest path" in check.detail
+    assert "slack" in check.detail
+
+
+def test_worktree_headroom_fails_when_slack_is_negative(tmp_path, monkeypatch):
+    """Forced with synthetic inputs, same reasoning as `test_headroom_arithmetic_
+    green_warn_fail` — never by actually creating a 260-character path."""
+    monkeypatch.setattr(doctor.os, "name", "nt")
+    repo = _project(tmp_path)
+    monkeypatch.setattr(doctor.runner, "worktree_root", lambda root: Path("x" * 200))
+    monkeypatch.setattr(doctor, "worst_worktree_name", lambda root: (40, "_review-x"))
+    monkeypatch.setattr(doctor, "worst_relative", lambda root: (40, "some/long/path.py"))
+
+    check = _named(doctor.checks(repo), "worktree-headroom")
+
+    assert not check.ok
+    assert "MAX_PATH" in check.detail
+    assert "LongPathsEnabled" in check.detail
+    assert "core.longpaths" not in check.detail.split("Not ")[0]  # only named as the thing to avoid
+
+
+def test_worktree_headroom_warns_twenty_chars_from_the_edge(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor.os, "name", "nt")
+    repo = _project(tmp_path)
+    monkeypatch.setattr(doctor.runner, "worktree_root", lambda root: Path("x" * 10))
+    # used = 10 + 1 + 10 + 1 + rel_len; rel_len=217 makes used=239, slack=20.
+    monkeypatch.setattr(doctor, "worst_worktree_name", lambda root: (10, "_review-x"))
+    monkeypatch.setattr(doctor, "worst_relative", lambda root: (217, "a" * 217))
+
+    check = _named(doctor.checks(repo), "worktree-headroom")
+
+    assert check.ok, "a warn is still a pass — only negative slack fails"
+    assert "thin" in check.detail
+
+
+def test_worktree_headroom_reports_not_applicable_on_posix(tmp_path, monkeypatch):
+    """Calls the check function directly rather than through `doctor.checks()`
+    — patching `os.name` process-wide and then running every other check
+    (`claude_on_path` among them) breaks on a real Windows box, since some of
+    those go through `pathlib` machinery that inspects `os.name` itself. The
+    subject here is only whether this one check degrades to "not applicable"."""
+    monkeypatch.setattr(doctor.os, "name", "posix")
+    repo = _project(tmp_path)
+
+    check = doctor.worktree_headroom(repo)
+
+    assert check.skipped and check.ok
+    assert "not applicable" in check.detail
+
+
+# --- the Windows long-path backstop (`runner._worktree_add`) ------------------
+#
+# The two stderr shapes below are quoted verbatim from the 2026-08-06 sweep
+# recorded on `nightshift-worktree-paths-not-defensive-on-windows`.
+
+
+class _Result:
+    def __init__(self, returncode: int, stderr: str = "", stdout: str = ""):
+        self.returncode = returncode
+        self.stderr = stderr
+        self.stdout = stdout
+
+
+def test_worktree_add_passes_through_a_clean_result(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "_git", lambda root, *a: _Result(0))
+
+    result = runner._worktree_add(tmp_path, "--detach", str(tmp_path), "main")
+
+    assert result.returncode == 0
+
+
+def test_worktree_add_passes_through_an_unrelated_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "_git",
+                        lambda root, *a: _Result(128, stderr="fatal: not a git repository"))
+
+    result = runner._worktree_add(tmp_path, "--detach", str(tmp_path), "main")
+
+    assert result.returncode == 128
+    assert "not a git repository" in result.stderr
+
+
+def test_worktree_add_raises_on_filename_too_long(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "_git", lambda root, *a: _Result(
+        128, stderr="fatal: unable to create file 'a/very/long/path.py': Filename too long"))
+    monkeypatch.setattr(doctor, "worst_worktree_name", lambda root: (10, "_review-x"))
+    monkeypatch.setattr(doctor, "worst_relative", lambda root: (20, "some/path.py"))
+
+    with pytest.raises(runner.WorktreePathTooLong) as excinfo:
+        runner._worktree_add(tmp_path, "--detach", str(tmp_path), "main")
+
+    message = str(excinfo.value)
+    assert "MAX_PATH" in message
+    assert "LongPathsEnabled" in message
+
+
+def test_worktree_add_raises_on_git_dir_too_big(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "_git",
+                        lambda root, *a: _Result(128, stderr="fatal: '$GIT_DIR' too big"))
+    monkeypatch.setattr(doctor, "worst_worktree_name", lambda root: (10, "_review-x"))
+    monkeypatch.setattr(doctor, "worst_relative", lambda root: (20, "some/path.py"))
+
+    with pytest.raises(runner.WorktreePathTooLong) as excinfo:
+        runner._worktree_add(tmp_path, "--detach", str(tmp_path), "main")
+
+    assert "MAX_PATH" in str(excinfo.value)

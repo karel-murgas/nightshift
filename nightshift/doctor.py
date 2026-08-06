@@ -42,12 +42,14 @@ true.
 """
 from __future__ import annotations
 
+import importlib.metadata as metadata
 import json
+import os
 import socket
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import nightshift
 from nightshift import preflight, runner
@@ -56,10 +58,22 @@ from nightshift.manifest import AI_DIR, ManifestError
 from nightshift.preflight import Check
 
 __all__ = ["checks", "drift", "Drift", "lf_worktree", "claude_on_path", "hosts_entry",
-           "preflight_config", "framework_version"]
+           "preflight_config", "framework_version", "worktree_headroom",
+           "worst_relative", "worst_worktree_name", "headroom",
+           "GREEN", "WARN", "FAIL"]
 
 _HOSTS = f"{AI_DIR}/hosts.json"
 _HOST_OVERRIDE = f"{AI_DIR}/host.json"
+
+# Windows' `MAX_PATH`, 260, minus the trailing NUL every Win32 file API needs —
+# see `worktree_headroom` below and `nightshift-worktree-paths-not-defensive-
+# on-windows`, the card this whole block answers.
+_MAX_PATH = 259
+# A stated judgment, not a measurement (the card's own words): roughly one
+# extra nested package directory plus a longer card id — the shape of drift
+# that eats headroom without anyone noticing.
+_WARN_BELOW = 30
+GREEN, WARN, FAIL = "green", "warn", "fail"
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess | None:
@@ -164,6 +178,171 @@ def hosts_entry(root: Path) -> Check:
     return Check("hosts-json", True, f"{hostname} configured in {_HOSTS}")
 
 
+def _pytest_version() -> str | None:
+    """The installed pytest's version, or `None` when it is not installed here.
+
+    Never hardcoded — the bytecode cache name is stamped by whichever pytest
+    actually runs, not by a constant that would silently drift the day the
+    project upgrades. A spec lookup rather than an import, same reasoning as
+    `suite.xdist_available`: this is asked on the way to building a report, and
+    paying for pytest's own import to answer would be backwards. `None` is a
+    real answer, not an error — `worst_relative` falls back to the tracked
+    maximum alone, which under-reports but never crashes doctor over a box that
+    has not installed its dev extra yet.
+    """
+    try:
+        return metadata.version("pytest")
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def worst_relative(root: Path) -> tuple[int, str]:
+    """The longest relative path a checkout of `root` will ever have to hold —
+    every tracked file, and (when pytest is installed to measure it against)
+    the assertion-rewrite bytecode cache pytest builds beside every tracked
+    `*.py`: `<dir>/__pycache__/<stem>.cpython-<XY>-pytest-<ver>.pyc`, built from
+    the running interpreter's own cache tag and the installed pytest's own
+    version — never hardcoded.
+
+    That cache is *generated*, not tracked, so `git ls-files` alone misses it.
+    On this project the gap was 11 characters (74 tracked vs. 85 generated) —
+    the measurement that decided this function needs both halves, not just the
+    one `git ls-files` can answer.
+
+    Returns `(length, path)` so a report can name what is binding, not just
+    how long it is.
+    """
+    result = _git(root, "ls-files")
+    tracked = ([p for p in result.stdout.splitlines() if p.strip()]
+              if result is not None and result.returncode == 0 else [])
+    if not tracked:
+        return 0, "(no tracked files)"
+
+    worst_len, worst_path = 0, tracked[0]
+    for p in tracked:
+        if len(p) > worst_len:
+            worst_len, worst_path = len(p), p
+
+    pytest_version = _pytest_version()
+    if pytest_version is not None:
+        tag = sys.implementation.cache_tag
+        for p in tracked:
+            if not p.endswith(".py"):
+                continue
+            pure = PurePosixPath(p)
+            cache = str(pure.parent / "__pycache__" /
+                       f"{pure.stem}.{tag}-pytest-{pytest_version}.pyc")
+            if len(cache) > worst_len:
+                worst_len, worst_path = len(cache), cache
+    return worst_len, worst_path
+
+
+def worst_worktree_name(root: Path) -> tuple[int, str]:
+    """The longest worktree directory name the framework itself generates
+    today: `_review-`/`_rebase-` (`runner.py`) prefixed to the longest card id
+    currently on the board, and the fixed `_merge-check`
+    (`merge_check._check_root`). Derived from the live board, not a constant —
+    a longer card id lands as drift the next run reports rather than as a
+    number nobody updates.
+
+    `_merge-check` is compared as the literal 12-character name rather than
+    `_merge-check/<card-id>` (its actual on-disk nesting, one directory
+    deeper than `_review-`/`_rebase-`): the two prefixed names already carry
+    the id and dominate the max at every id length seen on this board, so the
+    simplification does not change the reported number here — but it does mean
+    a `merge_check` cut is not the scenario this check is sized against. Noted
+    on the card this answers rather than silently assumed.
+    """
+    from nightshift import board
+
+    longest_id = ""
+    for lane in board.LANES:
+        for card in board.cards(root, lane):
+            if len(card.id) > len(longest_id):
+                longest_id = card.id
+
+    candidates = {
+        f"_review-{longest_id}": len(f"_review-{longest_id}"),
+        f"_rebase-{longest_id}": len(f"_rebase-{longest_id}"),
+        "_merge-check": len("_merge-check"),
+    }
+    name = max(candidates, key=candidates.get)
+    return candidates[name], name
+
+
+def headroom(wt_root_len: int, name_len: int, rel_len: int) -> tuple[int, str]:
+    """The pure arithmetic behind `worktree_headroom`, pulled out so it is
+    testable against synthetic inputs and never against an actual
+    300-character path — the working `MAX_PATH` this check exists to report on
+    would refuse to create one in the first place (Approach, same card).
+
+    Slack = `259 - (wt_root_len + 1 + name_len + 1 + rel_len)`, the two `+1`s
+    for the path separators `worktree_root / worktree_name / relative_path`
+    actually need. Green above 30 chars of slack, warn 0-30, fail below 0.
+    """
+    slack = _MAX_PATH - (wt_root_len + 1 + name_len + 1 + rel_len)
+    if slack < 0:
+        return slack, FAIL
+    if slack < _WARN_BELOW:
+        return slack, WARN
+    return slack, GREEN
+
+
+def worktree_headroom(root: Path) -> Check:
+    """How much of Windows' 260-char `MAX_PATH` a worktree cut on this
+    checkout would still have left — the framework cuts one on every dispatch,
+    review, merge-check and rebase, and until this check existed there was no
+    warning before it failed mid-night.
+
+    Report only, never fixed — see the module docstring. `core.longpaths` is
+    deliberately not among the remedies: the 2026-08-06 sweep on
+    `nightshift-worktree-paths-not-defensive-on-windows` found it makes git
+    succeed and then Python fail to open a file that visibly exists
+    (`FileNotFoundError`), and at greater depth git fails anyway with a worse
+    message (`'$GIT_DIR' too big`) — strictly worse than doing nothing, not
+    merely unrecommended. Nothing here can prevent the underlying constraint
+    either (`repo_root + relative + worktree_overhead <= 259` is arithmetic,
+    not a bug); the job is to say the number early, not to make it larger.
+
+    Windows only (`os.name == "nt"`) — POSIX has no `MAX_PATH`, so it is
+    reported "not applicable", never a bare `ok=True`, per the
+    `hook-killed-at-timeout-read-as-clean` rule that a check which cannot run
+    must not look like a check that found nothing. Skipped where nothing
+    dispatches either, same reasoning as `claude_on_path`/`hosts_entry`: a repo
+    with no board never cuts a worktree.
+    """
+    if os.name != "nt":
+        return Check("worktree-headroom", True,
+                     "not applicable — MAX_PATH is a Windows constraint",
+                     skipped=True)
+    if not _dispatches(root):
+        return Check("worktree-headroom", True,
+                     "no board here — nothing cuts a worktree", skipped=True)
+
+    wt_root = runner.worktree_root(root)
+    wt_root_len = len(str(wt_root))
+    name_len, name = worst_worktree_name(root)
+    rel_len, rel = worst_relative(root)
+    slack, status = headroom(wt_root_len, name_len, rel_len)
+
+    detail = (f"worktree root {wt_root_len} chars + worktree name {name_len} "
+             f"({name!r}) + longest path {rel_len} ({rel!r}) = "
+             f"{wt_root_len + 1 + name_len + 1 + rel_len}/{_MAX_PATH} chars — "
+             f"{slack} of slack")
+    if status == FAIL:
+        return Check("worktree-headroom", False,
+                     f"{detail}; a worktree cut here can already exceed "
+                     f"MAX_PATH. Remedies: enable LongPathsEnabled (admin, the "
+                     f"real fix), move this checkout nearer the drive root, or "
+                     f"`subst`/`mklink /J` a short alias for it. Not "
+                     f"`core.longpaths` — see this module's docstring.")
+    if status == WARN:
+        return Check("worktree-headroom", True,
+                     f"{detail} — thin; one more nested package directory or "
+                     f"a longer card id could tip this negative")
+    return Check("worktree-headroom", True, detail)
+
+
 def preflight_config(root: Path) -> Check:
     """What the preflight reads late enough to fail expensively.
 
@@ -236,7 +415,10 @@ def framework_version(root: Path, checkout: Path | None = None) -> Check:
 # The order they are reported in: cheapest and most self-explanatory first, and
 # the two that need the project's `.ai/` last, so a repo the framework was just
 # installed into says something useful before it says something confusing.
-CHECKS = (lf_worktree, claude_on_path, hosts_entry, preflight_config, framework_version)
+# `worktree_headroom` sits with `lf_worktree` — both are about the checkout's
+# own shape rather than about dispatch config — ahead of the three that are.
+CHECKS = (lf_worktree, worktree_headroom, claude_on_path, hosts_entry,
+          preflight_config, framework_version)
 
 
 def checks(root: Path) -> list[Check]:
