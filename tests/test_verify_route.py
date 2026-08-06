@@ -179,6 +179,16 @@ def test_the_digest_reads_the_declared_field_instead_of_the_lane(tmp_path):
     assert digest._landed_tag({"outcome": "reviewed"}, card, "testing") == "play"
 
 
+def test_a_card_in_review_is_still_tagged_review_whatever_it_declares(tmp_path):
+    """`review/` means the branch did not merge — a human has to resolve a rebase —
+    so there is nothing to play yet however the card declares itself. The field
+    answers what a *landed* card wants from him, not whether it landed."""
+    repo = _repo(tmp_path)
+    path = _card(repo, "review", extra="verify: play\n")
+    card = digest.Card.load(path, "review")
+    assert digest._landed_tag({"outcome": "review"}, card, "review") == "review"
+
+
 # --- the routing -------------------------------------------------------------
 
 def _settled(tmp_path, monkeypatch, verify: str, how_to_test: str = "Open the game.") -> Path:

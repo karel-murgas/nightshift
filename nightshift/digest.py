@@ -838,12 +838,19 @@ def _landed_tag(dispatch: dict, card: Card | None, lane: str) -> str:
     """
     if card is not None and card.is_visual:
         return "look"
+    # `review/` is read from the lane, not the field, and that is not an
+    # oversight: a card sitting there did **not** merge — it needs a human to
+    # resolve a rebase — so there is nothing to play yet whatever it declares.
+    # The field answers "what does a *landed* card want from him", which is a
+    # different question from "did it land".
+    if lane == "review":
+        return "review"
     if card is not None:
         return "play" if card.verify == "play" else "review"
     # No card to read — it was archived, or vanished mid-run. Fall back to the
     # lane, then to what the run itself observed.
-    if lane in ("testing", "review"):
-        return "play" if lane == "testing" else "review"
+    if lane == "testing":
+        return "play"
     return "play" if dispatch.get("outcome") == "reviewed" else "review"
 
 
