@@ -37,7 +37,9 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 LOG = Path(".ai/corrections.log")
-ARCHIVE = Path(".ai/corrections.archive.log")
+ARCHIVE = Path(".ai/corrections.archive.log")  # gate-ok(source_reference_liveness): created by
+# --compact the first time it runs; this repo's own log has never been compacted, so the file
+# does not exist here yet, though Dungeoneer's .gitignore tracks it once created.
 VOCAB = Path(".ai/gates/data/corrections_vocab.json")
 
 FIELDS = ("date", "slug", "klass", "channel", "gate", "note")
@@ -262,6 +264,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--channel", help="list the entries found by one channel")
     parser.add_argument("--since", help="only entries on or after this YYYY-MM-DD")
     parser.add_argument("--compact", action="store_true",
+                        # gate-ok(source_reference_liveness): help text for the flag that
+                        # creates .ai/corrections.archive.log; see the ARCHIVE constant above.
                         help="move every entry that now carries a [[disposition: ...]] "
                              "into .ai/corrections.archive.log")
     args = parser.parse_args(argv)

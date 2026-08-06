@@ -106,7 +106,7 @@ def check(repo_root: Path) -> list[Violation]:
             violations.append(Violation(
                 rel, line,
                 f"pytest_invocation: `{flag}` is built into an argv here. The parallel "
-                f"flags live in .ai/suite.py — call `suite.parallel_args()` instead, which "
+                f"flags live in nightshift/suite.py — call `suite.parallel_args()` instead, which "
                 f"probes for pytest-xdist and degrades to serial when it is missing",
             ))
     return violations

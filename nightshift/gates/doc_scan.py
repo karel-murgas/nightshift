@@ -34,7 +34,8 @@ from nightshift.manifest import AI_DIR, ManifestError
 # 08_staleness.md §3.1. Directories are scanned recursively for *.md.
 DOC_ROOTS: tuple[str, ...] = (
     ".claude/memory",
-    ".ai/recipes",
+    ".ai/recipes",  # gate-ok(source_reference_liveness): scanned in a CONSUMING project's
+    # tree at check time; this framework's own checkout has no recipes of its own to scan.
     ".claude/agents",
     ".claude/plans",
 )
@@ -677,6 +678,46 @@ def _path_suffixes(repo_root_str: str) -> tuple[frozenset[str], frozenset[str]]:
     return frozenset(suffixes), frozenset(stems)
 
 
+@lru_cache(maxsize=4)
+def project_file_paths(repo_root_str: str) -> frozenset[str]:
+    """Every project + framework file's *whole* repo-relative posix path, not
+    the tail suffixes `_path_suffixes` keeps.
+
+    Built for `source_reference_liveness`, which has a question `_path_suffixes`
+    cannot answer: a source literal may claim a bare *directory*
+    (`.ai/gates`, `dungeoneer/assets`) rather than a file, and "does some real
+    path start with this prefix" needs the whole path, not a flattened bag of
+    tail suffixes — a suffix set has already thrown away which segment was the
+    front. Same project-plus-framework merge and the same
+    `_IGNORED_TREE_PARTS`/`_IGNORED_TREE_PREFIXES` filtering as `_path_suffixes`,
+    kept as a second small function rather than folded into it so that
+    function's existing return shape (and every caller depending on it) is
+    untouched.
+    """
+    repo_root = Path(repo_root_str)
+    project = _project_files(repo_root)
+    if project is None:
+        project = [
+            path.relative_to(repo_root).parts
+            for path in repo_root.rglob("*")
+            if path.is_file() and not _IGNORED_TREE_PARTS & set(path.parts)
+        ]
+    framework_root = _framework_root()
+    if framework_root is not None:
+        project = list(project) + [
+            (FRAMEWORK_PACKAGE, *path.relative_to(framework_root).parts)
+            for path in _framework_files()
+        ]
+    out: set[str] = set()
+    for parts in project:
+        if _IGNORED_TREE_PARTS & set(parts):
+            continue
+        if any(parts[:len(prefix)] == prefix for prefix in _IGNORED_TREE_PREFIXES):
+            continue
+        out.add("/".join(parts))
+    return frozenset(out)
+
+
 def _under_ignored_prefix(token: str) -> bool:
     """Whether a (normalized) relative path token sits under one of
     `_IGNORED_TREE_PREFIXES`, regardless of how many segments it has above that
@@ -743,4 +784,5 @@ def file_stems(repo_root: Path) -> frozenset[str]:
 def clear_caches() -> None:
     _index.cache_clear()
     _path_suffixes.cache_clear()
+    project_file_paths.cache_clear()
     _framework_root.cache_clear()

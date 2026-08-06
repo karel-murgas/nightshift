@@ -338,6 +338,9 @@ class Tiers:
     was a correct table nothing read, and a dispatcher that silently defaulted would
     recreate it invisibly.
     """
+    # gate-ok(source_reference_liveness): the default is a path in a CONSUMING
+    # project's tree (see the docstring above) — this framework's own checkout
+    # declares no [tiers] table and carries no docs/tier-binding.md of its own.
     binding_doc: str = "docs/tier-binding.md"
 
 

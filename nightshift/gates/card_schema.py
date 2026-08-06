@@ -268,6 +268,9 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
                            f"reviewing its own output sees what it intended, not what it made (§16)")
     recipe = fields.get("recipe", "none")
     if recipe != "none" and not (repo_root / ".ai" / "recipes" / f"{recipe}.md").is_file():
+        # gate-ok(source_reference_liveness): `.ai/recipes/` is a per-consuming-project
+        # directory this gate reads from `repo_root` at check time; this framework's own
+        # checkout carries none, since recipes are a project's, not this package's.
         bad("recipe", f"`recipe: {recipe}` has no spine at .ai/recipes/{recipe}.md")
 
     sections = _sections(text)

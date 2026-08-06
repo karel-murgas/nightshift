@@ -449,6 +449,7 @@ project's one.
 | `pytest_invocation` | only suite.py may spell pytest's parallel flags; callers use parallel_args() |
 | `readme_generated` | README.md's generated blocks (gate list, runner flags, manifest fields) match a fresh generation |
 | `run_stop_recorded` | runner.py logs a stop reason only via _stop(), which also records it |
+| `source_reference_liveness` | a source string literal that looks like a repo path must resolve to something real |
 | `subprocess_encoding` | no subprocess call in the tooling decodes output with the locale codec |
 | `subprocess_result_checked` | no subprocess call in the tooling discards its result |
 | `write_newline` | no text-mode write in the tooling leaves newline translation unpinned |

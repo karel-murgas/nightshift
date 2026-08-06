@@ -430,6 +430,9 @@ def _plan_obsidian(plan: Plan, root: Path) -> None:
     # commit. The runner now skips `.obsidian/` when judging dirtiness, so this is
     # no longer blocking — but a file that changes every time you look at the board
     # is noise in every diff forever, and untracking it is two commands.
+    # gate-ok(source_reference_liveness): both paths are queried against `root`, the
+    # project being initialised, at check time — not this framework's own checkout,
+    # which carries no .obsidian/workspace-mobile.json of its own.
     tracked = _git_out(root, "ls-files", "--", ".obsidian/workspace.json",
                        ".obsidian/workspace-mobile.json")
     if tracked:
@@ -440,6 +443,10 @@ def _plan_obsidian(plan: Plan, root: Path) -> None:
             f"Untrack it and keep the file: `git rm --cached {names}` then commit — "
             f"the .gitignore entry init writes stops it coming back.")
 
+    # gate-ok(source_reference_liveness): every `.obsidian/community-plugins.json`
+    # below names a file under `vault` (the project being initialised), read and
+    # written at check time — this framework's own checkout has no such file, so
+    # each of the four mentions below resolves to nothing here by construction.
     community = vault / "community-plugins.json"
     enabled: list = []
     if community.is_file():
@@ -448,24 +455,24 @@ def _plan_obsidian(plan: Plan, root: Path) -> None:
             enabled = loaded if isinstance(loaded, list) else []
         except (OSError, json.JSONDecodeError) as exc:
             plan.notes.append(
-                f".obsidian/community-plugins.json is unreadable ({exc}) — Base Board "
+                f".obsidian/community-plugins.json is unreadable ({exc}) — Base Board "  # gate-ok(source_reference_liveness): see the block comment above
                 f"NOT enabled. Fix the file and re-run; rewriting it would take your "
                 f"other plugins with it.")
             enabled = None  # type: ignore[assignment]
     if enabled is not None:
         merged_list, added = merge_community_plugins(enabled)
         if added:
-            plan.writes[".obsidian/community-plugins.json"] = (
+            plan.writes[".obsidian/community-plugins.json"] = (  # gate-ok(source_reference_liveness): see the block comment above
                 json.dumps(merged_list, indent=2) + "\n")
             installed = (vault / "plugins" / BOARD_KANBAN_PLUGIN).is_dir()
             plan.info.append(
-                f"{BOARD_KANBAN_PLUGIN} enabled in .obsidian/community-plugins.json"
+                f"{BOARD_KANBAN_PLUGIN} enabled in .obsidian/community-plugins.json"  # gate-ok(source_reference_liveness): see the block comment above
                 + ("" if installed else
                    " — but NOT installed: the plugin's code is not in .obsidian/plugins/, "
                    "so fetch it from Settings → Community plugins → Browse and the Kanban "
                    "appears. Until then Obsidian reports it as failed to load"))
         else:
-            plan.kept.append(".obsidian/community-plugins.json")
+            plan.kept.append(".obsidian/community-plugins.json")  # gate-ok(source_reference_liveness): see the block comment above
 
     core = vault / "core-plugins.json"
     if core.is_file():
@@ -721,6 +728,8 @@ def build_plan(root: Path, *, integration: str | None,
 
     # The tier binding: a document is written only if none already carries the
     # block. Writing a second one would create the exact duplicate §16 forbids.
+    # gate-ok(source_reference_liveness): the default location `nightshift init` writes
+    # the tier-binding doc to IN THE PROJECT BEING INITIALISED, not in this checkout.
     binding = tables.get("tiers", {}).get("binding_doc") or "docs/tier-binding.md"
     tables.setdefault("tiers", {})["binding_doc"] = binding
     binding_doc = render((TEMPLATES / "tier-binding.md").read_text(encoding="utf-8"), values)
@@ -743,24 +752,27 @@ def build_plan(root: Path, *, integration: str | None,
     fragment.pop("_comment", None)
     settings_path = root / ".claude" / "settings.json"
     existing: dict = {}
+    # gate-ok(source_reference_liveness): every `.claude/settings.json` below names
+    # `settings_path`, a file under `root` (the project being initialised) — this
+    # framework's own checkout is not that project and has no settings.json of its own.
     plan.settings_created = not settings_path.is_file()
     if settings_path.is_file():
         try:
             existing = json.loads(settings_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             plan.notes.append(
-                f".claude/settings.json is unreadable ({exc}) — hooks NOT wired. Fix the "
+                f".claude/settings.json is unreadable ({exc}) — hooks NOT wired. Fix the "  # gate-ok(source_reference_liveness): see the block comment above
                 f"file and re-run; overwriting it would take your permissions with it.")
             existing = {}
             settings_path = None  # type: ignore[assignment]
     if settings_path is not None:
         merged, added = merge_hooks(existing, fragment)
         if added:
-            plan.writes[".claude/settings.json"] = json.dumps(merged, indent=2) + "\n"
+            plan.writes[".claude/settings.json"] = json.dumps(merged, indent=2) + "\n"  # gate-ok(source_reference_liveness): see the block comment above
             plan.info.append(f"{added} hook entr{'y' if added == 1 else 'ies'} wired into "
-                             f".claude/settings.json (existing keys untouched)")
+                             f".claude/settings.json (existing keys untouched)")  # gate-ok(source_reference_liveness): see the block comment above
         else:
-            plan.kept.append(".claude/settings.json")
+            plan.kept.append(".claude/settings.json")  # gate-ok(source_reference_liveness): see the block comment above
 
     # A guess that was not accepted is worth one line, or the operator never learns
     # the gate behind it is switched off — which is the quiet half of "absence is
@@ -791,6 +803,9 @@ def build_plan(root: Path, *, integration: str | None,
 
 
 INSTALL_SKILL = ".claude/skills/install-nightshift/SKILL.md"
+# gate-ok(source_reference_liveness): the path `bootstrap_plan` writes into the project
+# being installed, rendered from nightshift/templates/skills/install-nightshift/SKILL.md
+# — never this checkout's own .claude/skills/, which this framework does not have.
 
 
 def bootstrap_plan(root: Path) -> Plan:
@@ -846,6 +861,8 @@ def bootstrap_main(argv: list[str] | None = None) -> int:
     print("  runs the install, then diagnoses and fixes what the checks report and")
     print("  files cards for anything needing your decision.")
     print("\n  If the skill is not offered, start the session again — skills are read")
+    # gate-ok(source_reference_liveness): same INSTALL_SKILL path as above, quoted for
+    # the operator to read in the project just installed, not in this checkout.
     print("  at startup — or just say: read .claude/skills/install-nightshift/SKILL.md")
     print("  and do it.\n")
     return 0
@@ -871,7 +888,8 @@ def receipt_text(plan: Plan) -> str:
     here. Overwriting would leave a repo whose receipt truthfully says this run created
     nothing, and therefore an uninstall with nothing to remove.
     """
-    settings = ".claude/settings.json"
+    settings = ".claude/settings.json"  # gate-ok(source_reference_liveness): the project this
+    # receipt describes, not this framework's own checkout — see the docstring above.
     # `.obsidian/` is excluded for the same reason as `settings.json`, one step
     # further: those two files are merges into the operator's vault config, and
     # unlike a hook entry there is nothing here worth taking back. A plugin toggle
@@ -1070,6 +1088,8 @@ def ask_permission_mode(*, interactive: bool) -> str:
     if not interactive:
         return "default"
     print("\n  How much may a dispatched worker do on this machine?")
+    # gate-ok(source_reference_liveness): the file this interview is about to write
+    # into the project being initialised — this framework's own checkout has none.
     print("  (`.ai/hosts.json` → permission_mode. Change it any time.)\n")
     return _choose("  choose 1-3", PERMISSION_MODES, "default")
 

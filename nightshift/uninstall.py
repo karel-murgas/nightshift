@@ -215,6 +215,8 @@ def plan(root: Path) -> Removal:
                 out.files.append(rel)
     else:
         for rel, content in sorted(owned.items()):
+            # gate-ok(source_reference_liveness): `rel` is joined onto `root`, the
+            # project being uninstalled from — never this checkout's own tree.
             if rel == ".claude/settings.json" or not (root / rel).is_file():
                 continue
             if _ours_by_content(root, rel, content):
@@ -234,6 +236,7 @@ def plan(root: Path) -> Removal:
     # file is what makes the append self-describing.
     claimed_appends = set(receipt.get("appended", [])) if receipt else set()
     for rel in sorted(set(owned) | claimed_appends):
+        # gate-ok(source_reference_liveness): same `root`-relative comparison as above.
         if rel in out.files or rel == ".claude/settings.json":
             continue
         path = root / rel
@@ -287,6 +290,9 @@ def plan(root: Path) -> Removal:
         try:
             existing = json.loads(settings_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
+            # gate-ok(source_reference_liveness): names `settings_path`, a file under
+            # `root` — the project being uninstalled from, never this checkout, which
+            # carries no `.claude/` of its own.
             out.kept.append(".claude/settings.json — unreadable; hooks left alone")
         else:
             merged, removed = strip_hooks(existing)
@@ -297,6 +303,9 @@ def plan(root: Path) -> Removal:
                 # project whose settings held only hooks of its own, or a bare `{}`
                 # somebody committed, would look identical from here.
                 if not merged and receipt is not None and receipt.get("settings_created"):
+                    # gate-ok(source_reference_liveness): the same `root`-relative
+                    # settings file as above, queued for removal from the project
+                    # being uninstalled from.
                     out.files.append(".claude/settings.json")
                 else:
                     out.settings = json.dumps(merged, indent=2) + "\n"
@@ -363,6 +372,9 @@ def report(removal: Removal) -> None:
         for rel in sorted(removal.blocks):
             print(f"    ~ {rel}")
     if removal.hooks_removed:
+        # gate-ok(source_reference_liveness): describing the operator's own
+        # `.claude/settings.json` in the project being uninstalled from, printed
+        # for them to read — not a path in this checkout.
         print(f"\n  unmerge {removal.hooks_removed} hook entr"
               f"{'y' if removal.hooks_removed == 1 else 'ies'} from "
               f".claude/settings.json (every other key kept; the file is "

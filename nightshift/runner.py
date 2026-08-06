@@ -95,7 +95,8 @@ RUNS = Path(".ai/runs")
 # rest of the runner's state (§ "Resumable from disk alone").
 STATUS_FILE = Path(".ai/runs/status.json")
 # Committed, keyed by hostname. HOST_FILE is an optional untracked override.
-HOSTS_FILE = Path(".ai/hosts.json")
+HOSTS_FILE = Path(".ai/hosts.json")  # gate-ok(source_reference_liveness): committed
+# in a project with a Board/; this repo dispatches nothing, so it has none of its own.
 HOST_FILE = Path(".ai/host.json")
 
 def harvest_dirs(root: Path) -> tuple[Path, ...]:
@@ -733,7 +734,7 @@ def select(root: Path, capabilities: set[str], bad_schema: dict[str, list[str]],
             no(f"worker: {card.worker} has no charter")
         elif card.requires and card.requires not in capabilities:
             no(f"requires: {card.requires} — {socket.gethostname()} does not declare it "
-               f"(.ai/hosts.json)")
+               f"(.ai/hosts.json)")  # gate-ok(source_reference_liveness): same HOSTS_FILE as above
         elif card.attempts >= MAX_ATTEMPTS and not forced_now:
             no(f"attempts: {card.attempts} — at the limit, belongs in failed/")
         elif (wait := _backoff_remaining(card)) > 0 and not forced_now:
@@ -2727,7 +2728,7 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
         if assert_integration_unmoved(root, base, base_tip):
             _log(f"  ! {card.id} committed to `{base}` from outside its worktree — "
                  f"reset `{base}` to {base_tip[:8]}; the card's work is judged on {branch} "
-                 f"(worktree fence backstop, .ai/hooks/worktree_fence.py)")
+                 f"(worktree fence backstop, nightshift/hooks/worktree_fence.py)")
         # Before the exit code, always: a wall *is* a non-zero exit, and reading
         # it as one is the bug this ordering exists to prevent — the card would
         # be charged an attempt and an `## Error` for the plan running out.
