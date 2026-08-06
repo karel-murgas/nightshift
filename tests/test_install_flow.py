@@ -1006,6 +1006,35 @@ def test_an_existing_gitignore_keeps_its_own_patterns(tmp_path):
     assert f"{AI_DIR}/runs/" in text
 
 
+def test_shipped_gitignore_template_ignores_python_bytecode():
+    """`nightshift-worktrees-never-ignore-pycache`: a worker's own `pytest` run left
+    `__pycache__/` behind uncommitted, the runner's wip-banking `git add -A` tracked
+    it (nothing here told it not to), and a later worktree cut had to materialise the
+    tracked cache files and failed. Standard for every Python project; pin its
+    presence in the shipped template so it cannot regress silently."""
+    text = (init.TEMPLATES / "gitignore").read_text(encoding="utf-8")
+    lines = {line.strip() for line in text.splitlines()
+             if line.strip() and not line.strip().startswith("#")}
+    assert "__pycache__/" in lines
+    assert "*.pyc" in lines
+
+
+def test_a_fresh_install_never_tracks_python_bytecode(tmp_path):
+    """The concrete failure from the card: a worker's `pytest` run produces
+    `__pycache__/*.pyc`, and `git add -A` (the runner's wip-banking step) must
+    leave it untracked rather than picking it up because nothing ignored it."""
+    repo = _repo(tmp_path)
+    _install(repo)
+
+    cache = repo / "pkg" / "__pycache__"
+    cache.mkdir()
+    (cache / "core.cpython-313.pyc").write_bytes(b"\x00")
+
+    status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
+                            check=True, capture_output=True, encoding="utf-8")
+    assert "__pycache__" not in status.stdout, status.stdout
+
+
 def test_uninstall_deletes_run_output_it_wrote(tmp_path):
     """`.ai/runs/` is unambiguously ours, so remove-only-if-empty does not apply — it
     left the directory behind after every uninstall that followed a preflight."""

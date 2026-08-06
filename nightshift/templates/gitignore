@@ -4,6 +4,15 @@
 #
 # Comments live on their own line: a `#` after a pattern is part of the pattern.
 
+# Python bytecode cache. Standard for every Python project, and its absence here
+# let a worker's own `pytest` run leave `__pycache__/` behind uncommitted; the
+# runner's wip-banking `git add -A` then tracked it (nothing here told it not to),
+# and a later worktree cut had to materialise the tracked cache files.
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
 # Per-run worker logs and transcripts. Large, and meaningful only on the machine
 # that produced them.
 .ai/runs/
