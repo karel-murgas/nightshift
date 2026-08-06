@@ -2098,6 +2098,7 @@ tier: worker
 worker: code-thread
 recipe: none
 unattended: false
+verify: review
 created: {dt.date.today().isoformat()}
 ---
 
