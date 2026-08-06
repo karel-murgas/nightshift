@@ -54,7 +54,18 @@ _DOCS = (
     # would leave the branch-role paragraph ungated in exactly the repos that keep it
     # somewhere else.
     Path(AI_DIR) / "CLAUDE.md",
+    # Both homes of the origin project's session log, because it moved. It lived
+    # under `.claude/plans/ai_team/` until 2026-08-06, when the AI-team docs became
+    # a built record and moved to `.claude/memory/ai_team/` — and this tuple was not
+    # updated, so from that day the gate silently checked one file instead of two.
+    # It cost exactly what a silent check costs: on 2026-08-06 the branch role moved
+    # to `test` and SESSIONS.md was still telling every session that `dev` would
+    # resume the role, which is the drift this gate exists to catch, in the file it
+    # had stopped reading. Both paths are listed rather than one corrected, because
+    # a consuming project may keep the doc at either and a missing file is a no-op
+    # here by construction.
     Path(".claude") / "plans" / "ai_team" / "SESSIONS.md",
+    Path(".claude") / "memory" / "ai_team" / "SESSIONS.md",
 )
 
 # Prose asserting a branch holds the working/integration role. The branch name

@@ -127,3 +127,25 @@ def test_missing_docs_report_nothing(tmp_path):
     (tmp_path / ".ai" / "manifest.toml").write_text(
         '[branches]\nintegration = "trunk"\n', encoding="utf-8")
     assert branch_role_prose.check(tmp_path) == []
+
+
+def test_the_session_log_is_checked_at_both_of_its_homes(tmp_path):
+    """The regression this gate suffered itself.
+
+    `_DOCS` named `.claude/plans/ai_team/SESSIONS.md`. On 2026-08-06 the origin
+    project's AI-team docs moved to `.claude/memory/ai_team/` and this tuple was
+    not updated, so the gate silently checked one file instead of two — and it
+    cost exactly what a silent check costs: the branch role moved to `test` the
+    same day and the unread SESSIONS.md was still telling every session that
+    `dev` would resume the role. A missing file is a no-op here, so a stale path
+    produces no error, no violation, and no signal at all.
+    """
+    for home in ("plans", "memory"):
+        root = tmp_path / home
+        _repo(root, "- Active integration branch: **`trunk`**\n", integration="trunk")
+        log = root / ".claude" / home / "ai_team" / "SESSIONS.md"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("- Always commit to `dev`\n", encoding="utf-8")
+        violations = branch_role_prose.check(root)
+        assert any("SESSIONS.md" in v.file for v in violations), (
+            f"a stale branch claim in .claude/{home}/ai_team/SESSIONS.md went unread")
