@@ -19,3 +19,8 @@ dist/
 .ai/host.json
 # the kill switch, dropped by hand
 .ai/STOP
+# the Tier-2 stale-sweep ledger — per-machine and rebuildable, per its own
+# docstring (stale_sweep.py); found undeclared here by source_reference_liveness's
+# new Path()/-chain reconstruction, which resolves a gitignored candidate
+# structurally instead of needing a per-file appeal.
+.ai/stale_ledger.json

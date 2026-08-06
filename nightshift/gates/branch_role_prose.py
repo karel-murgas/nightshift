@@ -64,6 +64,12 @@ _DOCS = (
     # had stopped reading. Both paths are listed rather than one corrected, because
     # a consuming project may keep the doc at either and a missing file is a no-op
     # here by construction.
+    # gate-ok(source_reference_liveness): neither line resolves against this
+    # repo's own tree -- the doc these name lives only in a consuming project
+    # (Dungeoneer), never in nightshift, so self-gating this repo can never
+    # confirm either. That is not staleness: check() above already resolves
+    # the real question (which of the two homes the checked project actually
+    # has) at runtime, by trying both and skipping whichever is missing.
     Path(".claude") / "plans" / "ai_team" / "SESSIONS.md",
     Path(".claude") / "memory" / "ai_team" / "SESSIONS.md",
 )

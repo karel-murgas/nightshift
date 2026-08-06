@@ -44,6 +44,10 @@ LEDGER = Path(".ai") / "stale_ledger.json"
 # — "did a sweep run at all, and when" — which Digest.md needs to be able to
 # show truthfully on any machine, so it must be a real, committed fact rather
 # than something that goes silent the moment the ledger is missing or cleared.
+# gate-ok(source_reference_liveness): committed once a `--stale` sweep writes
+# it (write_status below), not before -- this repo has never run one against
+# itself yet, and read_status()'s own contract treats that absence as "never
+# run", the correct current fact, not staleness to paper over with a stub.
 STATUS = Path(".ai") / "stale_status.json"
 
 

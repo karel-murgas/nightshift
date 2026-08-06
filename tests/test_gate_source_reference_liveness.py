@@ -168,6 +168,63 @@ def test_the_configured_test_directory_is_out_of_scope(tmp_path):
     assert gate.check(tmp_path) == []
 
 
+# --- `Path(...) / "seg" / "seg"` chains (path-literals-split-across-segments) -
+
+def test_a_stale_div_chain_is_caught(tmp_path):
+    """`gate-doc-list-outlived-the-doc-move`, 2026-08-06, reintroduced exactly:
+    `branch_role_prose._DOCS` held this literal, spelled as a `/`-chain, months
+    after the doc it names had moved — and the gate built the same day for
+    stale path literals could not see it, because no single string constant in
+    the chain contains a `/`."""
+    root = _tree(tmp_path, (
+        "from pathlib import Path\n"
+        'SESSIONS = Path(".claude") / "plans" / "ai_team" / "SESSIONS.md"\n'
+    ))
+    violations = gate.check(root)
+    assert violations, "a stale Path()/-chain must be reported"
+    assert ".claude/plans/ai_team/SESSIONS.md" in _messages(violations)
+
+
+def test_a_resolving_div_chain_is_not_a_violation(tmp_path):
+    """The control: the identical chain, naming a file that is actually there,
+    is silent."""
+    root = _tree(tmp_path, (
+        "from pathlib import Path\n"
+        'SESSIONS = Path(".claude") / "memory" / "ai_team" / "SESSIONS.md"\n'
+    ), real=(".claude/memory/ai_team/SESSIONS.md",))
+    assert gate.check(root) == []
+
+
+def test_a_div_chain_with_a_non_literal_leaf_is_not_a_claim(tmp_path):
+    """`Path(root) / "gates"` — `root` is a variable, not a string constant, so
+    the chain is parameterised the same way `f"{worktree}/..."` is: not a
+    concrete claim on any one location."""
+    root = _tree(tmp_path, (
+        "from pathlib import Path\n"
+        "root = get_root()\n"
+        'GATES = Path(root) / "gates" / "does_not_exist.py"\n'
+    ))
+    assert gate.check(root) == []
+
+
+def test_the_real_docs_shape_is_the_regression_case(tmp_path):
+    """The exact shape of `branch_role_prose._DOCS` as shipped after the
+    2026-08-06 fix: two historical homes for the same doc, one stale, one
+    live. The stale entry alone must fail; reverting the fix (only the stale
+    entry present) must fail too — that is the shape this card exists for."""
+    root = _tree(tmp_path, (
+        "from pathlib import Path\n"
+        "_DOCS = (\n"
+        '    Path(".claude") / "plans" / "ai_team" / "SESSIONS.md",\n'
+        '    Path(".claude") / "memory" / "ai_team" / "SESSIONS.md",\n'
+        ")\n"
+    ), real=(".claude/memory/ai_team/SESSIONS.md",))
+    violations = gate.check(root)
+    assert violations, "the still-present stale entry must be reported"
+    assert ".claude/plans/ai_team/SESSIONS.md" in _messages(violations)
+    assert ".claude/memory/ai_team/SESSIONS.md" not in _messages(violations)
+
+
 def test_the_gate_names_the_appeal_form_in_its_message(tmp_path):
     """A violation nobody knows how to answer becomes a violation somebody
     silences."""

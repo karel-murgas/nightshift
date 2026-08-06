@@ -78,6 +78,52 @@ now handled structurally rather than by marker:**
   — is fully known from its first real segment on, and is one of the four
   instances this gate must catch.
 
+**A `Path(...) / "seg" / "seg"` chain is reconstructed the same way, and it is
+the gate's first known blind spot** (`path-literals-split-across-segments`,
+2026-08-06): `branch_role_prose._DOCS` held `Path(".claude") / "plans" /
+"ai_team" / "SESSIONS.md"` months after that doc moved, and this gate — built
+the same day for exactly this failure mode — could not see it, because no
+single string constant in the chain contains a `/`. `_div_chain_leaves` walks
+the left-associative `BinOp(op=Div)` spine leaves-first; `_leaf_literal` reads
+a leaf as a literal segment if it is a bare string constant or a `Path(...)`
+call wrapping exactly one (the leading leaf's usual shape), and anything else
+— `Path(root)`, a `Name`, an f-string leaf — becomes a `_SENTINEL` slot,
+visited for its own literals, exactly like an f-string's formatted value. The
+segments are then joined with `/` and handed to the same `_extract`, so a
+dynamic leading segment (`Path(AI_DIR) / "gates"` in `audit.py`) inherits the
+existing sentinel-adjacency rule and drops out the same way
+`f"{worktree}/.ai/gates/run.py"` already does — no separate case needed.
+
+**The raw hit list against both repos' real trees (step 2 of that card, read
+before the rule was settled) surfaced eight `Path(...) / "seg"` chains in
+each repo. Six of the sixteen did not resolve outright; two of those six were
+already covered by the gitignore mechanism below, leaving four real gate
+violations, all in this repo** — not the zero a narrower rule would have made
+convenient to assume. Reading them changed two things this docstring would
+otherwise get wrong by omission:
+
+* `branch_role_prose._DOCS` (the incident this card is about) reconstructs to
+  **two** unresolved candidates, not one — both the stale
+  `.claude/plans/ai_team/SESSIONS.md` *and* the live
+  `.claude/memory/ai_team/SESSIONS.md`, because self-gating this repo can
+  never confirm either: the doc they name lives only in a consuming project
+  (Dungeoneer), never in nightshift's own tree, and `branch_role_prose.check()`
+  already resolves the real question — which home the checked project has —
+  at runtime. Appealed in place, both lines, with that reasoning; narrowing
+  the gate to somehow accept one and not the other would have meant
+  special-casing the one shape this card exists to catch.
+* `stale_sweep.LEDGER` (`.ai/stale_ledger.json`) reconstructed to an
+  unresolved candidate because its own docstring's claim — "gitignored,
+  rebuildable" — was not true of this checkout's `.gitignore`. Fixed by adding
+  the missing line, which is the honest fix: the structural gitignore
+  resolution below now covers it, exactly as the docstring already claimed it
+  would. `stale_sweep.STATUS` (`.ai/stale_status.json`) is the opposite case —
+  meant to be committed, but only once a `--stale` sweep has actually run
+  against this repo and produced it, which has not happened yet; appealed,
+  since `read_status()`'s own contract already treats that absence as "never
+  run" and fabricating a stub file would have been the invented value this
+  process exists to refuse.
+
 **Runtime-created paths** (`.ai/runs/`, `.ai/STOP`, `stale_ledger.json`) are
 recognised structurally too: a candidate that `git check-ignore` says this
 repo's own `.gitignore` declares is treated as resolved. A gitignored path is
@@ -214,10 +260,49 @@ def _extract(text: str, root_re: re.Pattern[str]) -> set[str]:
     return found
 
 
+def _div_chain_leaves(node: ast.BinOp) -> list[ast.AST]:
+    """Flatten a left-associative `a / b / c` `BinOp(op=Div)` spine into its
+    leaves, left to right — `Path(".claude") / "plans" / "ai_team" /
+    "SESSIONS.md"` parses as `((Path(".claude") / "plans") / "ai_team") /
+    "SESSIONS.md"`, so the leaves are read off by walking the left spine."""
+    leaves: list[ast.AST] = []
+
+    def walk(n: ast.AST) -> None:
+        if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div):
+            walk(n.left)
+            leaves.append(n.right)
+        else:
+            leaves.append(n)
+
+    walk(node)
+    return leaves
+
+
+def _leaf_literal(node: ast.AST) -> str | None:
+    """The literal path segment one `/`-chain leaf contributes, or `None` if
+    the leaf is not a literal. Two shapes: a bare string constant (`"plans"`),
+    or a `Path(...)` call wrapping exactly one string constant — the leading
+    leaf of every chain in house style (`Path(".claude") / ...`). Anything
+    else (`Path(root)`, a Name, an f-string) is not a literal segment; the
+    caller treats it as a dynamic slot, the same as an f-string's formatted
+    value."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if (isinstance(node, ast.Call)
+            and isinstance(node.func, (ast.Name, ast.Attribute))
+            and getattr(node.func, "attr", getattr(node.func, "id", None)) == "Path"
+            and len(node.args) == 1 and not node.keywords
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)):
+        return node.args[0].value
+    return None
+
+
 def _collect(tree: ast.AST, root_re: re.Pattern[str]) -> list[tuple[int, str]]:
     """`(lineno, candidate)` for every path-shaped string in `tree`, skipping
-    bare docstring/comment-shaped statements and reconstructing f-strings
-    before matching — see the module docstring for why both matter."""
+    bare docstring/comment-shaped statements and reconstructing f-strings and
+    `Path(...) / "seg" / "seg"` chains before matching — see the module
+    docstring for why both matter."""
     found: list[tuple[int, str]] = []
 
     def visit(node: ast.AST) -> None:
@@ -233,6 +318,18 @@ def _collect(tree: ast.AST, root_re: re.Pattern[str]) -> list[tuple[int, str]]:
                     parts.append(_SENTINEL)
                     visit(value)  # the dynamic slot may itself hold real literals
             for cand in _extract("".join(parts), root_re):
+                found.append((node.lineno, cand))
+            return
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            parts = []
+            for leaf in _div_chain_leaves(node):
+                literal = _leaf_literal(leaf)
+                if literal is not None:
+                    parts.append(literal)
+                else:
+                    parts.append(_SENTINEL)
+                    visit(leaf)  # the dynamic segment may itself hold real literals
+            for cand in _extract("/".join(parts), root_re):
                 found.append((node.lineno, cand))
             return
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
