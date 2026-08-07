@@ -99,10 +99,12 @@ _WALL = re.compile(
     re.IGNORECASE,
 )
 
-# The monthly spend cap, checked before the generic plan wall because its
-# response differs: it does not wait out. "monthly" is optional — the prose is
-# "hit your monthly spend limit", but "spend limit" alone is unambiguous and no
-# other wall uses the word.
+# The monthly spend cap, checked before the generic plan wall so it is named as
+# itself in the log rather than folded into SESSION — the *behaviour* is now
+# SESSION's (see the scope table above), but which wall was hit is still worth
+# reporting accurately. "monthly" is optional — the prose is "hit your monthly
+# spend limit", but "spend limit" alone is unambiguous and no other wall uses
+# the word.
 _MONTHLY = re.compile(r"\bspend limit\b", re.IGNORECASE)
 
 # What separates a plan wall from a 429. Checked first: plan exhaustion is
