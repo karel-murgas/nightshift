@@ -48,6 +48,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -3180,6 +3181,83 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
 
 
 # --------------------------------------------------------------------------
+# When a stage of the pipeline raises instead of returning
+# --------------------------------------------------------------------------
+
+# How much of a traceback is quoted into the card. Enough to name the frame that
+# raised and the call path into it; not so much that a deep recursion buries the
+# rest of the card. Head and tail are both kept because the two ends carry
+# different facts — the first lines say the exception happened and where the
+# runner entered, the last say what actually raised.
+_CRASH_TB_HEAD = 6
+_CRASH_TB_TAIL = 24
+
+
+def _crash_traceback(exc: BaseException) -> list[str]:
+    """`exc`'s traceback as bounded lines, elided in the middle if it is long."""
+    lines: list[str] = []
+    for chunk in traceback.format_exception(type(exc), exc, exc.__traceback__):
+        lines += chunk.rstrip("\n").split("\n")
+    if len(lines) <= _CRASH_TB_HEAD + _CRASH_TB_TAIL:
+        return lines
+    elided = len(lines) - _CRASH_TB_HEAD - _CRASH_TB_TAIL
+    return (lines[:_CRASH_TB_HEAD]
+            + [f"... {elided} line(s) elided ..."]
+            + lines[-_CRASH_TB_TAIL:])
+
+
+def crashed_dispatch(root: Path, card: board.Card, exc: BaseException) -> Dispatch:
+    """One card's pipeline raised. Turn that into *that card's* failure.
+
+    An exception out of `dispatch` used to propagate through `run` to `main` and
+    exit 1, abandoning every card still in the queue: on 2026-08-06 a single
+    `FileNotFoundError: [WinError 206]` from one oversized card's `Popen` ended
+    the night before it had started, and left a worktree and branch behind for
+    hand-cleaning. A card the runner cannot dispatch is a failure of that card,
+    exactly like a red gate — so this returns the same `Dispatch("failed", …)`
+    the gate path returns and lets the existing settle/record/publish path carry
+    it. No new outcome value, no new lane; `CONSECUTIVE_FAILURE_STOP` is already
+    the net that promotes a *systematic* crash to the night's problem.
+
+    The attempt stays spent. `dispatch` commits `attempts` before the worker
+    starts precisely so a machine that dies mid-dispatch cannot retry forever, so
+    a crash past that point has spent it whatever this function decides.
+
+    Two things make the failure diagnosable from the card alone, which is the ask
+    the raw `WinError 206` failed: `detail` reads as a cause (`dispatch crashed —
+    FileNotFoundError: …`) rather than as noise, and `evidence` names the card and
+    quotes the traceback, so `## Error` answers *which card* and *roughly why*
+    without opening the gitignored `.ai/runs/`.
+
+    Cleanup is what `dispatch`'s own exit paths would have done and did not get
+    to: `commit_wip` to bank whatever the worker managed, then `drop_worktree` —
+    the same order, and for the same reason, as the `worker exited {code}` path.
+    It is guarded in turn: a cleanup that raises must not re-crash the loop this
+    function exists to protect.
+    """
+    detail = f"dispatch crashed — {type(exc).__name__}: {exc}".strip()
+    quoted = [f"the runner crashed while dispatching card `{card.id}`; "
+              f"no verdict was reached for it", ""] + _crash_traceback(exc)
+    # Indented four spaces like every other excerpt, so a `#` anywhere in the
+    # traceback cannot match `doc_scan._HEADING`.
+    evidence = "\n".join(f"    {line}".rstrip() for line in quoted)
+
+    try:
+        tree = worktree_root(root) / card.id
+        if tree.exists():
+            commit_wip(root, tree, card.id)
+            drop_worktree(root, tree)      # also clears the handover
+        else:
+            clear_handover(root, card.id)
+    except Exception as cleanup_exc:       # noqa: BLE001 — see the docstring
+        _log(f"  ! could not clean up after {card.id}'s crash: "
+             f"{type(cleanup_exc).__name__}: {cleanup_exc}. A worktree may be left "
+             f"under {worktree_root(root)} for hand-removal.")
+
+    return Dispatch("failed", detail, evidence=evidence)
+
+
+# --------------------------------------------------------------------------
 # Settle — what the outcome does to the board
 # --------------------------------------------------------------------------
 
@@ -3792,6 +3870,35 @@ def run(root: Path, args: argparse.Namespace) -> int:
             _log(f"stopping — {reason}")
             record.stop(reason)
 
+        def _pipeline(candidate: Candidate, model: str) -> Dispatch:
+            """Every stage that turns a ready card into a `Dispatch`.
+
+            A function, rather than the two statements it inlines, so that the
+            guard at its single call site covers a *region* instead of two named
+            calls: a stage added to this pipeline later is inside the guard by
+            construction, rather than by whoever adds it remembering to widen an
+            `except` that names its predecessors. That property is the point —
+            the crash this guard exists for came out of `dispatch`, but nothing
+            makes `dispatch` the only stage that can raise.
+
+            `settle` is deliberately *not* in here. A `settle` that raises leaves
+            the card's lane indeterminate, and carrying on past that compounds
+            the damage rather than containing it.
+            """
+            result = dispatch(work, candidate.card, base, model,
+                              args.card_budget, args.test_timeout)
+
+            # The review stage (automate-review-step): a card whose gates+tests
+            # passed goes to the diff reviewer before it lands. The reviewer's
+            # verdict routes it — needs-decision/ or (merge → testing/) — replacing
+            # the old unconditional landing in review/. Only a `review` outcome
+            # reaches it; a wall/failure/park is untouched. `review_stage` carries
+            # the dispatch cost forward and adds its own, so `spent +=` stays once.
+            if result.outcome == "review":
+                result = review_stage(work, candidate.card, result, base,
+                                      args.card_budget, args.test_timeout)
+            return result
+
         def _settled(candidate: Candidate, result: Dispatch, model: str) -> str:
             """Settle one dispatch, record it, and return `settle`'s own account.
 
@@ -3842,18 +3949,15 @@ def run(root: Path, args: argparse.Namespace) -> int:
                 index += 1
                 continue
 
-            result = dispatch(work, candidate.card, base, model,
-                              args.card_budget, args.test_timeout)
-
-            # The review stage (automate-review-step): a card whose gates+tests
-            # passed goes to the diff reviewer before it lands. The reviewer's
-            # verdict routes it — needs-decision/ or (merge → testing/) — replacing
-            # the old unconditional landing in review/. Only a `review` outcome
-            # reaches it; a wall/failure/park is untouched. `review_stage` carries
-            # the dispatch cost forward and adds its own, so `spent +=` stays once.
-            if result.outcome == "review":
-                result = review_stage(work, candidate.card, result, base,
-                                      args.card_budget, args.test_timeout)
+            # `Exception`, never a bare `except`: `KeyboardInterrupt` and
+            # `SystemExit` are not this card's failure and must still end the
+            # night — a Ctrl-C that filed an `## Error` against whatever card was
+            # in flight would be worse than the crash.
+            try:
+                result = _pipeline(candidate, model)
+            except Exception as exc:       # noqa: BLE001 — see `crashed_dispatch`
+                result = crashed_dispatch(work, candidate.card, exc)
+                _log(f"  ! {candidate.card.id} — {result.detail}")
             spent += result.cost_usd
 
             # Before every other outcome: the harness being broken is not a
