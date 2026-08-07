@@ -57,11 +57,19 @@ GRACE_MINUTES = 2
 #           `--sessions` counts, and the one a night may sleep through.
 # WEEKLY    the weekly allowance is gone. Does not reopen inside a night, so
 #           sleeping on it would idle until morning and produce nothing.
-# MONTHLY   the account's monthly spend cap. Like WEEKLY it does not reopen
-#           inside a night — it lifts only at the billing reset or when the cap
-#           is raised by hand — so the runner stops rather than sleeps. Kept
-#           distinct from WEEKLY only so the morning log names it accurately;
-#           the behaviour is identical. Delivered as a 429 whose prose is
+# MONTHLY   the account's monthly spend cap — the budget for tokens bought on
+#           top of the subscription. It is *not* a capacity wall: running out of
+#           extra tokens is not running out of tokens, because when the rolling
+#           session window refreshes the plan's own allowance comes back and the
+#           extras are not needed at all. So it sleeps and retries exactly like
+#           SESSION and counts against `--sessions` the same way (Karel,
+#           2026-08-07, after it ended a night at 00:56 with `--sessions 2` and
+#           six cards still queued). What it must *not* do is wait for the
+#           billing reset: the thing being waited for is the session refresh,
+#           which is why `resume_at` caps this scope at one session window
+#           however far out the CLI says the cap itself lifts. Kept a distinct
+#           scope from SESSION only so the morning log names it accurately.
+#           Delivered as a 429 whose prose is
 #           "You've hit your monthly spend limit" — which is why it needs its
 #           own phrase: none of the SESSION/WEEKLY wording appears in it, and a
 #           bare-429 reading would treat a hard billing wall as a five-minute
@@ -123,14 +131,20 @@ _WEEKLY_WORD = re.compile(r"\bweek(?:ly)?\b", re.IGNORECASE)
 class Wall:
     """One recognised usage limit. Frozen — it is evidence, not state."""
 
-    scope: str                      # SESSION | WEEKLY | TRANSIENT
+    scope: str                      # SESSION | WEEKLY | MONTHLY | TRANSIENT
     resets_at: dt.datetime | None   # None when the CLI did not say
     evidence: str                   # the matched line, for the run log and the card
 
     @property
     def waits_out(self) -> bool:
-        """Whether sleeping on this wall could plausibly finish inside a night."""
-        return self.scope in (SESSION, TRANSIENT)
+        """Whether sleeping on this wall could plausibly finish inside a night.
+
+        MONTHLY waits out even though the spend cap itself does not lift tonight,
+        because what the runner is waiting for is the session window reopening —
+        past that the subscription's own allowance covers the work and the
+        overage the cap governs is not needed. See the scope table above.
+        """
+        return self.scope in (SESSION, MONTHLY, TRANSIENT)
 
     @property
     def spends_a_session(self) -> bool:
@@ -230,8 +244,18 @@ def resume_at(wall: Wall, now: dt.datetime | None = None) -> dt.datetime:
     for a plan wall and a few minutes for a 429 — plus `GRACE_MINUTES` either
     way. Guessing five hours on a hiccup would cost a night; guessing five
     minutes on a real wall costs one wasted retry, so the asymmetry decides it.
+
+    MONTHLY is the exception to preferring the CLI's own time. A spend cap's
+    reset is the billing date, which can be weeks out, and that is not what the
+    runner is waiting for — it is waiting for the session window that makes the
+    overage unnecessary. So this scope is capped at one session window: without
+    the cap, a `resets_at` parsed off the spend-limit message would put the night
+    to sleep until next month.
     """
     now = now or dt.datetime.now()
     default = dt.timedelta(minutes=TRANSIENT_MINUTES) if wall.scope == TRANSIENT \
         else dt.timedelta(hours=SESSION_HOURS)
-    return (wall.resets_at or (now + default)) + dt.timedelta(minutes=GRACE_MINUTES)
+    when = wall.resets_at or (now + default)
+    if wall.scope == MONTHLY:
+        when = min(when, now + dt.timedelta(hours=SESSION_HOURS))
+    return when + dt.timedelta(minutes=GRACE_MINUTES)

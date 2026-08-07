@@ -87,25 +87,57 @@ def test_a_weekly_limit_is_marked_as_one_and_is_not_waited_out():
     assert not wall.waits_out
 
 
-def test_the_monthly_spend_cap_is_recognised_and_not_waited_out():
+def test_the_monthly_spend_cap_is_recognised_and_waited_out_like_a_session():
     """The exact 429 that ended the 2026-07-24 night: "You've hit your monthly
     spend limit". None of the SESSION/WEEKLY wording appears in it, so before
     this phrase existed it fell through to `failed` and cost three cards an
-    attempt each. It must not wait out — a billing cap lifts at the reset or by
-    hand, never inside a night."""
+    attempt each.
+
+    It waits out (Karel, 2026-08-07). The cap is on tokens bought *on top of*
+    the subscription, so hitting it is not running out of capacity — once the
+    rolling session window refreshes, the plan's own allowance covers the work
+    and the overage is not needed. Treating it as terminal ended the 2026-08-06
+    night at 00:56 with `--sessions 2` and six cards still queued.
+    """
     wall = limits.detect(
         1, "You've hit your monthly spend limit · raise it at claude.ai/settings/usage",
         now=NOW)
     assert wall.scope == limits.MONTHLY
-    assert not wall.waits_out
+    assert wall.waits_out
+    assert wall.spends_a_session
+
+
+def test_a_monthly_wall_waits_for_the_session_window_not_the_billing_reset():
+    """The cap that matters. A spend limit's own reset is the billing date, and
+    the runner is not waiting for that — it is waiting for the session window
+    that makes the overage unnecessary. Without the cap, a reset time parsed off
+    the message would put the night to sleep until next month."""
+    wall = limits.detect(
+        1, "You've hit your monthly spend limit, resets at 2026-08-31 00:00", now=NOW)
+    assert wall.scope == limits.MONTHLY
+    assert wall.resets_at == dt.datetime(2026, 8, 31, 0, 0)
+    assert limits.resume_at(wall, NOW) == NOW + dt.timedelta(
+        hours=limits.SESSION_HOURS, minutes=limits.GRACE_MINUTES)
+
+
+def test_a_monthly_wall_still_prefers_a_reset_sooner_than_a_session():
+    """The cap is a ceiling, not a replacement: a stated time inside the window
+    is still the better answer than waiting the full five hours."""
+    wall = limits.detect(
+        1, "You've hit your monthly spend limit, resets at 2026-07-23 03:00", now=NOW)
+    assert limits.resume_at(wall, NOW) == dt.datetime(2026, 7, 23, 3, 0) + \
+        dt.timedelta(minutes=limits.GRACE_MINUTES)
 
 
 def test_a_spend_limit_is_not_read_as_a_transient_hiccup():
-    """Delivered as a 429, but retrying into a hard billing wall every five
-    minutes until morning is the exact failure the scope split exists to stop."""
+    """Delivered as a 429, but a spend cap is the window closing rather than a
+    hiccup in it: it must spend one of the night's sessions, not retry in five
+    minutes against a `TRANSIENT_RETRIES` budget it would exhaust by morning."""
     wall = limits.detect(1, "api_error 429: You have hit your spend limit", now=NOW)
     assert wall.scope == limits.MONTHLY
-    assert not wall.waits_out
+    assert wall.spends_a_session
+    assert limits.resume_at(wall, NOW) == NOW + dt.timedelta(
+        hours=limits.SESSION_HOURS, minutes=limits.GRACE_MINUTES)
 
 
 def test_a_session_limit_is_waited_out():
