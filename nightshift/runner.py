@@ -681,6 +681,62 @@ class Candidate:
     reason: str
 
 
+# The size past which a `tasks/` card has stopped being good worker input.
+#
+# A card *is* the worker's opening message, and the wrapper around it is only
+# ~4.6 KB — so card size and prompt size track each other almost exactly, and
+# nothing has bounded either since `worker-prompt-off-argv` retired the argv
+# limit. The cost of an oversized card is not a crash, it is attention:
+# `menu-unlock-indicators` reached 36 KB, and to fix a pip count its worker had
+# to read ~25 KB of superseded history first.
+#
+# 14 KB because the largest legitimately dense cards in `tasks/` are around
+# 11-12 KB (`hack-end-summary` 11.7 KB, `monthly-wall-doc-drift` 11.2 KB — a
+# full acceptance split plus a findings list). 14 KB clears those with real
+# headroom, so the line fires on genuine growth rather than on a normal big
+# card, and sits at well under half the 36 KB that actually hurt.
+#
+# A named constant rather than an inline literal for two reasons: a comfort
+# threshold on a growing board is a number that will move, and `oversize_note`
+# cites this name in its message so the reader is told what to change.
+CARD_COMFORT_BYTES = 14 * 1024
+
+
+def oversize_note(card: board.Card) -> str:
+    """One advisory line about a card grown past `CARD_COMFORT_BYTES`, or `""`.
+
+    **Advisory by construction.** The caller folds this into the candidate's
+    `reason`, which is what `run()` logs per card and what `record.skipped`
+    carries into `Digest.md` — it never touches `dispatchable`. That is the
+    whole design: gates here have exactly one severity (`Violation`), so a
+    blocking version of this would turn the board red on Karel using his own
+    board, and a gate that does that is a gate that gets muted. Nothing about a
+    card's size makes it undispatchable.
+
+    **`tasks/` only, and that is the subtlety worth stating.** A card grows
+    after dispatch and it grows *legitimately*: the runner and close-out append
+    `## Summary`, `## Thread`, `## Telemetry` and `## Error`, which is how
+    `done/` holds 20-21 KB cards that were half that when they were handed to a
+    worker. Measuring any other lane would fire on exactly the cards this has
+    nothing useful to say about — noise about the record working as designed.
+    The lane check lives here rather than at the call site so that a second
+    caller cannot get it wrong; `select()` reads `tasks/` and nothing else, so
+    today the check is belt as well as braces.
+
+    Measured on `card.text` rather than `path.stat().st_size` because the text
+    is the thing actually handed to a worker, and because it is the same number
+    on a checkout whose working files carry CRLF.
+    """
+    if card.lane != "tasks":
+        return ""
+    size = len(card.text.encode("utf-8"))
+    if size <= CARD_COMFORT_BYTES:
+        return ""
+    return (f"{size / 1024:.1f} KB, over the {CARD_COMFORT_BYTES / 1024:.0f} KB "
+            f"CARD_COMFORT_BYTES threshold — compact it, or split it into "
+            f"separate cards, before it is dispatched again")
+
+
 def _backoff_remaining(card: board.Card) -> int:
     """Minutes still to wait before this card may be retried, from `finished:`."""
     finished = card.fields.get("finished")
@@ -717,13 +773,23 @@ def select(root: Path, capabilities: set[str], bad_schema: dict[str, list[str]],
       capability. Wanting it harder does not put a GPU in the laptop, and
       dispatching a malformed card produces confident nonsense rather than an
       error.
+
+    A card over `CARD_COMFORT_BYTES` has `oversize_note`'s line appended to
+    whichever reason it earned. It is a remark about the card, not a verdict on
+    it: an oversized card is dispatchable exactly when it would have been at
+    half the size, and the note rides the `reason` field precisely because that
+    field is already carried to both readers — the run log and the digest.
     """
     out: list[Candidate] = []
     for card in board.cards(root, "tasks"):
         forced_now = forced is not None and card.id == forced
 
+        def add(dispatchable: bool, reason: str) -> None:
+            note = oversize_note(card)
+            out.append(Candidate(card, dispatchable, f"{reason}; {note}" if note else reason))
+
         def no(reason: str) -> None:
-            out.append(Candidate(card, False, reason))
+            add(False, reason)
 
         if card.id in bad_schema:
             no(f"card_schema: {len(bad_schema[card.id])} violation(s) — not a finished card")
@@ -744,7 +810,7 @@ def select(root: Path, capabilities: set[str], bad_schema: dict[str, list[str]],
             why = f"tier: {card.tier}, worker: {card.worker}"
             if forced_now and not card.unattended:
                 why += " — asked for by name, so `unattended: false` is waived"
-            out.append(Candidate(card, True, why))
+            add(True, why)
     return out
 
 
