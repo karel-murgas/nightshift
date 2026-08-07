@@ -1,10 +1,11 @@
-"""Which directories hold *tooling* — the scope five gates ask about.
+"""Which directories hold *tooling* — the scope the discipline gates ask about.
 
 `subprocess_result_checked`, `subprocess_encoding`, `write_newline`,
-`pytest_invocation` and `run_stop_recorded` all enforce rules about the code that
-*runs* the machinery, not about the code under test. Every one of them was earned
-by an incident in the orchestrator, and every one of them spelled that scope
-`Path(".ai")`, because when they were written the orchestrator lived there.
+`pytest_invocation`, `run_stop_recorded` and `prompt_not_in_argv` all enforce
+rules about the code that *runs* the machinery, not about the code under test.
+Every one of them was earned by an incident in the orchestrator, and the first
+five spelled that scope `Path(".ai")`, because when they were written the
+orchestrator lived there.
 
 **It does not any more, and nothing noticed.** 07_portability.md §8 moved ~16,800
 lines into this package; the gates stayed pointed at the directory those lines had

@@ -1807,7 +1807,7 @@ def run_checker(root: Path, card: board.Card, out_dir: Path, round_no: int,
     binary = claude_binary()
     assert binary
     argv = [
-        binary, "-p", prompt,
+        binary, "-p",
         "--agent", card.checker,
         "--model", model,
         *_STREAM_ARGV,
@@ -1818,7 +1818,8 @@ def run_checker(root: Path, card: board.Card, out_dir: Path, round_no: int,
     ]
     cost = 0.0
     try:
-        proc = _run_worker(argv, out_dir, timeout, out_dir / "stream.jsonl")
+        proc = _run_worker(argv, out_dir, timeout, out_dir / "stream.jsonl",
+                           prompt=prompt)
         textio.write_text_lf(out_dir / f"review-{round_no}.log", proc.stdout + proc.stderr)
         result = _terminal_result(proc.stdout)
         try:
@@ -1899,7 +1900,7 @@ def run_reviewer(root: Path, card: board.Card, out_dir: Path, model: str, base: 
         textio.write_text_lf(out_dir / "review-diff.patch", diff.stdout)
 
         argv = [
-            binary, "-p", prompt,
+            binary, "-p",
             "--agent", REVIEWER_AGENT,
             "--model", model,
             "--output-format", "json",
@@ -1909,7 +1910,7 @@ def run_reviewer(root: Path, card: board.Card, out_dir: Path, model: str, base: 
         ]
         cost = 0.0
         try:
-            proc = _run_worker(argv, tree, timeout)
+            proc = _run_worker(argv, tree, timeout, prompt=prompt)
             textio.write_text_lf(out_dir / "review.log", proc.stdout + proc.stderr)
             try:
                 cost = float(json.loads(proc.stdout).get("total_cost_usd", 0.0))
@@ -2021,7 +2022,7 @@ def run_stale_check(root: Path, doc_rel: str, out_dir: Path, model: str,
     if not binary:
         return {}, 0.0, None
     argv = [
-        binary, "-p", prompt,
+        binary, "-p",
         "--agent", "stale-hunter",
         "--model", model,
         *_STREAM_ARGV,
@@ -2031,7 +2032,8 @@ def run_stale_check(root: Path, doc_rel: str, out_dir: Path, model: str,
     ]
     cost = 0.0
     try:
-        proc = _run_worker(argv, root, timeout, out_dir / "stream.jsonl")
+        proc = _run_worker(argv, root, timeout, out_dir / "stream.jsonl",
+                           prompt=prompt)
         textio.write_text_lf(out_dir / "run.log", proc.stdout + proc.stderr)
         result = _terminal_result(proc.stdout)
         try:
@@ -2345,7 +2347,8 @@ def _run_tests(cwd: Path, log: Path, timeout: int, junit: Path,
 
 def _run_worker(argv: list[str], cwd: Path, timeout: int,
                 stream_path: Path | None = None,
-                env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+                env: dict[str, str] | None = None,
+                prompt: str = "") -> subprocess.CompletedProcess:
     """The one place the Claude CLI is executed.
 
     A named seam rather than an inline call, for two reasons. It is the only
@@ -2375,6 +2378,35 @@ def _run_worker(argv: list[str], cwd: Path, timeout: int,
     not drain-thread completion). So both paths `join(timeout=...)` and log-and-
     proceed rather than wait, matching this file's existing rule that an
     observer able to end the run is worse than none.
+
+    **`prompt` goes down the child's stdin, never on `argv`** (worker-prompt-off-argv).
+    Windows caps a `CreateProcess` command line at 32,767 characters, so the old
+    `[binary, "-p", prompt, ...]` shape died with `WinError 206` — "the filename or
+    extension is too long" — the moment a card grew past ~32 KB. That happened for
+    real on 2026-08-06 and took the whole overnight queue with it. `claude -p`
+    already reads its prompt from stdin when no prompt positional is given
+    (`--input-format` defaults to `text`), so this is a change of transport with no
+    change of meaning: the text is still the opening user message, and `--agent`,
+    `--resume`, `--max-budget-usd` and the `stream-json` tee are untouched. No
+    prompt this project can build is size-limited by the OS again.
+
+    Three details it is easy to get wrong here:
+
+    * **A third thread, not an inline write.** ~40 KB does not fit a pipe buffer, so
+      the write blocks until the child drains it — and a child that never reads
+      stdin would block it forever, *before* `proc.wait(timeout=...)` is reached.
+      That would quietly convert the timeout guarantee into a hang. Feeding on its
+      own daemon thread keeps the guard reachable on every path; the joins below
+      bound it exactly like the drain threads.
+    * **stdin is opened and closed even when `prompt` is empty.** Today the child
+      inherits the runner's console stdin, which is neither wanted nor observable.
+      A closed pipe is an immediate EOF, which is what a non-interactive worker
+      should see.
+    * **`newline=""` on the write side.** `text=True` gives a `TextIOWrapper` whose
+      default translates every `\\n` to `os.linesep`, i.e. silently CRLF-ifies the
+      prompt on Windows. The prompt must reach the model byte-for-byte as written
+      to `prompt-N.md`, so the translation is pinned off — the same rule the
+      `write_newline` gate enforces everywhere else in this tree.
     """
     stream_fh = None
     if stream_path is not None:
@@ -2390,13 +2422,22 @@ def _run_worker(argv: list[str], cwd: Path, timeout: int,
         # some of those bytes. Without it the decode raises in the drain
         # thread, the accumulator stays empty, and the verdict silently reads
         # as empty.
-        proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE,
+        proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True,
                                 encoding="utf-8", errors="replace", env=env)
     except OSError:
         if stream_fh is not None:
             stream_fh.close()
         raise
+
+    # Pin newline translation off on the write side; see the docstring. Guarded
+    # rather than assumed: this is best-effort formatting fidelity, and losing it
+    # must never be the thing that fails a dispatch.
+    try:
+        proc.stdin.reconfigure(newline="")
+    except (AttributeError, OSError, ValueError):
+        pass
 
     out_lines: list[str] = []
     err_lines: list[str] = []
@@ -2431,10 +2472,31 @@ def _run_worker(argv: list[str], cwd: Path, timeout: int,
             except (OSError, ValueError):
                 pass
 
+    def _feed_stdin() -> None:
+        try:
+            if prompt:
+                proc.stdin.write(prompt)
+                proc.stdin.flush()
+        except (OSError, ValueError):
+            # A child that exited before reading breaks the pipe. That is the
+            # child's failure to report, not a reason to raise from the seam —
+            # its exit code and stderr are already on their way back.
+            pass
+        finally:
+            try:
+                proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+
     t_out = threading.Thread(target=_drain_stdout, daemon=True)
     t_err = threading.Thread(target=_drain_stderr, daemon=True)
     t_out.start()
     t_err.start()
+    # Started *after* the drains, on purpose: a big prompt only fits down the pipe
+    # as fast as the child consumes it, and a child blocked on its own full stdout
+    # would never get there.
+    t_in = threading.Thread(target=_feed_stdin, daemon=True)
+    t_in.start()
 
     def _close_stream() -> None:
         if stream_fh is not None:
@@ -2450,6 +2512,7 @@ def _run_worker(argv: list[str], cwd: Path, timeout: int,
         proc.wait()
         t_out.join(timeout=5)
         t_err.join(timeout=5)
+        t_in.join(timeout=5)
         _close_stream()
         raise subprocess.TimeoutExpired(argv, timeout, output="".join(out_lines),
                                         stderr="".join(err_lines))
@@ -2459,6 +2522,7 @@ def _run_worker(argv: list[str], cwd: Path, timeout: int,
     # drain thread may still be blocked on `readline()` with no EOF in sight.
     t_out.join(timeout=5)
     t_err.join(timeout=5)
+    t_in.join(timeout=5)
     _close_stream()
 
     return subprocess.CompletedProcess(argv, proc.returncode,
@@ -2538,9 +2602,10 @@ def run_producer(root: Path, card: board.Card, tree: Path, out_dir: Path, branch
             card_body=card.text,
         ) + continue_note + feedback
 
-    def _argv(prompt: str, session: str) -> list[str]:
+    def _argv(session: str) -> list[str]:
+        """Flags only — the prompt reaches the child on stdin (`_run_worker`)."""
         out = [
-            binary, "-p", prompt,
+            binary, "-p",
             "--agent", card.worker,
             "--model", model,
             *_STREAM_ARGV,
@@ -2563,8 +2628,9 @@ def run_producer(root: Path, card: board.Card, tree: Path, out_dir: Path, branch
 
     def _once(prompt: str, session: str) -> tuple[dict, float, int, limits.Wall | None]:
         textio.write_text_lf(out_dir / f"prompt-{round_no}.md", prompt)
-        proc = _run_worker(_argv(prompt, session), tree, timeout,
-                           out_dir / "stream.jsonl", env=_worker_env(root, tree, out_dir))
+        proc = _run_worker(_argv(session), tree, timeout,
+                           out_dir / "stream.jsonl", env=_worker_env(root, tree, out_dir),
+                           prompt=prompt)
         # `worker-N.json` holds exactly the terminal result event, not the raw
         # multi-line stream — `read_telemetry`/`_session_id` both `json.loads`
         # this file as one object, which a raw JSONL tee would break. Falls

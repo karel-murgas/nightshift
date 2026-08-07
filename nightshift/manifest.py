@@ -91,7 +91,7 @@ class Project:
     resolves) but are not part of the code slice.
 
     `tooling_dirs` are directories holding code that *runs the machinery* rather
-    than code under test — the scope of the five discipline gates, alongside `.ai/`,
+    than code under test — the scope of the discipline gates, alongside `.ai/`,
     which is always in it. Empty for almost every project: a consuming repo's
     tooling is its `.ai/`, and that needs no declaration. It exists because this
     package's own checkout is the exception, and pointing those gates at
