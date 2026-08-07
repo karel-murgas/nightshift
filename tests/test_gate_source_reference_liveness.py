@@ -12,6 +12,7 @@ to be proved rather than assumed.
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -230,3 +231,52 @@ def test_the_gate_names_the_appeal_form_in_its_message(tmp_path):
     silences."""
     root = _tree(tmp_path, 'TARGET = ".ai/runner.py"\n')
     assert "gate-ok(source_reference_liveness)" in _messages(gate.check(root))
+
+
+# --- the gitignore pass, against a real repo ---------------------------------
+
+def _ignoring_repo(tmp_path: Path, source: str, pattern: str) -> Path:
+    """A real `git init` repo whose `.gitignore` holds `pattern`, with the
+    ignored path deliberately **absent from disk**.
+
+    Real git rather than a mock, for the same reason `test_gate_line_endings`
+    uses one: the behaviour under test is `git check-ignore`'s own, and mocking
+    it would mock the thing that was wrong.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".ai").mkdir(parents=True)
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    (repo / ".gitignore").write_text(pattern + "\n", encoding="utf-8")
+    (repo / ".ai" / "newthing.py").write_text(source, encoding="utf-8")
+    doc_scan.clear_caches()
+    return repo
+
+
+def test_a_runtime_dir_matches_its_directory_only_gitignore_pattern(tmp_path):
+    """The ten-violation regression, 2026-08-07. `.gitignore` carries `.ai/runs/`
+    with a trailing slash, which matches **directories only** — and
+    `git check-ignore` cannot tell a path is a directory when nothing exists at
+    it, which is the normal case for a path created at runtime. So probing the
+    candidate exactly as the source wrote it (`.ai/runs`, no slash) missed, and
+    the gate reported ten violations in `runner.py`, `digest.py` and
+    `hooks/correction_prompt.py` — on the very path its own module docstring
+    names as the structural case."""
+    root = _ignoring_repo(tmp_path, 'LOGS = ".ai/runs"\n', ".ai/runs/")
+    assert not gate.check(root), (
+        "a gitignored runtime directory must resolve structurally, even when the "
+        "pattern is directory-only and the directory does not exist yet")
+
+
+def test_the_directory_form_of_a_candidate_still_resolves(tmp_path):
+    """The probe added for the case above must not break the spelling that
+    already worked — a candidate written with its trailing slash."""
+    root = _ignoring_repo(tmp_path, 'LOGS = ".ai/runs/"\n', ".ai/runs/")
+    assert not gate.check(root)
+
+
+def test_a_path_no_gitignore_covers_is_still_a_violation(tmp_path):
+    """The probe widens what resolves, so pin what must not: adding the
+    directory form must not make every absent path look ignored."""
+    root = _ignoring_repo(tmp_path, 'TARGET = ".ai/runner.py"\n', ".ai/runs/")
+    assert gate.check(root), "an absent path no pattern covers is still debt"
+    assert ".ai/runner.py" in _messages(gate.check(root))
