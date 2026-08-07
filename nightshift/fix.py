@@ -244,9 +244,9 @@ def dispatch(root: Path, text: str, round_no: int, *, permission_mode: str,
 
     binary = runner.claude_binary()
     assert binary, "can_dispatch() checked this"
-    argv = [binary, "-p", text, "--model", _model(root),
+    argv = [binary, "-p", "--model", _model(root),
             *runner._STREAM_ARGV, "--permission-mode", permission_mode]
-    done = runner._run_worker(argv, root, timeout, out_dir / "stream.jsonl")
+    done = runner._run_worker(argv, root, timeout, out_dir / "stream.jsonl", prompt=text)
     result = runner._terminal_result(done.stdout or "")
     return done.returncode, str(result.get("result") or "").strip()
 

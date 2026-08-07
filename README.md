@@ -446,6 +446,7 @@ project's one.
 | `memory_freshness` | a diff touching a declared source area must also touch its memory doc |
 | `orientation_budget` | the declared orientation files stay under [memory].budget_bytes |
 | `orientation_shape` | declared orientation docs hold current state, not dated history |
+| `prompt_not_in_argv` | no argv carries a worker prompt on `-p`; it goes down the child's stdin |
 | `pytest_invocation` | only suite.py may spell pytest's parallel flags; callers use parallel_args() |
 | `readme_generated` | README.md's generated blocks (gate list, runner flags, manifest fields) match a fresh generation |
 | `run_stop_recorded` | runner.py logs a stop reason only via _stop(), which also records it |
@@ -461,7 +462,7 @@ that is a supported state rather than a gap: `orientation_budget` needs
 `import_layering` needs `[layering].forbid`.
 Without those they run and report nothing. `dead_code` and the doc-scan family
 (`doc_reference_liveness`, `doc_signature_drift`, `deletion_sweep`) read
-`[project]`; the five discipline gates read `[project].tooling_dirs` on top of
+`[project]`; the discipline gates read `[project].tooling_dirs` on top of
 `.ai/`; the rest are config-free.
 
 **Writing your own:** a file in `.ai/gates/` exposing `check(repo_root) ->
