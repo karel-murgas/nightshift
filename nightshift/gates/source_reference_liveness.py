@@ -353,10 +353,29 @@ def _gitignored(repo_root: Path, tokens: list[str]) -> set[str]:
     match — the same class of bug `write_newline`/`subprocess_encoding` exist
     to catch elsewhere, found here by running this gate against a real
     Windows checkout rather than assuming the call was safe.
+
+    **Each candidate is probed both as written and as a directory**, because a
+    `.gitignore` entry with a trailing slash matches directories *only*, and
+    `git check-ignore` cannot tell that a path is a directory when nothing
+    exists at it. That is the normal case here rather than an edge one: the
+    whole reason a path reaches this function is that it is created at runtime,
+    so it is absent from a clean checkout by definition. Without the second
+    probe, `.ai/runs` fails to match this repo's own `.ai/runs/` pattern — which
+    is how the module docstring came to name `.ai/runs/` as *the* structural
+    case while the gate reported ten violations on it, in `runner.py`,
+    `digest.py` and `hooks/correction_prompt.py`. `git check-ignore .ai/runs`
+    says no; `git check-ignore '.ai/runs/'` says yes.
     """
     if not tokens:
         return set()
-    payload = ("\n".join(tokens) + "\n").encode("utf-8")
+    # Maps every probe back to the candidate it came from, so a hit on the
+    # directory form still answers for the token as the source actually wrote it.
+    probes: dict[str, str] = {}
+    for token in tokens:
+        probes.setdefault(token, token)
+        if not token.endswith("/"):
+            probes.setdefault(token + "/", token)
+    payload = ("\n".join(probes) + "\n").encode("utf-8")
     try:
         proc = subprocess.run(
             # `--non-matching`, not its `-n` short form: `pytest_invocation` reads a
@@ -373,7 +392,9 @@ def _gitignored(repo_root: Path, tokens: list[str]) -> set[str]:
     for line in text.splitlines():
         source, sep, path = line.partition("\t")
         if sep and not source.startswith("::"):
-            ignored.add(path.strip('"'))
+            probed = path.strip('"')
+            if probed in probes:
+                ignored.add(probes[probed])
     return ignored
 
 

@@ -474,30 +474,35 @@ def _plan_obsidian(plan: Plan, root: Path) -> None:
         else:
             plan.kept.append(".obsidian/community-plugins.json")  # gate-ok(source_reference_liveness): see the block comment above
 
+    # gate-ok(source_reference_liveness): every `.obsidian/core-plugins.json` below
+    # names a file under `vault` (the project being initialised), read and written at
+    # check time — this framework's own checkout has no such file, so each of the five
+    # mentions below resolves to nothing here by construction. Same case as the
+    # community-plugins block above, and as `.obsidian/workspace.json` above that.
     core = vault / "core-plugins.json"
     if core.is_file():
         try:
             loaded = json.loads(core.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             plan.notes.append(
-                f".obsidian/core-plugins.json is unreadable ({exc}) — the core Bases "
+                f".obsidian/core-plugins.json is unreadable ({exc}) — the core Bases "  # gate-ok(source_reference_liveness): see the block comment above
                 f"plugin was NOT enabled. Fix the file and re-run.")
             return
         if not isinstance(loaded, dict):
             return
         merged_map, added = merge_core_plugins(loaded)
         if added:
-            plan.writes[".obsidian/core-plugins.json"] = (
+            plan.writes[".obsidian/core-plugins.json"] = (  # gate-ok(source_reference_liveness): see the block comment above
                 json.dumps(merged_map, indent=2) + "\n")
-            plan.info.append("the core Bases plugin enabled in "
+            plan.info.append("the core Bases plugin enabled in "  # gate-ok(source_reference_liveness): see the block comment above
                              ".obsidian/core-plugins.json (every other key untouched)")
         else:
-            plan.kept.append(".obsidian/core-plugins.json")
+            plan.kept.append(".obsidian/core-plugins.json")  # gate-ok(source_reference_liveness): see the block comment above
     else:
         # Present vault, absent core map: Obsidian has not written one yet. Say so
         # rather than inventing the file — see the module comment above.
         plan.notes.append(
-            "no .obsidian/core-plugins.json yet, so the core Bases plugin was left "
+            "no .obsidian/core-plugins.json yet, so the core Bases plugin was left "  # gate-ok(source_reference_liveness): see the block comment above
             "alone — writing a partial one would assert a state for every core plugin "
             "you never chose. Obsidian writes it on launch; re-run `nightshift init` "
             "after that, or enable Bases in Settings → Core plugins.")
