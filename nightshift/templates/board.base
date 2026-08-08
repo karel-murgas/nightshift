@@ -11,6 +11,14 @@
 # `type: kanban` needs the **Base Board** community plugin; the tables need
 # **Bases**, which is core. With only Bases you get `Unknown view type: kanban`.
 #
+# The `oversize` formula is the board's copy of the runner's comfort threshold: a
+# card in `{{board}}/tasks` bigger than CARD_COMFORT_BYTES shows its size, everything
+# else shows nothing. It is computed on every render from `file.size`, so nothing is
+# written into any card and compacting one by hand clears the mark immediately.
+# The `14336` and the `tasks` below cannot import anything across the Bases boundary,
+# so `nightshift/gates/board_view_sync.py` pins both against `runner.py` — and this
+# comment is not where that is written down, because it does not survive (see above).
+#
 # `{{board}}/ideas` is the maintainer's private lane and is filtered out, EXCEPT for a
 # note that has a `state:` — flagging one is how a note asks to leave the lane, and
 # seeing that on the board is the whole point of the flag.
@@ -21,6 +29,8 @@ filters:
     - or:
         - '!file.inFolder("{{board}}/{{private_lane}}")'
         - "!state.isEmpty()"
+formulas:
+  oversize: 'if(file.inFolder("{{board}}/tasks") && file.size > 14336, (file.size / 1024).toFixed(1) + " KB", "")'
 properties:
   note.state:
     displayName: Lane
@@ -40,6 +50,8 @@ properties:
     displayName: Created
   note.attempts:
     displayName: Attempts
+  formula.oversize:
+    displayName: Too big
 views:
   - type: kanban
     name: Kanban
@@ -51,6 +63,7 @@ views:
       - requires
       - tags
       - attempts
+      - formula.oversize
     boardColumns:
 {{board_columns}}
     cardTitleProperty: title
@@ -72,6 +85,7 @@ views:
       - worker
       - tier
       - created
+      - formula.oversize
     sort:
       - property: state
         direction: DESC

@@ -433,6 +433,7 @@ project's one.
 <!-- generated:gate-list -->
 | Gate | What it checks |
 |---|---|
+| `board_view_sync` | the board view's oversize formula must agree with runner.CARD_COMFORT_BYTES |
 | `branch_role_prose` | docs naming the integration branch must agree with .ai/manifest.toml [branches] |
 | `card_schema` | cards on the board match the card schema, and `state:` agrees with the lane |
 | `corrections_log` | the correction log parses and its class/channel values are in vocabulary |
