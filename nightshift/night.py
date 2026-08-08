@@ -33,14 +33,20 @@ same thing on both.
      this (2026-07-28: the first cloud run dispatched into a container with no
      deps, no posture and no CLI, and produced no visible output at all).
 
-  4. **Publishing.** The laptop's checkout *is* Karel's repo, so a card's branch
-     is already somewhere he can reach it — `runner.py` never pushes there. A
-     cloud container is ephemeral: everything it commits (the board, merged
-     cards, a parked card's `ai/<id>` branch) dies with it unless it is pushed
-     before the container ends. An unknown host gets `publish_remote: "origin"`
-     in the same override this writes for posture, so `runner.publish()` pushes
-     after every settled card and once more at the end of the night — see
-     `runner.py`'s "Publish" section for why and what it pushes.
+  4. **Publishing.** A cloud container is ephemeral: everything it commits (the
+     board, merged cards, a parked card's `ai/<id>` branch) dies with it unless
+     it is pushed before the container ends. An unknown host gets
+     `publish_remote: "origin"` in the same override this writes for posture, so
+     `runner.publish()` pushes after every settled card and once more at the end
+     of the night — see `runner.py`'s "Publish" section for why and what it
+     pushes.
+
+     This is no longer a *difference* from a known host, only a stronger reason.
+     It read as one until 2026-08-08, on the argument that a laptop's checkout is
+     already the maintainer's repo — but a persistent box wants the same push for
+     backup and cross-machine visibility, and Dungeoneer's laptop now declares
+     `publish_remote` itself. The override still sets it because an unknown host
+     has no `hosts.json` entry to declare anything in.
 
 "Known host" = `socket.gethostname()` is a key in `.ai/hosts.json`. That single
 test routes local vs cloud; nothing is probed (the `hosts.json` design note
@@ -167,8 +173,10 @@ def _write_host_override() -> None:
     `publish_remote: "origin"` rides along with the posture for the same reason:
     a cloud container is the one place a night's commits would otherwise die
     unpublished (see the module docstring's fourth difference). `runner.publish()`
-    treats an absent/empty `publish_remote` as "don't push" — the laptop's
-    `hosts.json` entry carries none, so this is the one place that needs setting.
+    treats an absent/empty `publish_remote` as "don't push", and an unknown host
+    has no `hosts.json` entry to say otherwise in — which is why it is set here.
+    A *known* host declares it in `hosts.json` instead, and since 2026-08-08
+    Dungeoneer's laptop does; this is no longer the only place it is set.
     """
     if HOST_OVERRIDE.exists():
         _log(f"{HOST_OVERRIDE.name} already present — leaving it as-is.")

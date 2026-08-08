@@ -3625,9 +3625,21 @@ def _is_ancestor(root: Path, maybe_ancestor: str, descendant: str) -> bool:
 
 def publish(root: Path, remote: str, base: str, trusted_branch: str = "") -> None:
     """Push `base` and every live `ai/<id>` branch to `remote`, so a night's work
-    survives an ephemeral checkout. A no-op when `remote` is empty — the local
-    default, so Karel's own laptop never pushes anything on its own — or when
-    `remote` is not configured in this checkout.
+    survives an ephemeral checkout — and, since 2026-08-08, so a card that
+    succeeded is on the remote without anyone remembering to push it. A no-op
+    when `remote` is empty (the schema default, for a host that has not opted in)
+    or when `remote` is not configured in this checkout.
+
+    **The empty default is not a statement that a persistent box should not
+    push.** It was originally read that way — a laptop's checkout *is* the
+    maintainer's repo, so a branch there is already reachable — and that reading
+    was wrong about what the remote is for: reachable-on-this-disk is not the
+    same as backed up, visible from another machine, or survivable. Dungeoneer's
+    laptop declares `publish_remote: "origin"` for that reason (Karel,
+    2026-08-08: *"Pushing to test after card success should be automatic"*), so
+    a persistent host opting in is now the expected case, not the exception.
+    What stays deliberately manual is everything downstream of `base` — no
+    integration branch is merged anywhere, and no stable branch is touched.
 
     `base` is pushed **without force**: a rejection means something else (Karel,
     or another machine) moved `origin/<base>` since this checkout last saw it,
