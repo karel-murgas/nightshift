@@ -230,7 +230,7 @@ nightshift/
   gates/            # base.py, run.py, corpus.py, doc_scan.py, scope.py + the gates
   hooks/            # PreToolUse / PostToolUse hooks
   templates/        # what `init` writes into a project — templates/README.md
-tests/              # every test against a synthetic project, never this repo's own
+tests/              # a synthetic project per test, except where the subject IS this repo
 .ai/                # this package's own manifest — it is gated by itself
 ```
 
