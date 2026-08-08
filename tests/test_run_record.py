@@ -167,6 +167,33 @@ def test_an_unwritable_record_does_not_raise(tmp_path, monkeypatch):
     record.finish(cost_usd=1.0)          # must not raise
 
 
+# --- a card that ran while grown past useful worker input --------------------
+
+def test_an_oversized_card_that_ran_is_recorded_apart_from_the_skipped_ones(tmp_path):
+    """Round 2 of `oversized-cards-are-bad-worker-input`, and the separation is
+    the fix. An oversized card is dispatchable by design, so it is never in
+    `skipped` — which left `Digest.md` silent about exactly the case the signal
+    exists for. Putting it in `skipped` instead would have made the digest's own
+    `### Skipped — N` heading and its "Every card on the board was dispatchable"
+    fallback describe a card that ran, so the two lists have to stay disjoint at
+    the record, not just at the render."""
+    record = run_record.start(tmp_path, kind="run")
+    record.skipped([("parked", "unattended: false — declared as needing a human")])
+    record.oversized([("fat", 16_309, 14 * 1024)])
+
+    data = run_record.read_all(tmp_path)[0]
+    assert data["oversized"] == [{"card": "fat", "bytes": 16_309, "threshold": 14 * 1024}]
+    assert [s["card"] for s in data["skipped"]] == ["parked"]
+
+
+def test_a_record_carries_the_field_before_any_card_is_measured(tmp_path):
+    """`start()` seeds it like `skipped` and `dispatched`, so a run killed before
+    selection has the same shape as one that finished — the digest reads records
+    from runs it did not write, including older ones."""
+    run_record.start(tmp_path, kind="run")
+    assert run_record.read_all(tmp_path)[0]["oversized"] == []
+
+
 def test_reading_a_root_with_no_records_directory_is_empty_not_an_error(tmp_path):
     assert run_record.read_all(tmp_path) == []
     assert run_record.records_since(tmp_path, "2026-01-01T00:00:00") == []
@@ -179,6 +206,7 @@ def test_a_dry_run_writes_nothing(tmp_path):
     record = run_record.null()
     record.dispatched("probe", worker="w", model="m", attempt=1, outcome="failed")
     record.skipped([("a", "because")])
+    record.oversized([("b", 20_000, 14 * 1024)])
     record.stale(selected=1, checked=1, verified=1, carded=0)
     record.stop("reason")
     record.finish(cost_usd=1.0)

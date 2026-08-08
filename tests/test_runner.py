@@ -449,6 +449,67 @@ def test_the_threshold_clears_a_normal_dense_card(tmp_path):
     assert "CARD_COMFORT_BYTES" not in _select(root)["dense"].reason
 
 
+# --- and the half of that signal the digest can see (round 2) ----------------
+#
+# The run log gets a line for every card, but `Digest.md` is fed `record.skipped`,
+# which is `[c for c in candidates if not c.dispatchable]` — and an oversized card
+# is dispatchable *by design*. So the case the whole feature exists for, a card
+# dispatched over and over while it grows, was the one case the morning report
+# stayed silent about. `oversized_entries` is the separate list that fixes it.
+
+def test_a_card_that_ran_while_oversized_is_reported_to_the_digest(tmp_path):
+    """The round-2 regression, at the source. This card is *not* in the skip
+    list — that is the point — so without its own list nothing Karel reads in
+    the morning would mention it."""
+    root = _repo(tmp_path)
+    _charter(root, "code-thread")
+    path = _grow(_card(root, "tasks", "fat"), runner.CARD_COMFORT_BYTES + 2000)
+    candidates = runner.select(root, set(), {})
+
+    assert [c.card.id for c in candidates if not c.dispatchable] == []
+    assert runner.oversized_entries(candidates) == [
+        ("fat", len(path.read_text(encoding="utf-8")), runner.CARD_COMFORT_BYTES)]
+
+
+def test_a_normal_card_is_reported_to_the_digest_not_at_all(tmp_path):
+    """Every card is measured, so silence has to be the common case — a nightly
+    section listing the whole board is the section that gets skipped."""
+    root = _repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "lean")
+    assert runner.oversized_entries(runner.select(root, set(), {})) == []
+
+
+def test_an_oversized_card_that_was_skipped_is_not_also_reported_as_dispatched(tmp_path):
+    """It is already in `record.skipped` with the size note inside its reason, so
+    it reaches the digest under `### Skipped` where it belongs. Listing it here
+    too would report it twice, the second time under a heading that opens with
+    "Dispatched anyway" — about a card that never ran."""
+    root = _repo(tmp_path)
+    _charter(root, "code-thread")
+    _grow(_card(root, "tasks", "fat", unattended="false"),
+          runner.CARD_COMFORT_BYTES + 2000)
+    candidates = runner.select(root, set(), {})
+
+    assert not candidates[0].dispatchable
+    assert "CARD_COMFORT_BYTES" in candidates[0].reason   # reported, via the skip
+    assert runner.oversized_entries(candidates) == []     # and not a second time
+
+
+def test_the_size_the_digest_shows_is_the_size_the_message_quotes(tmp_path):
+    """Two surfaces, one measurement. A digest that said 15.9 KB while the run
+    log said 16.3 KB about the same card would make both unusable, which is why
+    `card_bytes` exists rather than each caller measuring for itself."""
+    root = _repo(tmp_path)
+    _charter(root, "code-thread")
+    _grow(_card(root, "tasks", "fat"), runner.CARD_COMFORT_BYTES + 2000)
+    candidates = runner.select(root, set(), {})
+
+    (_, size, _), = runner.oversized_entries(candidates)
+    stated, _ = (float(n) for n in re.findall(r"([\d.]+) KB", candidates[0].reason))
+    assert f"{size / 1024:.1f}" == f"{stated:.1f}"
+
+
 # --- naming one card by hand (`--card`) -------------------------------------
 #
 # This is the interactive path: Karel says "run card XYZ now" and someone types

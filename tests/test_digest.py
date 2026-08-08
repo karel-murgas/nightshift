@@ -148,6 +148,7 @@ def _record(root: Path, *, started: str = f"{_TODAY}T02:14:08",
             kind: str = "run", label: str = "up to 8 card(s), staleness sweep",
             stop_reason: str | None = None, dispatched: list[dict] | None = None,
             skipped: list[tuple[str, str]] | None = None, stale: dict | None = None,
+            oversized: list[tuple[str, int, int]] | None = None,
             cost_usd: float = 0.0, walls: int = 0) -> Path:
     data = {
         "started": started, "finished": finished, "complete": complete,
@@ -156,6 +157,8 @@ def _record(root: Path, *, started: str = f"{_TODAY}T02:14:08",
         "cards_dispatched": len(dispatched or []),
         "dispatched": list(dispatched or []),
         "skipped": [{"card": c, "reason": r} for c, r in (skipped or [])],
+        "oversized": [{"card": c, "bytes": b, "threshold": t}
+                      for c, b, t in (oversized or [])],
         "notes": [],
     }
     if stale is not None:
@@ -533,6 +536,67 @@ def test_a_run_that_skipped_nothing_says_so(tmp_path):
     (tmp_path / "Board").mkdir()
     _record(tmp_path)
     assert "Every card on the board was dispatchable" in digest.render(tmp_path)
+
+
+# --- a card that DID run, while grown past useful worker input ---------------
+
+def test_a_card_dispatched_while_oversized_is_reported(tmp_path):
+    """Round 2 of `oversized-cards-are-bad-worker-input`. The signal was built to
+    land "where he already looks every morning", and this is that place — but an
+    oversized card is dispatchable by design, so it is absent from `skipped`, and
+    the digest said nothing at all about the one case the feature exists for: a
+    card dispatched again and again while it grows."""
+    (tmp_path / "Board").mkdir()
+    _record(tmp_path, oversized=[("menu-unlock-indicators", 16_309, 14 * 1024)])
+    block = _sub(_run_section(digest.render(tmp_path)), "### Oversized — 1")
+    assert "`menu-unlock-indicators`" in block
+    assert "15.9 KB" in block          # its own size
+    assert "over 14 KB" in block       # the threshold it passed
+
+
+def test_the_oversized_block_says_what_to_do_not_just_that_a_number_was_passed(tmp_path):
+    """The acceptance criterion in as many words. A digest line naming a number
+    Karel cannot act on is a line he learns to skip — it has to carry the two
+    remedies and the name of the constant to change."""
+    (tmp_path / "Board").mkdir()
+    _record(tmp_path, oversized=[("fat", 20_000, 14 * 1024)])
+    block = _sub(_run_section(digest.render(tmp_path)), "### Oversized — 1")
+    assert "compact" in block and "split" in block
+    assert "CARD_COMFORT_BYTES" in block
+
+
+def test_an_oversized_card_is_never_counted_among_the_skipped(tmp_path):
+    """The reason this is its own field rather than an entry in `skipped`. The
+    card ran; a `### Skipped — 1` heading and an "Every card on the board was
+    dispatchable" fallback that disagreed with each other would make the section
+    Karel checks first untrustworthy, to report something that is not a skip."""
+    (tmp_path / "Board").mkdir()
+    _record(tmp_path, oversized=[("fat", 20_000, 14 * 1024)])
+    run = _run_section(digest.render(tmp_path))
+    assert "### Skipped — 0" in run
+    assert "Every card on the board was dispatchable" in _sub(run, "### Skipped — 0")
+    assert "fat" not in _sub(run, "### Skipped — 0")
+
+
+def test_a_run_with_nothing_oversized_grows_no_section(tmp_path):
+    """Unlike the five sections above it, this one is a nudge and not one of the
+    morning's standing questions — and the threshold was chosen to clear a normal
+    dense card, so silence is the honest steady state. A permanent "*nothing was
+    over the threshold*" line is a fixture reporting a non-event."""
+    (tmp_path / "Board").mkdir()
+    _record(tmp_path)
+    assert "### Oversized" not in digest.render(tmp_path)
+
+
+def test_a_record_written_before_the_field_existed_still_renders(tmp_path):
+    """The digest reads records it did not write, including ones from runs older
+    than this change — `.ai/runs/records/` keeps thirty."""
+    (tmp_path / "Board").mkdir()
+    path = _record(tmp_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    del data["oversized"]
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    assert "### Oversized" not in digest.render(tmp_path)
 
 
 # --- daytime work is not unattended work ------------------------------------

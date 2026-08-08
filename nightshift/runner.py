@@ -702,12 +702,30 @@ class Candidate:
 CARD_COMFORT_BYTES = 14 * 1024
 
 
+def card_bytes(card: board.Card) -> int:
+    """The size of the input a worker is actually handed for this card.
+
+    `card.text` rather than `path.stat().st_size` for two reasons: the text is
+    the thing put in front of a worker, and it is the same number on a checkout
+    whose working files carry CRLF. One function because there are now two
+    callers — the message below and the digest's record entry — and a signal
+    whose two surfaces disagreed about the size would be worse than no signal.
+    """
+    return len(card.text.encode("utf-8"))
+
+
 def oversize_note(card: board.Card) -> str:
     """One advisory line about a card grown past `CARD_COMFORT_BYTES`, or `""`.
 
-    **Advisory by construction.** The caller folds this into the candidate's
-    `reason`, which is what `run()` logs per card and what `record.skipped`
-    carries into `Digest.md` — it never touches `dispatchable`. That is the
+    **Advisory by construction.** `select()` folds this into the candidate's
+    `reason`, which is what `run()` logs per card — it never touches
+    `dispatchable`. `run()` also uses "returned something" as its *predicate*
+    for `record.oversized`, which is how a dispatched oversized card reaches
+    `Digest.md` at all: it is dispatchable, so it is not in `record.skipped`,
+    so before that field the digest was silent about exactly the case this
+    signal exists for. Reusing this function as the test rather than
+    re-deriving the condition is deliberate — it keeps the lane rule and the
+    comparison in one place for both readers. That is the
     whole design: gates here have exactly one severity (`Violation`), so a
     blocking version of this would turn the board red on Karel using his own
     board, and a gate that does that is a gate that gets muted. Nothing about a
@@ -729,7 +747,7 @@ def oversize_note(card: board.Card) -> str:
     """
     if card.lane != "tasks":
         return ""
-    size = len(card.text.encode("utf-8"))
+    size = card_bytes(card)
     if size <= CARD_COMFORT_BYTES:
         return ""
     return (f"{size / 1024:.1f} KB, over the {CARD_COMFORT_BYTES / 1024:.0f} KB "
@@ -812,6 +830,27 @@ def select(root: Path, capabilities: set[str], bad_schema: dict[str, list[str]],
                 why += " — asked for by name, so `unattended: false` is waived"
             add(True, why)
     return out
+
+
+def oversized_entries(candidates: list[Candidate]) -> list[tuple[str, int, int]]:
+    """The `(card_id, bytes, threshold)` rows `record.oversized` takes.
+
+    **Dispatchable ones only, and that is the whole of the field.** A card that
+    was skipped already carries `oversize_note`'s sentence verbatim inside its
+    skip reason, so it is reported under `### Skipped` where it belongs;
+    repeating it here would double-report it *and* file a card that never ran
+    under a heading whose first two words are "Dispatched anyway". The cards
+    left are precisely the ones no other section of the digest can mention — the
+    reason `Digest.md` was silent about a card being dispatched over and over
+    while it grew.
+
+    A named function rather than a comprehension inline in `run()` for the
+    reason `oversize_note` is one: the predicate is the thing worth pinning, and
+    a test that re-spelled it at the call site would be a mirror of the code
+    rather than a check on it.
+    """
+    return [(c.card.id, card_bytes(c.card), CARD_COMFORT_BYTES)
+            for c in candidates if c.dispatchable and oversize_note(c.card)]
 
 
 def resolve_named(root: Path, card_id: str,
@@ -3908,6 +3947,12 @@ def run(root: Path, args: argparse.Namespace) -> int:
         # no lane diff can recover it, and five art cards stalled on a capability
         # this host does not have looked exactly like an empty night for a week.
         record.skipped([(c.card.id, c.reason) for c in candidates if not c.dispatchable])
+        # And the ones that DID run while over `CARD_COMFORT_BYTES`. A separate
+        # field because an oversized card is dispatchable by design, so it is
+        # absent from the list above — which left the digest silent about the
+        # one case the signal exists for, a card dispatched over and over while
+        # it grows.
+        record.oversized(oversized_entries(candidates))
 
         if args.card:
             ready, why = resolve_named(work, args.card, candidates)

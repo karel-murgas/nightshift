@@ -129,6 +129,29 @@ class Record:
         self.data["skipped"] = [{"card": cid, "reason": reason} for cid, reason in entries]
         self.save()
 
+    def oversized(self, entries: list[tuple[str, int, int]]) -> None:
+        """Cards that were **dispatched** while over `runner.CARD_COMFORT_BYTES`,
+        as `(card_id, bytes, threshold)`.
+
+        A field of its own, and the separation is the whole reason this exists.
+        An oversized card is dispatchable by design — that is the choice made on
+        `oversized-cards-are-bad-worker-input`, advisory over a hard stop — so it
+        is absent from `skipped` by construction, and the case the signal exists
+        for (a card dispatched again and again while it grows) was therefore the
+        one case `Digest.md` stayed silent about. Folding it into `skipped`
+        instead would have made the digest's own `### Skipped — N` heading and
+        its *"Every card on the board was dispatchable"* fallback say something
+        untrue about a card that ran.
+
+        Numbers, not the sentence the run log prints. The record holds what the
+        runner observed and the digest decides how it reads in the morning — and
+        the two surfaces phrase it differently on purpose: one line per card in
+        the log, N cards under one shared remedy in the digest.
+        """
+        self.data["oversized"] = [{"card": cid, "bytes": size, "threshold": limit}
+                                  for cid, size, limit in entries]
+        self.save()
+
     def stale(self, *, selected: int, checked: int, verified: int, carded: int,
               incomplete: int = 0, cards: list[str] | None = None) -> None:
         """The sweep's real yield. `selected` and `incomplete` are the two the
@@ -201,7 +224,7 @@ def start(root: Path, *, kind: str, label: str = "", host: str = "") -> Record:
         "started": started, "finished": None, "complete": False,
         "kind": kind, "label": label, "host": host,
         "stop_reason": None, "cost_usd": 0.0, "walls": 0, "cards_dispatched": 0,
-        "dispatched": [], "skipped": [], "notes": [],
+        "dispatched": [], "skipped": [], "oversized": [], "notes": [],
     })
     record.save()
     prune(root)

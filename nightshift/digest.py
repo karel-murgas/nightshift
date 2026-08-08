@@ -25,8 +25,8 @@ So the digest now reads `.ai/runs/records/` — each run's own account of itself
 
 1. **What happened, per run, newest first.** Sourced entirely from run records.
    Inside each run, Karel's questions in Karel's order: Failed → Decide →
-   Passed → Stale hunter → Skipped. A run that was killed or aborted says so in
-   its header. Every run since the last digest gets its own block, because a
+   Passed → Stale hunter → Skipped, then an **Oversized** nudge on the nights
+   one fires. A run that was killed or aborted says so in its header. Every run since the last digest gets its own block, because a
    night that dies without writing a digest would otherwise never be reported at
    all — which is exactly how the 02:14 abort stayed invisible.
 2. **Still waiting on you** — the standing board state, explicitly labelled as
@@ -808,7 +808,50 @@ def _run_block(root: Path, record: dict, index: dict[str, tuple[Card, str]],
             L.append(f"- **{len(groups[reason])}** — {_plain(reason)}")
             L.append(f"    - {ids}")
     L.append("")
+
+    # 6. Oversized — cards that DID run while past the comfort threshold. The
+    #    mirror image of Skipped, and it had to be its own field for exactly
+    #    that reason: an oversized card is dispatchable by design, so it never
+    #    appears above, and the digest was silent about the one case the signal
+    #    exists for — a card dispatched again and again while it grows.
+    #
+    #    Rendered only when it fires, unlike the five sections above. Those are
+    #    the morning's standing questions and each earns its "*nothing*" answer;
+    #    this is a nudge, and the threshold was set to clear a normal dense card,
+    #    so the honest steady state is silence. A permanent "*no card was over
+    #    the threshold*" line is a fixture reporting a non-event, which is the
+    #    failure `_QUEUE_SHOWN` above exists to avoid.
+    #
+    #    The remedy is said once for the whole group rather than repeated per
+    #    card — the same call as "**All N failed the same way**" and the skip
+    #    grouping: what Karel does about three oversized cards is one action
+    #    repeated, not three findings. So the per-card line carries only its two
+    #    numbers, and the prose lives here instead of being a second copy of
+    #    `runner.oversize_note`'s sentence drifting against it.
+    oversized = record.get("oversized") or []
+    if oversized:
+        L.append(f"### Oversized — {len(oversized)}")
+        L.append("")
+        L.append("**Dispatched anyway** — size is a remark about a card, never a verdict "
+                 "on it. But a card *is* the worker's opening message, so every attempt "
+                 "re-reads all of it: compact each one, or split it into separate cards. "
+                 "The threshold is `CARD_COMFORT_BYTES` in `nightshift/runner.py`.")
+        L.append("")
+        for o in oversized:
+            L.append(f"- {_named(o['card'], index)} — "
+                     f"{_kb(o.get('bytes', 0))}, over {_kb(o.get('threshold', 0), 0)}")
+        L.append("")
     return L
+
+
+def _kb(size: object, places: int = 1) -> str:
+    """`15873` → `15.5 KB`. Bytes are what the record carries — they are what
+    the runner measured — and KB is what a human compares against a threshold he
+    remembers as "14"."""
+    try:
+        return f"{float(size) / 1024:.{places}f} KB"
+    except (TypeError, ValueError):
+        return "? KB"
 
 
 def _retry_note(failure: dict) -> str:
