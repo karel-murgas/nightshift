@@ -2871,16 +2871,39 @@ def test_settle_reviewed_merges_and_lands_in_testing(tmp_path, monkeypatch):
     card.write({"started": "2026-07-24T03:00:00"})
     calls: list = []
     monkeypatch.setattr(runner, "rebase_and_merge",
-                        lambda r, card, branch, base, test_timeout=600:
-                        (calls.append((branch, base)) or (True, "merged")))
+                        lambda r, card, branch, base, test_timeout=600, remote="":
+                        (calls.append((branch, base, remote)) or (True, "merged")))
 
     note = runner.settle(root, "probe", runner.Dispatch("reviewed", "clean"))
     settled = board.find(root, "probe")
     assert settled.lane == "testing"
     assert settled.fields["state"] == "testing"
     assert not settled.fields.get("started")
-    assert calls == [("ai/probe", runner.default_base(root))]   # rebased onto + merged into it
+    # Rebased onto + merged into the integration branch, and told which remote to
+    # delete the branch on — `""` here, since this fixture's host declares no
+    # `publish_remote` (see `test_settle_threads_the_publish_remote_to_the_merge`).
+    assert calls == [("ai/probe", runner.default_base(root), "")]
     assert "testing/" in note
+
+
+def test_settle_threads_the_publish_remote_to_the_merge(tmp_path, monkeypatch):
+    """The merge step deletes the card's branch on the remote as well as locally,
+    and it learns which remote the same way it learns the integration branch:
+    from the caller. `settle` resolves the host's `publish_remote` and passes it
+    down — so a host that opted into publishing also opts into the cleanup, and
+    one that did not is handed `""` and touches no remote."""
+    root = _worktree_repo(tmp_path)
+    _reviewed_branch(root, tmp_path)
+    (root / ".ai").mkdir(exist_ok=True)
+    (root / runner.HOST_FILE).write_bytes(
+        json.dumps({"publish_remote": "origin"}).encode("utf-8"))
+    seen: list = []
+    monkeypatch.setattr(runner, "rebase_and_merge",
+                        lambda r, card, branch, base, test_timeout=600, remote="":
+                        (seen.append(remote) or (True, "merged")))
+
+    runner.settle(root, "probe", runner.Dispatch("reviewed", "clean"))
+    assert seen == ["origin"]
 
 
 def test_settle_reviewed_but_unmergeable_goes_to_review_not_testing(tmp_path, monkeypatch):
@@ -2892,7 +2915,7 @@ def test_settle_reviewed_but_unmergeable_goes_to_review_not_testing(tmp_path, mo
     card = _reviewed_branch(root, tmp_path)
     card.write({"started": "2026-07-24T03:00:00"})
     monkeypatch.setattr(runner, "rebase_and_merge",
-                        lambda r, card, branch, base, test_timeout=600:
+                        lambda r, card, branch, base, test_timeout=600, remote="":
                         (False, "conflict in board.py"))
 
     note = runner.settle(root, "probe", runner.Dispatch("reviewed", "clean"))
@@ -2930,7 +2953,8 @@ def test_only_a_verify_review_card_reaches_done_from_this_stage(tmp_path, monkey
     now, but only for a card that *declares* `verify: review`, and only on a clean
     merge. Drive every routing the stage can produce and pin where each one lands."""
     monkeypatch.setattr(runner, "rebase_and_merge",
-                        lambda r, card, branch, base, test_timeout=600: (True, "merged"))
+                        lambda r, card, branch, base, test_timeout=600, remote="":
+                        (True, "merged"))
     cases = {
         "needs_decision": ("needs-decision", "play", runner.Dispatch("needs_decision", "q?")),
         "reviewed-play": ("testing", "play", runner.Dispatch("reviewed", "ok")),
@@ -2952,7 +2976,8 @@ def test_only_a_verify_review_card_reaches_done_from_this_stage(tmp_path, monkey
         root = _worktree_repo(sub)
         _reviewed_branch(root, sub, verify=verify)
         monkeypatch.setattr(runner, "rebase_and_merge",
-                            lambda r, card, branch, base, test_timeout=600: (False, "conflict"))
+                            lambda r, card, branch, base, test_timeout=600, remote="":
+                            (False, "conflict"))
         runner.settle(root, "probe", runner.Dispatch("reviewed", "ok"))
         assert board.find(root, "probe").lane == "review", verify
 
@@ -2961,7 +2986,8 @@ def test_a_play_card_lands_carrying_the_workers_scenario(tmp_path, monkeypatch):
     """The other half of the split: a card that does reach Karel's desk arrives
     with a `## How to test` written by the worker that built it, not bare."""
     monkeypatch.setattr(runner, "rebase_and_merge",
-                        lambda r, card, branch, base, test_timeout=600: (True, "merged"))
+                        lambda r, card, branch, base, test_timeout=600, remote="":
+                        (True, "merged"))
     root = _worktree_repo(tmp_path)
     _reviewed_branch(root, tmp_path, verify="play")
     runner.settle(root, "probe", runner.Dispatch(
@@ -2982,7 +3008,8 @@ def test_a_night_lands_a_reviewed_ok_card_in_testing(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "run_reviewer",
                         lambda *a, **k: ({"verdict": "ok", "notes": "clean"}, 0.1, None))
     monkeypatch.setattr(runner, "rebase_and_merge",
-                        lambda r, card, branch, base, test_timeout=600: (True, "merged"))
+                        lambda r, card, branch, base, test_timeout=600, remote="":
+                        (True, "merged"))
 
     runner.run(root, runner._parser(root).parse_args(
         ["--base", "development_team", "--max-cards", "1"]))
@@ -3773,6 +3800,136 @@ def test_rebase_and_merge_leaves_a_conflicting_branch_for_a_human(tmp_path):
     assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode == 0
 
 
+# --- ...and deleting the remote copy too (Karel, 2026-08-09) ----------------
+#
+# `publish` creates `<remote>/ai/<id>`; until this existed, nothing ever removed
+# it, so with `publish_remote` set every merged card orphaned a remote branch
+# forever (`origin/ai/cyberware-next-level-preview` is the live instance).
+# Against a real bare remote, per the 2026-07-28 lesson that a mocked push hid
+# the behaviour that mattered.
+
+def _remote_has(bare: Path, branch: str) -> bool:
+    return runner._git(bare, "rev-parse", "--verify", f"refs/heads/{branch}").returncode == 0
+
+
+def _advance_on_remote(bare: Path, tmp_path: Path, branch: str, name: str, body: str) -> str:
+    """Another machine pushes a commit onto `branch` after this checkout last
+    fetched — work the local branch has never contained."""
+    clone = tmp_path / f"other-machine-{branch.replace('/', '-')}"
+    subprocess.run(["git", "clone", "-q", str(bare), str(clone)], check=True)
+    subprocess.run(["git", "checkout", "-q", branch], cwd=clone, check=True)
+    (clone / name).write_text(body, encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=clone, check=True)
+    subprocess.run(["git", "commit", "-qm", f"{branch}: {name} (elsewhere)"],
+                   cwd=clone, check=True)
+    subprocess.run(["git", "push", "-q", "origin", branch], cwd=clone, check=True)
+    return runner._git(bare, "rev-parse", f"refs/heads/{branch}").stdout.strip()
+
+
+def test_rebase_and_merge_deletes_the_branch_on_the_remote_too(tmp_path):
+    """The gap this closes: `publish` had pushed `ai/probe`, the card merges, the
+    local ref goes — and the remote's copy used to stay forever. Both copies must
+    go, and for the same reason: the work is on the integration branch now."""
+    root = _worktree_repo(tmp_path)
+    bare = _bare_origin(root, tmp_path)
+    _branch_with_file(root, tmp_path, "ai/probe", "feature.py", "x = 1\n")
+    runner.publish(root, "origin", "development_team")
+    assert _remote_has(bare, "ai/probe"), "fixture: the branch must be on origin first"
+    card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
+
+    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team",
+                                          remote="origin")
+    assert merged, why
+    assert not _remote_has(bare, "ai/probe")
+    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode != 0
+
+
+def test_rebase_and_merge_touches_no_remote_without_a_publish_remote(tmp_path):
+    """A host that never opted into pushing must not start deleting on a remote:
+    an empty `publish_remote` (the schema default) leaves `origin/ai/probe` exactly
+    where it is, even though the local branch still goes."""
+    root = _worktree_repo(tmp_path)
+    bare = _bare_origin(root, tmp_path)
+    _branch_with_file(root, tmp_path, "ai/probe", "feature.py", "x = 1\n")
+    runner.publish(root, "origin", "development_team")
+    card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
+
+    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+    assert merged, why
+    assert _remote_has(bare, "ai/probe")
+    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode != 0
+
+
+def test_rebase_and_merge_refuses_to_delete_a_remote_carrying_unmerged_commits(tmp_path,
+                                                                               monkeypatch):
+    """The case that destroys work, and the one that makes the guard's *direction*
+    load-bearing. `origin/ai/probe` has a commit pushed from another machine since
+    this checkout last fetched: it was no part of what was just rebased, gated and
+    merged, and deleting the remote would be the only copy gone. Refuse, log, and
+    leave it — `publish`'s posture on a diverged branch.
+
+    Note what this does NOT check: ancestry against `development_team`. What
+    landed there is the rebased *copy*, so `ai/probe`'s own tip is never its
+    ancestor — a guard phrased that way would pass this test by refusing every
+    delete, including the three above. The guard is against the local branch."""
+    root = _worktree_repo(tmp_path)
+    bare = _bare_origin(root, tmp_path)
+    _branch_with_file(root, tmp_path, "ai/probe", "feature.py", "x = 1\n")
+    runner.publish(root, "origin", "development_team")
+    elsewhere = _advance_on_remote(bare, tmp_path, "ai/probe", "later.py", "y = 2\n")
+    card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
+
+    logged: list[str] = []
+    monkeypatch.setattr(runner, "_log", lambda message: logged.append(message))
+    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team",
+                                          remote="origin")
+
+    assert merged, why
+    assert _remote_has(bare, "ai/probe"), \
+        "a remote carrying commits this checkout never merged must never be deleted"
+    assert runner._git(bare, "rev-parse", "refs/heads/ai/probe").stdout.strip() == elsewhere
+    assert any("did NOT delete" in line for line in logged), logged
+    # The local delete is unaffected: those commits *are* on the integration branch.
+    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode != 0
+
+
+def test_rebase_and_merge_deletes_neither_copy_when_the_merge_fails(tmp_path):
+    """A conflicting card keeps both refs: a human needs the branch to resolve it,
+    and needs it reachable from wherever they are, which is the remote."""
+    root = _worktree_repo(tmp_path)
+    bare = _bare_origin(root, tmp_path)
+    _branch_with_file(root, tmp_path, "ai/probe", "shared.py", "value = 'A'\n")
+    runner.publish(root, "origin", "development_team")
+    _commit_on_base(root, tmp_path, "shared.py", "value = 'B'\n")
+    card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
+
+    merged, _ = runner.rebase_and_merge(root, card, "ai/probe", "development_team",
+                                        remote="origin")
+    assert not merged
+    assert _remote_has(bare, "ai/probe")
+    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode == 0
+
+
+def test_rebase_and_merge_says_nothing_about_a_branch_that_was_never_published(tmp_path,
+                                                                               monkeypatch):
+    """Most cards merge without ever having been pushed, so a remote with no such
+    branch is the ordinary case — not a failure, and not something to report as
+    one. The merge, and the local delete, proceed in silence."""
+    root = _worktree_repo(tmp_path)
+    _bare_origin(root, tmp_path)
+    _branch_with_file(root, tmp_path, "ai/probe", "feature.py", "x = 1\n")
+    card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
+
+    logged: list[str] = []
+    monkeypatch.setattr(runner, "_log", lambda message: logged.append(message))
+    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team",
+                                          remote="origin")
+
+    assert merged, why
+    assert not any("delete" in line for line in logged), logged
+    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode != 0
+
+
 # --- publish: pushing so a cloud run is pullable anywhere -------------------
 #
 # The runner commits everything locally — the board, merged cards on
@@ -4196,7 +4353,8 @@ def _fake_review_run(monkeypatch, root: Path, card_id: str) -> None:
                         runner.Dispatch("reviewed", "ok"))
     monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
     monkeypatch.setattr(runner, "rebase_and_merge",
-                        lambda r, card, branch, base, test_timeout=600: (True, "merged"))
+                        lambda r, card, branch, base, test_timeout=600, remote="":
+                        (True, "merged"))
 
 
 def test_an_append_run_does_not_close_the_window_for_the_next_run(tmp_path, monkeypatch):

@@ -3123,8 +3123,72 @@ def _unmerged_paths(tree: Path) -> list[str]:
     return _git(tree, "diff", "--name-only", "--diff-filter=U").stdout.split()
 
 
+def _delete_remote_branch(root: Path, remote: str, branch: str) -> None:
+    """Delete `branch` on `remote` once its work has landed, so a published card
+    branch does not outlive the local one (Karel, 2026-08-09: *"Delete on merge,
+    both local and remote."*).
+
+    Must be called from `rebase_and_merge` **while `branch` still exists
+    locally** — the guard below is an ancestry test against that very ref, and
+    after `git branch -D` there is nothing left to test against.
+
+    **The guard is against the local branch, not against `base`.** Ancestry
+    against `base` — the check `publish()`'s dormant-branch case would suggest —
+    is exactly backwards here: what lands on `base` is the *rebased copy*, so
+    `branch`'s own tip is never an ancestor of `base` after a successful merge
+    (the same fact that forces the local delete to use `-D`, not `-d`). A guard
+    phrased that way would refuse every delete, and a gate that never fires is
+    worse than none. The warrant for deleting is not ancestry at all: it is that
+    this checkout just rebased these commits, re-ran gates and the test slice on
+    the replayed result, and merged it.
+
+    What the local delete does not have to worry about, and this does, is that a
+    remote is **shared**. `remote`'s copy of `branch` may carry commits this
+    checkout has never seen — pushed by another machine or a cloud run since the
+    last fetch — which were no part of what was just rebased and merged, and
+    which a delete would destroy with no copy anywhere. That is the same class
+    of loss `publish()` documents (verified against a real bare remote,
+    `menu-unlock-indicators`, 2026-07-28). So: fetch the branch, and delete it
+    only when the remote's tip **is an ancestor of the local tip** — everything
+    the remote had is contained in what just merged. When it is not, refuse and
+    log loudly, leaving it for a human, exactly `publish()`'s posture on a
+    diverged branch.
+
+    A no-op when `remote` is empty (the schema default: a host that never opted
+    into pushing must not start deleting on a remote) or when `remote` is not
+    configured in this checkout. A remote that simply has no such branch is the
+    ordinary case — most cards merge without ever having been published — not a
+    failure, and is not logged as one. Every real failure is logged and
+    swallowed: a delete problem is an observability gap, not a reason to end the
+    night.
+    """
+    if not remote:
+        return
+    if _git(root, "remote", "get-url", remote).returncode != 0:
+        return
+
+    fetched = _git(root, "fetch", remote, branch)
+    if fetched.returncode != 0:
+        # The remote has no such branch: this card was merged without ever being
+        # published. Nothing to delete, and nothing to report.
+        return
+    remote_tip = _git(root, "rev-parse", "FETCH_HEAD").stdout.strip()
+    if not remote_tip or not _is_ancestor(root, remote_tip, branch):
+        _log(f"  ! merged {branch} but did NOT delete it on {remote} — the remote "
+             f"carries commits this checkout never merged (pushed from elsewhere "
+             f"since the last fetch); deleting would destroy them. Reconcile "
+             f"`{remote}/{branch}` by hand.")
+        return
+
+    deleted = _git(root, "push", remote, "--delete", branch)
+    if deleted.returncode != 0:
+        detail = (deleted.stderr or deleted.stdout or "").strip().splitlines()
+        _log(f"  ! merged {branch} but could not delete it on {remote} — "
+             f"{detail[-1][:150] if detail else 'see git output'}")
+
+
 def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
-                     test_timeout: int = 600) -> tuple[bool, str]:
+                     test_timeout: int = 600, remote: str = "") -> tuple[bool, str]:
     """Rebase a reviewed-ok card's branch onto the current integration tip,
     re-verify gates + the affected test slice, then merge (runner-hardening #3).
 
@@ -3139,13 +3203,24 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
     rebased result merges. Reuses `merge_check`'s worktree discipline. No LLM
     (§12): rebase, gates, tests and the merge are all exit codes.
 
-    Once the rebased result actually merges, `branch` is deleted. It was the
-    deliverable back when Karel merged cards by hand (Session G) — nothing reads
-    it once this function has merged automatically, and keeping it forever only
-    produces stale refs that `git branch --merged` cannot even recognise as
-    merged (the commit that lands is the rebased copy, not `branch`'s own tip). A
-    failed merge leaves `branch` in place, since a human still needs it to
-    resolve the conflict.
+    Once the rebased result actually merges, `branch` is deleted — locally, and
+    on `remote` too. It was the deliverable back when Karel merged cards by hand
+    (Session G) — nothing reads it once this function has merged automatically,
+    and keeping it forever only produces stale refs that `git branch --merged`
+    cannot even recognise as merged (the commit that lands is the rebased copy,
+    not `branch`'s own tip). A failed merge leaves both copies in place, since a
+    human still needs the branch to resolve the conflict.
+
+    `remote` is the host's `publish_remote`, threaded in by `settle` the same way
+    `base` is (`default_base`) rather than read from `host_setting` here: this
+    stays a function of its arguments — testable against a bare remote without
+    planting a host config — and it matches `publish(root, remote, base, …)`, so
+    both halves of a card branch's remote lifetime take the remote the same way.
+    The `""` default is the schema default and means "no remote deletion", so
+    every caller that has not opted into publishing keeps today's behaviour
+    exactly. `_delete_remote_branch` carries the guard and the reasoning; note
+    only that it must run **before** the local `-D`, because that guard is an
+    ancestry test against the local branch's own tip.
 
     Returns `(merged, detail)`. Any failure — the branch gone, a rebase conflict,
     or gates/tests failing on the replayed result — returns `(False, reason)` with
@@ -3205,6 +3280,11 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
         # `finally` drops the worktree only after.
         merged, why = merge_branch(root, rebased_sha, base, label=branch)
         if merged:
+            # The remote copy goes first, while `branch` still resolves: its
+            # guard is an ancestry test against this ref, which `-D` would take
+            # away. A refusal or a failure there is logged and swallowed, so the
+            # local delete below happens either way.
+            _delete_remote_branch(root, remote, branch)
             # The dispatch worktree that had `branch` checked out is already gone
             # by this point (dropped at the end of `dispatch`, well before review
             # and settle run), so the ref is never checked out anywhere here.
@@ -3555,7 +3635,12 @@ def settle(root: Path, card_id: str, result: Dispatch) -> str:
     if result.outcome == "reviewed":
         branch = card.fields.get("branch") or f"ai/{card_id}"
         integration = default_base(root)
-        merged, why = rebase_and_merge(root, card, branch, integration)
+        # The host's `publish_remote`, resolved here rather than inside
+        # `rebase_and_merge`, for the same reason `integration` is: the merge
+        # step stays a function of its arguments. Empty on a host that never
+        # opted into pushing, and then nothing is deleted on any remote.
+        remote = str(host_setting(root, "publish_remote", "")).strip()
+        merged, why = rebase_and_merge(root, card, branch, integration, remote=remote)
         if merged:
             # Written before the move, so the card carries its scenario into the
             # lane rather than arriving there bare — the same ordering, and for the
@@ -3614,7 +3699,14 @@ def _card_branches(root: Path) -> list[str]:
     """Every local `ai/<id>` branch, in the same lightweight per-card namespace
     `prepare_worktree`/`drop_worktree` already use. A card that merged and had
     `rebase_and_merge` delete its branch does not appear — correct, since its
-    work is already on `base`, which is published in its own right."""
+    work is already on `base`, which is published in its own right.
+
+    That absence is what keeps `publish` from resurrecting a merged card's
+    branch, but it is not what removes the copy already on the remote: nothing
+    here reaches across, and until 2026-08-09 nothing did, so every published
+    card left an orphaned `<remote>/ai/<id>` behind forever. Deleting that is
+    `rebase_and_merge`'s job, at the moment it deletes the local ref and while it
+    still has the tip to check the remote's against."""
     out = _git(root, "for-each-ref", "--format=%(refname:short)", "refs/heads/ai/")
     return [line.strip() for line in out.stdout.splitlines() if line.strip()]
 
@@ -3680,6 +3772,14 @@ def publish(root: Path, remote: str, base: str, trusted_branch: str = "") -> Non
       an ancestor — it carries commits this checkout does not have, diverged or
       newer — the push is refused and logged loudly rather than guessed at; that
       is a human reconciliation, same as a rejected `base` push.
+
+    A pushed card branch is not permanent. `rebase_and_merge` deletes it on this
+    same remote when the card's work merges (2026-08-09), so what accumulates
+    here is only the branches of cards still in flight — parked, in review, or
+    failed — not one ref per card ever run. The ancestry gate below and the one
+    guarding that delete look alike and are not the same check: this one asks
+    whether the *remote* may be overwritten by local history, that one whether
+    the *remote's* history is already contained in what merged.
 
     Every failure is logged and swallowed — same posture as `_log`'s own file
     tee: a push problem is an observability gap, not a reason to end the night.
