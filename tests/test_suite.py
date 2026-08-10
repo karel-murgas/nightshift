@@ -11,6 +11,7 @@ was written in would not have caught `source_dirs` being ignored.
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -512,8 +513,14 @@ def test_the_box_that_ran_out_of_memory_is_capped():
 def test_plenty_of_memory_yields_no_opinion_so_auto_is_kept():
     """This only ever narrows. When memory is not the binding constraint the argv
     must stay byte-identical to the historical `-n auto`, so that a well-provisioned
-    box is not silently slowed down by a cap it does not need."""
-    assert suite.worker_count(22, 31.5) is None
+    box is not silently slowed down by a cap it does not need.
+
+    The figures are "enough for every core *and* the reserve": 22 workers need
+    22 x 1.4 + 4 = 34.8 GB. `(22, 31.5)` used to be here and is deliberately gone —
+    31.5 GB fits 22 workers only by leaving 0.7 GB for the whole rest of the box,
+    which is the 2026-08-10 crash, not a well-provisioned box (see
+    `test_the_cap_leaves_room_for_everything_that_is_not_the_suite`)."""
+    assert suite.worker_count(22, 64.0) is None
     assert suite.worker_count(4, 64.0) is None
 
 
@@ -541,6 +548,58 @@ def test_the_cap_never_exceeds_the_cpu_count():
     for cpus in (1, 2, 6, 22):
         capped = suite.worker_count(cpus, 512.0)
         assert capped is None or capped <= cpus
+
+
+def test_the_cap_leaves_room_for_everything_that_is_not_the_suite():
+    """The 2026-08-10 incident. A cap that spends the *whole* free figure keeps the
+    suite alive and takes the desktop down with it — on Windows the failing
+    allocation lands in whichever process asks next, so VS Code and Explorer
+    crashed while pytest ran on.
+
+    Karel's box: 12 CPUs, 13.4 GB of commit headroom. Without the reserve the
+    arithmetic allows 9 workers = 12.6 GB, leaving ~0.8 GB. With it, the workers
+    must fit in 13.4 - 4 = 9.4 GB."""
+    capped = suite.worker_count(12, 13.4)
+    assert capped is not None, "13.4 GB must not read as 'no opinion' on a 12-CPU box"
+    assert capped * suite.WORKER_MEMORY_GB <= 13.4 - suite.SYSTEM_RESERVE_GB
+    assert capped < int(13.4 / suite.WORKER_MEMORY_GB), (
+        "the cap must be strictly tighter than the reserve-less arithmetic, "
+        "otherwise SYSTEM_RESERVE_GB is not being applied")
+
+
+def test_the_reserve_never_drives_the_cap_below_the_floor():
+    """Subtracting the reserve can take the affordable count to zero or negative.
+    That must land on `MIN_WORKERS`, never on `-n 0` (an error) or a negative."""
+    for memory in (0.0, 1.0, suite.SYSTEM_RESERVE_GB, suite.SYSTEM_RESERVE_GB + 0.1):
+        assert suite.worker_count(22, memory) == suite.MIN_WORKERS
+
+
+def test_the_probe_reports_commit_headroom_when_that_is_what_is_scarce():
+    """Windows charges commit on reserve, not on first touch, so a box at 40%
+    physical memory can be at 90% commit — and it is commit that fails
+    allocations. The probe must return the scarcer meter, so a machine with plenty
+    of free RAM and no commit headroom is still capped.
+
+    Asserted through the real `GlobalMemoryStatusEx` on Windows, since the bug was
+    that the code read a genuine field that was the wrong genuine field."""
+    if sys.platform != "win32":
+        pytest.skip("commit headroom is a Windows accounting concept")
+    import ctypes
+
+    class _MemoryStatus(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+    status = _MemoryStatus()
+    status.dwLength = ctypes.sizeof(_MemoryStatus)
+    assert ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+    gb = 1024 ** 3
+    scarcer = min(status.ullAvailPhys, status.ullAvailPageFile) / gb
+    assert suite.available_memory_gb() == pytest.approx(scarcer, rel=0.15), (
+        "the probe must track the scarcer of physical and commit, not ullAvailPhys")
 
 
 def test_the_memory_probe_is_either_a_positive_number_or_none():

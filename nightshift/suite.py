@@ -577,6 +577,22 @@ WORKER_MEMORY_GB = 1.4
 # describing a box that cannot run two interpreters.
 MIN_WORKERS = 2
 
+# Memory the suite must leave for everything that is not the suite (2026-08-10).
+#
+# Spending *all* of the headroom is what made the 2026-08-10 incident hurt someone
+# other than the test run. A cap computed from the whole free figure is arithmetic
+# that just fits: on Karel's box it allowed 9 workers against 13.4 GB of commit
+# headroom, i.e. 12.6 GB of workers and ~0.8 GB left for the editor those tests
+# were launched from. The suite then survives and the desktop does not, which is
+# the wrong thing to optimise — a slower suite costs minutes, a crashed VS Code
+# costs the session.
+#
+# 4 GB is sized for what is realistically open while the suite runs (an IDE, a
+# browser, a chat client) plus the growth they do while it runs, not for an idle
+# box. It only ever binds when memory was already tight; on a box with room the
+# subtraction changes nothing because the CPU count binds first.
+SYSTEM_RESERVE_GB = 4.0
+
 
 def xdist_available() -> bool:
     """Is pytest-xdist importable here? A spec lookup, not an import — this is
@@ -586,7 +602,8 @@ def xdist_available() -> bool:
 
 
 def available_memory_gb() -> float | None:
-    """Free physical memory in GB, or `None` when it cannot be determined.
+    """Memory a new worker process can actually obtain, in GB — or `None` when it
+    cannot be determined.
 
     `None` is a real answer meaning "no opinion", not an error: every caller
     falls back to `-n auto`, which is what this project did unconditionally
@@ -594,6 +611,33 @@ def available_memory_gb() -> float | None:
     but adding a hard dependency to the module that decides how to run the tests
     means a box that has not installed it cannot run them at all, which is a
     worse failure than the one being fixed.
+
+    **Why this is not "free physical memory" (measured 2026-08-10).** It was, and
+    on Windows that reads the wrong number. Windows refuses an allocation when the
+    system-wide *commit charge* would exceed the commit limit (RAM + pagefile),
+    and commit is charged when a page is reserved, not when it is first touched —
+    so a box can be at 40% physical memory use and simultaneously out of commit.
+    Measured on Karel's box: 31.9 GB RAM with 18.9 GB free (`ullAvailPhys`), but
+    only 13.4 GB of commit headroom (`ullAvailPageFile`) against a 127.9 GB limit
+    — 89.5% committed, confirmed against `\\Memory\\%% Committed Bytes In Use` and
+    `Win32_PerfFormattedData_PerfOS_Memory`. Reading `ullAvailPhys` there returned
+    18.9, `worker_count(12, 18.9)` found 12 workers affordable, and the cap
+    therefore declined to cap: `-n auto` spawned 12 workers wanting ~16.8 GB of
+    commit against 13.4 GB of headroom.
+
+    That overshoot does not fail like an OOM. Commit exhaustion is *system-wide*:
+    the allocation that fails belongs to whichever process asks next, so VS Code,
+    Explorer and Discord crashed while the tests kept running and Task Manager
+    showed memory at ~52%. The guard existed and was inert in exactly the
+    condition it was written for, because it was watching the wrong meter.
+
+    So both meters are read and the scarcer one wins. Physical still matters (a
+    box that must page every worker in and out is thrashing even with commit to
+    spare); commit is what turns an overshoot into other people's crashes.
+
+    POSIX is left reading available physical memory: Linux's default
+    `overcommit_memory=0` has no comparable hard limit to run into, and the
+    failure mode this docstring is about is a Windows commit-accounting one.
     """
     if sys.platform == "win32":
         try:
@@ -614,7 +658,9 @@ def available_memory_gb() -> float | None:
             status.dwLength = ctypes.sizeof(_MemoryStatus)
             if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
                 return None
-            return status.ullAvailPhys / (1024 ** 3)
+            # `ullAvailPageFile` is misnamed: it is commit headroom (commit limit
+            # minus commit charge), not space left in pagefile.sys.
+            return min(status.ullAvailPhys, status.ullAvailPageFile) / (1024 ** 3)
         except (OSError, AttributeError, ValueError):
             return None
     try:
@@ -636,10 +682,16 @@ def worker_count(cpus: int | None, memory_gb: float | None) -> int | None:
     `worker_count(22, None)` silently read *this* machine's memory — so the case
     that matters most (the probe failed, fall back to `auto`) was the one case a
     test could not express. `probed_worker_count` does the looking.
+
+    `memory_gb` is what `available_memory_gb` reports — on Windows the scarcer of
+    free physical memory and commit headroom. `SYSTEM_RESERVE_GB` comes off it
+    before anything is divided, so the answer is how many workers fit in the room
+    the suite is *allowed* to take, never how many fit in the room that exists.
     """
     if not cpus or memory_gb is None:
         return None
-    affordable = int(memory_gb / WORKER_MEMORY_GB)
+    for_workers = max(0.0, memory_gb - SYSTEM_RESERVE_GB)
+    affordable = int(for_workers / WORKER_MEMORY_GB)
     capped = max(MIN_WORKERS, min(cpus, affordable))
     # Saying `-n 22` on a 22-CPU box is what `auto` already does. Returning None
     # keeps the argv identical to the historical one whenever memory is not the
