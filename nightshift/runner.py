@@ -1712,8 +1712,19 @@ class Dispatch:
     detail: str
     cost_usd: float = 0.0
     rounds: int = 1
-    # Set only on "limited". Carries the reset time the run loop needs to decide
-    # between sleeping and stopping, and the evidence line for the run log.
+    # Set whenever a usage wall landed anywhere in this card's pipeline — NOT
+    # only on "limited" (`wall-on-review-wrapup-discards-a-verdict`). A wall
+    # carries two independent facts, and conflating them was the defect: "this
+    # attempt produced nothing" (an accounting claim, often false) and "the
+    # plan's window is closed" (a scheduling claim, always true). Only the second
+    # is evidence, so a stage that had already written a terminal verdict now
+    # honours it — the card settles on `review`/`parked`/`needs_decision` like any
+    # other — and the wall rides home on this field regardless. The run loop
+    # consults it after settling *any* outcome, so a card that landed still costs
+    # the night its session and still triggers the sleep-or-stop.
+    #
+    # Carries the reset time the run loop needs to decide between sleeping and
+    # stopping, and the evidence line for the run log.
     wall: limits.Wall | None = None
     # Set only on "limited" (runner-worker-handover). `kept` is True when the
     # worktree and session were preserved for a warm resume rather than dropped;
@@ -1811,6 +1822,71 @@ def _read_verdict(path: Path) -> dict:
     except (json.JSONDecodeError, ValueError):
         return {}
     return found if isinstance(found, dict) else {}
+
+
+# The pipeline stages that produce a verdict, named so the wall-handling at each
+# spawn site says which predicate it means rather than inlining a set of strings.
+PRODUCER_STAGE, CHECKER_STAGE = "producer", "checker"
+REVIEWER_STAGE, STALE_STAGE = "reviewer", "stale-hunter"
+
+
+def verdict_survives_a_wall(stage: str, verdict: dict, *, rounds_left: int = 0) -> bool:
+    """Whether a verdict already written is *terminal for its stage*, and so
+    survives the wall that landed on the call that was wrapping it up
+    (`wall-on-review-wrapup-discards-a-verdict`).
+
+    **The defect this closes is an ordering, not a durability problem.** Every
+    spawn function returns `(verdict, cost, wall)`, and at each site the wall
+    branch returned before the verdict was ever looked at — so a stage that had
+    written a complete, usable verdict and *then* walled on its own wrap-up call
+    was recorded byte-identically to one that died before writing anything
+    (2026-08-09, `menu-art-cyberware`: `review-2.json` said `pass`, and the run
+    log said "not attempted, attempt given back"). Nothing has to be read back
+    off disk to fix that; the parsed verdict is already a local variable next to
+    the wall. This function is asked *first*, and only then is the process's exit
+    consulted.
+
+    **There is no threshold here, deliberately.** "Complete" is not a new
+    judgment — it is the predicate the no-wall path a few lines below each site
+    already applies, and a truncated file degrades for free because
+    `_read_verdict` returns `{}` on a `JSONDecodeError`. Per stage:
+
+    * `PRODUCER_STAGE` — `outcome: parked` only. A park is terminal by
+      construction: the round loop already `break`s on it and no re-roll resolves
+      an ambiguity, and losing one costs Karel a whole night's question. Any
+      other producer verdict keeps the old give-back, because a verdict attests
+      the *worker's* account, not that the tree is finished — honouring a
+      half-written tree would turn a free give-back into a spent attempt.
+    * `CHECKER_STAGE` — `pass`, or any complete verdict once the rounds are
+      spent. **The `rounds_left` guard is not optional.** A checker that walls
+      after writing `revise` at round 1 of 3 must still be `limited`: the loop
+      cannot spend rounds 2-3 in a closed window, and the path below it would
+      file the card as *"did not pass this in 1 round(s)"* — parking a card that
+      had two rounds it never received.
+    * `REVIEWER_STAGE` — the two routings the reviewer exists to produce. Its
+      whole output *is* the verdict file, so a complete one means it finished.
+    * `STALE_STAGE` — its own `complete: true`, which the prompt already defines
+      as "I finished reading the whole document".
+
+    An unrecognised stage is `False`: today's behaviour, never a guess. A fifth
+    judge stage therefore has to state its own predicate here to be honoured, and
+    `test_every_spawn_sites_wall_path_routes_through_the_shared_helper` is what
+    stops it quietly copying the wrong ordering from its neighbours instead.
+    """
+    if not isinstance(verdict, dict) or not verdict:
+        return False
+    if stage == PRODUCER_STAGE:
+        return str(verdict.get("outcome", "")).lower() == "parked"
+    if stage == CHECKER_STAGE:
+        called = str(verdict.get("verdict", "")).lower()
+        if called == "pass":
+            return True
+        return rounds_left <= 0 and called in ("revise", "reject")
+    if stage == REVIEWER_STAGE:
+        return str(verdict.get("verdict", "")).lower() in ("ok", "needs_decision")
+    if stage == STALE_STAGE:
+        return bool(verdict.get("complete"))
+    return False
 
 
 def _session_id(out_dir: Path, round_no: int) -> str:
@@ -2395,7 +2471,16 @@ def stale_phase(root: Path, count: int, model: str, deadline, card_budget: float
         _status(root, phase="stale-sweep", doc=cand.doc, model=model, since=_now())
         verdict, cost, wall = run_stale_check(root, cand.doc, out_dir, model, card_budget, timeout)
         checked += 1
-        if wall is not None:
+        # The artefact decides, not the process's exit
+        # (`wall-on-review-wrapup-discards-a-verdict`). `stale-hunter` is a pure
+        # judge — its verdict *is* its entire output — so one that already says
+        # `complete: true` means the doc was read to the end and the wall landed
+        # on the wrap-up call after it. Honour it: the findings get carded and the
+        # doc ledgered below, and only *then* does the sweep stop. A wall with
+        # nothing complete written still leaves the ledger untouched, exactly as
+        # before, so the doc is re-checked next time rather than recorded as
+        # verified on a check that never finished.
+        if wall is not None and not verdict_survives_a_wall(STALE_STAGE, verdict):
             _log(f"  {cand.doc}: usage limit during the sweep — leaving the ledger untouched")
             _flush()
             break
@@ -2437,6 +2522,13 @@ def stale_phase(root: Path, count: int, model: str, deadline, card_budget: float
         stale_sweep.mark_verified(root, cand.doc, ledger)
         verified += 1
         _flush()
+        if wall is not None:
+            # This doc's verdict was honoured and is now durable — card committed,
+            # ledger marked. The window is still shut, so the sweep stops here
+            # rather than spawning the next `stale-hunter` into it.
+            _log(f"  {cand.doc}: the checker walled on its wrap-up after a complete "
+                 f"verdict — honoured and ledgered; stopping the sweep there")
+            break
     _flush()
     return checked, verified, carded
 
@@ -3046,6 +3138,12 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
     feedback = ""
     tried: list[str] = []
     round_no = 0
+    # A wall that landed on a stage which had *already* written a terminal
+    # verdict (`verdict_survives_a_wall`). The verdict is honoured, so this
+    # attempt is no longer `limited` — but the night's window is still closed, so
+    # the wall rides home on every `Dispatch` this function returns from here on
+    # and the run loop applies its sleep-or-stop after the card has settled.
+    honoured_wall: limits.Wall | None = None
 
     while round_no < max_rounds:
         round_no += 1
@@ -3073,6 +3171,20 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
         # it as one is the bug this ordering exists to prevent — the card would
         # be charged an attempt and an `## Error` for the plan running out.
         if wall is not None:
+            # And before the wall, the artefact: a producer that had already
+            # written `outcome: parked` walled on its wrap-up, not on the work.
+            # Its question is the deliverable and it is complete, so it is
+            # honoured rather than thrown away with the window
+            # (`wall-on-review-wrapup-discards-a-verdict`, answer B). Harvest
+            # first — the candidates are most of what makes a park answerable —
+            # then `break` to the park path below, which is also what skips the
+            # `code != 0` branch a wall would otherwise fall into.
+            if verdict_survives_a_wall(PRODUCER_STAGE, verdict):
+                honoured_wall = wall
+                _log(f"    {card.id} walled on its wrap-up after parking — honouring the "
+                     f"question it already wrote; the night's window is still closed")
+                rescued = harvest(root, tree, out_dir)
+                break
             return _limit_reached(root, card, tree, branch, out_dir, round_no, wall,
                                   cost, f"usage limit reached — {wall.evidence}")
         if code != 0:
@@ -3124,8 +3236,23 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
                                           card_budget, test_timeout * 2)
         cost += spent
         if wall is not None:
-            return _limit_reached(root, card, tree, branch, out_dir, round_no, wall,
-                                  cost, f"usage limit reached while checking — {wall.evidence}")
+            # The reported instance of this card, and the reason it exists:
+            # 2026-08-09's round-2 art-reviewer wrote `review-2.json` — `pass`,
+            # best `menu_card_cyberware_s30.png`, with reasoning — and walled on
+            # its final turn, and `review` was fully parsed on the very return
+            # path that ignored it. `rounds_left` is what keeps a `revise` with
+            # rounds still unspent `limited`: honouring that would file the card
+            # as "did not pass in 1 round(s)" and park work that had two rounds
+            # it never received.
+            if verdict_survives_a_wall(CHECKER_STAGE, review,
+                                       rounds_left=max_rounds - round_no):
+                honoured_wall = wall
+                _log(f"    {card.checker} walled on its wrap-up after writing a complete "
+                     f"verdict — honouring it; the night's window is still closed")
+            else:
+                return _limit_reached(
+                    root, card, tree, branch, out_dir, round_no, wall,
+                    cost, f"usage limit reached while checking — {wall.evidence}")
         called = str(review.get("verdict", "")).lower()
         _log(f"    {card.checker}: {called or '(no verdict)'} — "
              f"{str(review.get('notes', ''))[:80]}")
@@ -3142,9 +3269,14 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
             notes=str(review.get("notes", "")), history="; ".join(tried) or "(none)",
         )
 
+    # `honoured_wall` rides home on every exit path from here down. Which lane the
+    # card reaches is settled on its own merits, exactly as it would have been
+    # without a wall; what the wall still decides is the *night*, and the run loop
+    # reads that off `Dispatch.wall` after the card has settled.
     if verdict.get("outcome") == "parked":
         drop_worktree(root, tree)
-        return Dispatch("parked", str(verdict.get("summary", ""))[:300], cost, round_no)
+        return Dispatch("parked", str(verdict.get("summary", ""))[:300], cost, round_no,
+                        honoured_wall)
 
     # The checker never passed inside the round budget. That is a park, not a
     # failure (§13): the candidates and the critique are exactly what Karel needs
@@ -3159,7 +3291,7 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
             f"`{called}`, best candidate `{best}`. {str(review.get('notes', ''))[:180]} "
             f"Candidates and every round's critique are in "
             f"`.ai/runs/{card.id}/attempt-{attempt}/`.",
-            cost, round_no,
+            cost, round_no, honoured_wall,
         )
 
     # A worker can finish its edits and die before it ever runs `git commit` —
@@ -3183,7 +3315,7 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
     if commits in ("", "0") and rescued == 0:
         drop_worktree(root, tree)
         return Dispatch("failed", "the worker produced neither a commit nor an artefact",
-                        cost, round_no)
+                        cost, round_no, honoured_wall)
 
     _log(f"    worker produced {commits} commit(s) — running gates on {branch}")
     _status(root, phase="gates", card=card.id, attempt=attempt, branch=branch,
@@ -3195,7 +3327,7 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
     # which is precisely what happened on 2026-07-23 before this existed.
     if status == GATE_CRASH:
         drop_worktree(root, tree)
-        return Dispatch("blocked", why, cost, round_no)
+        return Dispatch("blocked", why, cost, round_no, honoured_wall)
 
     # A gate violation's evidence is the violation lines themselves. `why` already
     # carries the worst four joined by `; ` (`_run_gates`), so the block is that
@@ -3221,8 +3353,8 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
         # ordinary `failed` below.
         if _is_repo_drift(_gate_violations_json(tree), changed):
             drop_worktree(root, tree)
-            return Dispatch("blocked", why, cost, round_no, repo_drift=True,
-                            evidence=evidence)
+            return Dispatch("blocked", why, cost, round_no, honoured_wall,
+                            repo_drift=True, evidence=evidence)
 
     ok = status == GATE_PASS
     if ok:
@@ -3244,11 +3376,12 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
 
     drop_worktree(root, tree)
     if not ok:
-        return Dispatch("failed", why, cost, round_no, evidence=evidence)
+        return Dispatch("failed", why, cost, round_no, honoured_wall, evidence=evidence)
     made = f"{commits} commit(s) on {branch}" + (f", {rescued} artefact(s)" if rescued else "")
     if checked:
         made += f", {card.checker} passed it in {round_no} round(s)"
     return Dispatch("review", str(verdict.get("summary", made))[:300], cost, round_no,
+                    honoured_wall,
                     how_to_test=str(verdict.get("how_to_test", "")).strip()[:1000])
 
 
@@ -3501,6 +3634,17 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
     """
     branch = card.fields.get("branch") or f"ai/{card.id}"
 
+    # The window is already known to be closed: an earlier stage walled and had
+    # its verdict honoured (`wall-on-review-wrapup-discards-a-verdict`), so the
+    # card reached here on its merits but the plan has run out. Spawning the
+    # reviewer now would call into a window already proven shut, burn a
+    # subprocess and degrade to review/ anyway — so degrade straight away, with
+    # the wall still on the returned Dispatch so the night stops or sleeps.
+    if result.wall is not None:
+        _log(f"    a usage limit already closed this window — not spawning "
+             f"{REVIEWER_AGENT} for {card.id}; leaving it in review/ for a manual look")
+        return result
+
     # Nothing to review as a diff: an artefact-only card (art) has no commit on
     # its branch, and its human gate is Karel at review/, unchanged (this card
     # "does not change how art review works"). A dead branch lands here too.
@@ -3521,13 +3665,24 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
                                        card_budget, timeout * 3)
     total = result.cost_usd + cost
 
-    if wall is not None:
-        # The plan ran out mid-review. Gates+tests already passed, so this is not
-        # the card's fault — land it in review/ for a manual look rather than
-        # spending the night's machinery re-deciding a card that is otherwise done.
+    # The artefact before the process's exit. A reviewer's *entire* output is its
+    # verdict file, so one that says `ok` or `needs_decision` means the review
+    # genuinely finished and the wall landed on the wrap-up call after it — the
+    # measured shape of `wall-on-review-wrapup-discards-a-verdict`. It routes on
+    # that verdict; an incomplete or missing one still degrades to review/ exactly
+    # as before. Either way the wall rides home on the returned Dispatch, because
+    # the plan running out is a fact about the *night* whatever this card did.
+    if wall is not None and not verdict_survives_a_wall(REVIEWER_STAGE, verdict):
+        # The plan ran out mid-review with nothing usable written. Gates+tests
+        # already passed, so this is not the card's fault — land it in review/ for
+        # a manual look rather than spending the night's machinery re-deciding a
+        # card that is otherwise done.
         _log(f"    review hit a usage limit — leaving {card.id} in review/ for a manual look")
-        return Dispatch("review", result.detail, total, result.rounds,
+        return Dispatch("review", result.detail, total, result.rounds, wall,
                         how_to_test=result.how_to_test)
+    if wall is not None:
+        _log(f"    {REVIEWER_AGENT} walled on its wrap-up after writing a complete verdict "
+             f"— honouring it; the night's window is still closed")
 
     called = str(verdict.get("verdict", "")).lower()
     _log(f"    {REVIEWER_AGENT}: {called or '(no verdict)'} — "
@@ -3538,13 +3693,13 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
                         "The reviewer flagged this for your decision but stated no question "
                         "— treat that as itself needing a look; the diff and the review are "
                         f"in `.ai/runs/{card.id}/attempt-{card.attempts}/`.",
-                        total, result.rounds)
+                        total, result.rounds, wall)
     if called == "ok":
         return Dispatch("reviewed", str(verdict.get("notes", "reviewed ok"))[:300],
-                        total, result.rounds, how_to_test=result.how_to_test)
+                        total, result.rounds, wall, how_to_test=result.how_to_test)
     # No usable verdict — degrade to the old behaviour, a human review at review/.
     _log(f"    no usable review verdict for {card.id} — leaving it in review/")
-    return Dispatch("review", result.detail, total, result.rounds,
+    return Dispatch("review", result.detail, total, result.rounds, wall,
                     how_to_test=result.how_to_test)
 
 
@@ -4340,6 +4495,18 @@ def run(root: Path, args: argparse.Namespace) -> int:
             dead until you look".
             """
             landed = settle(work, candidate.card.id, result)
+            # The three wall cases must be tellable apart at a glance, which is
+            # the whole complaint on `wall-on-review-wrapup-discards-a-verdict`:
+            # "walled with nothing" is `limited` and already says *not attempted,
+            # attempt given back*; "the gate harness crashed" is `blocked` and
+            # says so; this third one used to be indistinguishable from the first
+            # and now names itself. Appended here rather than inside `settle`
+            # because it is a fact about the *night*, not about the card's lane —
+            # and this is the one place the run log line is produced.
+            if result.wall is not None and result.outcome != "limited":
+                landed += (" — the stage walled on its wrap-up after writing a complete "
+                           "verdict, so the verdict was honoured and the card landed; "
+                           "the night's window is still closed")
             record.dispatched(
                 candidate.card.id, title=candidate.card.title,
                 worker=candidate.card.worker, model=model,
@@ -4347,6 +4514,57 @@ def run(root: Path, args: argparse.Namespace) -> int:
                 detail=result.detail, cost_usd=result.cost_usd, landed=landed,
                 evidence=result.evidence)
             return landed
+
+        def _window_closed(wall: limits.Wall, card_id: str, *, retrying: bool) -> bool:
+            """Spend one of the night's windows on `wall`, and say whether the run
+            may go on. `False` means stop — `_stop` has already recorded why.
+
+            Shared by the two callers because a wall carries the same scheduling
+            fact whichever way its card settled
+            (`wall-on-review-wrapup-discards-a-verdict`): the `limited` branch,
+            where the card was never attempted and is retried in the next window,
+            and a card that *landed* on an honoured verdict, whose index has
+            already advanced. `retrying` is the only difference, and it is only
+            wording — the arithmetic, the caps and the sleep are identical.
+            """
+            nonlocal walls, hiccups
+            if wall.spends_a_session:
+                walls += 1
+                if walls >= args.sessions:
+                    _stop(f"{walls} session limit(s) used, which is "
+                          f"--sessions {args.sessions}")
+                    return False
+            else:
+                # A 429 is a hiccup, not the window closing, so it buys a
+                # short wait instead of one of the night's sessions. Capped
+                # all the same: a hiccup that never clears is indistinguishable
+                # from a wall we misread, and must not retry until morning.
+                hiccups += 1
+                if hiccups > TRANSIENT_RETRIES:
+                    _stop(f"{hiccups} transient rate limits tonight; that is "
+                          f"no longer a hiccup. See `.ai/runs/` for what the CLI said")
+                    return False
+            if not wall.waits_out:
+                _stop(f"this is a {wall.scope} limit; it does not "
+                      f"reopen inside a night, so waiting would idle until morning")
+                return False
+            resume = limits.resume_at(wall)
+            if deadline and resume >= deadline:
+                _stop(f"the window reopens at {resume:%H:%M}, past "
+                      f"{deadline:%H:%M}")
+                return False
+            counted = f"{walls} of {args.sessions}" if wall.spends_a_session \
+                else f"transient, {hiccups} of {TRANSIENT_RETRIES}"
+            then = f"then retrying {card_id}" if retrying \
+                else f"then going on from {card_id}, which landed"
+            _log(f"usage limit reached ({counted}) — sleeping until "
+                 f"{resume:%H:%M}, {then}")
+            record.note(f"usage limit reached ({counted}) — slept until "
+                        f"{resume:%H:%M}, {then}")
+            if not _sleep_until(resume):
+                _stop("kill switch appeared while waiting for the window")
+                return False
+            return True
 
         spent = 0.0
         done = 0
@@ -4410,39 +4628,7 @@ def run(root: Path, args: argparse.Namespace) -> int:
 
             if result.outcome == "limited":
                 _log("  " + _settled(candidate, result, model))
-                if result.wall.spends_a_session:
-                    walls += 1
-                    if walls >= args.sessions:
-                        _stop(f"{walls} session limit(s) used, which is "
-                              f"--sessions {args.sessions}")
-                        break
-                else:
-                    # A 429 is a hiccup, not the window closing, so it buys a
-                    # short wait instead of one of the night's sessions. Capped
-                    # all the same: a hiccup that never clears is indistinguishable
-                    # from a wall we misread, and must not retry until morning.
-                    hiccups += 1
-                    if hiccups > TRANSIENT_RETRIES:
-                        _stop(f"{hiccups} transient rate limits tonight; that is "
-                              f"no longer a hiccup. See `.ai/runs/` for what the CLI said")
-                        break
-                if not result.wall.waits_out:
-                    _stop(f"this is a {result.wall.scope} limit; it does not "
-                          f"reopen inside a night, so waiting would idle until morning")
-                    break
-                resume = limits.resume_at(result.wall)
-                if deadline and resume >= deadline:
-                    _stop(f"the window reopens at {resume:%H:%M}, past "
-                          f"{deadline:%H:%M}")
-                    break
-                counted = f"{walls} of {args.sessions}" if result.wall.spends_a_session \
-                    else f"transient, {hiccups} of {TRANSIENT_RETRIES}"
-                _log(f"usage limit reached ({counted}) — sleeping until "
-                     f"{resume:%H:%M}, then retrying {candidate.card.id}")
-                record.note(f"usage limit reached ({counted}) — slept until "
-                            f"{resume:%H:%M}, then retried {candidate.card.id}")
-                if not _sleep_until(resume):
-                    _stop("kill switch appeared while waiting for the window")
+                if not _window_closed(result.wall, candidate.card.id, retrying=True):
                     break
 
                 # Reloaded, not reused. `dispatch` computes the attempt number
@@ -4486,6 +4672,20 @@ def run(root: Path, args: argparse.Namespace) -> int:
                 _stop(f"{in_a_row} dispatches failed in a row. If this was a "
                       f"usage limit the detector missed, the CLI output is under "
                       f"`.ai/runs/` and the phrase belongs in `limits._WALL`")
+                break
+
+            # The night still treats a wall as a wall even when the card landed
+            # (`wall-on-review-wrapup-discards-a-verdict`). A stage walled on its
+            # wrap-up, its verdict was honoured and the card settled on its
+            # merits — but the plan's window is shut, and walking on to the next
+            # card as if it were open would spend an attempt on every one of
+            # them. Same arithmetic as the `limited` branch above, minus the
+            # retry: this card is finished and the index has already advanced, so
+            # it must NOT take that branch's `continue  # same card, new window`.
+            # After `publish`, so hours of sleep never sit between a settled card
+            # and its being pushed.
+            if result.wall is not None and not _window_closed(
+                    result.wall, candidate.card.id, retrying=False):
                 break
 
         # After the cards, spend whatever window is left on staleness — never

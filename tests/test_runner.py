@@ -2190,6 +2190,75 @@ def test_only_the_spawn_functions_may_execute_the_claude_cli():
         "run_producer", "run_checker", "run_stale_check", "run_reviewer"}
 
 
+# Spawn sites whose wall path is allowed NOT to consult
+# `verdict_survives_a_wall`. Explicit and empty on purpose: a stage that should
+# never honour a pre-wall artefact is a real possibility, but it has to be
+# written down here with a reason rather than left as an omission nobody notices.
+_WALL_HANDLING_EXEMPT: frozenset = frozenset()
+
+
+def _functions_calling(source: str, callee: str) -> dict:
+    """How many times each top-level function calls `callee` by name. AST, so a
+    mention in a docstring or a comment does not count."""
+    import ast
+
+    tree = ast.parse(source)
+    counts: dict = {}
+    for function in [n for n in tree.body if isinstance(n, ast.FunctionDef)]:
+        found = sum(
+            1 for node in ast.walk(function)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == callee)
+        if found:
+            counts[function.name] = found
+    return counts
+
+
+def test_every_spawn_sites_wall_path_routes_through_the_shared_helper():
+    """The second-order guard for `wall-on-review-wrapup-discards-a-verdict`.
+
+    The spawn sites are a *growing* set — there were two, then three, then four
+    (`run_reviewer` arrived with `automate-review-step`). A fix that patched
+    three `if wall is not None:` branches by hand would be silently wrong the day
+    a fifth judge stage lands: it would copy the ordering from its neighbours,
+    and nothing would error. So the honour-the-artefact decision lives in one
+    shared helper, and this keys off the *same* enumeration
+    `test_only_the_spawn_functions_may_execute_the_claude_cli` asserts, rather
+    than a second hand-written list that could drift from it.
+
+    The rule is a count, not a mere presence: a function that calls two spawn
+    functions must consult the helper twice. `dispatch` is exactly that case —
+    `run_producer` and `run_checker` are two different stages with two different
+    predicates, and a fix that routed one and forgot the other is the specific
+    mistake this catches.
+    """
+    source = _RUNNER_SOURCE.read_text(encoding="utf-8")
+    spawn_sites = _functions_spawning(source, "binary") - _WALL_HANDLING_EXEMPT
+    assert spawn_sites, "the enumeration is empty; this guard would check nothing"
+
+    helper_calls = _functions_calling(source, "verdict_survives_a_wall")
+    for site in sorted(spawn_sites):
+        callers = _functions_calling(source, site)
+        assert callers, (
+            f"{site} spawns a worker but nothing calls it — a spawn site with no "
+            f"caller cannot have its wall path checked"
+        )
+        for caller, spawned in callers.items():
+            handled = helper_calls.get(caller, 0)
+            total_spawned = sum(
+                _functions_calling(source, other).get(caller, 0)
+                for other in spawn_sites)
+            assert handled >= total_spawned, (
+                f"{caller} calls {total_spawned} spawn function(s) ({site} among "
+                f"them, {spawned}x) but consults verdict_survives_a_wall only "
+                f"{handled}x. A wall on a stage's wrap-up call must ask whether "
+                f"that stage already wrote a terminal verdict BEFORE it asks how "
+                f"the process exited — see `wall-on-review-wrapup-discards-a-"
+                f"verdict`. Add the call, or name the stage in "
+                f"_WALL_HANDLING_EXEMPT with a reason."
+            )
+
+
 def test_the_deciding_functions_are_pure_file_state_lookups():
     """The stronger half of the same rule: a function that decides *what* the
     runner does must not shell out at all — not to the CLI, not to git, not to
@@ -3035,6 +3104,10 @@ def test_the_review_stage_falls_back_to_review_on_a_wall(tmp_path, monkeypatch):
                                  "development_team", 0.0, 120)
     assert result.outcome == "review"
     assert result.cost_usd == pytest.approx(0.4)   # cost still carried forward
+    # …and the wall rides home even on the degrade path (wall-on-review-wrapup-
+    # discards-a-verdict): the card's lane is decided on its merits, but the
+    # night's window is shut and the run loop has to be told.
+    assert result.wall is not None
 
 
 def test_the_review_stage_falls_back_to_review_on_an_unusable_verdict(tmp_path, monkeypatch):
@@ -3049,6 +3122,311 @@ def test_the_review_stage_falls_back_to_review_on_an_unusable_verdict(tmp_path, 
     result = runner.review_stage(root, card, runner.Dispatch("review", "x", 0.0),
                                  "development_team", 0.0, 120)
     assert result.outcome == "review"
+
+
+# --- a wall on a stage's wrap-up must not discard the verdict it already wrote -
+#
+# `wall-on-review-wrapup-discards-a-verdict`. The measured instance (2026-08-09,
+# `menu-art-cyberware`): the round-2 art-reviewer wrote `review-2.json` — verdict
+# `pass`, best `menu_card_cyberware_s30.png`, with its reasoning — and *then* hit
+# a usage wall on its own wrap-up call. The runner logged "not attempted, attempt
+# given back", byte-identical to what it logs when a reviewer dies before writing
+# anything, and the verdict was recovered by hand out of a gitignored directory.
+#
+# The defect is an ordering, not durability: every spawn function returns
+# `(verdict, cost, wall)` and each site asked "did the process end cleanly?"
+# before "did this stage produce a usable verdict?", with the verdict already
+# parsed into a local variable on the return path that ignored it. So these tests
+# never read anything back off `.ai/runs/` — if a fix ever needs to, it has
+# inherited the parent card's durability problem and is the wrong fix.
+
+def _fake_loop_walling(monkeypatch, verdicts: list[str], *, wall_at: int = 1,
+                       write_verdict: bool = True, notes: str = "looks right"):
+    """`_fake_loop`, except the checker's call on round `wall_at` returns the
+    CLI's usage-limit exit — *after* writing its verdict, which is the shape that
+    was measured. `write_verdict=False` is the other half: a checker that walled
+    before writing anything, which must still give the attempt back.
+
+    Driven through `_run_worker` rather than by stubbing `run_checker`, so the
+    real `_read_verdict` and the real `limits.detect` are both on the path: a
+    wall genuinely *is* a non-zero exit here, which is what made it read as the
+    card's fault in the first place.
+    """
+    seen: dict = {"calls": []}
+    pending = list(verdicts)
+    rounds = {"checker": 0}
+
+    def fake(argv, cwd, timeout, stream_path=None, env=None, prompt=""):
+        agent = argv[argv.index("--agent") + 1]
+        seen["calls"].append(agent)
+        if agent == "art":
+            tmp = Path(cwd) / "dungeoneer" / "assets" / ".tmp"
+            tmp.mkdir(parents=True, exist_ok=True)
+            (tmp / "cand.png").write_bytes(b"\x89PNG")
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
+        rounds["checker"] += 1
+        walled = rounds["checker"] == wall_at
+        if write_verdict or not walled:
+            target = Path(next(l.strip() for l in prompt.splitlines()
+                               if l.strip().endswith(".json")))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(
+                {"verdict": pending.pop(0), "best": "cand.png", "notes": notes}),
+                encoding="utf-8")
+        return subprocess.CompletedProcess(
+            argv, 1 if walled else 0, json.dumps({"total_cost_usd": 0.1}),
+            "Claude AI usage limit reached" if walled else "")
+
+    monkeypatch.setattr(runner, "_run_worker", fake)
+    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    return seen
+
+
+def test_a_checker_that_walls_after_writing_pass_has_its_verdict_honoured(
+        tmp_path, monkeypatch):
+    """The reported scenario, end to end. A complete `pass` written before the
+    wall means the checking genuinely finished, so the card lands in review/ and
+    the attempt is spent — it produced a reviewed deliverable. The wall is not
+    thrown away with it: it rides home on `Dispatch.wall` so the night still
+    knows its window is closed."""
+    root = _worktree_repo(tmp_path)
+    _art_card(root)
+    _fake_loop_walling(monkeypatch, ["pass"])
+
+    result = runner.dispatch(root, board.find(root, "icon"), "development_team",
+                             "sonnet", 5.0, 120)
+    assert result.outcome == "review"          # NOT "limited"
+    assert result.wall is not None and result.wall.scope == limits.SESSION
+
+    runner.settle(root, "icon", result)
+    card = board.find(root, "icon")
+    assert card.lane == "review"
+    assert card.attempts == 1                  # spent, not given back
+
+
+def test_a_checker_that_walls_having_written_nothing_still_gives_the_attempt_back(
+        tmp_path, monkeypatch):
+    """The regression guard, first half. Honouring an artefact must not become
+    honouring the absence of one — a checker that died before writing is exactly
+    what the warm-resume path exists for, and it keeps it unchanged."""
+    root = _worktree_repo(tmp_path)
+    _art_card(root)
+    _fake_loop_walling(monkeypatch, ["pass"], write_verdict=False)
+
+    result = runner.dispatch(root, board.find(root, "icon"), "development_team",
+                             "sonnet", 5.0, 120)
+    assert result.outcome == "limited"
+
+    runner.settle(root, "icon", result)
+    card = board.find(root, "icon")
+    assert card.lane == "tasks"
+    assert card.attempts == 0
+    assert "## Error" not in card.text
+
+
+def test_a_checker_that_walls_on_revise_with_rounds_left_is_still_limited(
+        tmp_path, monkeypatch):
+    """The regression guard, second half, and the reason the terminal test is not
+    just "is the verdict complete?". `revise` at round 1 of 3 is a *resumable*
+    interruption: the loop cannot spend rounds 2-3 in a closed window, and the
+    path below it would file the card as "did not pass this in 1 round(s)" —
+    parking a card that had two rounds it never received."""
+    root = _worktree_repo(tmp_path)
+    _art_card(root)
+    _fake_loop_walling(monkeypatch, ["revise"])
+    assert runner.MAX_ROUNDS > 1, "this test is only meaningful with rounds to spare"
+
+    result = runner.dispatch(root, board.find(root, "icon"), "development_team",
+                             "sonnet", 5.0, 120)
+    assert result.outcome == "limited"          # never "parked"
+
+    runner.settle(root, "icon", result)
+    card = board.find(root, "icon")
+    assert card.lane == "tasks" and card.attempts == 0
+
+
+def test_a_checker_that_walls_on_revise_in_the_last_round_is_honoured_as_a_park(
+        tmp_path, monkeypatch):
+    """The other side of `rounds_left`. Once the rounds are spent there is no
+    resumable work left, so a complete `revise` on the final round is terminal
+    and the card reaches Karel with the critique — which is the outcome it would
+    have had if the wrap-up call had returned cleanly."""
+    root = _worktree_repo(tmp_path)
+    _art_card(root)
+    _fake_loop_walling(monkeypatch, ["revise"] * runner.MAX_ROUNDS,
+                       wall_at=runner.MAX_ROUNDS)
+
+    result = runner.dispatch(root, board.find(root, "icon"), "development_team",
+                             "sonnet", 5.0, 120)
+    assert result.outcome == "parked"
+    assert result.wall is not None
+    assert f"did not pass this in {runner.MAX_ROUNDS} round(s)" in result.detail
+
+
+def test_a_producer_that_walls_after_parking_keeps_its_question(tmp_path, monkeypatch):
+    """Answer B. A park is terminal by construction — the round loop already
+    `break`s on it and no re-roll resolves an ambiguity — and discarding one costs
+    Karel a whole night's question. It reaches needs-decision/ carrying it."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+    _fake_worker(monkeypatch, commit=False, returncode=1,
+                 stderr="Claude AI usage limit reached",
+                 verdict={"outcome": "parked",
+                          "summary": "HP or heat? the card allows either"})
+
+    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+                             "sonnet", 5.0, 120)
+    assert result.outcome == "parked"
+    assert result.wall is not None
+    assert "HP or heat" in result.detail
+
+    runner.settle(root, "probe", result)
+    card = board.find(root, "probe")
+    assert card.lane == "needs-decision"
+    assert "HP or heat" in card.text
+
+
+def test_a_producer_that_walls_on_any_other_verdict_is_unchanged(tmp_path, monkeypatch):
+    """B and not C. A verdict attests the *worker's* account, not that the tree
+    is finished, so anything but a park keeps today's `_limit_reached` behaviour —
+    otherwise a half-written tree goes red on the gates and converts a free
+    give-back into a spent attempt, which is the harm the wall path prevents."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+    _fake_worker(monkeypatch, commit=False, returncode=1,
+                 stderr="Claude AI usage limit reached",
+                 verdict={"outcome": "done", "summary": "implemented"})
+
+    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+                             "sonnet", 5.0, 120)
+    assert result.outcome == "limited"
+
+    runner.settle(root, "probe", result)
+    assert board.find(root, "probe").attempts == 0
+
+
+def test_a_reviewer_that_walls_after_writing_ok_still_routes_on_it(tmp_path, monkeypatch):
+    """The diff reviewer's entire output *is* its verdict file, so a complete one
+    means the review finished and the wall landed on the wrap-up after it. It
+    routes, instead of degrading to review/ for a human who has nothing to add."""
+    root = _worktree_repo(tmp_path)
+    _tier_binding(root)
+    card = _reviewed_branch(root, tmp_path)
+    _stub_reviewer(monkeypatch, {"verdict": "ok", "notes": "clean"}, cost=0.2,
+                   wall=limits.Wall(limits.SESSION, None, "usage limit reached"))
+
+    result = runner.review_stage(root, card, runner.Dispatch("review", "x", 0.5),
+                                 "development_team", 0.0, 120)
+    assert result.outcome == "reviewed"
+    assert result.wall is not None
+    assert result.cost_usd == pytest.approx(0.7)
+
+
+def test_a_reviewer_that_walls_after_needs_decision_still_carries_the_question(
+        tmp_path, monkeypatch):
+    root = _worktree_repo(tmp_path)
+    _tier_binding(root)
+    card = _reviewed_branch(root, tmp_path)
+    _stub_reviewer(monkeypatch, {"verdict": "needs_decision", "question": "which cap?"},
+                   wall=limits.Wall(limits.SESSION, None, "usage limit reached"))
+
+    result = runner.review_stage(root, card, runner.Dispatch("review", "x", 0.1),
+                                 "development_team", 0.0, 120)
+    assert result.outcome == "needs_decision"
+    assert "which cap?" in result.detail
+    assert result.wall is not None
+
+
+def test_the_review_stage_does_not_spawn_the_reviewer_into_a_closed_window(
+        tmp_path, monkeypatch):
+    """An earlier stage already walled and had its verdict honoured, so the
+    incoming `Dispatch` carries the wall. Spawning the reviewer now would call
+    into a window already proven shut, burn a subprocess and degrade anyway."""
+    root = _worktree_repo(tmp_path)
+    _tier_binding(root)
+    card = _reviewed_branch(root, tmp_path)
+    spawned = _stub_reviewer(monkeypatch, {"verdict": "ok"})
+
+    wall = limits.Wall(limits.SESSION, None, "usage limit reached")
+    result = runner.review_stage(
+        root, card, runner.Dispatch("review", "x", 0.4, 1, wall),
+        "development_team", 0.0, 120)
+    assert spawned == []                          # never called
+    assert result.outcome == "review"
+    assert result.wall is wall                    # still on its way to the run loop
+    assert result.cost_usd == pytest.approx(0.4)  # nothing spent
+
+
+# --- the night still treats an honoured wall as a wall ------------------------
+
+def _landed_wall(scope: str = limits.SESSION) -> runner.Dispatch:
+    """A card that *landed* — gates and tests passed, the verdict was honoured —
+    on a dispatch that nonetheless met the wall."""
+    return runner.Dispatch("review", "ok", 0.0, 1,
+                           limits.Wall(scope, None, "usage limit reached"))
+
+
+def test_a_landed_card_carrying_a_wall_still_stops_the_night(tmp_path, monkeypatch):
+    """The wall's other half is not thrown away, only moved. The card settled, so
+    it is not retried — but the window is shut, and `--sessions 1` means "work
+    until the session limit is reached" whichever way the card went."""
+    root = _loaded_board(tmp_path, "a", "b", "c")
+
+    calls = _night(monkeypatch, root, [_landed_wall()])
+    runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
+    assert calls == ["a"]        # not ["a", "b", …] — the window is not open
+
+
+def test_a_landed_card_carrying_a_wall_sleeps_and_goes_on_rather_than_retrying(
+        tmp_path, monkeypatch):
+    """The difference from the `limited` branch, and the whole point of moving
+    the wall rather than dropping it: `a` is finished and must NOT take the
+    `continue  # same card, new window` retry path. The night sleeps out the
+    window and resumes at the *next* card."""
+    root = _loaded_board(tmp_path, "a", "b")
+    slept: list = []
+
+    calls = _night(monkeypatch, root, [_landed_wall()])
+    monkeypatch.setattr(runner, "_sleep_until", lambda when: slept.append(when) or True)
+    runner.run(root, runner._parser(root).parse_args(
+        ["--base", "development_team", "--sessions", "2"]))
+
+    assert calls == ["a", "b"]   # `a` landed once; `b` follows it, `a` is not re-run
+    assert len(slept) == 1, "the night must wait out the window, not walk straight on"
+
+
+def test_a_landed_wall_that_does_not_reopen_stops_the_night(tmp_path, monkeypatch):
+    """A weekly limit does not reopen inside a night, so there is nothing to sleep
+    for — the same reasoning the `limited` branch applies, reached from a card
+    that landed."""
+    root = _loaded_board(tmp_path, "a", "b")
+
+    calls = _night(monkeypatch, root, [_landed_wall(limits.WEEKLY)])
+    runner.run(root, runner._parser(root).parse_args(
+        ["--base", "development_team", "--sessions", "2"]))
+    assert calls == ["a"]
+
+
+def test_the_run_log_tells_an_honoured_wall_apart_from_an_empty_one(tmp_path, monkeypatch):
+    """Karel's morning has to distinguish three things at a glance: "walled with
+    nothing — attempt given back", "walled after a complete verdict — honoured,
+    card landed", and "the gate harness crashed". The first and third already name
+    themselves; being unable to name the second is the whole complaint on this
+    card."""
+    root = _loaded_board(tmp_path, "a")
+    _night(monkeypatch, root, [_landed_wall()])
+    monkeypatch.setattr(runner, "_sleep_until", lambda when: True)
+    lines: list[str] = []
+    monkeypatch.setattr(runner, "_log", lambda msg: lines.append(str(msg)))
+
+    runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
+
+    landed = [l for l in lines if "verdict was honoured" in l]
+    assert landed, f"no line named the honoured-verdict case; got {lines}"
+    assert "the night's window is still closed" in landed[0]
 
 
 def test_the_reviewer_is_never_shown_the_workers_prompt(tmp_path, monkeypatch):
