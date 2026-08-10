@@ -619,7 +619,7 @@ def available_memory_gb() -> float | None:
     so a box can be at 40% physical memory use and simultaneously out of commit.
     Measured on Karel's box: 31.9 GB RAM with 18.9 GB free (`ullAvailPhys`), but
     only 13.4 GB of commit headroom (`ullAvailPageFile`) against a 127.9 GB limit
-    — 89.5% committed, confirmed against `\\Memory\\%% Committed Bytes In Use` and
+    — 89.5% committed, confirmed against `\\Memory\\% Committed Bytes In Use` and
     `Win32_PerfFormattedData_PerfOS_Memory`. Reading `ullAvailPhys` there returned
     18.9, `worker_count(12, 18.9)` found 12 workers affordable, and the cap
     therefore declined to cap: `-n auto` spawned 12 workers wanting ~16.8 GB of
