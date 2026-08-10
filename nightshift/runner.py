@@ -4503,7 +4503,14 @@ def run(root: Path, args: argparse.Namespace) -> int:
             # and now names itself. Appended here rather than inside `settle`
             # because it is a fact about the *night*, not about the card's lane —
             # and this is the one place the run log line is produced.
-            if result.wall is not None and result.outcome != "limited":
+            #
+            # Excludes every give-back outcome, not just `limited`. A card can be
+            # honoured at the checker and *then* meet a crashed gate harness or a
+            # drifted gate, and `settle` files that as `blocked` with "not
+            # attempted, attempt given back" — onto which "the card landed" would
+            # be a flat contradiction in the one line a 6 AM reader trusts.
+            if result.wall is not None and result.outcome not in (
+                    "limited", "blocked", "interrupted"):
                 landed += (" — the stage walled on its wrap-up after writing a complete "
                            "verdict, so the verdict was honoured and the card landed; "
                            "the night's window is still closed")

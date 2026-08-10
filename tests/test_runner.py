@@ -3429,6 +3429,30 @@ def test_the_run_log_tells_an_honoured_wall_apart_from_an_empty_one(tmp_path, mo
     assert "the night's window is still closed" in landed[0]
 
 
+def test_a_give_back_outcome_carrying_a_wall_is_never_called_a_landing(
+        tmp_path, monkeypatch):
+    """The compound case: a checker is honoured, and *then* the gate harness
+    crashes. `settle` files that as `blocked` — "not attempted, attempt given
+    back" — and appending "the card landed" to it would contradict itself in the
+    one line a 6 AM reader trusts. The honoured-verdict note is for landings
+    only, so it names every give-back outcome as excluded rather than `limited`
+    alone."""
+    root = _loaded_board(tmp_path, "a")
+    blocked = runner.Dispatch("blocked", "the gate harness crashed", 0.0, 1,
+                              limits.Wall(limits.SESSION, None, "usage limit reached"))
+    _night(monkeypatch, root, [blocked])
+    monkeypatch.setattr(runner, "settle",
+                        lambda r, cid, res: f"{cid}: not attempted, attempt given back")
+    lines: list[str] = []
+    monkeypatch.setattr(runner, "_log", lambda msg: lines.append(str(msg)))
+
+    runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
+
+    assert not [l for l in lines if "the card landed" in l], (
+        "a blocked/limited/interrupted dispatch gives the attempt back — it never landed"
+    )
+
+
 def test_the_reviewer_is_never_shown_the_workers_prompt(tmp_path, monkeypatch):
     """§16: an agent that knows what was intended sees what was intended. The
     runner builds the reviewer's context — the diff, the criteria, the repo — and
