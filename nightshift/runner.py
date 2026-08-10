@@ -238,12 +238,12 @@ DEFAULT_RUN_BUDGET_USD = 0.0
 # 2 sleeps through the first reset and stops at the second.
 DEFAULT_SESSIONS = 1
 
-# Dispatches that may fail back-to-back before the night ends. This is the net
-# under `limits.detect` rather than a feature in its own right: a wall phrased in
-# words the detector does not carry looks exactly like every card failing, and
-# without this the runner would walk the whole queue spending an attempt on each.
-# Three, because three unrelated cards failing in a row is already not about the
-# cards.
+# Dispatches that may fail — or be interrupted, which is the same absence of a
+# verdict — back-to-back before the night ends. This is the net under
+# `limits.detect` rather than a feature in its own right: a wall phrased in words
+# the detector does not carry looks exactly like every card failing, and without
+# this the runner would walk the whole queue spending an attempt on each. Three,
+# because three unrelated cards failing in a row is already not about the cards.
 CONSECUTIVE_FAILURE_STOP = 3
 
 # Transient 429s the night will wait out before deciding they are not transient.
@@ -1191,6 +1191,34 @@ def _next_rescue_branch(root: Path, card_id: str) -> str:
     return f"{prefix}{highest + 1}"
 
 
+def _drop_rescue_branch(root: Path, name: str) -> None:
+    """Delete one rescue ref — on the remote first, then locally.
+
+    `publish()` pushes *every* ref under `refs/heads/ai/` and a rescue branch
+    lives there like any other, so on a host that declares `publish_remote`
+    (Dungeoneer's laptop does) the ref being reaped here has a copy on the
+    remote. Reaping only the local half would leave exactly the orphaned
+    `<remote>/ai/<id>@failed-N` that `rebase_and_merge` stopped leaving behind
+    for card branches on 2026-08-09 — up to `MAX_ATTEMPTS` per card, and
+    nothing would ever look at them again.
+
+    Excluding rescue refs from `publish()` instead would be the smaller change
+    and the wrong one: on an ephemeral cloud checkout the pushed copy is the
+    *only* place a preserved attempt survives the container, which is the whole
+    point of preserving it (failed-attempt-work-is-deleted-not-resumed).
+
+    Remote before local, because `_delete_remote_branch`'s guard is an ancestry
+    test against the local tip and there is nothing left to test against after
+    `git branch -D`. The remote is resolved here rather than threaded through
+    the callers because two of them (`sweep_terminal_cards`,
+    `cap_rescue_branches_in_flight`) reap across cards at startup, before the
+    run loop has resolved a remote of its own.
+    """
+    _delete_remote_branch(root, str(host_setting(root, "publish_remote", "")).strip(),
+                          name, action="reaped")
+    _git(root, "branch", "-D", name)
+
+
 def prune_rescue_branches(root: Path, card_id: str) -> None:
     """Delete every rescue branch for a card that has left `tasks/` for good.
 
@@ -1199,7 +1227,7 @@ def prune_rescue_branches(root: Path, card_id: str) -> None:
     failed-attempt commits have nothing left to be rescued *for* — the same
     reasoning `prune_run_dir` already applies to `.ai/runs/<id>/`."""
     for name in _rescue_branches(root, card_id):
-        _git(root, "branch", "-D", name)
+        _drop_rescue_branch(root, name)
 
 
 def cap_rescue_branches(root: Path, card_id: str, keep: int = MAX_ATTEMPTS) -> None:
@@ -1215,7 +1243,7 @@ def cap_rescue_branches(root: Path, card_id: str, keep: int = MAX_ATTEMPTS) -> N
     branches = sorted(_rescue_branches(root, card_id), key=rescue_no)
     excess = len(branches) - keep
     for stale in branches[:max(excess, 0)]:
-        _git(root, "branch", "-D", stale)
+        _drop_rescue_branch(root, stale)
 
 
 def cap_rescue_branches_in_flight(root: Path, keep: int = MAX_ATTEMPTS) -> None:
@@ -3203,11 +3231,18 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
                 state_hash = _worktree_state_hash(tree)
                 drop_worktree(root, tree)
                 write_handover(root, card.id, Handover(session, state_hash, 0))
+                # `kept=False`: the worktree was just dropped, and `kept` means
+                # exactly "the checkout was preserved for a warm resume in
+                # place" — `settle` appends "worktree kept for warm resume" from
+                # it, which on this path would be a flat lie in the one line a
+                # 6 AM reader trusts. Nothing is lost by saying so: what carries
+                # this resume is the `wip:` commit plus the handover written
+                # above, which is the `FROM_WIP` path, not the warm one.
                 return Dispatch(
                     "interrupted",
                     f"worker interrupted (api_error) before verification ran — "
                     f"resuming from its `wip:` commit next dispatch",
-                    cost, round_no, kept=True)
+                    cost, round_no, kept=False)
             drop_worktree(root, tree)
             # `evidence` is why, not just that: the gates and tests paths both fill
             # it and this one used to pass nothing, so a dead worker's `## Error`
@@ -3439,14 +3474,21 @@ def _unmerged_paths(tree: Path) -> list[str]:
     return _git(tree, "diff", "--name-only", "--diff-filter=U").stdout.split()
 
 
-def _delete_remote_branch(root: Path, remote: str, branch: str) -> None:
+def _delete_remote_branch(root: Path, remote: str, branch: str, *,
+                          action: str = "merged") -> None:
     """Delete `branch` on `remote` once its work has landed, so a published card
     branch does not outlive the local one (Karel, 2026-08-09: *"Delete on merge,
     both local and remote."*).
 
-    Must be called from `rebase_and_merge` **while `branch` still exists
-    locally** — the guard below is an ancestry test against that very ref, and
-    after `git branch -D` there is nothing left to test against.
+    Must be called **while `branch` still exists locally** — the guard below is
+    an ancestry test against that very ref, and after `git branch -D` there is
+    nothing left to test against.
+
+    `action` is what the caller just did to the branch, and it appears in the two
+    failure logs: `merged` for `rebase_and_merge`, `reaped` for a rescue ref
+    dropped by `_drop_rescue_branch`. Only the wording differs — the shared-remote
+    reasoning below is the same either way, because the danger is a property of
+    the remote, not of why this checkout is finished with the branch.
 
     **The guard is against the local branch, not against `base`.** Ancestry
     against `base` — the check `publish()`'s dormant-branch case would suggest —
@@ -3490,8 +3532,8 @@ def _delete_remote_branch(root: Path, remote: str, branch: str) -> None:
         return
     remote_tip = _git(root, "rev-parse", "FETCH_HEAD").stdout.strip()
     if not remote_tip or not _is_ancestor(root, remote_tip, branch):
-        _log(f"  ! merged {branch} but did NOT delete it on {remote} — the remote "
-             f"carries commits this checkout never merged (pushed from elsewhere "
+        _log(f"  ! {action} {branch} but did NOT delete it on {remote} — the remote "
+             f"carries commits this checkout does not have (pushed from elsewhere "
              f"since the last fetch); deleting would destroy them. Reconcile "
              f"`{remote}/{branch}` by hand.")
         return
@@ -3499,7 +3541,7 @@ def _delete_remote_branch(root: Path, remote: str, branch: str) -> None:
     deleted = _git(root, "push", remote, "--delete", branch)
     if deleted.returncode != 0:
         detail = (deleted.stderr or deleted.stdout or "").strip().splitlines()
-        _log(f"  ! merged {branch} but could not delete it on {remote} — "
+        _log(f"  ! {action} {branch} but could not delete it on {remote} — "
              f"{detail[-1][:150] if detail else 'see git output'}")
 
 
@@ -4658,7 +4700,16 @@ def run(root: Path, args: argparse.Namespace) -> int:
 
             index += 1
             done += 1
-            in_a_row = in_a_row + 1 if result.outcome == "failed" else 0
+            # `interrupted` counts too, and not as a courtesy: before that
+            # outcome existed an `api_error` dispatch was `failed`, so a
+            # connection dropping card after card tripped this breaker on the
+            # third one. Excluding it would have quietly removed that net — and
+            # made it removable in *both* directions, since an alternating
+            # failed/interrupted night would never reach three of either. The
+            # streak is about consecutive dispatches that produced no verdict,
+            # which is exactly the shape "not about the cards" takes.
+            in_a_row = (in_a_row + 1
+                        if result.outcome in ("failed", "interrupted") else 0)
             _log("  " + _settled(candidate, result, model))
             # Idempotent, and after every settled card rather than only at the end
             # of the night — a cloud container can be killed between cards, and
@@ -4676,9 +4727,12 @@ def run(root: Path, args: argparse.Namespace) -> int:
             # damage of guessing wrong here (one quiet night) is far below the
             # damage of not guessing (the whole queue spent, then `failed/`).
             if in_a_row >= CONSECUTIVE_FAILURE_STOP:
-                _stop(f"{in_a_row} dispatches failed in a row. If this was a "
-                      f"usage limit the detector missed, the CLI output is under "
-                      f"`.ai/runs/` and the phrase belongs in `limits._WALL`")
+                _stop(f"{in_a_row} dispatches failed in a row (an interruption counts "
+                      f"as one — it produced no verdict either). If this was a usage "
+                      f"limit the detector missed, the CLI output is under `.ai/runs/` "
+                      f"and the phrase belongs in `limits._WALL`; if they were "
+                      f"interruptions, the thing to look at is this machine's "
+                      f"connection, not the cards")
                 break
 
             # The night still treats a wall as a wall even when the card landed

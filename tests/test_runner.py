@@ -1667,6 +1667,84 @@ def test_a_card_forced_past_max_attempts_by_name_still_caps_rescue_branches(
     assert len(listed) <= runner.MAX_ATTEMPTS
 
 
+# A rescue ref lives under `refs/heads/ai/`, which is exactly the namespace
+# `publish` pushes wholesale — so on a host with `publish_remote` set every
+# rescue branch gets a copy on the remote, and a reap that only deleted the
+# local half would leave up to `MAX_ATTEMPTS` orphaned `origin/ai/<id>@failed-N`
+# refs per retired card. That is the gap `rebase_and_merge` closed for card
+# branches on 2026-08-09, re-opened by a new ref shape. Against a real bare
+# remote, per the 2026-07-28 lesson.
+
+def _host_publishes_to_origin(root: Path) -> None:
+    (root / ".ai").mkdir(parents=True, exist_ok=True)
+    (root / ".ai" / "host.json").write_bytes(
+        json.dumps({"publish_remote": "origin"}).encode("utf-8"))
+
+
+def test_publish_pushes_a_rescue_branch_and_the_reap_deletes_both_copies(tmp_path,
+                                                                        monkeypatch):
+    """Pushing them is deliberate — on an ephemeral cloud checkout the pushed copy
+    is the only place a preserved attempt survives the container, which is the
+    whole point of preserving it. So the reap has to reach both halves."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+    bare = _bare_origin(root, tmp_path)
+    _host_publishes_to_origin(root)
+
+    _fake_worker(monkeypatch, commit=True, returncode=1)
+    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+                             "sonnet", 5.0, 120)
+    runner.settle(root, "probe", result)
+    _fake_worker(monkeypatch, commit=True, returncode=0,
+                 verdict={"outcome": "done", "summary": "x"})
+    card = board.find(root, "probe")
+    card.write({"finished": None})
+    runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+
+    runner.publish(root, "origin", "development_team")
+    assert _remote_has(bare, "ai/probe@failed-1"), \
+        "a rescue ref is an `ai/` branch and publish must push it like any other"
+
+    runner.prune_rescue_branches(root, "probe")
+    assert not _remote_has(bare, "ai/probe@failed-1"), \
+        "reaping the local ref must not leave the pushed copy orphaned on the remote"
+    assert runner._git(root, "rev-parse", "--verify", "ai/probe@failed-1").returncode != 0
+
+
+def test_a_reap_touches_no_remote_without_a_publish_remote(tmp_path):
+    """A host that never opted into pushing must not start deleting on a remote —
+    the same posture `rebase_and_merge` takes on the schema default."""
+    root = _worktree_repo(tmp_path)
+    bare = _bare_origin(root, tmp_path)
+    _branch_with_file(root, tmp_path, "ai/probe@failed-1", "rescued.py", "x = 1\n")
+    runner.publish(root, "origin", "development_team")
+    assert _remote_has(bare, "ai/probe@failed-1")
+
+    runner.prune_rescue_branches(root, "probe")
+    assert _remote_has(bare, "ai/probe@failed-1")
+    assert runner._git(root, "rev-parse", "--verify", "ai/probe@failed-1").returncode != 0
+
+
+def test_a_reap_refuses_a_remote_rescue_ref_carrying_commits_this_checkout_lacks(tmp_path):
+    """The case that would destroy work: another machine pushed onto this rescue
+    ref since the last fetch. The local reap still happens — this checkout is
+    finished with it — but the remote copy is left for a human, loudly, exactly
+    as on a diverged card branch."""
+    root = _worktree_repo(tmp_path)
+    bare = _bare_origin(root, tmp_path)
+    _host_publishes_to_origin(root)
+    _branch_with_file(root, tmp_path, "ai/probe@failed-1", "rescued.py", "x = 1\n")
+    runner.publish(root, "origin", "development_team")
+    elsewhere = _advance_on_remote(bare, tmp_path, "ai/probe@failed-1",
+                                  "more.py", "y = 2\n")
+
+    runner.prune_rescue_branches(root, "probe")
+    assert _remote_tip(bare, "ai/probe@failed-1") == elsewhere, \
+        "commits this checkout never had must survive the reap"
+    assert runner._git(root, "rev-parse", "--verify", "ai/probe@failed-1").returncode != 0
+
+
 def test_attempts_is_committed_before_the_worker_starts(tmp_path, monkeypatch):
     """The property the whole 'resumable from disk alone' claim rests on. If the
     machine dies inside the worker, the next boot must find the attempt already
@@ -5350,11 +5428,17 @@ def test_an_api_error_before_verification_gives_the_attempt_back_and_hands_over(
     result = runner.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "interrupted"
-    assert result.kept is True
+    # `kept` means the *checkout* was preserved for a warm resume in place, and
+    # this path drops it — `settle` renders it as "worktree kept for warm
+    # resume", so claiming it here would put a flat falsehood in the one line a
+    # 6 AM reader trusts. The resume rides on the `wip:` commit and the handover
+    # (`FROM_WIP`), asserted below, not on a kept worktree.
+    assert result.kept is False
 
     landed = runner.settle(root, "probe", result)
     assert "attempt given back" in landed
     assert "api_error" in landed
+    assert "worktree kept" not in landed
 
     settled_card = board.find(root, "probe")
     assert settled_card.lane == "tasks"
@@ -5380,8 +5464,29 @@ def test_an_interrupted_dispatch_does_not_stop_the_night(tmp_path, monkeypatch):
     root = _loaded_board(tmp_path, "a", "b")
 
     calls = _night(monkeypatch, root, [
-        runner.Dispatch("interrupted", "worker interrupted (api_error)", kept=True),
+        runner.Dispatch("interrupted", "worker interrupted (api_error)"),
         runner.Dispatch("review", "ok"),
     ])
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
     assert calls == ["a", "b"]
+
+
+def test_interruptions_count_toward_the_consecutive_failure_breaker(tmp_path, monkeypatch):
+    """One dropped connection is one card's bad luck; three in a row is this
+    machine's network, and walking the rest of the queue only spends money on
+    finding that out again. Before `interrupted` existed these were `failed` and
+    tripped the breaker — introducing the outcome must not quietly remove that
+    net, in either direction: an alternating failed/interrupted night must trip
+    it too, or neither half ever reaches three."""
+    root = _loaded_board(tmp_path, "a", "b", "c", "d", "e")
+
+    calls = _night(monkeypatch, root, [
+        runner.Dispatch("interrupted", "worker interrupted (api_error)"),
+        runner.Dispatch("failed", "worker exited 1"),
+        runner.Dispatch("interrupted", "worker interrupted (api_error)"),
+        runner.Dispatch("review", "ok"),
+        runner.Dispatch("review", "ok"),
+    ])
+    runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
+    assert calls == ["a", "b", "c"]
+    assert "failed in a row" in _only_record(root)["stop_reason"]
