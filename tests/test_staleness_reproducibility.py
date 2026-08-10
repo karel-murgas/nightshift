@@ -292,3 +292,76 @@ def test_a_swept_doc_records_progress_even_if_the_run_never_finishes(tmp_path, m
         ["git", "-C", str(root), "ls-files", str(stale_sweep.STATUS).replace("\\", "/")],
         capture_output=True, text=True, encoding="utf-8", errors="replace")
     assert tracked.stdout.strip(), "status must be committed, not left dirty"
+
+
+def test_a_stale_checker_that_walls_after_a_complete_verdict_is_honoured(
+        tmp_path, monkeypatch):
+    """`wall-on-review-wrapup-discards-a-verdict`, the sweep's share of it.
+
+    `stale-hunter` is a pure judge — its verdict *is* its whole output — so a
+    `complete: true` written before the wall means the doc was read to the end
+    and the wall landed on the wrap-up call after it. The sweep used to `break`
+    on the wall first, "leaving the ledger untouched", which threw away a
+    finished check and guaranteed the next run would redo it identically. Now the
+    card is written and committed and the doc ledgered, and only *then* does the
+    sweep stop — card → commit → ledger, the same order the killed-sweep test
+    above pins, with the stop moved after it instead of before.
+    """
+    from nightshift import limits, stale_sweep
+
+    root = _board_repo(tmp_path)
+    (root / ".claude" / "agents").mkdir(parents=True)
+    (root / ".claude" / "agents" / "code-thread.md").write_text(
+        "---\nname: code-thread\n---\n", encoding="utf-8")
+
+    ledgered: list[str] = []
+    monkeypatch.setattr(runner.stale_sweep, "load_ledger", lambda r: {})
+    monkeypatch.setattr(runner.stale_sweep, "select", lambda r, n, ledger: [
+        stale_sweep.Candidate("drift.md", 5, None, 5),
+        stale_sweep.Candidate("other.md", 4, None, 4)])
+    monkeypatch.setattr(runner.stale_sweep, "mark_verified",
+                        lambda r, d, l: ledgered.append(d))
+    monkeypatch.setattr(runner, "stale_run_dir", lambda r, doc: root)
+    monkeypatch.setattr(runner, "run_stale_check", lambda *a, **k: (
+        {"complete": True, "summary": "1 drift",
+         "findings": [{"claim": "c", "cite": "f.py:1", "why": "w"}]},
+        0.0, limits.Wall(limits.SESSION, None, "usage limit reached")))
+
+    checked, verified, carded = runner.stale_phase(root, 2, "m", None, 0.0, 600)
+
+    assert (checked, verified, carded) == (1, 1, 1), (
+        "the walled doc's complete verdict must be honoured — and the sweep must "
+        "still stop there rather than spawning the next checker into a shut window"
+    )
+    assert ledgered == ["drift.md"]
+    card = root / "Board" / "tasks" / f"{runner._stale_slug('drift.md')}.md"
+    assert card.is_file(), "the findings card must be written before the sweep stops"
+    tracked = subprocess.run(
+        ["git", "-C", str(root), "ls-files", f"Board/tasks/{card.stem}.md"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert tracked.stdout.strip(), "and committed — .ai/runs/ is not a rescue"
+
+
+def test_a_stale_checker_that_walls_with_nothing_complete_leaves_the_ledger_alone(
+        tmp_path, monkeypatch):
+    """The regression guard. An incomplete verdict plus a wall is still "not
+    verified": the doc is re-checked next time rather than being recorded as
+    verified on a check that never finished."""
+    from nightshift import limits, stale_sweep
+
+    root = _board_repo(tmp_path)
+    ledgered: list[str] = []
+    monkeypatch.setattr(runner.stale_sweep, "load_ledger", lambda r: {})
+    monkeypatch.setattr(runner.stale_sweep, "select", lambda r, n, ledger: [
+        stale_sweep.Candidate("drift.md", 5, None, 5)])
+    monkeypatch.setattr(runner.stale_sweep, "mark_verified",
+                        lambda r, d, l: ledgered.append(d))
+    monkeypatch.setattr(runner, "stale_run_dir", lambda r, doc: root)
+    monkeypatch.setattr(runner, "run_stale_check", lambda *a, **k: (
+        {"complete": False}, 0.0,
+        limits.Wall(limits.SESSION, None, "usage limit reached")))
+
+    checked, verified, carded = runner.stale_phase(root, 1, "m", None, 0.0, 600)
+
+    assert (checked, verified, carded) == (1, 0, 0)
+    assert ledgered == []

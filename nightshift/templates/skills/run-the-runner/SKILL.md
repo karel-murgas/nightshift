@@ -145,8 +145,19 @@ Each card ends in exactly one lane, and the run log says which:
 | `review` | `review/` | Fell back to a human review — an artefact-only card (art), or the reviewer/rebase-merge could not decide (a wall, a conflict). The `## Merge` note says why |
 | `parked` | `needs-decision/` | The worker hit a real ambiguity and wrote a `## Question`. **A success state**, not a failure |
 | `failed` | `tasks/`, or `failed/` at 3 attempts | Gates red, tests red, worker non-zero, or it produced neither a commit nor an artefact. Reason lands in the card's `## Error` |
-| `limited` | stays in `tasks/` | Usage wall. **The attempt is given back** — the card was not blamed |
+| `limited` | stays in `tasks/` | Usage wall, and the stage had **nothing** written when it hit. **The attempt is given back** — the card was not blamed |
 | `blocked` | stays in `tasks/` | The gate harness itself crashed. Attempt given back, and the night stops: no card can be judged until it is fixed |
+
+A wall is **not** an outcome of its own when the stage that met it had already written a
+complete verdict. A checker that wrote `pass`, a reviewer that wrote `ok`/`needs_decision`, a
+`stale-hunter` that wrote `complete: true`, or a worker that wrote `outcome: parked` and only
+*then* hit the wall on its wrap-up call has finished its work — the verdict is honoured, the
+card settles in the lane above on its own merits, and the attempt is spent. The run log says
+so in as many words ("the verdict was honoured and the card landed"), which is what tells that
+case apart from the `limited` row above. The night still treats the wall as a wall: the session
+is counted and it sleeps or stops exactly as it would have, just without retrying a card that
+is already done. A verdict that is *not* terminal — a checker's `revise` with rounds still
+unspent — stays `limited`, because those rounds cannot be spent in a closed window.
 
 Where to look:
 
