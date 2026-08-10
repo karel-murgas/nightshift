@@ -1,40 +1,41 @@
 <!doctype html>
-<html lang="en">
+<html lang="cs">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>nightshift — slides</title>
-<meta name="description" content="Slide deck: one set of guardrails, two ways to work — inline and overnight.">
+<title>nightshift — prezentace</title>
+<meta name="description" content="Prezentace: AI tým, který pracuje u klávesnice i přes noc. Co jsme chtěli, jak jsme se tam dostali, co nefunguje.">
 <style>
 /* ─────────────────────────────────────────────────────────────
-   nightshift — a SPOKEN deck. Few words per slide; the speaker
-   carries the argument. Diagrams and numbers over prose.
-   Palette: cool blue-black night, sodium-lamp amber.
-   Type: monospace as the display face — the product talks in text.
+   nightshift — MLUVENÁ prezentace. Málo slov na snímek;
+   argument nese řečník. Obrázky a čísla místo odstavců.
+   Paleta: firemní modrá #009FE3 na tmavém podkladu.
+   Písmo: bezpatkové jako hlavní řez (publikum není technické),
+   neproporcionální jen na kód a štítky.
    ───────────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
 
 :root {
-  --ground:#0D1219; --surface:#151C26; --raised:#1C2431;
-  --line:#2A3441; --line-soft:#1F2833;
-  --text:#E2E8F1; --dim:#8E9AAB; --faint:#5A6675;
-  --amber:#EE9A3E; --amber-soft:#3A2A17;
-  --pass:#5FB489; --fail:#D96C61; --hold:#6FA0D6;
+  --ground:#0A121A; --surface:#121C26; --raised:#18242F;
+  --line:#26333F; --line-soft:#1C2732;
+  --text:#E6EDF3; --dim:#94A4B4; --faint:#5F6E7D;
+  --brand:#009FE3; --brand-pure:#009FE3; --brand-soft:#0A2A3C;
+  --pass:#58B58C; --fail:#E0726B; --hold:#7FB0DE;
   --mono: ui-monospace,"Cascadia Mono","JetBrains Mono","SFMono-Regular",Consolas,"DejaVu Sans Mono",monospace;
   --sans: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
 }
 @media (prefers-color-scheme: light) {
   :root {
-    --ground:#EDF0F5; --surface:#FFFFFF; --raised:#F5F7FA;
-    --line:#CBD5E1; --line-soft:#E2E8F0;
-    --text:#111823; --dim:#4F5B6B; --faint:#8595A8;
-    --amber:#A85B08; --amber-soft:#FBEBD8;
-    --pass:#2A7A56; --fail:#AB3C35; --hold:#33639C;
+    --ground:#EEF3F7; --surface:#FFFFFF; --raised:#F4F8FB;
+    --line:#C9D6E0; --line-soft:#E1EAF1;
+    --text:#0E1720; --dim:#4A5967; --faint:#8496A6;
+    --brand:#0077AC; --brand-pure:#009FE3; --brand-soft:#E1F3FC;
+    --pass:#2A7A56; --fail:#B03A34; --hold:#33639C;
   }
 }
-:root[data-theme="light"]{--ground:#EDF0F5;--surface:#FFFFFF;--raised:#F5F7FA;--line:#CBD5E1;--line-soft:#E2E8F0;--text:#111823;--dim:#4F5B6B;--faint:#8595A8;--amber:#A85B08;--amber-soft:#FBEBD8;--pass:#2A7A56;--fail:#AB3C35;--hold:#33639C;}
-:root[data-theme="dark"]{--ground:#0D1219;--surface:#151C26;--raised:#1C2431;--line:#2A3441;--line-soft:#1F2833;--text:#E2E8F1;--dim:#8E9AAB;--faint:#5A6675;--amber:#EE9A3E;--amber-soft:#3A2A17;--pass:#5FB489;--fail:#D96C61;--hold:#6FA0D6;}
+:root[data-theme="light"]{--ground:#EEF3F7;--surface:#FFFFFF;--raised:#F4F8FB;--line:#C9D6E0;--line-soft:#E1EAF1;--text:#0E1720;--dim:#4A5967;--faint:#8496A6;--brand:#0077AC;--brand-pure:#009FE3;--brand-soft:#E1F3FC;--pass:#2A7A56;--fail:#B03A34;--hold:#33639C;}
+:root[data-theme="dark"]{--ground:#0A121A;--surface:#121C26;--raised:#18242F;--line:#26333F;--line-soft:#1C2732;--text:#E6EDF3;--dim:#94A4B4;--faint:#5F6E7D;--brand:#009FE3;--brand-pure:#009FE3;--brand-soft:#0A2A3C;--pass:#58B58C;--fail:#E0726B;--hold:#7FB0DE;}
 
 body {
   margin:0; background:var(--ground); color:var(--text);
@@ -42,7 +43,7 @@ body {
   scroll-snap-type:y mandatory; overflow-y:scroll; height:100vh;
 }
 
-/* ── slide shell ──────────────────────────────────────────── */
+/* ── kostra snímku ────────────────────────────────────────── */
 .slide {
   min-height:100svh; scroll-snap-align:start; scroll-snap-stop:always;
   display:flex; flex-direction:column; justify-content:center;
@@ -50,448 +51,456 @@ body {
   position:relative;
 }
 .inner { width:100%; max-width:64rem; margin:0 auto;
-         display:flex; flex-direction:column; gap:clamp(1.4rem,3.2vh,2.5rem); }
+         display:flex; flex-direction:column; gap:clamp(1.2rem,3vh,2.2rem); }
 
 .kicker {
   font-family:var(--mono); font-size:clamp(.62rem,1.1vw,.72rem); font-weight:700;
-  letter-spacing:.22em; text-transform:uppercase; color:var(--amber); margin:0;
+  letter-spacing:.22em; text-transform:uppercase; color:var(--brand); margin:0;
 }
-h1 { font-family:var(--mono); font-weight:700; margin:0; line-height:1;
-     letter-spacing:-.04em; font-size:clamp(3rem,11vw,7.5rem); }
-h2 { font-family:var(--mono); font-weight:700; margin:0; line-height:1.08;
-     letter-spacing:-.03em; font-size:clamp(1.7rem,4.6vw,3.1rem); text-wrap:balance; }
-h3 { font-family:var(--mono); font-weight:700; margin:0; font-size:clamp(.88rem,1.6vw,1rem);
-     letter-spacing:-.01em; }
-.say { font-size:clamp(1rem,1.85vw,1.3rem); line-height:1.45; color:var(--dim);
-       margin:0; max-width:46ch; text-wrap:pretty; }
-.say b { color:var(--text); font-weight:600; }
-.say em { font-style:normal; color:var(--amber); }
+h1 { font-weight:800; margin:0; line-height:1;
+     letter-spacing:-.045em; font-size:clamp(3rem,11vw,7.5rem); }
+h2 { font-weight:800; margin:0; line-height:1.1;
+     letter-spacing:-.025em; font-size:clamp(1.6rem,4.4vw,3rem); text-wrap:balance; }
+h3 { font-weight:700; margin:0; font-size:clamp(.88rem,1.6vw,1rem); }
+.say { font-size:clamp(.95rem,1.8vw,1.25rem); line-height:1.5; color:var(--dim);
+       margin:0; max-width:50ch; text-wrap:pretty; }
+.say b { color:var(--text); font-weight:650; }
+.say em { font-style:normal; color:var(--brand); font-weight:650; }
+.foot { font-size:clamp(.76rem,1.25vw,.88rem); color:var(--faint); margin:0; max-width:76ch; line-height:1.55; }
 code { font-family:var(--mono); font-size:.88em; background:var(--raised);
        border:1px solid var(--line-soft); border-radius:3px; padding:.06em .34em; white-space:nowrap; }
 
-/* ── chrome ───────────────────────────────────────────────── */
+/* ── navigace ─────────────────────────────────────────────── */
 .rail { position:fixed; right:clamp(.7rem,2vw,1.6rem); top:50%; transform:translateY(-50%);
         display:flex; flex-direction:column; gap:.55rem; z-index:50; }
 .rail button { width:9px; height:9px; padding:0; border-radius:50%; cursor:pointer;
         border:1px solid var(--faint); background:transparent; transition:background .18s,border-color .18s; }
-.rail button[aria-current="true"] { background:var(--amber); border-color:var(--amber); }
-.rail button:hover { border-color:var(--amber); }
+.rail button[aria-current="true"] { background:var(--brand-pure); border-color:var(--brand-pure); }
+.rail button:hover { border-color:var(--brand-pure); }
 .num { position:absolute; left:clamp(1.5rem,6vw,6rem); bottom:clamp(1.5rem,4vh,2.5rem);
        font-family:var(--mono); font-size:.7rem; letter-spacing:.16em; color:var(--faint); }
 .hint { position:fixed; right:clamp(2.4rem,5vw,4rem); bottom:clamp(1.2rem,3vh,2rem);
         font-family:var(--mono); font-size:.66rem; letter-spacing:.12em; color:var(--faint);
         z-index:50; transition:opacity .6s; }
-:focus-visible { outline:2px solid var(--amber); outline-offset:3px; border-radius:2px; }
+:focus-visible { outline:2px solid var(--brand-pure); outline-offset:3px; border-radius:2px; }
 
-/* ── title ────────────────────────────────────────────────── */
-.lamp { width:14px; height:14px; border-radius:50%; background:var(--amber);
-        box-shadow:0 0 0 5px color-mix(in srgb,var(--amber) 15%,transparent); flex:none; }
+/* ── titulní ──────────────────────────────────────────────── */
+.lamp { width:14px; height:14px; border-radius:50%; background:var(--brand-pure);
+        box-shadow:0 0 0 5px color-mix(in srgb,var(--brand-pure) 18%,transparent); flex:none; }
 @media (prefers-reduced-motion:no-preference){
   .lamp { animation:pulse 4s ease-in-out infinite; }
-  @keyframes pulse { 0%,100%{box-shadow:0 0 0 5px color-mix(in srgb,var(--amber) 15%,transparent);}
-                     50%{box-shadow:0 0 0 11px color-mix(in srgb,var(--amber) 5%,transparent);} }
+  @keyframes pulse { 0%,100%{box-shadow:0 0 0 5px color-mix(in srgb,var(--brand-pure) 18%,transparent);}
+                     50%{box-shadow:0 0 0 11px color-mix(in srgb,var(--brand-pure) 6%,transparent);} }
 }
 .title-row { display:flex; align-items:center; gap:1.1rem; }
+.byline { font-family:var(--mono); font-size:.74rem; letter-spacing:.14em; color:var(--faint); margin:0; }
 
-/* ── two-panel ────────────────────────────────────────────── */
-.duo { display:grid; grid-template-columns:repeat(auto-fit,minmax(17rem,1fr)); gap:clamp(1rem,2.5vw,2rem); }
-.panel { border-left:3px solid var(--amber); padding:.2rem 0 .2rem 1.3rem;
+/* ── dvojpanel ────────────────────────────────────────────── */
+.duo { display:grid; grid-template-columns:repeat(auto-fit,minmax(17rem,1fr)); gap:clamp(1rem,2.5vw,2.2rem); }
+.panel { border-left:3px solid var(--brand-pure); padding:.2rem 0 .2rem 1.3rem;
          display:flex; flex-direction:column; gap:.55rem; }
 .panel.q { border-left-color:var(--line); }
-.panel .big { font-family:var(--mono); font-weight:700; letter-spacing:-.02em;
-              font-size:clamp(1.05rem,2.1vw,1.45rem); line-height:1.3; }
-.panel p { margin:0; font-size:clamp(.84rem,1.4vw,.96rem); color:var(--dim); line-height:1.5; }
+.panel.no { border-left-color:var(--fail); }
+.panel .big { font-weight:800; letter-spacing:-.03em;
+              font-size:clamp(1.4rem,3.2vw,2.1rem); line-height:1.15; }
+.panel .big.sm { font-size:clamp(1rem,2vw,1.3rem); letter-spacing:-.015em; line-height:1.3; }
+.panel p { margin:0; font-size:clamp(.84rem,1.42vw,.98rem); color:var(--dim); line-height:1.5; }
+.panel ul { margin:0; padding-left:1.05rem; display:flex; flex-direction:column; gap:.4rem; }
+.panel li { font-size:clamp(.83rem,1.4vw,.96rem); color:var(--dim); line-height:1.45; }
+.panel li b { color:var(--text); font-weight:650; }
 
-/* ── THE MAP ──────────────────────────────────────────────── */
-.map { display:flex; flex-direction:column; align-items:center; width:100%; }
-.map-top { display:grid; grid-template-columns:1fr 1fr; gap:clamp(1rem,3vw,2.5rem); width:100%; }
-@media (max-width:640px){ .map-top { grid-template-columns:1fr; } }
-.mode { background:var(--surface); border:1px solid var(--line); border-top:3px solid var(--amber);
-        border-radius:6px; padding:clamp(.85rem,2vw,1.25rem); display:flex; flex-direction:column; gap:.5rem; }
-.mode.night { border-top-color:var(--hold); }
-.mode h3 { color:var(--amber); }
-.mode.night h3 { color:var(--hold); }
-.mode ul { margin:0; padding-left:1.05rem; display:flex; flex-direction:column; gap:.26rem; }
-.mode li { font-size:clamp(.77rem,1.35vw,.9rem); color:var(--dim); line-height:1.45; }
-.funnel { width:100%; height:clamp(1.8rem,4.5vh,3rem); color:var(--faint); }
-.funnel svg { width:100%; height:100%; display:block; }
-.shared { width:100%; background:var(--raised); border:1px solid var(--amber);
-          border-radius:6px; padding:clamp(.9rem,2.2vw,1.35rem); text-align:center; }
-.shared .lab { font-family:var(--mono); font-size:.66rem; letter-spacing:.2em;
-               text-transform:uppercase; color:var(--amber); }
-.shared .items { display:flex; flex-wrap:wrap; justify-content:center; gap:.42rem .65rem; margin-top:.7rem; }
-.chip { font-family:var(--mono); font-size:clamp(.7rem,1.3vw,.85rem); color:var(--text);
-        background:var(--surface); border:1px solid var(--line); border-radius:99px; padding:.24rem .8rem; }
+/* ── cíle ─────────────────────────────────────────────────── */
+.goals { margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:.85rem; }
+.goals li { display:grid; grid-template-columns:1.6rem 1fr; align-items:baseline; gap:.4rem;
+            font-size:clamp(.92rem,1.6vw,1.12rem); color:var(--dim); line-height:1.45; max-width:56ch; }
+.goals li b { color:var(--text); font-weight:700; }
+.goals .n { font-family:var(--mono); font-size:.78em; color:var(--brand); font-weight:700; }
 
-/* ── board lanes ──────────────────────────────────────────── */
-.lanes { display:flex; flex-wrap:wrap; gap:.5rem; }
-.lane { flex:1 1 7.5rem; min-width:6.6rem; background:var(--surface);
+/* ── čtyři mechanismy ─────────────────────────────────────── */
+.mechs { display:grid; grid-template-columns:repeat(auto-fit,minmax(15rem,1fr)); gap:1px;
+         background:var(--line-soft); border:1px solid var(--line-soft); border-radius:6px; overflow:hidden; }
+.mech { background:var(--surface); padding:clamp(.9rem,2vw,1.25rem); display:flex; flex-direction:column; gap:.4rem; }
+.mech .h { font-weight:700; font-size:clamp(.95rem,1.65vw,1.1rem); color:var(--brand); }
+.mech .h small { display:block; font-family:var(--mono); font-weight:600; font-size:.62rem;
+                 letter-spacing:.16em; text-transform:uppercase; color:var(--faint); margin-top:.2rem; }
+.mech p { margin:0; font-size:clamp(.8rem,1.35vw,.92rem); color:var(--dim); line-height:1.5; }
+
+/* ── složky na nástěnce ───────────────────────────────────── */
+/* 8 složek = 4×2. Auto-fit by je zalomil na 7+1, což vypadá jako chyba. */
+.lanes { display:grid; grid-template-columns:repeat(4,1fr); gap:.5rem; }
+@media (max-width:760px){ .lanes { grid-template-columns:repeat(2,1fr); } }
+.lane { background:var(--surface);
         border:1px solid var(--line); border-top:3px solid var(--line);
         border-radius:5px; padding:.7rem .75rem; display:flex; flex-direction:column; gap:.22rem; }
-.lane b { font-family:var(--mono); font-size:.77rem; }
-.lane span.d { font-size:.73rem; color:var(--dim); line-height:1.4; }
-.lane .who { font-family:var(--mono); font-size:.58rem; letter-spacing:.14em;
+.lane b { font-family:var(--mono); font-size:.78rem; }
+.lane span.d { font-size:.74rem; color:var(--dim); line-height:1.4; }
+.lane .who { font-family:var(--mono); font-size:.57rem; letter-spacing:.14em;
              text-transform:uppercase; color:var(--faint); }
-.lane.you { border-top-color:var(--amber); }
-.lane.you .who { color:var(--amber); }
+.lane.you { border-top-color:var(--brand-pure); }
+.lane.you .who { color:var(--brand); }
 .lane.bot { border-top-color:var(--pass); }
-.lane.ask { border-top-color:var(--hold); }
-.lane.ask .who { color:var(--hold); }
 .lane.dead { border-top-color:var(--fail); }
 
-/* ── hand-operated steps ──────────────────────────────────── */
-.hands { display:grid; grid-template-columns:repeat(auto-fit,minmax(12.5rem,1fr)); gap:1px;
-         background:var(--line-soft); border:1px solid var(--line-soft); border-radius:6px; overflow:hidden; }
-.hand { background:var(--surface); padding:clamp(.85rem,2vw,1.2rem); display:flex; flex-direction:column; gap:.35rem; }
-.hand .cmd { font-family:var(--mono); font-size:clamp(.78rem,1.4vw,.92rem); color:var(--amber); font-weight:700; }
-.hand p { margin:0; font-size:clamp(.76rem,1.32vw,.88rem); color:var(--dim); line-height:1.45; }
-.hand .tag { font-family:var(--mono); font-size:.58rem; letter-spacing:.14em; text-transform:uppercase; color:var(--faint); }
+/* ── diagram životního cyklu ──────────────────────────────── */
+.flowwrap { width:100%; display:flex; justify-content:flex-start; }
+.flow { width:100%; max-width:44rem; height:auto; display:block; }
+.d-box { fill:var(--surface); stroke:var(--line); stroke-width:1.5; }
+.d-box.me { stroke:var(--brand-pure); stroke-width:2; }
+.d-pill { fill:none; stroke:var(--brand-pure); stroke-width:1.5; stroke-dasharray:5 4; }
+.d-t { font-family:var(--sans); font-weight:700; font-size:14px; fill:var(--text); }
+.d-s { font-family:var(--sans); font-weight:400; font-size:11.5px; fill:var(--dim); }
+.d-lane { font-family:var(--mono); font-weight:700; font-size:10px; letter-spacing:.2em; fill:var(--faint); }
+.d-lane.me { fill:var(--brand); }
+.d-flow { fill:none; stroke:var(--faint); stroke-width:1.5; }
+.d-flow.dash { stroke:var(--brand-pure); stroke-dasharray:5 4; }
+.legend { display:flex; flex-wrap:wrap; gap:.4rem 1.4rem;
+          font-size:clamp(.78rem,1.3vw,.9rem); color:var(--dim); }
+.legend span { display:flex; align-items:center; gap:.45rem; }
+.legend i { width:14px; height:3px; border-radius:2px; background:var(--brand-pure); flex:none; }
+.legend i.mach { background:var(--faint); }
 
-/* ── card mock ────────────────────────────────────────────── */
-.card-mock { background:var(--surface); border:1px solid var(--line); border-radius:6px;
-             font-family:var(--mono); font-size:clamp(.68rem,1.25vw,.82rem); line-height:1.7; overflow:hidden; }
-.card-mock .fm { padding:.75rem 1.1rem; border-bottom:1px solid var(--line-soft); color:var(--dim); }
-.card-mock .fm i { font-style:normal; color:var(--faint); }
-.card-mock .sec { padding:.5rem 1.1rem; color:var(--faint); border-bottom:1px solid var(--line-soft); }
-.card-mock .hl { background:var(--amber-soft); border-left:3px solid var(--amber);
-                 padding:.85rem 1.1rem; border-bottom:1px solid var(--line-soft); }
-.card-mock .hl b { color:var(--amber); display:block; margin-bottom:.35rem; }
-.card-mock .hl span { color:var(--text); font-family:var(--sans); font-size:1.05em; line-height:1.5; }
-
-/* ── night strip ──────────────────────────────────────────── */
-.strip { display:grid; grid-template-columns:repeat(auto-fit,minmax(8.5rem,1fr)); gap:1px;
-         background:var(--line-soft); border:1px solid var(--line-soft); border-radius:6px; overflow:hidden; }
-.tick { background:var(--surface); padding:clamp(.75rem,1.8vw,1.05rem); display:flex; flex-direction:column; gap:.28rem; }
-.tick .t { font-family:var(--mono); font-size:clamp(.78rem,1.45vw,.95rem); font-weight:700; color:var(--amber); }
-.tick .w { font-size:clamp(.73rem,1.28vw,.86rem); color:var(--dim); line-height:1.4; }
-
-/* ── loop ─────────────────────────────────────────────────── */
-.cycle { display:flex; flex-wrap:wrap; align-items:stretch; gap:.55rem; }
-.cyc { flex:1 1 10.5rem; border:1px dashed var(--line); border-radius:5px;
-       padding:.85rem 1rem; display:flex; flex-direction:column; gap:.32rem; }
-.cyc b { font-family:var(--mono); font-size:.8rem; color:var(--amber); }
-.cyc span { font-size:.81rem; color:var(--dim); line-height:1.45; }
-.arrow { align-self:center; color:var(--faint); font-size:1.05rem; }
-@media (max-width:760px){ .arrow { display:none; } }
-
-/* ── numbers ──────────────────────────────────────────────── */
-.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(8.5rem,1fr)); gap:1px;
+/* ── čísla ────────────────────────────────────────────────── */
+/* 8 čísel = 4×2, ze stejného důvodu jako složky výš. */
+.grid { display:grid; grid-template-columns:repeat(4,1fr); gap:1px;
         background:var(--line-soft); border:1px solid var(--line-soft); border-radius:6px; overflow:hidden; }
-.cell { background:var(--surface); padding:clamp(.85rem,2vw,1.25rem); display:flex; flex-direction:column; gap:.12rem; }
-.cell .n { font-family:var(--mono); font-weight:700; letter-spacing:-.045em; line-height:1;
+@media (max-width:760px){ .grid { grid-template-columns:repeat(2,1fr); } }
+.cell { background:var(--surface); padding:clamp(.85rem,2vw,1.2rem); display:flex; flex-direction:column; gap:.15rem; }
+.cell .n { font-weight:800; letter-spacing:-.045em; line-height:1;
            font-size:clamp(1.5rem,3.4vw,2.3rem); font-variant-numeric:tabular-nums; }
-.cell .n.hot { color:var(--amber); }
-.cell .l { font-size:clamp(.69rem,1.2vw,.79rem); color:var(--dim); line-height:1.38; }
+.cell .n.hot { color:var(--brand); }
+.cell .l { font-size:clamp(.7rem,1.2vw,.8rem); color:var(--dim); line-height:1.4; }
 
-/* ── lists ────────────────────────────────────────────────── */
-.plain { margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:.7rem; }
+/* ── třídy chyb, s podílem ────────────────────────────────── */
+.classes { display:flex; flex-direction:column; gap:clamp(1rem,2.4vh,1.6rem); }
+.cls { display:flex; flex-direction:column; gap:.45rem; max-width:56rem; }
+.cls .top { display:flex; align-items:baseline; gap:.85rem; }
+.cls .pct { font-weight:800; font-size:clamp(1.1rem,2.2vw,1.5rem); color:var(--brand);
+            font-variant-numeric:tabular-nums; min-width:3.4rem; letter-spacing:-.03em; }
+.cls .nm { font-weight:700; font-size:clamp(.92rem,1.55vw,1.08rem); }
+.cls p { margin:0; font-size:clamp(.8rem,1.35vw,.94rem); color:var(--dim); line-height:1.5; max-width:62ch; }
+/* Podíl jako proužek v celé šířce, ne jako podtržení nadpisu — jinak to
+   čte jako dekorace a ne jako číslo. */
+.cls .track { height:6px; border-radius:3px; background:var(--line-soft); overflow:hidden; }
+.cls .track i { display:block; height:100%; background:var(--brand-pure); border-radius:3px; }
+
+/* ── seznam s odrážkou ────────────────────────────────────── */
+.plain { margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:.8rem; }
 .plain li { display:flex; gap:.8rem; align-items:baseline;
-            font-size:clamp(.88rem,1.5vw,1.05rem); color:var(--dim); line-height:1.45; max-width:54ch; }
-.plain li b { color:var(--text); font-weight:600; }
+            font-size:clamp(.86rem,1.45vw,1.02rem); color:var(--dim); line-height:1.5; max-width:60ch; }
+.plain li b { color:var(--text); font-weight:700; }
 .plain .mark { font-family:var(--mono); color:var(--fail); flex:none; }
+.plain .mark.ok { color:var(--pass); }
 
 pre { font-family:var(--mono); background:var(--surface); border:1px solid var(--line);
       border-radius:6px; padding:clamp(.9rem,2vw,1.2rem); margin:0; overflow-x:auto;
-      font-size:clamp(.74rem,1.35vw,.9rem); line-height:1.9; }
+      font-size:clamp(.72rem,1.3vw,.88rem); line-height:1.85; }
 pre .c { color:var(--faint); }
-pre .p { color:var(--amber); }
+pre .p { color:var(--brand); }
 .warnbox { border:1px solid var(--fail); border-left-width:3px; border-radius:5px;
            background:color-mix(in srgb,var(--fail) 8%,transparent);
-           padding:clamp(.9rem,2vw,1.2rem); }
-.warnbox p { margin:0; font-size:clamp(.85rem,1.4vw,1rem); color:var(--text); line-height:1.5; max-width:58ch; }
+           padding:clamp(.85rem,2vw,1.1rem); }
+.warnbox p { margin:0; font-size:clamp(.82rem,1.35vw,.96rem); color:var(--text); line-height:1.5; max-width:60ch; }
+.link { font-family:var(--mono); font-size:clamp(.95rem,2.4vw,1.6rem); color:var(--brand);
+        word-break:break-all; font-weight:700; letter-spacing:-.02em; }
 </style>
 </head>
 <body>
 
-<nav class="rail" aria-label="slides"></nav>
-<div class="hint" id="hint">← → to move</div>
+<nav class="rail" aria-label="snímky"></nav>
+<div class="hint" id="hint">← → další snímek</div>
 
-<!-- 1 ───────────────────────────────────────────────────── -->
+<!-- 1 ── titulní ─────────────────────────────────────────── -->
 <section class="slide">
   <div class="inner">
-    <div class="title-row"><span class="lamp" aria-hidden="true"></span><p class="kicker">a board-driven AI dev team for a Python repo</p></div>
+    <div class="title-row"><span class="lamp" aria-hidden="true"></span><p class="kicker">AI tým pro jeden Python projekt</p></div>
     <h1>nightshift</h1>
-    <p class="say" style="max-width:38ch">One set of guardrails. <b>Two ways to work</b> — at the keyboard, or overnight.</p>
+    <p class="say" style="max-width:40ch">Jedna sada pravidel. <b>Dva způsoby práce</b> — u klávesnice, nebo přes noc.</p>
+    <p class="byline">KAREL MURGAŠ · SRPEN 2026</p>
   </div>
-  <div class="num">01</div>
+  <div class="num"></div>
 </section>
 
-<!-- 2 ───────────────────────────────────────────────────── -->
+<!-- 2 ── proč ───────────────────────────────────────────── -->
 <section class="slide">
   <div class="inner">
-    <p class="kicker">why</p>
-    <h2>Rules grow.<br>Recall doesn't.</h2>
-    <div class="duo">
-      <div class="panel">
-        <div class="big">65 rules</div>
-        <p>written down in this project — prose an agent must recall in full, every session</p>
-      </div>
-      <div class="panel q">
-        <div class="big">40% enforced</div>
-        <p>by a test or a gate. The rest still depend on someone remembering</p>
-      </div>
-    </div>
+    <p class="kicker">proč vůbec</p>
+    <h2>Pravidel přibývá.<br>Paměti ne.</h2>
+    <p class="say">Tenhle projekt má <b>68 sepsaných pravidel.</b> Asistent si je má vybavit znovu v každém sezení — a začíná pokaždé s prázdnou hlavou.</p>
+    <p class="say">Stejný problém má i člověk. Rozdíl je, že u asistenta je to <em>měřitelné</em> — a proto se s tím dá něco dělat.</p>
   </div>
-  <div class="num">02</div>
+  <div class="num"></div>
 </section>
 
-<!-- 3 ───────────────────────────────────────────────────── -->
+<!-- 3 ── I. cíle ────────────────────────────────────────── -->
 <section class="slide">
   <div class="inner">
-    <p class="kicker">the cost of a defect</p>
-    <h2>Not a bad commit.<br>Your&nbsp;attention.</h2>
-    <p class="say">Caught by a gate at 3&nbsp;AM, or by you over coffee — <b>identical defect, wildly different cost.</b></p>
-  </div>
-  <div class="num">03</div>
-</section>
-
-<!-- 4 ───────────────────────────────────────────────────── -->
-<section class="slide">
-  <div class="inner">
-    <p class="kicker">two rules everything follows from</p>
-    <div class="duo">
-      <div class="panel">
-        <div class="big">What Python can do,<br>Python should do.</div>
-        <p>A rule a script can check is never a charter bullet. The orchestrator makes zero LLM calls.</p>
-      </div>
-      <div class="panel">
-        <div class="big">No gate,<br>no delegation.</div>
-        <p>Unattended work is safe only where a machine can judge it. Gates first, workers second.</p>
-      </div>
-    </div>
-  </div>
-  <div class="num">04</div>
-</section>
-
-<!-- 5 ── THE MAP ─────────────────────────────────────────── -->
-<section class="slide">
-  <div class="inner">
-    <p class="kicker">the whole idea, in one picture</p>
-    <div class="map">
-      <div class="map-top">
-        <div class="mode">
-          <h3>INLINE — me, at the keyboard</h3>
-          <ul>
-            <li>an ordinary session</li>
-            <li>no board required</li>
-            <li>exactly as it worked before</li>
-          </ul>
-        </div>
-        <div class="mode night">
-          <h3>OVERNIGHT — the runner</h3>
-          <ul>
-            <li>a card, its own git worktree</li>
-            <li>I start it. It is not a daemon</li>
-            <li>I read the result in the morning</li>
-          </ul>
-        </div>
-      </div>
-      <div class="funnel" aria-hidden="true">
-        <svg viewBox="0 0 400 60" preserveAspectRatio="none">
-          <path d="M100 0 V24 Q100 33 109 33 H191 Q200 33 200 42 V60"
-                fill="none" stroke="currentColor" stroke-width="1.4"/>
-          <path d="M300 0 V24 Q300 33 291 33 H209 Q200 33 200 42 V60"
-                fill="none" stroke="currentColor" stroke-width="1.4"/>
-        </svg>
-      </div>
-      <div class="shared">
-        <div class="lab">the same guardrails, either way</div>
-        <div class="items">
-          <span class="chip">skills</span>
-          <span class="chip">34 gates, on save</span>
-          <span class="chip">2,065 tests</span>
-          <span class="chip">preflight before push</span>
-          <span class="chip">corrections log</span>
-          <span class="chip">memory</span>
-        </div>
-      </div>
-    </div>
-    <p class="say" style="margin:0 auto; text-align:center; max-width:48ch">The board is an <em>addition</em>, not a replacement.</p>
-  </div>
-  <div class="num">05</div>
-</section>
-
-<!-- 6 ───────────────────────────────────────────────────── -->
-<section class="slide">
-  <div class="inner">
-    <p class="kicker">the board — eight directories of markdown</p>
-    <h2 style="font-size:clamp(1.3rem,3vw,1.9rem)">No database. No daemon. A card is a file.</h2>
-    <div class="lanes">
-      <div class="lane you"><span class="who">mine</span><b>ideas/</b><span class="d">private. no script reads it</span></div>
-      <div class="lane you"><span class="who">mine</span><b>inbox/</b><span class="d">a rough note, no schema</span></div>
-      <div class="lane you"><span class="who">i approve</span><b>tasks/</b><span class="d">ready — waiting for my nod</span></div>
-      <div class="lane ask"><span class="who">i answer</span><b>needs-decision/</b><span class="d">a question only I can settle</span></div>
-      <div class="lane bot"><span class="who">machine</span><b>review/</b><span class="d">gates green</span></div>
-      <div class="lane bot"><span class="who">i test</span><b>testing/</b><span class="d">merged, waiting on me</span></div>
-      <div class="lane bot"><span class="who">archive</span><b>done/</b><span class="d">kept as evidence</span></div>
-      <div class="lane dead"><span class="who">archive</span><b>failed/</b><span class="d">kept too</span></div>
-    </div>
-    <p class="say">A card's state is which folder it sits in. That is what survives a 3&nbsp;AM reboot.</p>
-  </div>
-  <div class="num">06</div>
-</section>
-
-<!-- 7 ───────────────────────────────────────────────────── -->
-<section class="slide">
-  <div class="inner">
-    <p class="kicker">nothing runs itself</p>
-    <h2>Four things I do by hand.</h2>
-    <div class="hands">
-      <div class="hand">
-        <span class="tag">1 · capture</span>
-        <span class="cmd">drop a note</span>
-        <p>Into <code>inbox/</code>, from the phone. No frontmatter — refining it is the system's job.</p>
-      </div>
-      <div class="hand">
-        <span class="tag">2 · scope</span>
-        <span class="cmd">run triage</span>
-        <p>One note at a time, when I ask. It writes a card — or parks a question rather than guess.</p>
-      </div>
-      <div class="hand">
-        <span class="tag">3 · approve</span>
-        <span class="cmd">read the card</span>
-        <p>I read its <code>## Approach</code>. Nothing dispatches that I have not agreed with.</p>
-      </div>
-      <div class="hand">
-        <span class="tag">4 · dispatch</span>
-        <span class="cmd">start the runner</span>
-        <p>By hand, or on a schedule I set. Stops on a wall, a budget, or <code>.ai/STOP</code>.</p>
-      </div>
-    </div>
-  </div>
-  <div class="num">07</div>
-</section>
-
-<!-- 8 ───────────────────────────────────────────────────── -->
-<section class="slide">
-  <div class="inner">
-    <p class="kicker">step 3 — the approval point</p>
-    <h2 style="font-size:clamp(1.3rem,3vw,1.9rem)">One paragraph decides whether it runs.</h2>
-    <div class="card-mock">
-      <div class="fm">
-        <i>id:</i> heavy-guard-should-bleed<br>
-        <i>tier:</i> worker &nbsp; <i>worker:</i> code-thread &nbsp; <i>unattended:</i> true
-      </div>
-      <div class="sec">## Intent</div>
-      <div class="hl">
-        <b>## Approach</b>
-        <span><code>is_drone</code> did double duty — AI and crit-DoT flavour. Add an independent
-        <code>is_mechanical</code> flag for the flavour, and leave <code>is_drone</code> to the AI.</span>
-      </div>
-      <div class="sec">## Steps &nbsp;·&nbsp; ## Acceptance &nbsp;·&nbsp; ## Open Questions → none</div>
-    </div>
-    <p class="say">The principle, not the diff. A gate refuses a <code>tasks/</code> card that has no such paragraph.</p>
-  </div>
-  <div class="num">08</div>
-</section>
-
-<!-- 9 ───────────────────────────────────────────────────── -->
-<section class="slide">
-  <div class="inner">
-    <p class="kicker">what the night does with an approved card</p>
-    <div class="strip">
-      <div class="tick"><span class="t">worktree</span><span class="w">its own branch — the integration branch is untouched</span></div>
-      <div class="tick"><span class="t">dispatch</span><span class="w">one worker, one card, at the tier the card declares</span></div>
-      <div class="tick"><span class="t">gates + tests</span><span class="w">the machine judges first — I never read failed work</span></div>
-      <div class="tick"><span class="t">review</span><span class="w">an agent that sees the diff, never the prompt</span></div>
-      <div class="tick"><span class="t">merge</span><span class="w">rebased, re-verified, then merged</span></div>
-      <div class="tick"><span class="t">digest</span><span class="w">what landed, what failed, what needs me</span></div>
-    </div>
-    <p class="say">Every branch in the runner is a file check or an exit code. <b>Zero LLM calls in the orchestrator</b> — that is what makes 3&nbsp;AM predictable.</p>
-  </div>
-  <div class="num">09</div>
-</section>
-
-<!-- 10 ──────────────────────────────────────────────────── -->
-<section class="slide">
-  <div class="inner">
-    <p class="kicker">when it cannot decide</p>
-    <h2>"I need to ask you<br>something" is a <em style="font-style:normal;color:var(--amber)">success</em>.</h2>
-    <p class="say">A parked card carries what was tried, what is ambiguous, the options, and what each implies. <b>A decision I can make in 15 seconds from my phone.</b></p>
-    <p class="say">Ambiguity resolved by invention is the worst overnight outcome there is.</p>
-  </div>
-  <div class="num">10</div>
-</section>
-
-<!-- 11 ──────────────────────────────────────────────────── -->
-<section class="slide">
-  <div class="inner">
-    <p class="kicker">how the rules get earned</p>
-    <div class="cycle">
-      <div class="cyc"><b>1 · log it</b><span>one line per correction — and <em style="font-style:normal;color:var(--amber)">why it was believed</em></span></div>
-      <span class="arrow">→</span>
-      <div class="cyc"><b>2 · cluster</b><span>the shape of an error repeats, not its subject</span></div>
-      <span class="arrow">→</span>
-      <div class="cyc"><b>3 · earn a gate</b><span>or refuse one and say so — judgment stays human</span></div>
-      <span class="arrow">→</span>
-      <div class="cyc"><b>4 · audit</b><span>every rule against what actually enforces it</span></div>
-    </div>
-    <p class="say"><b>You get the machinery for earning gates — not our gate suite.</b> A new repo starts with the generic ones and an empty log.</p>
-  </div>
-  <div class="num">11</div>
-</section>
-
-<!-- 12 ──────────────────────────────────────────────────── -->
-<section class="slide">
-  <div class="inner">
-    <p class="kicker">the least flattering evidence</p>
-    <h2>We pointed it at itself.<br>It found seven blind spots.</h2>
-    <p class="say">Gates still scanning a folder the code had moved out of. One whose target file was deleted three steps earlier — <b>green while reading nothing.</b></p>
-    <p class="say">All silent. All the same class the log had already recorded 17 times.</p>
-  </div>
-  <div class="num">12</div>
-</section>
-
-<!-- 13 ──────────────────────────────────────────────────── -->
-<section class="slide">
-  <div class="inner">
-    <p class="kicker">where it stands — measured today</p>
-    <div class="grid">
-      <div class="cell"><span class="n hot">34</span><span class="l">gates, ~7&nbsp;s, on every save</span></div>
-      <div class="cell"><span class="n">2,065</span><span class="l">tests, green</span></div>
-      <div class="cell"><span class="n">36</span><span class="l">cards taken to merged or done</span></div>
-      <div class="cell"><span class="n">129</span><span class="l">corrections, 12 classes</span></div>
-      <div class="cell"><span class="n">65</span><span class="l">rules audited for enforcement</span></div>
-      <div class="cell"><span class="n">17.7k</span><span class="l">lines of framework</span></div>
-      <div class="cell"><span class="n">465</span><span class="l">tests on the framework itself</span></div>
-      <div class="cell"><span class="n">41.8k</span><span class="l">lines of game it grew from</span></div>
-    </div>
-    <p class="say">One developer, one repo. Directional instruments, not a study.</p>
-  </div>
-  <div class="num">13</div>
-</section>
-
-<!-- 14 ──────────────────────────────────────────────────── -->
-<section class="slide">
-  <div class="inner">
-    <p class="kicker">before you get excited</p>
-    <h2>What you don't get.</h2>
-    <ul class="plain">
-      <li><span class="mark">✕</span><span><b>A pre-earned gate suite.</b> Week one is generic gates and an empty log.</span></li>
-      <li><span class="mark">✕</span><span><b>Non-Python support.</b> The AST gates assume Python underneath.</span></li>
-      <li><span class="mark">✕</span><span><b>Local models.</b> Costed against real telemetry, then parked. Nothing depends on them.</span></li>
-      <li><span class="mark">✕</span><span><b>A sandbox.</b> The permission mode a code card needs is the whole machine.</span></li>
+    <p class="kicker">I · co jsme chtěli</p>
+    <h2>Pět cílů.</h2>
+    <ul class="goals">
+      <li><span class="n">01</span><span><b>Práce přes noc.</b> Zadám večer, ráno čtu, co se stalo.</span></li>
+      <li><span class="n">02</span><span><b>Práce u klávesnice.</b> V běžném sezení platí přesně stejná pravidla.</span></li>
+      <li><span class="n">03</span><span><b>Spolehlivost.</b> Chyba se má zastavit sama a nahlas — ne až u mě, o týden později.</span></li>
+      <li><span class="n">04</span><span><b>Čistý kód a dokumentace.</b> Ne jen „ono to nějak funguje“.</span></li>
+      <li><span class="n">05</span><span><b>Rozhodnutí zůstávají na mně.</b> AI nesmí rozhodnutí hádat.</span></li>
     </ul>
   </div>
-  <div class="num">14</div>
+  <div class="num"></div>
 </section>
 
-<!-- 15 ──────────────────────────────────────────────────── -->
+<!-- 4 ── II. čtyři mechanismy ───────────────────────────── -->
 <section class="slide">
   <div class="inner">
-    <p class="kicker">try it</p>
-    <h2 style="font-size:clamp(1.3rem,3vw,2rem)">Two commands to stand it up.</h2>
-    <pre>pip install -e path/to/nightshift
-nightshift init <span class="p">--integration</span> &lt;your-branch&gt;
-
-<span class="c"># then, whenever you want it</span>
-python -m nightshift.runner <span class="p">--dry-run</span>
-python -m nightshift.runner <span class="p">--card</span> &lt;id&gt; <span class="p">--max-cards</span> 1</pre>
-    <div class="warnbox">
-      <p><b><code>permission_mode: bypassPermissions</code> is what a code card needs — and it is the whole machine, not a sandbox.</b> <code>init</code> will never set it for you.</p>
+    <p class="kicker">II · jak jsme se tam dostali</p>
+    <h2 style="font-size:clamp(1.4rem,3.2vw,2.1rem)">Čtyři věci, na kterých to stojí.</h2>
+    <div class="mechs">
+      <div class="mech">
+        <div class="h">Testy<small>síť pod celou hrou</small></div>
+        <p>1 708 automatických testů. Když asistent v noci něco rozbije, ví se to za pár minut — a beze mě.</p>
+      </div>
+      <div class="mech">
+        <div class="h">Kontroly („gates“)<small>hlídač na každé pravidlo</small></div>
+        <p>39 malých skriptů, každý hlídá jedno pravidlo projektu. Spustí se po každé úpravě souboru, celé zhruba za 7 sekund. <b>Co umí ohlídat skript, nemá zůstat v próze.</b></p>
+      </div>
+      <div class="mech">
+        <div class="h">Vlastní kopie projektu<small>„worktree“</small></div>
+        <p>Každý úkol dostane svou kopii projektu na disku. Dva úkoly si navzájem nepřepíšou soubory a hlavní větev zůstane nedotčená až do konce.</p>
+      </div>
+      <div class="mech">
+        <div class="h">Přestavěná paměť<small>poznámky pro asistenta</small></div>
+        <p>Poznámky, které si asistent čte na začátku, narostly na 196 kB — a přečíst je stálo víc, než z nich plynulo. Rozdělené na krátké „orientační“ (čtou se vždy) a podrobné (jen když jsou potřeba).</p>
+      </div>
     </div>
   </div>
-  <div class="num">15</div>
+  <div class="num"></div>
+</section>
+
+<!-- 5 ── II. karta ──────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">II · nástěnka — osm složek s poznámkami</p>
+    <h2 style="font-size:clamp(1.3rem,2.9vw,1.9rem)">Jeden úkol = jeden soubor.<br>Stav = složka, ve které leží.</h2>
+    <div class="lanes">
+      <div class="lane you"><span class="who">moje</span><b>ideas/</b><span class="d">soukromé nápady, sem nesmí žádný skript</span></div>
+      <div class="lane you"><span class="who">moje</span><b>inbox/</b><span class="d">rychlá poznámka, bez formy</span></div>
+      <div class="lane you"><span class="who">schvaluji</span><b>tasks/</b><span class="d">hotová karta, čeká na můj souhlas</span></div>
+      <div class="lane you"><span class="who">odpovídám</span><b>needs-decision/</b><span class="d">otázka, kterou musím rozhodnout já</span></div>
+      <div class="lane bot"><span class="who">stroj</span><b>review/</b><span class="d">kontroly i testy prošly</span></div>
+      <div class="lane you"><span class="who">hraju</span><b>testing/</b><span class="d">sloučeno, čeká, až si to vyzkouším</span></div>
+      <div class="lane bot"><span class="who">archiv</span><b>done/</b><span class="d">hotovo, karta zůstává jako doklad</span></div>
+      <div class="lane dead"><span class="who">archiv</span><b>failed/</b><span class="d">neúspěch — nemaže se taky</span></div>
+    </div>
+    <p class="say">Žádná databáze, žádná služba běžící na pozadí. Když ve tři ráno spadne proud, <b>stav práce je pořád na disku.</b></p>
+  </div>
+  <div class="num"></div>
+</section>
+
+<!-- 6 ── II. životní cyklus (diagram) ───────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">II · životní cyklus karty</p>
+    <h2 style="font-size:clamp(1.3rem,2.9vw,1.9rem)">Kdo dělá co.</h2>
+    <div class="flowwrap">
+      <svg class="flow" viewBox="0 0 640 492" role="img"
+           aria-label="Životní cyklus karty. 1: napíšu poznámku do inbox. 2: stroj z ní udělá kartu. 3: přečtu a schválím. 4: noční běh — vlastní kopie projektu, kód, kontroly, testy, revize, sloučení; nebo se místo hádání zeptá a karta jde do needs-decision, odkud se po mé odpovědi vrací ke schválení. 5: ráno si to zahraju.">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="var(--faint)"/>
+          </marker>
+          <marker id="ahb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="var(--brand-pure)"/>
+          </marker>
+        </defs>
+
+        <text class="d-lane me" x="160" y="14" text-anchor="middle">JÁ</text>
+        <text class="d-lane"    x="480" y="14" text-anchor="middle">STROJ</text>
+
+        <!-- spojnice (pod rámečky) -->
+        <path class="d-flow" d="M160 96 V108 H480 V116" marker-end="url(#ah)"/>
+        <path class="d-flow" d="M480 182 V194 H160 V202" marker-end="url(#ah)"/>
+        <path class="d-flow" d="M160 268 V280 H480 V288" marker-end="url(#ah)"/>
+        <path class="d-flow" d="M480 378 V390 H160 V394" marker-end="url(#ah)"/>
+        <!-- odbočka k otázce a návrat ke schválení -->
+        <path class="d-flow dash" d="M350 335 H296" marker-end="url(#ahb)"/>
+        <path class="d-flow dash" d="M30 335 H14 V237 H24" marker-end="url(#ahb)"/>
+
+        <!-- 1 -->
+        <rect class="d-box me" x="30" y="34" width="260" height="62" rx="6"/>
+        <text class="d-t" x="46" y="60">1 · Napíšu poznámku</text>
+        <text class="d-s" x="46" y="79">Jedna věta do inbox/. Klidně z mobilu.</text>
+        <!-- 2 -->
+        <rect class="d-box" x="350" y="120" width="260" height="62" rx="6"/>
+        <text class="d-t" x="366" y="146">2 · Stroj z ní udělá kartu</text>
+        <text class="d-s" x="366" y="165">Co, proč, jak a kdy je to hotové.</text>
+        <!-- 3 -->
+        <rect class="d-box me" x="30" y="206" width="260" height="62" rx="6"/>
+        <text class="d-t" x="46" y="232">3 · Přečtu a schválím</text>
+        <text class="d-s" x="46" y="251">Bez mého souhlasu se nespustí nic.</text>
+        <!-- 4 -->
+        <rect class="d-box" x="350" y="292" width="260" height="86" rx="6"/>
+        <text class="d-t" x="366" y="318">4 · Noční běh</text>
+        <text class="d-s" x="366" y="338">kopie projektu → kód → kontroly →</text>
+        <text class="d-s" x="366" y="355">testy → revize → sloučení do větve</text>
+        <!-- otázka -->
+        <rect class="d-pill" x="30" y="292" width="260" height="86" rx="6"/>
+        <text class="d-t" x="46" y="318" fill="var(--brand)">…nebo se zeptá</text>
+        <text class="d-s" x="46" y="338">needs-decision/ — čeká na mě</text>
+        <text class="d-s" x="46" y="355">Otázka je lepší výsledek než dohad.</text>
+        <!-- 5 -->
+        <rect class="d-box me" x="30" y="398" width="260" height="62" rx="6"/>
+        <text class="d-t" x="46" y="424">5 · Ráno si to zahraju</text>
+        <text class="d-s" x="46" y="443">Funguje → done/. Nefunguje → zpět.</text>
+      </svg>
+    </div>
+    <div class="legend">
+      <span><i></i>rozhoduje člověk</span>
+      <span><i class="mach"></i>dělá stroj</span>
+      <span>Čtyři místa, kde se mě to ptá — a to je záměr.</span>
+    </div>
+  </div>
+  <div class="num"></div>
+</section>
+
+<!-- 7 ── II. limit není konec ───────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">II · noc, která se nevejde do jednoho okna</p>
+    <h2>Limit není konec.<br>Je to pauza.</h2>
+    <p class="say">Nejedeme přes API, ale <b>na limitech předplatného.</b> Po naražení do limitu je možné příští session navázat automaticky.</p>
+    <ul class="plain">
+      <li><span class="mark ok">→</span><span>Uloží se <b>rozjetá session i pracovní kopie</b> projektu.</span></li>
+      <li><span class="mark ok">→</span><span>Runner počká na reset limitu a <b>pokračuje tam, kde skončil.</b></span></li>
+      <li><span class="mark ok">→</span><span>Úkol větší než jedno okno se tak dodělá <b>napříč několika sessions.</b></span></li>
+    </ul>
+    <p class="say">A když <b>dva pokusy po sobě</b> nepohnou ani řádkem, karta se odloží — místo aby dostávala pokusy donekonečna.</p>
+  </div>
+  <div class="num"></div>
+</section>
+
+<!-- 8 ── III. čísla ─────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">III · čísla — změřeno 10. 8. 2026</p>
+    <h2 style="font-size:clamp(1.4rem,3.2vw,2.1rem)">Hra se staví od března.<br>Nightshift na ní jede tři týdny.</h2>
+    <div class="grid">
+      <div class="cell"><span class="n hot">60</span><span class="l">dokončených karet</span></div>
+      <div class="cell"><span class="n">25</span><span class="l">případů, kdy se stroj radši zeptal</span></div>
+      <div class="cell"><span class="n">1</span><span class="l">karta spadlá do <code>failed/</code> — napočtvrté prošla</span></div>
+      <div class="cell"><span class="n hot">39</span><span class="l">kontrol, ~7 s, po každé úpravě souboru</span></div>
+      <div class="cell"><span class="n">1 708</span><span class="l">testů hry — zelených <b>(od března)</b></span></div>
+      <div class="cell"><span class="n">1 213</span><span class="l">testů samotného nástroje</span></div>
+      <div class="cell"><span class="n">149</span><span class="l">zapsaných oprav, 15 tříd chyb</span></div>
+      <div class="cell"><span class="n hot">53 %</span><span class="l">z 68 pravidel už něco hlídá — zbytek platí, dokud si AI vzpomene</span></div>
+    </div>
+    <p class="foot"><b>Hra se staví od 15. 3. 2026</b> — 42 tis. řádků a její testy jsou práce půl roku, ne tří týdnů.
+       <b>Všechno ostatní je za tři týdny</b>, co na ní jede nightshift (21. 7. – 10. 8. 2026): karty, kontroly, log oprav, 22 tis. řádků nástroje.
+       Ten seznam pravidel je sám o sobě půlka výsledku — před třemi týdny nikdo nevěděl ani to, kolik jich projekt má.
+       Jeden vývojář, jeden projekt. <b>Orientační měřidla, ne studie</b> — nemám s čím to porovnat, protože stejný projekt bez toho neběžel.</p>
+  </div>
+  <div class="num"></div>
+</section>
+
+<!-- 8 ── IV. nejčastější chyby ──────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">IV · co se pokazilo</p>
+    <h2 style="font-size:clamp(1.4rem,3.2vw,2.1rem)">Nejčastější chyba nebyl špatný kód.</h2>
+    <div class="classes">
+      <div class="cls">
+        <div class="top"><span class="pct">32 %</span><span class="nm">„Odvozeno, neověřeno“</span></div>
+        <div class="track"><i style="width:32%"></i></div>
+        <p>Tvrzení o kódu, které vzniklo úvahou místo pohledu do souboru. Zdaleka nejčastější třída — a dělá ji stroj i člověk.</p>
+      </div>
+      <div class="cls">
+        <div class="top"><span class="pct">14 %</span><span class="nm">„Kontrola přestala kontrolovat“</span></div>
+        <div class="track"><i style="width:14%"></i></div>
+        <p>Hlídač zůstal zelený, ale mezitím hlídal složku, která se přejmenovala. Zelená bez obsahu.</p>
+      </div>
+      <div class="cls">
+        <div class="top"><span class="pct">11 %</span><span class="nm">„Tiché nic“</span></div>
+        <div class="track"><i style="width:11%"></i></div>
+        <p>Kód se zavolal, neudělal nic a nikomu to nedošlo — protože se nic nerozbilo.</p>
+      </div>
+    </div>
+    <p class="foot">Z 138 zapsaných chyb. Zbytek: zastaralá dokumentace, nevynucená pravidla, odložené místo opravené.</p>
+  </div>
+  <div class="num"></div>
+</section>
+
+<!-- 9 ── IV. zelená, která nic neznamenala ──────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">IV · nejméně lichotivý důkaz</p>
+    <h2>Zelená, která nic<br>neznamenala.</h2>
+    <ul class="plain">
+      <li><span class="mark">✕</span><span>Hlídač četl soubor, který se mezitím přestěhoval jinam. <b>Byl zelený a nečetl nic</b> — tři týdny.</span></li>
+      <li><span class="mark">✕</span><span>Nástroj, kterým jsem ty chyby počítal, viděl jen polovinu archivu. Na největší třídu chyb hlásil <b>„0“</b>.</span></li>
+      <li><span class="mark">✕</span><span>Karta měla značku v zápisu, který parser neuměl přečíst. <b>35 kontrol zelených</b> — a karta přitom vůbec neměla jít do noci.</span></li>
+    </ul>
+    <p class="say">Všechny tři našel až člověk. <em>Zelená není důkaz</em> — je to jen absence nálezu.</p>
+  </div>
+  <div class="num"></div>
+</section>
+
+<!-- 10 ── IV. co pořád bolí ─────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">IV · otevřené problémy</p>
+    <h2 style="font-size:clamp(1.4rem,3.2vw,2.1rem)">Co pořád bolí.</h2>
+    <ul class="plain">
+      <li><span class="mark">!</span><span><b>Žádné pískoviště.</b> Aby noční běh mohl pracovat, dostane práva na celý počítač. Není to kontejner. Otevřený problém, ne vyřešený.</span></li>
+      <li><span class="mark">!</span><span><b>Velká karta = špatné zadání.</b> Čím víc toho karta chce, tím hůř to dopadne. Dneska na to upozorní kontrola, ale hranice je odhad, ne měření.</span></li>
+      <li><span class="mark">!</span><span><b>Změna přes dva repozitáře.</b> Půlka tady, půlka v nástroji — testy pak byly zelené nebo červené podle toho, co měl vedle sebe ten druhý. <b>39 spadlých testů</b>, než mi to došlo.</span></li>
+      <li><span class="mark">!</span><span><b>Platí se z týdenního limitu.</b> Ranní okno si ohlídáš sám — kdy noc pustíš a kolik session jí povolíš. Co ale utrpí, je <b>týdenní strop</b>: co spotřebuje noc, nemáš ve čtvrtek.</span></li>
+    </ul>
+  </div>
+  <div class="num"></div>
+</section>
+
+<!-- 11 ── V. pro co ano / pro co ne ─────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">V · pro koho to je</p>
+    <div class="duo">
+      <div class="panel">
+        <div class="big sm">Dává to smysl</div>
+        <ul>
+          <li><b>Python projekt střední velikosti.</b> Desítky tisíc řádků.</li>
+          <li><b>Který už má testy</b> a bude žít roky, ne týdny.</li>
+          <li><b>Jeden až pár lidí</b> — a pravidla, která se pořád opakují.</li>
+          <li><b>Kde je nudná práce</b>, co se dá popsat jednou větou.</li>
+        </ul>
+      </div>
+      <div class="panel no">
+        <div class="big sm">Nedává to smysl</div>
+        <ul>
+          <li><b>Malý projekt nebo prototyp.</b> Režie převáží užitek.</li>
+          <li><b>JavaScript, TypeScript, cokoli jiného.</b> Část kontrol čte přímo Python — ty by se musely napsat znovu.</li>
+          <li><b>Tým, kde tuhle roli plní code review a CI.</b> Pak je to duplikát.</li>
+          <li><b>Prostředí, kde agent nesmí na stroj.</b> Viz předchozí snímek.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="num"></div>
+</section>
+
+<!-- 12 ── VI. odkaz ─────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">VI · vyzkoušet</p>
+    <p class="link">github.com/karel-murgas/nightshift</p>
+    <pre>git clone https://github.com/karel-murgas/nightshift.git
+cd nazev-projektu &amp;&amp; pip install -e ../nightshift
+nightshift bootstrap
+
+<span class="c"># a pak, uvnitř Claude Code ve svém projektu:</span>
+<span class="p">/install-nightshift</span></pre>
+    <div class="warnbox">
+      <p><b>Než to pustíš přes noc:</b> aby worker mohl sám psát kód, potřebuje práva na celý počítač — není to kontejner ani pískoviště. Instalátor se na to zeptá a <b>nikdy to nenastaví za tebe.</b></p>
+    </div>
+    <p class="say">Nedostaneš hotovou sadu kontrol. Dostaneš <em>nářadí, kterým si je vyrobíš z vlastních chyb.</em></p>
+  </div>
+  <div class="num"></div>
 </section>
 
 <script>
@@ -502,9 +511,13 @@ python -m nightshift.runner <span class="p">--card</span> &lt;id&gt; <span class
 
   slides.forEach((s, i) => {
     s.id = 's' + (i + 1);
+    // Číslo snímku plní JS. Ručně psaná čísla se rozešla s pořadím, jakmile
+    // někde uprostřed přibyl snímek.
+    const num = s.querySelector('.num');
+    if (num) num.textContent = String(i + 1).padStart(2, '0');
     const b = document.createElement('button');
     b.type = 'button';
-    b.setAttribute('aria-label', 'Slide ' + (i + 1));
+    b.setAttribute('aria-label', 'Snímek ' + (i + 1));
     b.addEventListener('click', () => go(i));
     rail.appendChild(b);
   });
@@ -522,8 +535,8 @@ python -m nightshift.runner <span class="p">--card</span> &lt;id&gt; <span class
     mark(n);
   }
 
-  // Which slide is on screen. An observer rather than a scroll handler: steadier,
-  // and it stays correct however the slide was reached (key, dot, trackpad).
+  // Který snímek je na obrazovce. Observer místo scroll handleru: klidnější,
+  // a zůstane správný, ať se na snímek člověk dostal klávesou, tečkou nebo touchpadem.
   const io = new IntersectionObserver(
     entries => entries.forEach(e => { if (e.isIntersecting) mark(slides.indexOf(e.target)); }),
     { threshold: 0.55 }
