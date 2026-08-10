@@ -15,6 +15,7 @@ Two properties matter, and one of them is a refusal:
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -156,6 +157,38 @@ def test_naming_an_unknown_gate_lists_what_is_available(tmp_path, capsys):
     assert gates_run.main(["--root", str(root), "nope"]) == 2
     out = capsys.readouterr().out
     assert "Unknown gate(s): nope" in out and "real_gate" in out
+
+
+# --- --json -------------------------------------------------------------------
+#
+# The structured half of `failed-attempt-work-is-deleted-not-resumed`: a caller
+# that needs to know *which paths* a violation touches (the runner's
+# blocked-vs-failed classifier) reads this instead of slicing `str(Violation)`.
+
+def test_json_emits_structured_violations(tmp_path, capsys):
+    root = _project(tmp_path, no_tabs=GATE.format(file="a.py", rule="tabs are forbidden"))
+    assert gates_run.main(["--root", str(root), "no_tabs", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["total"] == 1
+    assert payload["gates"] == ["no_tabs"]
+    assert payload["violations"] == [
+        {"gate": "no_tabs", "file": "a.py", "line": 1, "rule": "tabs are forbidden"}]
+
+
+def test_json_on_a_clean_project_is_an_empty_list_and_exit_zero(tmp_path, capsys):
+    root = _project(tmp_path, always_ok="def check(root):\n    return []\n")
+    assert gates_run.main(["--root", str(root), "always_ok", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"violations": [], "total": 0, "gates": ["always_ok"]}
+
+
+def test_json_prints_nothing_but_the_one_json_line(tmp_path, capsys):
+    """No human-readable text mixed in — a caller doing `json.loads(stdout)` must
+    not have to strip anything first."""
+    root = _project(tmp_path, no_tabs=GATE.format(file="a.py", rule="x"))
+    gates_run.main(["--root", str(root), "no_tabs", "--json"])
+    out = capsys.readouterr().out
+    assert len(out.strip().splitlines()) == 1
 
 
 # --- the two directories -----------------------------------------------------

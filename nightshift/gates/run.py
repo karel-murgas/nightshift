@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import sys
 from pathlib import Path
 
@@ -92,6 +93,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("gates", nargs="*", help="specific gate names to run (default: all)")
     parser.add_argument("--fix", action="store_true",
                         help="apply autofixes where a gate supports one (currently none do)")
+    parser.add_argument("--json", action="store_true",
+                        help="emit violations as structured JSON ({file, line, rule, gate}) "
+                             "instead of the human-readable text, for a caller that needs to "
+                             "act on *which paths* failed rather than read a sentence about it")
     parser.add_argument("--root", type=Path, default=None,
                         help="repo to gate (default: found from the working directory)")
     # Everything EXCEPT these. The distinction from naming gates positionally matters
@@ -122,14 +127,28 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     total = 0
+    # `--json`'s payload, built alongside the text output rather than instead of
+    # running the gates a second time -- one pass over `selected` either way.
+    structured: list[dict] = []
     for name in selected:
         module = all_gates[name]
         violations = module.check(repo_root)  # type: ignore[attr-defined]
         if args.fix and hasattr(module, "fix"):
             module.fix(repo_root)  # type: ignore[attr-defined]
         for v in violations:
-            print(str(v))
+            if args.json:
+                structured.append({"gate": name, "file": v.file, "line": v.line,
+                                   "rule": v.rule})
+            else:
+                print(str(v))
             total += 1
+
+    if args.json:
+        # One line, one object -- a caller that only wants to know whether this
+        # run was clean can check `violations == []` without touching `total`.
+        print(json.dumps({"violations": structured, "total": total,
+                          "gates": selected}))
+        return 1 if total else 0
 
     if total:
         print(f"\n{total} violation(s) across {len(selected)} gate(s): {', '.join(selected)}")

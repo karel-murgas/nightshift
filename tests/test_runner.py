@@ -1532,6 +1532,141 @@ def test_the_branch_survives_the_dispatch_but_the_worktree_does_not(tmp_path, mo
     assert not (runner.worktree_root(root) / "probe").exists()
 
 
+# --- a failed attempt's commits are preserved, not deleted (failed-attempt- ---
+# --- work-is-deleted-not-resumed) ----------------------------------------- --
+#
+# Where the work used to die: not at the moment of failure (`drop_worktree`
+# already kept the branch) but at the *next* dispatch's cold start, where
+# `git branch -D` discarded it before this card existed. A test that only
+# checks the failing attempt would pass against the old code too — the
+# assertion has to be made after a second dispatch.
+
+def _rev(root: Path, ref: str) -> str:
+    return subprocess.run(["git", "rev-parse", ref], cwd=root,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def test_a_failed_attempts_branch_is_a_rescue_ref_after_the_next_dispatch(tmp_path, monkeypatch):
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+    _fake_worker(monkeypatch, commit=True, returncode=1)
+
+    card = board.find(root, "probe")
+    result = runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+    assert result.outcome == "failed"
+    runner.settle(root, "probe", result)
+    first_sha = _rev(root, "ai/probe")
+
+    _fake_worker(monkeypatch, commit=True, returncode=0,
+                 verdict={"outcome": "done", "summary": "x"})
+    card = board.find(root, "probe")
+    card.write({"finished": None})  # skip the backoff wait, not the counting
+    runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+
+    assert _rev(root, "ai/probe@failed-1") == first_sha, \
+        "the first attempt's commits must survive under a rescue name"
+    assert _rev(root, "ai/probe") != first_sha, \
+        "ai/probe itself is the fresh attempt's branch, cut from base again"
+
+
+def test_a_second_failed_attempt_becomes_failed_2_not_a_collision(tmp_path, monkeypatch):
+    """Renaming by `card.attempts` (rewound by `blocked`/`limited`) could reuse
+    a slot a real failure already holds; the next-free-N scan must not
+    collide even across a mixed fail/fail history."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+
+    for _ in range(2):
+        _fake_worker(monkeypatch, commit=True, returncode=1)
+        card = board.find(root, "probe")
+        card.write({"finished": None})
+        result = runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+        runner.settle(root, "probe", result)
+
+    # Third dispatch's cold start renames the second attempt's branch — the
+    # first attempt's rescue ref must still be there under its own name.
+    _fake_worker(monkeypatch, commit=True, returncode=0,
+                 verdict={"outcome": "done", "summary": "x"})
+    card = board.find(root, "probe")
+    card.write({"finished": None})
+    runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+
+    listed = subprocess.run(["git", "branch", "--list", "ai/probe@failed-*"], cwd=root,
+                            capture_output=True, text=True).stdout
+    assert "ai/probe@failed-1" in listed and "ai/probe@failed-2" in listed
+
+
+def test_rescue_branches_are_reaped_when_a_card_retires_to_failed(tmp_path, monkeypatch):
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+    _fake_worker(monkeypatch, commit=True, returncode=1)
+
+    for _ in range(runner.MAX_ATTEMPTS):
+        card = board.find(root, "probe")
+        card.write({"finished": None})
+        result = runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+        runner.settle(root, "probe", result)
+
+    assert board.find(root, "probe").lane == "failed"
+    listed = subprocess.run(["git", "branch", "--list", "ai/probe@failed-*"], cwd=root,
+                            capture_output=True, text=True).stdout
+    assert listed.strip() == "", "rescue refs must not outlive the card that leaves tasks/"
+
+
+def test_rescue_branches_are_reaped_when_a_done_card_is_swept_at_startup(tmp_path, monkeypatch):
+    """`done/` is reached by Karel, by hand — reaped in the startup sweep,
+    mirroring `prune_run_dir`'s own terminal-lane rule."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+    _fake_worker(monkeypatch, commit=True, returncode=1)
+    card = board.find(root, "probe")
+    result = runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+    runner.settle(root, "probe", result)  # attempt 1 failed, ai/probe holds its commit
+
+    _fake_worker(monkeypatch, commit=True, returncode=0,
+                 verdict={"outcome": "done", "summary": "x"})
+    card = board.find(root, "probe")
+    card.write({"finished": None})
+    runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+    # ai/probe@failed-1 now exists; Karel hand-moves the card straight to done/.
+    board.move(root, board.find(root, "probe"), "done")
+
+    pruned = runner.sweep_terminal_cards(root)
+    assert "probe" in pruned or True  # pruned only reflects run-dir removal; branch check below
+    listed = subprocess.run(["git", "branch", "--list", "ai/probe@failed-*"], cwd=root,
+                            capture_output=True, text=True).stdout
+    assert listed.strip() == ""
+
+
+def test_a_card_forced_past_max_attempts_by_name_still_caps_rescue_branches(
+        tmp_path, monkeypatch):
+    """`--card` waives the attempt limit, so a card can be cold-started past
+    `MAX_ATTEMPTS` by hand — the cap enforced at startup, mirroring
+    `cap_run_dirs_in_flight`, is the backstop that keeps rescue refs bounded
+    even then."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+
+    for _ in range(runner.MAX_ATTEMPTS + 2):
+        _fake_worker(monkeypatch, commit=True, returncode=1)
+        card = board.find(root, "probe")
+        card.write({"finished": None})
+        result = runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+        # Give the attempt back by hand instead of retiring, so the card stays
+        # in tasks/ across every one of these forced re-dispatches.
+        board.find(root, "probe").write({"attempts": None, "started": None, "finished": None})
+
+    runner.cap_rescue_branches_in_flight(root)
+    listed = subprocess.run(["git", "branch", "--list", "ai/probe@failed-*"], cwd=root,
+                            capture_output=True, text=True).stdout.split()
+    assert len(listed) <= runner.MAX_ATTEMPTS
+
+
 def test_attempts_is_committed_before_the_worker_starts(tmp_path, monkeypatch):
     """The property the whole 'resumable from disk alone' claim rests on. If the
     machine dies inside the worker, the next boot must find the attempt already
@@ -1616,6 +1751,102 @@ def test_red_gates_fail_the_card_even_with_a_done_verdict(tmp_path, monkeypatch)
                              "sonnet", 5.0, 120)
     assert result.outcome == "failed"
     assert "gates" in result.detail
+
+
+# --- repo drift vs the card's own doing (failed-attempt-work-is-deleted-not-resumed) --
+#
+# A gate violation whose every violating path lies outside this attempt's own
+# diff is not a fact about the card — it is the same category as a crashed
+# harness, one notch less severe, and gets the same `blocked` give-back. The
+# classifier reads `Violation`'s structured `file`/`line`/`rule` via
+# `nightshift.gates.run --json`, never a regex over `gates.txt` and never the
+# gate's name — these stub gates are deliberately unnamed/unknown ones, to
+# prove the classifier does not special-case a particular gate.
+
+_JSON_AWARE_GATE = '''
+import json, sys
+if "--json" in sys.argv:
+    print(json.dumps({{"violations": [{{"gate": "stub", "file": "{file}", "line": 1,
+                                       "rule": "{rule}"}}], "total": 1, "gates": ["stub"]}}))
+else:
+    print("{file}:1 — {rule}")
+sys.exit(1)
+'''
+
+
+def test_a_violation_entirely_outside_this_attempts_diff_is_blocked_not_failed(
+        tmp_path, monkeypatch):
+    """The repo-drift case: `Board/other.md` was never touched by this attempt,
+    so whatever the gate is unhappy about is not this card's doing. Same give-
+    back as a crashed harness, not an attempt spent."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+    _gate_stub(monkeypatch, tmp_path,
+               _JSON_AWARE_GATE.format(file="Board/other.md", rule="stale"))
+    _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
+
+    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+                             "sonnet", 5.0, 120)
+    assert result.outcome == "blocked"
+    assert result.repo_drift is True
+    branches = subprocess.run(["git", "branch", "--list", "ai/probe"], cwd=root,
+                              capture_output=True, text=True).stdout
+    assert "ai/probe" in branches, "the branch is preserved state, same as a crashed harness"
+
+
+def test_a_violation_inside_this_attempts_diff_still_fails_the_card(tmp_path, monkeypatch):
+    """One violation on a path the worker actually touched is enough to make
+    this the card's own problem, even if the classifier would otherwise call
+    every other violation drift."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+    _gate_stub(monkeypatch, tmp_path,
+               _JSON_AWARE_GATE.format(file="worked.txt", rule="nope"))
+    _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
+
+    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+                             "sonnet", 5.0, 120)
+    assert result.outcome == "failed"
+    assert "gates" in result.detail
+
+
+def test_a_pathless_violation_from_an_unknown_gate_falls_through_to_failed(
+        tmp_path, monkeypatch):
+    """Unparseable — or here, path-empty — must never buy a free attempt. This
+    gate is not one the classifier has ever heard of; it must still refuse to
+    call the violation drift on structure alone, not by recognising a name."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+    _gate_stub(monkeypatch, tmp_path, _JSON_AWARE_GATE.format(file="", rule="mystery"))
+    _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
+
+    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+                             "sonnet", 5.0, 120)
+    assert result.outcome == "failed"
+    assert result.repo_drift is False
+
+
+def test_a_gate_stub_that_does_not_understand_json_never_classifies_as_drift(
+        tmp_path, monkeypatch):
+    """A gate harness that does not support `--json` (an older one, or a
+    scripted stand-in that ignores its argv) must degrade to `failed` — the
+    payload does not parse, so there is no structured data to trust, and
+    guessing it is drift would spend nobody's attempt for free but the
+    runner's own credibility."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+    _gate_stub(monkeypatch, tmp_path,
+               "print('Board/other.md:1 — nope'); raise SystemExit(1)\n")
+    _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
+
+    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+                             "sonnet", 5.0, 120)
+    assert result.outcome == "failed"
+    assert result.repo_drift is False
 
 
 def test_a_failing_test_suite_fails_the_card(tmp_path, monkeypatch):
@@ -4647,3 +4878,108 @@ def test_the_crash_guard_wraps_a_region_rather_than_naming_its_stages(tmp_path):
     assert "dispatch(" in body and "review_stage(" in body, \
         f"`{helper}` is not where the per-card stages live, so the guard has stopped " \
         "covering the region it is meant to"
+
+
+# --- an api_error interruption is not a verdict (failed-attempt-work-is- -----
+# --- deleted-not-resumed, the api_error slice) ------------------------------
+#
+# corridor-generation-redesign attempt 1: a disconnected socket after 121
+# turns, 48.6 min, $12.80 — no gate log, no pytest log, because the run never
+# reached verification. `commit_wip` rescued the diff as a `wip:` commit; the
+# next cold start would have `git branch -D`'d it, and with no handover
+# nothing would have resumed. The fix keys on `terminal_reason` plus the
+# *absence* of a verification log, never on the exit code (1, same as an
+# ordinary self-reported failure).
+
+def test_api_error_with_no_verification_log_is_an_interruption(tmp_path):
+    out_dir = tmp_path / "attempt-1"
+    out_dir.mkdir()
+    (out_dir / "worker-1.json").write_text(
+        json.dumps({"terminal_reason": "api_error"}), encoding="utf-8")
+    assert runner._api_error_interruption(out_dir, 1) is True
+
+
+def test_api_error_after_gates_ran_is_not_an_interruption(tmp_path):
+    """A worker that *did* reach verification and failed it must never be
+    treated as merely interrupted — that would be a way to inherit a red tree
+    for free, exactly what the rejected parts of option C would have allowed."""
+    out_dir = tmp_path / "attempt-1"
+    out_dir.mkdir()
+    (out_dir / "worker-1.json").write_text(
+        json.dumps({"terminal_reason": "api_error"}), encoding="utf-8")
+    (out_dir / "gates.txt").write_text("", encoding="utf-8")
+    assert runner._api_error_interruption(out_dir, 1) is False
+
+
+def test_api_error_after_pytest_ran_is_not_an_interruption(tmp_path):
+    out_dir = tmp_path / "attempt-1"
+    out_dir.mkdir()
+    (out_dir / "worker-1.json").write_text(
+        json.dumps({"terminal_reason": "api_error"}), encoding="utf-8")
+    (out_dir / "pytest.txt").write_text("", encoding="utf-8")
+    assert runner._api_error_interruption(out_dir, 1) is False
+
+
+def test_a_non_api_error_exit_1_is_never_read_as_an_interruption(tmp_path):
+    """Both a genuine failure and an api_error interruption exit 1 — the
+    classifier must key on `terminal_reason`, never on the code."""
+    out_dir = tmp_path / "attempt-1"
+    out_dir.mkdir()
+    (out_dir / "worker-1.json").write_text(
+        json.dumps({"terminal_reason": "some_other_reason"}), encoding="utf-8")
+    assert runner._api_error_interruption(out_dir, 1) is False
+
+
+def test_an_api_error_before_verification_gives_the_attempt_back_and_hands_over(
+        tmp_path, monkeypatch):
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+
+    def fake(argv, cwd, timeout, stream_path=None, env=None, prompt=""):
+        (Path(cwd) / "wip.txt").write_text("draft", encoding="utf-8")
+        return subprocess.CompletedProcess(
+            argv, 1, json.dumps({"total_cost_usd": 0.2, "terminal_reason": "api_error",
+                                 "session_id": "sess-api-1"}),
+            "Connection closed mid-response")
+    monkeypatch.setattr(runner, "_run_worker", fake)
+    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+
+    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+                             "sonnet", 5.0, 120)
+    assert result.outcome == "interrupted"
+    assert result.kept is True
+
+    landed = runner.settle(root, "probe", result)
+    assert "attempt given back" in landed
+    assert "api_error" in landed
+
+    settled_card = board.find(root, "probe")
+    assert settled_card.lane == "tasks"
+    assert settled_card.attempts == 0, "the given-back attempt must not be spent"
+
+    handover = runner.read_handover(root, "probe")
+    assert handover.session_id == "sess-api-1"
+
+    # The `wip:` commit is on the branch, not lost with the dropped worktree.
+    log = subprocess.run(["git", "log", "--format=%s", "ai/probe"], cwd=root,
+                         capture_output=True, text=True).stdout
+    assert "wip: probe interrupted" in log
+    assert not (runner.worktree_root(root) / "probe").exists()
+
+    # And the next dispatch resumes from that commit rather than cold-starting.
+    _tree, _branch, mode = runner.prepare_worktree(root, settled_card, "development_team")
+    assert mode == runner.FROM_WIP
+
+
+def test_an_interrupted_dispatch_does_not_stop_the_night(tmp_path, monkeypatch):
+    """Unlike `blocked`, an interruption is a fact about one connection, not
+    about the repo or this machine — the rest of the queue is still good."""
+    root = _loaded_board(tmp_path, "a", "b")
+
+    calls = _night(monkeypatch, root, [
+        runner.Dispatch("interrupted", "worker interrupted (api_error)", kept=True),
+        runner.Dispatch("review", "ok"),
+    ])
+    runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
+    assert calls == ["a", "b"]

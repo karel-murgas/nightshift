@@ -1161,6 +1161,70 @@ def commit_wip(root: Path, tree: Path, card_id: str) -> bool:
     return done.returncode == 0
 
 
+def _rescue_prefix(card_id: str) -> str:
+    return f"ai/{card_id}@failed-"
+
+
+def _rescue_branches(root: Path, card_id: str) -> list[str]:
+    """Every `ai/<card_id>@failed-N` ref, whatever order git lists them in."""
+    prefix = _rescue_prefix(card_id)
+    listed = _git(root, "for-each-ref", "--format=%(refname:short)",
+                  f"refs/heads/{prefix}*").stdout
+    return [line.strip() for line in listed.splitlines() if line.strip()]
+
+
+def _next_rescue_branch(root: Path, card_id: str) -> str:
+    """The next free `ai/<card_id>@failed-N` name.
+
+    Not `card.attempts` — `blocked`/`limited` rewind `attempts` on give-back
+    (`settle`), so the same number can recur across a card's life and collide
+    with a rescue slot a real failure already used. Scanning existing refs for
+    the highest `N` and adding one is correct regardless of how attempts were
+    spent or given back, and needs no rewind-aware bookkeeping of its own.
+    """
+    prefix = _rescue_prefix(card_id)
+    highest = 0
+    for name in _rescue_branches(root, card_id):
+        suffix = name[len(prefix):]
+        if suffix.isdigit():
+            highest = max(highest, int(suffix))
+    return f"{prefix}{highest + 1}"
+
+
+def prune_rescue_branches(root: Path, card_id: str) -> None:
+    """Delete every rescue branch for a card that has left `tasks/` for good.
+
+    Called on `prune_run_dir`'s own triggers (failed-attempt-work-is-deleted-
+    not-resumed): once a card is retired or otherwise settled, its preserved
+    failed-attempt commits have nothing left to be rescued *for* — the same
+    reasoning `prune_run_dir` already applies to `.ai/runs/<id>/`."""
+    for name in _rescue_branches(root, card_id):
+        _git(root, "branch", "-D", name)
+
+
+def cap_rescue_branches(root: Path, card_id: str, keep: int = MAX_ATTEMPTS) -> None:
+    """Backstop for a card still in flight, mirroring `cap_run_dir`: keep only
+    the `keep` most recent rescue branches. A card dispatched by name
+    (`--card`) waives the attempt limit (03_board.md), so without this a card
+    re-run past `MAX_ATTEMPTS` by hand could accumulate rescue refs without
+    bound; the ordinary retirement path never reaches more than `keep - 1`."""
+    def rescue_no(name: str) -> int:
+        suffix = name[len(_rescue_prefix(card_id)):]
+        return int(suffix) if suffix.isdigit() else -1
+
+    branches = sorted(_rescue_branches(root, card_id), key=rescue_no)
+    excess = len(branches) - keep
+    for stale in branches[:max(excess, 0)]:
+        _git(root, "branch", "-D", stale)
+
+
+def cap_rescue_branches_in_flight(root: Path, keep: int = MAX_ATTEMPTS) -> None:
+    """`cap_rescue_branches` over every card still in `tasks/` — the only lane
+    whose rescue branches are not otherwise reaped by `prune_rescue_branches`."""
+    for card in board.cards(root, "tasks"):
+        cap_rescue_branches(root, card.id, keep)
+
+
 def prepare_worktree(root: Path, card: board.Card,
                      base: str) -> tuple[Path, str, str]:
     """The worktree for this attempt, plus how it continues (FRESH/REENTER/FROM_WIP).
@@ -1194,7 +1258,14 @@ def prepare_worktree(root: Path, card: board.Card,
         _git(root, "worktree", "remove", "--force", str(path))
     _git(root, "worktree", "prune")
     if _branch_exists(root, branch):
-        _git(root, "branch", "-D", branch)
+        # This is where a failed attempt's work used to die: `git branch -D`
+        # here, one line, discarded the previous attempt's commits the moment
+        # the card was retried — nothing ever read them again (failed-attempt-
+        # work-is-deleted-not-resumed). Renaming instead keeps them reachable
+        # as a rescue ref until the card leaves `tasks/` for good
+        # (`prune_rescue_branches`), while `branch` itself is free for the
+        # fresh checkout below exactly as before.
+        _git(root, "branch", "-m", branch, _next_rescue_branch(root, card.id))
     clear_handover(root, card.id)
     path.parent.mkdir(parents=True, exist_ok=True)
     made = _worktree_add(root, "-b", branch, str(path), base)
@@ -1416,6 +1487,12 @@ def sweep_terminal_cards(root: Path) -> list[str]:
     for lane in ("done", "failed"):
         for card in board.cards(root, lane):
             prune_worktree_if_present(root, card.id)
+            # Unconditional, unlike the run-dir branch below: a rescue branch
+            # is a git ref, not a `.ai/runs/` file, so it can outlive (or
+            # predate) whatever that existence check is testing for, and
+            # `prune_rescue_branches` is already a no-op when there is nothing
+            # to delete.
+            prune_rescue_branches(root, card.id)
             if (root / RUNS / card.id).exists():
                 prune_run_dir(root, card.id)
                 pruned.append(card.id)
@@ -1627,7 +1704,10 @@ class Dispatch:
     # "review" (gates+tests passed, awaiting the review stage or a human's eye) |
     # "reviewed" (the diff reviewer said ok — settle merges and lands it in testing/) |
     # "needs_decision" (the reviewer flagged a choice for Karel) | "parked" |
-    # "failed" | "limited" | "blocked"
+    # "failed" | "limited" | "blocked" | "interrupted" (an API disconnection
+    # that never reached verification — gives the attempt back like "blocked",
+    # but does not stop the night: it is a fact about one connection, not the
+    # repo or this machine)
     outcome: str
     detail: str
     cost_usd: float = 0.0
@@ -1649,6 +1729,12 @@ class Dispatch:
     # block `settle` writes onto the card so the reason survives being read from
     # another machine, or after `prune_run_dir` has taken the attempt directory.
     evidence: str = ""
+    # Set only on "blocked": whether this is a gate violation whose every path
+    # lies outside the attempt's own diff (repo drift, `failed-attempt-work-
+    # is-deleted-not-resumed`) rather than the pre-existing gate-harness-crashed
+    # reason. Both give the attempt back and stop the night; only the reason
+    # text differs, and `settle` needs to know which one it is telling.
+    repo_drift: bool = False
     # The worker's scenario for Karel, written onto a `verify: play` card as
     # `## How to test` when it merges. It rides from the worker's verdict through
     # the review stage rather than being asked for at the end: only the worker
@@ -1734,6 +1820,27 @@ def _session_id(out_dir: Path, round_no: int) -> str:
     disk — so warm resume only has to *use* a fact that was already on disk."""
     data = _load_json(out_dir / f"worker-{round_no}.json")
     return str(data.get("session_id", "") or "")
+
+
+def _api_error_interruption(out_dir: Path, round_no: int) -> bool:
+    """Whether this round's non-zero exit was an API disconnection that never
+    reached verification, rather than a genuine self-reported failure
+    (failed-attempt-work-is-deleted-not-resumed, the `api_error` slice).
+
+    Keys on `terminal_reason` from the worker's own result JSON plus the
+    *absence* of a gate or pytest log — never on the exit code, which is `1`
+    for both this and an ordinary failure (`corridor-generation-redesign`
+    attempt 1: 121 turns, a disconnected socket, and a 1,237-line rescue
+    nobody would have resumed). A worker that *did* reach verification and
+    failed it writes `gates.txt`/`pytest.txt` before this is ever called (they
+    are written later in `dispatch`, after `run_producer` returns) — that path
+    returns `failed` through its own branch and never reaches this check, so
+    the two are told apart by construction, not by guessing at intent.
+    """
+    data = _load_json(out_dir / f"worker-{round_no}.json")
+    if str(data.get("terminal_reason", "")) != "api_error":
+        return False
+    return not (out_dir / "gates.txt").exists() and not (out_dir / "pytest.txt").exists()
 
 
 def _si(n: float) -> str:
@@ -2381,6 +2488,51 @@ def _run_gates(root: Path, cwd: Path, log: Path) -> tuple[str, str]:
     return GATE_VIOLATION, "gates: " + "; ".join(lines[:4])
 
 
+def _gate_violations_json(cwd: Path) -> list[dict] | None:
+    """A second, structured read of the same gate run `_run_gates` just did —
+    `nightshift.gates.run --json`'s `file`/`line`/`rule` per violation, for the
+    blocked-vs-failed classifier below. `None` when the payload does not parse
+    (an older or scripted gate harness that does not understand `--json`, or a
+    crash between the two calls): the caller must treat that exactly like a
+    violation with no usable path, never as license to guess.
+
+    A second subprocess call rather than threading a fourth return value through
+    `_run_gates` and every one of its callers: gates are deterministic Python
+    with no LLM (00_architecture.md SS12), so re-running them is cheap, and it
+    keeps `_run_gates`'s existing contract — and `gates.txt`'s human-readable
+    text — untouched for the rebase-and-merge caller that has no use for paths.
+    """
+    out = subprocess.run([*GATE_ARGV, "--json"], cwd=cwd, capture_output=True,
+                         text=True, encoding="utf-8", errors="replace")
+    try:
+        data = json.loads(out.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    violations = data.get("violations") if isinstance(data, dict) else None
+    return violations if isinstance(violations, list) else None
+
+
+def _is_repo_drift(violations: list[dict] | None, changed: set[str]) -> bool:
+    """Whether a gate violation is a fact about the repo rather than about this
+    attempt's own diff — every violation names a path, and every one of those
+    paths lies outside `changed` (`git diff --name-only base...branch`).
+
+    `False` — never drift, so the caller falls back to `failed` — when the
+    payload did not parse (`violations is None`) or when *any* violation is
+    missing a usable path or names a path this attempt actually touched.
+    Unparseable or ambiguous must never buy a free attempt (Acceptance); one
+    violation inside the diff is enough to make this the card's own problem,
+    even if every other violation points elsewhere.
+    """
+    if not violations:
+        return False
+    for v in violations:
+        path = str(v.get("file", "")).strip()
+        if not path or path in changed:
+            return False
+    return True
+
+
 # How the runner parallelises pytest — `suite.parallel_args()`, which resolves to
 # `--dist loadfile` with either `-n auto` or a memory-capped worker count, and to
 # `()` when pytest-xdist is missing (see that function for why a missing optional
@@ -2928,6 +3080,22 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
             # exit costs the process, not the work (same reasoning as the
             # empty-diff path below — commit_wip is a no-op on a clean tree).
             commit_wip(root, tree, card.id)
+            # An API disconnection that never reached verification is an
+            # interruption, not a verdict on the card (failed-attempt-work-is-
+            # deleted-not-resumed, the `api_error` slice): give the attempt back
+            # and hand it a resume path, the same as a usage wall — just without
+            # the wall's sleep-until-reset, since nothing here says the *plan*
+            # is exhausted.
+            if _api_error_interruption(out_dir, round_no):
+                session = _session_id(out_dir, round_no)
+                state_hash = _worktree_state_hash(tree)
+                drop_worktree(root, tree)
+                write_handover(root, card.id, Handover(session, state_hash, 0))
+                return Dispatch(
+                    "interrupted",
+                    f"worker interrupted (api_error) before verification ran — "
+                    f"resuming from its `wip:` commit next dispatch",
+                    cost, round_no, kept=True)
             drop_worktree(root, tree)
             # `evidence` is why, not just that: the gates and tests paths both fill
             # it and this one used to pass nothing, so a dead worker's `## Error`
@@ -3033,16 +3201,31 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
     # carries the worst four joined by `; ` (`_run_gates`), so the block is that
     # same text split back onto its own lines — readable in a card, and no second
     # read of `gates.txt`, which is the file that does not survive pruning.
+    #
+    # Also this attempt's own file changes (suite.select, runner-test-selection),
+    # computed once here rather than only inside the `ok` branch below: the
+    # repo-drift classifier needs the same set for the *violation* case, and it
+    # is cheap to compute regardless of which way the gates went.
+    changed = set(_git(root, "diff", "--name-only", f"{base}...{branch}").stdout.split())
     evidence = ""
     if status == GATE_VIOLATION:
         evidence = "\n".join(f"    {part}" for part in why.split("; ")[:suite.EXCERPT_TESTS])
+        # Repo drift, not the card's own doing (failed-attempt-work-is-deleted-
+        # not-resumed): every violating path lies outside this attempt's diff,
+        # so the tree the gate is unhappy about is not the tree this worker
+        # wrote. Give the attempt back exactly like a crashed harness — the two
+        # are the same category, one notch less severe — and stop the night so
+        # nothing else is judged against the same drifted state. A violation
+        # with no usable path, or one that touches a changed file, is never
+        # drift: `_is_repo_drift` returns False and this falls through to the
+        # ordinary `failed` below.
+        if _is_repo_drift(_gate_violations_json(tree), changed):
+            drop_worktree(root, tree)
+            return Dispatch("blocked", why, cost, round_no, repo_drift=True,
+                            evidence=evidence)
 
     ok = status == GATE_PASS
     if ok:
-        # Only the slice this diff can affect (suite.select, runner-test-selection):
-        # a game-only change skips the ~500 AI-team infra tests it cannot touch,
-        # and back. Computed from the branch's own file changes since it forked.
-        changed = set(_git(root, "diff", "--name-only", f"{base}...{branch}").stdout.split())
         # `tree`, not `root`, is what the classification resolves against: a
         # changed test file is judged by what it imports, and the version that
         # matters is the one in the worktree pytest is about to run.
@@ -3508,7 +3691,11 @@ def _error_section(card_id: str, attempt: int, result: Dispatch, *,
     else:
         parts.append(
             f"Full output: {where} — gitignored, so it is only on that machine, and "
-            f"it is deleted if this card is retired after {MAX_ATTEMPTS} attempts.")
+            f"it is deleted if this card is retired after {MAX_ATTEMPTS} attempts. "
+            f"This attempt's commits are not lost either way: they stay on `ai/{card_id}` "
+            f"and, once this card is dispatched again, are preserved as a rescue branch "
+            f"(`ai/{card_id}@failed-N` — `prune_rescue_branches`) rather than deleted at "
+            f"the next cold start, until the card leaves `tasks/` for good.")
     return "\n\n".join(parts)
 
 
@@ -3553,6 +3740,7 @@ def settle(root: Path, card_id: str, result: Dispatch) -> str:
             f"it never left that machine either.")
         board.move(root, card, "failed")
         prune_run_dir(root, card_id)
+        prune_rescue_branches(root, card_id)
         return (f"{card_id}: → failed/ (no working-tree progress across "
                 f"{NO_PROGRESS_STOP} resumes)")
 
@@ -3567,13 +3755,14 @@ def settle(root: Path, card_id: str, result: Dispatch) -> str:
         return (f"{card_id}: resumed but the working tree did not move — attempt "
                 f"{card.attempts} spent, worktree kept for one more resume")
 
-    if result.outcome in ("limited", "blocked"):
-        # The two outcomes that give the attempt back, because neither is a fact
-        # about the card. `attempts` is committed before the worker starts so a
-        # crash cannot retry forever, and that is right for every other exit —
-        # but charging a card for the plan running out, or for this machine's
-        # gate harness being broken, would mean one bad night quietly pushed
-        # every card it touched closer to `failed/`.
+    if result.outcome in ("limited", "blocked", "interrupted"):
+        # The outcomes that give the attempt back, because none of them is a
+        # fact about the card. `attempts` is committed before the worker starts
+        # so a crash cannot retry forever, and that is right for every other
+        # exit — but charging a card for the plan running out, this machine's
+        # gate harness being broken, or a socket dropping mid-response would
+        # mean one bad night quietly pushed every card it touched closer to
+        # `failed/`.
         back = card.attempts - 1
         rewind: dict[str, str | None] = {
             "attempts": str(back) if back > 0 else None,
@@ -3583,14 +3772,31 @@ def settle(root: Path, card_id: str, result: Dispatch) -> str:
         # very first API call, with nothing done and no worktree kept, where the
         # branch records nothing. When the worktree is kept for a warm resume, its
         # branch is preserved state (commits, and any `wip:` commit), and
-        # `blocked` ran and committed — so neither drops it.
+        # `blocked`/`interrupted` ran and committed — so neither drops it.
         if back <= 0 and result.outcome == "limited" and not result.kept:
             rewind["branch"] = None
         card.write(rewind)
-        why = "usage limit" if result.outcome == "limited" else "gate harness crashed"
+        # Three different facts can all give the attempt back, and the morning
+        # log must say which: a crashed harness is this machine's problem, repo
+        # drift is a gate a *different* card (or a commit already on `base`)
+        # made stale, an interruption is a dropped connection that never
+        # reached verification — all three stop nothing being judged unfairly,
+        # but only naming the right one saves a hunt
+        # (failed-attempt-work-is-deleted-not-resumed).
+        why = ("usage limit" if result.outcome == "limited"
+              else "worker interrupted (api_error)" if result.outcome == "interrupted"
+              else "repo drift" if result.repo_drift
+              else "gate harness crashed")
         kept = " — worktree kept for warm resume" if result.kept else ""
+        # Repo drift specifically: the branch this dispatch judged is real work
+        # that a repo-wide fact, not this diff, made unjudgeable. It stays on
+        # `ai/<card_id>` and is preserved as a rescue branch at the next cold
+        # start, same as an ordinary `failed` attempt's commits.
+        rescued = (f" — its commits stay on `ai/{card_id}` and will be preserved as a "
+                  f"rescue branch (`ai/{card_id}@failed-N`) once this card is "
+                  f"dispatched again" if result.repo_drift else "")
         board.commit_board(root, f"board: {card_id} not attempted — {why}")
-        return f"{card_id}: not attempted, attempt given back — {result.detail}{kept}"
+        return f"{card_id}: not attempted, attempt given back — {result.detail}{kept}{rescued}"
 
     card.write({"started": None, "finished": _now()})
 
@@ -3676,6 +3882,7 @@ def settle(root: Path, card_id: str, result: Dispatch) -> str:
     if retiring:
         board.move(root, card, "failed")
         prune_run_dir(root, card_id)
+        prune_rescue_branches(root, card_id)
         return f"{card_id}: → failed/ after {card.attempts} attempts ({result.detail})"
     board.commit_board(root, f"board: {card_id} attempt {card.attempts} failed")
     return f"{card_id}: attempt {card.attempts} failed, will retry ({result.detail})"
@@ -4024,6 +4231,7 @@ def run(root: Path, args: argparse.Namespace) -> int:
                 _log(f"pruned run-dir(s) for {len(swept)} card(s) settled in a "
                      f"terminal lane since last run: {', '.join(swept)}")
             cap_run_dirs_in_flight(work)
+            cap_rescue_branches_in_flight(work)
             prune_old_run_logs(ctrl)
             demoted = enforce_worktree_ceiling(work)
             if demoted:
@@ -4183,14 +4391,21 @@ def run(root: Path, args: argparse.Namespace) -> int:
                 _log(f"  ! {candidate.card.id} — {result.detail}")
             spent += result.cost_usd
 
-            # Before every other outcome: the harness being broken is not a
-            # verdict, and continuing would walk the rest of the queue spending
-            # an attempt on each for a defect none of them caused.
+            # Before every other outcome: neither a broken harness nor a drifted
+            # gate is a verdict on this card, and continuing would walk the rest
+            # of the queue spending an attempt on each for a defect none of them
+            # caused.
             if result.outcome == "blocked":
                 _log("  " + _settled(candidate, result, model))
-                _stop("the gate harness is broken on this machine, so no card "
-                      "can be judged. No attempt was spent and no card was blamed; fix "
-                      "it and re-run. The traceback is in `.ai/runs/`")
+                if result.repo_drift:
+                    _stop(f"a gate violation outside {candidate.card.id}'s own diff — "
+                          f"repo drift, not this card's fault. No attempt was spent and "
+                          f"no card was blamed; fix the drifted gate and re-run. "
+                          f"{result.detail}")
+                else:
+                    _stop("the gate harness is broken on this machine, so no card "
+                          "can be judged. No attempt was spent and no card was blamed; fix "
+                          "it and re-run. The traceback is in `.ai/runs/`")
                 break
 
             if result.outcome == "limited":
