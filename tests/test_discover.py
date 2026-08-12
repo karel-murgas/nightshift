@@ -153,6 +153,17 @@ def test_project_name_prefers_pyproject_to_the_directory(repo):
     assert discover.project_name(repo).value == "declared-name"
 
 
+def test_project_name_survives_a_linked_worktree(repo, tmp_path_factory):
+    """A worktree the runner cuts for a card is named after the card, not the
+    project (`.dungeoneer-worktrees/<card-id>`) — a project with no
+    `pyproject.toml` must not let that directory name win, or every `[worker]`
+    field derived from it (fence_env, integration_checkout_dir, harvest_dirs)
+    misreports itself the moment discovery runs inside one."""
+    worktree = tmp_path_factory.mktemp("wt") / "some-card-slug"
+    _git(repo, "worktree", "add", "-q", str(worktree), "-b", "some-card-slug")
+    assert discover.project_name(worktree).value == repo.name
+
+
 def test_tests_dir_prefers_a_declared_testpaths(repo):
     assert discover.tests_dir(repo).value == "tests"
     (repo / "pyproject.toml").write_text(

@@ -112,10 +112,24 @@ def _pyproject(root: Path) -> dict:
 
 
 def project_name(root: Path) -> Proposal:
-    """`pyproject.toml`'s name if there is one, else the directory's."""
+    """`pyproject.toml`'s name if there is one, else the directory's.
+
+    "The directory's" means the *main* checkout's, not a linked worktree's own —
+    a worktree the runner cuts for a card is named after the card
+    (`.dungeoneer-worktrees/<card-id>`), and a project with no `pyproject.toml`
+    (Dungeoneer has none) would otherwise misreport its own name the moment
+    discovery runs inside one. `--git-common-dir` is shared by every worktree and
+    points at the main checkout regardless of which one `root` is.
+    """
     declared = _pyproject(root).get("project", {}).get("name")
     if isinstance(declared, str) and declared:
         return Proposal("project.name", declared, HIGH, "pyproject.toml [project].name")
+    common_dir = _git(root, "rev-parse", "--git-common-dir")
+    if common_dir:
+        main_root = (root / common_dir).resolve().parent
+        if main_root != root.resolve():
+            return Proposal("project.name", main_root.name, HIGH,
+                            "the main checkout's directory name (this is a linked worktree)")
     return Proposal("project.name", root.name, HIGH, "the repository directory name")
 
 
