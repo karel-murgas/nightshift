@@ -701,6 +701,67 @@ def test_settle_does_not_clobber_a_question_the_worker_already_wrote(tmp_path):
     assert truncated_summary not in text
 
 
+def test_settle_recovers_a_parked_question_written_on_the_branch_over_a_stale_one(
+    tmp_path,
+):
+    """parked-settle-trusts-stale-question-over-worker-branch, second occurrence
+    (cross-language-text-overflow-guard attempt 5, 2026-08-12): a card whose
+    `## Question` already had content — fully answered, sent back to `tasks/`,
+    then redispatched and parked again — must not have the WORKER'S new
+    question silently discarded just because `card.text`'s pre-dispatch
+    snapshot already had something under that heading. `settle` must read what
+    the worker actually committed on its own branch, not infer it from
+    presence-on-the-snapshot, and must prepend rather than replace so the
+    answered history survives alongside the new question."""
+    root = _repo(tmp_path)
+    _card(root, "tasks", "unclear", attempts="2", started="2026-07-23T03:00:00")
+    card = board.find(root, "unclear")
+    card.write_section("Question", "Old, already-answered question from a prior attempt.")
+    card.write({"branch": "ai/unclear"})
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "card with an old, answered question"],
+                   cwd=root, check=True)
+
+    subprocess.run(["git", "branch", "ai/unclear"], cwd=root, check=True)
+    seed = tmp_path / "seed-unclear"
+    subprocess.run(["git", "worktree", "add", str(seed), "ai/unclear"], cwd=root, check=True)
+    branch_card_path = seed / "Board" / "tasks" / "unclear.md"
+    branch_text = board.append_section(
+        branch_card_path.read_text(encoding="utf-8"),
+        "Question", "New question the worker actually asked this attempt.")
+    branch_card_path.write_text(branch_text, encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=seed, check=True)
+    subprocess.run(["git", "commit", "-qm", "worker: parked with a new question"],
+                   cwd=seed, check=True)
+    subprocess.run(["git", "worktree", "remove", "--force", str(seed)], cwd=root, check=True)
+
+    runner.settle(root, "unclear", runner.Dispatch("parked", "truncated attempt summary"))
+    result_text = board.find(root, "unclear").text
+    assert "New question the worker actually asked this attempt." in result_text
+    assert "Old, already-answered question from a prior attempt." in result_text
+    assert "truncated attempt summary" not in result_text
+
+
+def test_settle_leaves_an_unchanged_question_alone(tmp_path):
+    """The branch's `## Question` is byte-identical to the pre-dispatch one (the
+    worker never touched it) — not the recovery path, and not the no-question
+    fallback either. No duplication, no `result.detail` noise."""
+    root = _repo(tmp_path)
+    _card(root, "tasks", "unclear", attempts="2", started="2026-07-23T03:00:00")
+    card = board.find(root, "unclear")
+    card.write_section("Question", "Same question, never touched by the worker.")
+    card.write({"branch": "ai/unclear"})
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "card with a question"], cwd=root, check=True)
+
+    subprocess.run(["git", "branch", "ai/unclear"], cwd=root, check=True)
+
+    runner.settle(root, "unclear", runner.Dispatch("parked", "truncated attempt summary"))
+    result_text = board.find(root, "unclear").text
+    assert result_text.count("Same question, never touched by the worker.") == 1
+    assert "truncated attempt summary" not in result_text
+
+
 def test_a_failure_below_the_limit_stays_in_tasks_for_a_retry(tmp_path):
     root = _repo(tmp_path)
     _card(root, "tasks", "flaky", attempts="1", started="2026-07-23T03:00:00")

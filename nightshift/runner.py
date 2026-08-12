@@ -3896,6 +3896,20 @@ def _error_section(card_id: str, attempt: int, result: Dispatch, *,
     return "\n\n".join(parts)
 
 
+def _card_text_on_branch(root: Path, branch: str, relpath: str) -> str | None:
+    """The card file as the worker last committed it on its own branch, or
+    `None` if it cannot be read (branch gone, path renamed, not a git
+    failure the caller should surface — settle() falls back to the
+    pre-dispatch text it already has).
+
+    Exists because the worktree is already dropped by the time `settle()`
+    runs (drop_worktree happens before this is called), so the worker's
+    committed content is reachable only through git, not the filesystem.
+    """
+    done = _git(root, "show", f"{branch}:{relpath}")
+    return done.stdout if done.returncode == 0 else None
+
+
 def settle(root: Path, card_id: str, result: Dispatch) -> str:
     """Apply one dispatch's outcome. Rescans first: the card may have moved."""
     card = board.find(root, card_id)
@@ -4013,7 +4027,32 @@ def settle(root: Path, card_id: str, result: Dispatch) -> str:
         # 300 chars. Only fall back to it when the worker genuinely left no
         # question; otherwise this clobbers a real, carefully-written
         # question with a mid-sentence-truncated attempt summary.
-        if not board.section(card.text, "Question"):
+        #
+        # What "genuinely left no question" means is read from the WORKER'S
+        # branch, never from `card.text` alone (the pre-dispatch snapshot this
+        # process already had in memory) — a presence check on `card.text`
+        # cannot distinguish "never answered" from "answered already, and the
+        # worker wrote a NEW question on top of that history", so a card whose
+        # `## Question` already had content (fully answered, sent to tasks/,
+        # then redispatched and parked again) silently discarded everything
+        # the worker actually wrote (parked-settle-trusts-stale-question-over-
+        # worker-branch, second occurrence 2026-08-12, cross-language-text-
+        # overflow-guard attempt 5 — found by hand again because the symptom
+        # is invisible from the card alone: `attempts`/`finished` update, but
+        # `## Question` just doesn't move).
+        branch = card.fields.get("branch") or f"ai/{card_id}"
+        relpath = str(card.path.relative_to(root)).replace("\\", "/")
+        branch_text = _card_text_on_branch(root, branch, relpath)
+        branch_question = board.section(branch_text, "Question") if branch_text else ""
+        pre_dispatch_question = board.section(card.text, "Question")
+        if branch_question and branch_question != pre_dispatch_question:
+            # Prepend rather than replace — `write_section` overwrites the
+            # whole section, and the pre-dispatch content is real history
+            # (prior pickers, prior parks), not a stale placeholder to drop.
+            combined = (branch_question if not pre_dispatch_question
+                       else f"{branch_question}\n\n---\n\n{pre_dispatch_question}")
+            card.write_section("Question", combined)
+        elif not pre_dispatch_question:
             card.write_section("Question", result.detail or
                                "The worker parked this card but recorded no question — "
                                "that is itself a defect; see `.ai/runs/` for the attempt.")
