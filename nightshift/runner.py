@@ -1253,6 +1253,39 @@ def cap_rescue_branches_in_flight(root: Path, keep: int = MAX_ATTEMPTS) -> None:
         cap_rescue_branches(root, card.id, keep)
 
 
+def _normalize_worktree(path: Path) -> None:
+    """Re-materialise any CRLF a fresh checkout picked up, before a worker sees it.
+
+    `git worktree add` is a checkout, and a checkout is exactly the shape
+    `normalize_worktree` exists for (its own docstring: "run once per checkout
+    that pre-dates the attributes landing"). But that instruction assumes one
+    checkout per clone; the runner cuts a brand-new linked worktree per card,
+    every dispatch, and nothing ever ran the fix on those — so on a host where
+    the smudge filter re-introduces CRLF on checkout, every worktree started
+    unnormalized and a worker had no standing to fix a per-machine gate
+    violation on files it never touched (`fresh-worktree-never-gets-normalized`,
+    2026-08-13). Best-effort: a worktree normalize() cannot clean (real
+    uncommitted content, not just CRLF) is left for the gate to report as
+    before — this only removes the false-positive case.
+    """
+    import io
+    from contextlib import redirect_stdout
+
+    from nightshift import normalize_worktree as _now
+
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            rc = _now.normalize(path)
+    except Exception as exc:  # pragma: no cover - defensive, must never block dispatch
+        _log(f"    normalize_worktree raised on {path.name}, continuing anyway: {exc}")
+        return
+    if rc != 0:
+        _log(f"    normalize_worktree left violations in {path.name}:\n{buf.getvalue().rstrip()}")
+    elif "rewrote" in buf.getvalue():
+        _log(f"    normalized {path.name}'s line endings before dispatch")
+
+
 def prepare_worktree(root: Path, card: board.Card,
                      base: str) -> tuple[Path, str, str]:
     """The worktree for this attempt, plus how it continues (FRESH/REENTER/FROM_WIP).
@@ -1261,6 +1294,10 @@ def prepare_worktree(root: Path, card: board.Card,
     card that was limit-interrupted (it has a handover on disk) is continued:
     its kept worktree is reused in place if it still exists, or — if only the
     branch survived a WIP commit — a checkout is cut from that branch.
+
+    Every path out of here normalizes the worktree's line endings first
+    (`_normalize_worktree`) — a freshly cut worktree is a fresh checkout, which
+    is precisely the state that needs it.
     """
     branch = f"ai/{card.id}"
     path = worktree_root(root) / card.id
@@ -1268,6 +1305,7 @@ def prepare_worktree(root: Path, card: board.Card,
     warm = bool(handover.session_id or handover.diff_hash)
 
     if warm and _worktree_registered(root, path):
+        _normalize_worktree(path)
         return path, branch, REENTER
     if warm and _branch_exists(root, branch):
         # The worktree was lost but the branch (with its `wip:` commit) was not.
@@ -1279,6 +1317,7 @@ def prepare_worktree(root: Path, card: board.Card,
         made = _worktree_add(root, str(path), branch)
         if made.returncode != 0:
             raise RuntimeError(f"git worktree add (from wip) failed: {made.stderr.strip()}")
+        _normalize_worktree(path)
         return path, branch, FROM_WIP
 
     # Cold start — the empty case and every non-interrupted card.
@@ -1299,6 +1338,7 @@ def prepare_worktree(root: Path, card: board.Card,
     made = _worktree_add(root, "-b", branch, str(path), base)
     if made.returncode != 0:
         raise RuntimeError(f"git worktree add failed: {made.stderr.strip()}")
+    _normalize_worktree(path)
     return path, branch, FRESH
 
 

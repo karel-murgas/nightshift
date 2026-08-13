@@ -2716,6 +2716,67 @@ def test_a_lost_worktree_is_rebuilt_from_its_wip_commit(tmp_path):
     assert (tree / "wip.txt").read_text(encoding="utf-8") == "interrupted work"
 
 
+def test_prepare_worktree_normalizes_line_endings_on_a_fresh_checkout(tmp_path, monkeypatch):
+    """fresh-worktree-never-gets-normalized (2026-08-13): a `git worktree add`
+    is a fresh checkout, exactly the shape `normalize_worktree` exists for, but
+    nothing ever ran it on a per-card worktree — every dispatch started
+    unnormalized on a host whose checkout re-introduces CRLF, and a worker had
+    no standing to fix a per-machine gate violation on files it never touched.
+    Pin that the FRESH path now calls it on the worktree it just cut."""
+    import nightshift.normalize_worktree as normalize_worktree
+
+    root = _worktree_repo(tmp_path)
+    _card(root, "tasks", "crlfcard")
+    calls: list[Path] = []
+    monkeypatch.setattr(normalize_worktree, "normalize",
+                        lambda repo, **kw: calls.append(repo) or 0)
+
+    tree, _, mode = runner.prepare_worktree(
+        root, board.find(root, "crlfcard"), "development_team")
+
+    assert mode == runner.FRESH
+    assert calls == [tree]
+
+
+def test_prepare_worktree_normalizes_line_endings_from_wip_too(tmp_path, monkeypatch):
+    """The FROM_WIP path cuts its own fresh checkout (from the branch's `wip:`
+    commit rather than from base) — same fresh-checkout shape, same need."""
+    import nightshift.normalize_worktree as normalize_worktree
+
+    root = _worktree_repo(tmp_path)
+    _card(root, "tasks", "crlfwip")
+    _seed_wip_branch(root, tmp_path, "crlfwip", "interrupted work")
+    calls: list[Path] = []
+    monkeypatch.setattr(normalize_worktree, "normalize",
+                        lambda repo, **kw: calls.append(repo) or 0)
+
+    tree, _, mode = runner.prepare_worktree(
+        root, board.find(root, "crlfwip"), "development_team")
+
+    assert mode == runner.FROM_WIP
+    assert calls == [tree]
+
+
+def test_prepare_worktree_survives_normalize_worktree_raising(tmp_path, monkeypatch):
+    """A host-level normalize failure must never be the thing that blocks a
+    dispatch — best-effort only, per `_normalize_worktree`'s own docstring."""
+    import nightshift.normalize_worktree as normalize_worktree
+
+    root = _worktree_repo(tmp_path)
+    _card(root, "tasks", "crlfboom")
+
+    def _boom(repo, **kw):
+        raise OSError("disk on fire")
+
+    monkeypatch.setattr(normalize_worktree, "normalize", _boom)
+
+    tree, _, mode = runner.prepare_worktree(
+        root, board.find(root, "crlfboom"), "development_team")
+
+    assert mode == runner.FRESH
+    assert tree.is_dir()
+
+
 def test_a_dispatch_from_a_wip_commit_hands_over_a_progress_note_and_does_not_resume(
         tmp_path, monkeypatch):
     """Step 4, the handover. A dispatch of a card in the WIP-recovered state gives
