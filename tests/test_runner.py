@@ -1703,6 +1703,34 @@ def test_rescue_branches_are_reaped_when_a_done_card_is_swept_at_startup(tmp_pat
     assert listed.strip() == ""
 
 
+def test_rescue_branches_are_reaped_when_a_testing_card_is_swept_at_startup(
+        tmp_path, monkeypatch):
+    """rescue-branches-only-swept-on-failure (2026-08-13): `testing/` is where
+    the ordinary success path lands a card (settle()'s own hook is the primary
+    fix — this is the backstop for a card that reached testing/ some other
+    way, e.g. hand-moved, mirroring the done/ case above)."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+    _fake_worker(monkeypatch, commit=True, returncode=1)
+    card = board.find(root, "probe")
+    result = runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+    runner.settle(root, "probe", result)  # attempt 1 failed, ai/probe holds its commit
+
+    _fake_worker(monkeypatch, commit=True, returncode=0,
+                 verdict={"outcome": "done", "summary": "x"})
+    card = board.find(root, "probe")
+    card.write({"finished": None})
+    runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+    # ai/probe@failed-1 now exists; hand-moved to testing/ rather than through settle().
+    board.move(root, board.find(root, "probe"), "testing")
+
+    runner.sweep_terminal_cards(root)
+    listed = subprocess.run(["git", "branch", "--list", "ai/probe@failed-*"], cwd=root,
+                            capture_output=True, text=True).stdout
+    assert listed.strip() == ""
+
+
 def test_a_card_forced_past_max_attempts_by_name_still_caps_rescue_branches(
         tmp_path, monkeypatch):
     """`--card` waives the attempt limit, so a card can be cold-started past
@@ -3717,6 +3745,31 @@ def test_settle_reviewed_merges_and_lands_in_testing(tmp_path, monkeypatch):
     # `publish_remote` (see `test_settle_threads_the_publish_remote_to_the_merge`).
     assert calls == [("ai/probe", runner.default_base(root), "")]
     assert "testing/" in note
+
+
+def test_settle_reaps_rescue_branches_the_moment_a_card_succeeds_into_testing(
+        tmp_path, monkeypatch):
+    """rescue-branches-only-swept-on-failure (2026-08-13): the far more common
+    outcome — reviewed ok, merged, lands in testing/ — never called
+    `prune_rescue_branches` at all; a card's `@failed-N` refs from earlier
+    attempts survived until (if ever) a later trip through done/failed's
+    startup sweep. `settle`'s wrapper must reap them immediately, the same
+    dispatch that lands the card, not on some later sweep."""
+    root = _worktree_repo(tmp_path)
+    card = _reviewed_branch(root, tmp_path)
+    card.write({"started": "2026-07-24T03:00:00"})
+    subprocess.run(["git", "branch", "ai/probe@failed-1", "development_team"],
+                   cwd=root, check=True)
+    monkeypatch.setattr(runner, "rebase_and_merge",
+                        lambda r, card, branch, base, test_timeout=600, remote="":
+                        (True, "merged"))
+
+    runner.settle(root, "probe", runner.Dispatch("reviewed", "clean"))
+
+    assert board.find(root, "probe").lane == "testing"
+    listed = subprocess.run(["git", "branch", "--list", "ai/probe@failed-*"], cwd=root,
+                            capture_output=True, text=True).stdout
+    assert listed.strip() == ""
 
 
 def test_settle_threads_the_publish_remote_to_the_merge(tmp_path, monkeypatch):

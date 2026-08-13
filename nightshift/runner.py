@@ -1546,13 +1546,18 @@ def enforce_worktree_ceiling(root: Path, ceiling: int = WORKTREE_KEEP_CEILING) -
 
 
 def sweep_terminal_cards(root: Path) -> list[str]:
-    """The reconcile-time half of the terminal-lane rule: `done/` is reached by
-    Karel by hand, outside the runner, so it is never pruned eagerly — this
-    runs once at the next startup instead, over both terminal lanes so a
-    `failed/` card the eager prune missed (e.g. one filed before this card
-    shipped) is cleaned up too. Returns the card ids actually pruned."""
+    """The reconcile-time half of the terminal-lane rule: `done/` and `testing/`
+    are both reached by hand sometimes (a card closed out inline, outside the
+    runner: `manage-board`'s own documented gap) so they are never pruned
+    eagerly — this runs once at the next startup instead, over `done/`,
+    `failed/` and `testing/` so a card the eager prune missed (settle()'s own
+    hook covers every path *it* takes out of `tasks/`, but not a hand-moved
+    one) is cleaned up too. `testing/` was missing here until
+    `rescue-branches-only-swept-on-failure` (2026-08-13): a card that succeeds
+    normally lands there, not in `done/`/`failed/`, and used to keep its
+    `@failed-N` rescue refs forever. Returns the card ids actually pruned."""
     pruned = []
-    for lane in ("done", "failed"):
+    for lane in ("done", "failed", "testing"):
         for card in board.cards(root, lane):
             prune_worktree_if_present(root, card.id)
             # Unconditional, unlike the run-dir branch below: a rescue branch
@@ -3951,6 +3956,29 @@ def _card_text_on_branch(root: Path, branch: str, relpath: str) -> str | None:
 
 
 def settle(root: Path, card_id: str, result: Dispatch) -> str:
+    """Apply one dispatch's outcome, then reap rescue branches if the card just
+    left `tasks/` for good.
+
+    A thin wrapper around `_settle_impl` rather than a call inside it: that
+    function already has a dozen outcome branches, several returning early
+    straight after their own `board.move(...)`, so a call sprinkled into each
+    one is exactly the shape that gets a new branch added later and misses it
+    — which is how `rescue-branches-only-swept-on-failure` (2026-08-13)
+    happened in the first place (only the two `failed/`-retirement branches
+    called `prune_rescue_branches`; the far more common success-into-`testing/`
+    path never did, and neither did park-into-`needs-decision/` or
+    bounce-into-`review/`). Checking the card's lane once, after the real
+    work, covers every outcome uniformly and cannot be missed by a future one.
+    A card still in `tasks/` (retried, or vanished) is left alone — its rescue
+    branches are still what a future retry recovers from."""
+    message = _settle_impl(root, card_id, result)
+    card = board.find(root, card_id)
+    if card is not None and card.lane != "tasks":
+        prune_rescue_branches(root, card_id)
+    return message
+
+
+def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
     """Apply one dispatch's outcome. Rescans first: the card may have moved."""
     card = board.find(root, card_id)
     if card is None:
