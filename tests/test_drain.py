@@ -516,6 +516,33 @@ def test_dry_run_says_what_would_happen_and_spawns_nothing(tmp_path, monkeypatch
     assert _lane_of(root, "a-card") == "review"
 
 
+def test_the_dry_run_agrees_with_the_pass_about_every_card(tmp_path, monkeypatch, capsys):
+    """A dry run that disagrees with the pass is worse than no dry run: its entire job
+    is to say what the pass will do. The two were separate checks for one commit, and
+    the blocked-card skip landed in the pass and not in the report — so this asserts
+    the *decision*, card by card, rather than that the output is non-empty."""
+    root = _repo(tmp_path, ("green", "review"), ("some-art", "review"),
+                 ("blocked", "review"))
+    _branch_with_a_commit(root, "green")
+    _branch_with_a_commit(root, "some-art", empty=True)
+    _branch_with_a_commit(root, "blocked")
+    card = root / "Board" / LANE_DIR / "blocked.md"
+    card.write_text(card.read_text(encoding="utf-8")
+                    + "\n## Merge\n\nReviewed `ok`, but the branch will not rebase.\n",
+                    encoding="utf-8", newline="")
+    _Reviewer().install(monkeypatch)
+
+    drain.main(["--root", str(root), "--base", BASE, "--dry-run"])
+    printed = capsys.readouterr().out
+    reported = {line.split()[1]: line.split()[0]
+                for line in printed.splitlines() if line.startswith("  ")}
+
+    would_run = {c.id for c in drain.waiting(root)
+                 if not drain.skip_reason(root, BASE, c)}
+    assert {card_id for card_id, verb in reported.items() if verb == "review"} == would_run
+    assert reported == {"green": "review", "some-art": "leave", "blocked": "leave"}
+
+
 def test_the_command_reports_each_card_and_releases_the_lock(tmp_path, monkeypatch,
                                                              capsys):
     root = _repo(tmp_path, ("a-card", "review"))
