@@ -1851,7 +1851,11 @@ never edit, fix or merge — you report, the runner routes.
 
 @dataclass
 class Dispatch:
-    # "review" (gates+tests passed, awaiting the review stage or a human's eye) |
+    # "review" (gates+tests passed, nobody has concluded — the review stage either
+    # has not run yet or could not conclude, and `nightshift.drain` is the pass that
+    # takes it from there. Until that module existed this comment said "awaiting the
+    # review stage *or* a human's eye", and those two states behind one lane name are
+    # what hid `review/` having no exit at all) |
     # "reviewed" (the diff reviewer said ok — settle merges and lands it in testing/) |
     # "needs_decision" (the reviewer flagged a choice for Karel) | "parked" |
     # "failed" | "limited" | "blocked" | "interrupted" (an API disconnection
@@ -3819,6 +3823,21 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
         _git(root, "worktree", "prune")
 
 
+def branch_has_commits(root: Path, base: str, branch: str) -> bool:
+    """Does `branch` carry anything `base` does not — i.e. is there a diff to review?
+
+    The negative answer covers three states that all mean "there is nothing here
+    for a diff reviewer": an artefact-only card (`art`, whose deliverable is a
+    file a human looks at rather than a commit), a branch that was never cut, and
+    a branch already merged. All three are the same fact to every caller, which is
+    why they share one predicate rather than each testing `rev-list` for itself —
+    `drain` asks it about a card at rest in `review/` for exactly the reason
+    `review_stage` asks it about a card passing through.
+    """
+    count = _git(root, "rev-list", "--count", f"{base}..{branch}").stdout.strip()
+    return count not in ("", "0")
+
+
 def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
                  card_budget: float, timeout: int) -> Dispatch:
     """Run the diff reviewer on a card whose gates+tests just passed, and route.
@@ -3853,8 +3872,7 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
     # Nothing to review as a diff: an artefact-only card (art) has no commit on
     # its branch, and its human gate is Karel at review/, unchanged (this card
     # "does not change how art review works"). A dead branch lands here too.
-    commits = _git(root, "rev-list", "--count", f"{base}..{branch}").stdout.strip()
-    if commits in ("", "0"):
+    if not branch_has_commits(root, base, branch):
         return result
 
     try:
