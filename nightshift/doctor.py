@@ -52,13 +52,14 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 import nightshift
-from nightshift import preflight, runner
+from nightshift import freshness, preflight, runner
 from nightshift.gates import line_endings
 from nightshift.manifest import AI_DIR, ManifestError
 from nightshift.preflight import Check
 
 __all__ = ["checks", "drift", "Drift", "lf_worktree", "claude_on_path", "hosts_entry",
-           "preflight_config", "framework_version", "worktree_headroom",
+           "preflight_config", "framework_version", "framework_freshness",
+           "paired_branches", "worktree_headroom",
            "worst_relative", "worst_worktree_name", "headroom",
            "GREEN", "WARN", "FAIL"]
 
@@ -412,13 +413,76 @@ def framework_version(root: Path, checkout: Path | None = None) -> Check:
     return Check("nightshift", True, f"{sha} ({state}) at {checkout}")
 
 
+def framework_freshness(root: Path, checkout: Path | None = None) -> Check:
+    """Whether the framework checkout is behind its remote. **Reports; never fails.**
+
+    Behind on purpose is allowed — refusing a pull is a first-class answer and this
+    must not become a nag — so the verdict is always `ok`. What it buys is that the
+    question gets *asked*, here, where every push already passes, instead of being
+    remembered. The occasion (2026-08-14): two machines, one framework checkout
+    each, and nothing anywhere said which was behind.
+
+    The fetch is read-only and cannot move a working tree, which is what makes it
+    safe to do on the way to a push; the pull it names is a separate, explicit act
+    (`nightshift.freshness`). Nothing here pulls, for the reason that module's
+    docstring gives at length: an automatic pull does not prevent the framework
+    moving under a run, it schedules it.
+
+    `root` is unused for the same reason it is unused in `framework_version` — this
+    is a property of the install, not of the project being checked.
+    """
+    state = freshness.read(checkout)
+    return Check("nightshift-fresh", True, freshness.describe(state),
+                 skipped=not state.known)
+
+
+def paired_branches(root: Path, checkout: Path | None = None) -> Check:
+    """The framework and this repo are on branches that belong to the same work.
+
+    **The one freshness question that is a refusal**, and the only check here whose
+    subject is neither repo but the pair of them. A framework checkout on a feature
+    branch while this repo is on a different one is state *invisible from either
+    side*: the suite here would be green or red depending on which branch a sibling
+    directory happens to have out, and no gate in either repo can reach the other.
+    Measured once at 39 failed / 198 passed (`cross-repo-half-landed-alone`).
+
+    That is exactly what a preflight is for — the boundary where "the suite is
+    green" is about to be treated as evidence — so this fails rather than reporting.
+    The framework on its own default branch is always fine, and matching branch
+    names are fine, because that is what a paired change looks like.
+
+    No fetch: this is a comparison of two local HEADs and must not depend on a
+    network. Skipped where the framework is not a git checkout at all.
+    """
+    state = freshness.read(checkout, fetch=False)
+    if not state.branch:
+        return Check("paired-branches", True,
+                     f"framework at {state.checkout} is not a git checkout — no branch "
+                     f"to pair with", skipped=True)
+    here = runner.current_branch(root)
+    if not here:
+        return Check("paired-branches", True, "this repo reports no branch (detached?)",
+                     skipped=True)
+    why = freshness.unpaired(here, state)
+    if why:
+        return Check("paired-branches", False, why)
+    return Check("paired-branches", True,
+                 f"both on `{here}`" if state.branch == here
+                 else f"framework on its default `{state.branch}`, this repo on `{here}`")
+
+
 # The order they are reported in: cheapest and most self-explanatory first, and
 # the two that need the project's `.ai/` last, so a repo the framework was just
 # installed into says something useful before it says something confusing.
 # `worktree_headroom` sits with `lf_worktree` — both are about the checkout's
 # own shape rather than about dispatch config — ahead of the three that are.
+#
+# The two framework checks come last and in this order: the SHA (what is
+# installed), then how fresh it is, then whether it belongs to the same work as
+# this repo. Each is a strictly stronger claim than the one before, and only the
+# last can fail.
 CHECKS = (lf_worktree, worktree_headroom, claude_on_path, hosts_entry,
-          preflight_config, framework_version)
+          preflight_config, framework_version, framework_freshness, paired_branches)
 
 
 def checks(root: Path) -> list[Check]:

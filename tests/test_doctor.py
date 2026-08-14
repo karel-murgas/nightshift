@@ -21,7 +21,20 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import doctor, preflight, runner
+from nightshift import doctor, freshness, preflight, runner
+
+
+@pytest.fixture(autouse=True)
+def _pin_the_framework_reading(monkeypatch):
+    """The two framework checks read the *installed* checkout — a sibling directory
+    belonging to whoever is running the suite. Every test in this file is about the
+    set and order of checks, so leaving them live would make the file green or red
+    depending on which branch that directory happens to have out, which is the very
+    state `paired_branches` exists to report. `test_freshness.py` drives the real
+    logic against checkouts it builds itself."""
+    monkeypatch.setattr(freshness, "read", lambda checkout=None, *, fetch=True:
+                        freshness.Freshness(Path("/framework"), "main", "main",
+                                            known=True))
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -80,7 +93,7 @@ def test_a_clean_project_passes_every_check(tmp_path, monkeypatch):
 
     assert [check.name for check in results] == [
         "lf-worktree", "worktree-headroom", "claude-bin", "hosts-json",
-        "preflight-config", "nightshift"]
+        "preflight-config", "nightshift", "nightshift-fresh", "paired-branches"]
     assert all(check.ok for check in results), [
         (c.name, c.detail) for c in results if not c.ok]
 
@@ -273,9 +286,10 @@ def test_the_preflight_runs_the_doctor_checks_before_the_gates(tmp_path, monkeyp
                                   no_corrections="fixture", skip_tests=True)
 
     names = [check.name for check in result.checks]
-    assert names[:6] == ["lf-worktree", "worktree-headroom", "claude-bin", "hosts-json",
-                         "preflight-config", "nightshift"]
-    assert names.index("gates") == 6
+    assert names[:8] == ["lf-worktree", "worktree-headroom", "claude-bin", "hosts-json",
+                         "preflight-config", "nightshift", "nightshift-fresh",
+                         "paired-branches"]
+    assert names.index("gates") == len(doctor.CHECKS)
 
 
 def test_a_repo_with_no_board_skips_the_four_dispatch_checks(tmp_path):
