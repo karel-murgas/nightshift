@@ -89,6 +89,28 @@ LANES: tuple[str, ...] = (
 # `CLAUDE.md` and `reconcile` all named it as the first step of the flow.
 PRIVATE_LANE = "ideas"
 
+# The reports the tooling writes at the repo root — which is the vault root, so these
+# are what the maintainer actually reads. Owned here beside `LANES` because they are
+# board vocabulary: three modules write one each (`digest`, `ingest`, `chores`) and
+# three more have to recognise the whole set.
+#
+# **They are committed, and that is the point of the tuple.** Board state that exists
+# on one machine only is a decision the other machine cannot see, and a generated file
+# is not exempt from that — being regenerable is not a reason to leave it out of git.
+# So every consumer needs the same list, and there are three of them: `commit_board`
+# stages them, `runner.dirty_outside_board` exempts them (they are rewritten on every
+# run, and a dirty tree refuses a dispatch), and `hooks.correction_prompt` ignores them.
+#
+# Written down once because it was written down once before, wrong: the exemption and
+# the commit list each named `Digest.md` alone, so `ingest` and `chores` shipped a new
+# view each and joined neither list — and two untracked reports at the root made the
+# tree dirty and refused every batch outright. The commit list and the exemption list
+# are the same list; a view on one and not the other breaks in one of those two ways.
+DIGEST_VIEW = "Digest.md"
+ROUTING_VIEW = "Routing.md"
+CHORES_VIEW = "Chores.md"
+GENERATED_VIEWS: tuple[str, ...] = (DIGEST_VIEW, ROUTING_VIEW, CHORES_VIEW)
+
 # 03_board.md §2. Appended in this order when absent.
 RUNNER_FIELDS: tuple[str, ...] = ("attempts", "branch", "started", "finished")
 
@@ -443,24 +465,26 @@ def move(root: Path, card: Card, to_lane: str, commit: bool = True) -> Card:
 
 
 def commit_board(root: Path, message: str, extra_paths: tuple[str, ...] = ()) -> None:
-    """Commit whatever changed under `Board/`, and `Digest.md` if it exists.
+    """Commit whatever changed under `Board/`, and every `GENERATED_VIEWS` file present.
 
     Never `-a`: the runner must not be able to sweep up someone else's work in
-    progress. The existence check on `Digest.md` is not defensive noise — `git
+    progress. The existence check on each view is not defensive noise — `git
     add` fails the *whole* pathspec when one entry matches nothing, so naming a
     file that is not there yet silently stages nothing at all and the commit
     becomes a no-op. Found by a test asserting `attempts` reaches disk before
     the worker starts, which is the one bookkeeping guarantee that bounds a
     reboot loop; it would otherwise have surfaced on the first night in a fresh
-    clone, as a card retried forever.
+    clone, as a card retried forever. It matters more now than when `Digest.md`
+    was the only view: a repo that has run `digest` but never `ingest` has one
+    of the three on disk, which is the normal case rather than the edge.
 
     `extra_paths` is for the rare other committed, non-Board file a caller needs
     swept into the same commit (e.g. `stale_sweep.STATUS`) — each is checked to
-    exist first, for the same reason `Digest.md` is: a missing path would zero
+    exist first, for the same reason the views are: a missing path would zero
     out the whole `git add`.
     """
     paths = ([str(board_rel(root))]
-            + (["Digest.md"] if (root / "Digest.md").exists() else [])
+            + [v for v in GENERATED_VIEWS if (root / v).exists()]
             + [p for p in extra_paths if (root / p).exists()])
     staged = subprocess.run(["git", "add", "-A", "--", *paths], cwd=root,
                             check=False, capture_output=True, text=True,

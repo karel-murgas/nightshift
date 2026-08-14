@@ -491,16 +491,25 @@ def current_branch(root: Path) -> str:
 def dirty_outside_board(root: Path) -> list[str]:
     """Uncommitted work that is not the board's.
 
-    The runner commits `Board/` and `Digest.md`, never `-a`, so it cannot sweep
-    up someone else's work in progress — but it also branches worktrees off HEAD,
-    and a half-finished change sitting unstaged means HEAD is not what Karel
-    thinks he left. Refusing is cheaper than explaining it in the morning.
+    The runner commits `Board/` and the generated views, never `-a`, so it cannot
+    sweep up someone else's work in progress — but it also branches worktrees off
+    HEAD, and a half-finished change sitting unstaged means HEAD is not what the
+    maintainer thinks they left. Refusing is cheaper than explaining it in the
+    morning.
+
+    **Every `board.GENERATED_VIEWS` file is exempt, not just the digest.** Each is
+    rewritten by the command that owns it, often moments before a dispatch — the
+    inbox is routed and a batch is planned right before it runs — so treating one
+    as somebody's work in progress refuses the very run that produced it. Measured
+    2026-08-14: `Routing.md` and `Chores.md` at the repo root blocked `chores`
+    outright, because each shipped a new view and joined neither this list nor
+    `commit_board`'s.
     """
     out = _git(root, "status", "--porcelain")
     dirty = []
     for line in out.stdout.splitlines():
         path = line[3:].strip().strip('"')
-        if path.startswith("Board/") or path == "Digest.md":
+        if path.startswith("Board/") or path in board.GENERATED_VIEWS:
             continue
         if path.startswith(".obsidian/"):
             # The editor's own state, and the same phenomenon as the `Board/`

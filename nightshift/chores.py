@@ -69,8 +69,10 @@ from pathlib import Path
 from nightshift import board, gitmerge, manifest, runner, suite, textio, tiers, usage
 from nightshift.runner import repo_root
 
-#: Written at the repo root next to the digest, because that is the vault root.
-OUT = Path("Chores.md")
+#: Written at the repo root next to the digest, because that is the vault root. The
+#: name comes from `board`, which owns the set — see `GENERATED_VIEWS` on why a view
+#: has to be in one list to be committed and in another to not block a dispatch.
+OUT = Path(board.CHORES_VIEW)
 
 #: How many chores go in one batch by default. Not a technical limit — a review limit:
 #: the batch's value is that one pass of human attention covers all of it, and that

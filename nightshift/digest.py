@@ -65,7 +65,7 @@ from nightshift import run_record  # the run's own account of itself — the sou
 from nightshift import stale_sweep  # read_status() for the fallback Staleness line
 from nightshift import textio  # Digest.md is committed; write_text would CRLF it on Windows
 
-OUT = Path("Digest.md")
+OUT = Path(board.DIGEST_VIEW)
 
 # Workers whose output only a human can sign off — 03_board.md §5. A card owned
 # by one of these is framed "look at this", never "done".

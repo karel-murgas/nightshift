@@ -933,6 +933,72 @@ def test_board_edits_alone_do_not_count_as_a_dirty_tree(tmp_path):
     assert runner.dirty_outside_board(root) == []
 
 
+# --- the generated views are committed AND exempt ---------------------------
+#
+# Enumerated over `board.GENERATED_VIEWS` rather than named one per test, because
+# the defect being pinned is a view existing that one of these lists has never
+# heard of: `ingest` and `chores` each shipped one and joined neither list, and
+# `Digest.md`-by-name passed every test in this file while doing it. A fourth view
+# is covered by these three the day it is added to the tuple.
+
+
+@pytest.mark.parametrize("view", board.GENERATED_VIEWS)
+def test_a_generated_view_does_not_count_as_a_dirty_tree(tmp_path, view):
+    """Each is rewritten by the command that owns it, often immediately before a
+    dispatch — `ingest` routes the inbox, `chores` plans the batch. Reading one as
+    somebody's work in progress refuses the run that just wrote it."""
+    root = _repo(tmp_path)
+    (root / view).write_text(f"# {view}\n", encoding="utf-8")
+    assert runner.dirty_outside_board(root) == []
+
+
+def test_every_generated_view_together_still_leaves_a_clean_tree(tmp_path):
+    """The measured failure, 2026-08-14: `Routing.md` and `Chores.md` sitting at
+    the root made the tree dirty and `chores` refused to dispatch at all — the two
+    commands blocked each other."""
+    root = _repo(tmp_path)
+    for view in board.GENERATED_VIEWS:
+        (root / view).write_text(f"# {view}\n", encoding="utf-8")
+    assert runner.dirty_outside_board(root) == []
+
+
+@pytest.mark.parametrize("view", board.GENERATED_VIEWS)
+def test_commit_board_stages_a_generated_view_that_exists(tmp_path, view):
+    """Exempt from the dirty check is only half of it. A view that is never
+    committed exists on one machine only, which is board state the other machine
+    cannot see."""
+    root = _repo(tmp_path)
+    _card(root, "tasks", "moved")
+    (root / view).write_text(f"# {view}\n", encoding="utf-8")
+    board.commit_board(root, "board: probe")
+    log = subprocess.run(["git", "show", "--stat", "HEAD"], cwd=root,
+                         capture_output=True, text=True, check=True)
+    assert view in log.stdout
+
+
+def test_commit_board_stages_the_board_when_no_view_exists_yet(tmp_path):
+    """A fresh clone has none of the three, and `git add` fails the *whole*
+    pathspec when one entry matches nothing — which would silently stage nothing
+    and turn the `attempts` bookkeeping commit into a no-op."""
+    root = _repo(tmp_path)
+    _card(root, "tasks", "moved")
+    for view in board.GENERATED_VIEWS:
+        assert not (root / view).exists()
+    board.commit_board(root, "board: probe")
+    log = subprocess.run(["git", "show", "--stat", "HEAD"], cwd=root,
+                         capture_output=True, text=True, check=True)
+    assert "moved" in log.stdout
+
+
+def test_the_correction_prompt_hook_ignores_every_generated_view():
+    """The third consumer of the same list. A regenerated report is not evidence
+    that work happened, so it must not trip the correction nudge."""
+    from nightshift.hooks import correction_prompt
+
+    for view in board.GENERATED_VIEWS:
+        assert view in correction_prompt._IGNORED
+
+
 # --- host capabilities ------------------------------------------------------
 
 def _hosts(root: Path, mapping: dict) -> None:

@@ -45,9 +45,11 @@ from nightshift import board, manifest, textio, usage
 from nightshift.runner import (claude_binary, ensure_workspace_trusted, repo_root,
                                run_cli)
 
-#: Written at the repo root, next to `Digest.md`, because that is the Obsidian vault
-#: root — a report Karel has to go looking for is a report he does not read.
-OUT = Path("Routing.md")
+#: Written at the repo root, next to the digest, because that is the Obsidian vault
+#: root — a report the maintainer has to go looking for is a report they do not read.
+#: The name comes from `board`, which owns the set: a view is committed *and* exempt
+#: from the dispatch dirty-check, and this one was neither until 2026-08-14.
+OUT = Path(board.ROUTING_VIEW)
 
 #: Short model aliases, not dated ids: the alias is stable across CLI releases and a
 #: pinned id rots. Classification is a reading task with a one-line-per-note tail, so

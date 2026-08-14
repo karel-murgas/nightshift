@@ -46,6 +46,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from nightshift import board  # GENERATED_VIEWS — the one home for the report names
+
 _MESSAGE = (
     "[correction-capture] There is work in the tree newer than the last "
     "`.ai/corrections.log` entry. If the message above points out a mistake, "
@@ -55,8 +57,14 @@ _MESSAGE = (
     "If it is not a correction, ignore this line silently and do not mention it."
 )
 
-# Paths whose churn says nothing about whether work happened.
-_IGNORED = ("__pycache__", ".ai/corrections.log", "Digest.md", ".ai/runs/")
+# Paths whose churn says nothing about whether work happened. The generated reports
+# come from `board`, which is the one home for their names — a second copy here is how
+# `Routing.md` and `Chores.md` came to be missing from three lists at once. Imported at
+# module level rather than lazily like `find_root` below: that one is guarded because a
+# repo may legitimately have no manifest, whereas a `nightshift.board` that will not
+# import means this file could not have been located either.
+_IGNORED = (("__pycache__", ".ai/corrections.log", ".ai/runs/")
+            + board.GENERATED_VIEWS)
 
 
 def _repo_root() -> Path:
