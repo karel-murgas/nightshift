@@ -66,11 +66,14 @@ The rest is the standing rules, applied
 * **`review_stage` is reused, not reimplemented.** It already owns the criteria,
   the reviewer agent, the tier resolution, the throwaway-checkout blindness and
   every degradation path.
-* **An artefact-only card is left alone and is not re-attempted.** A card whose
-  branch carries no commit (`art`, a branch never cut) lives in `review/` for a
-  human on purpose. The check is one `git rev-list`, before any spend, so a pass
-  over it costs nothing and changes nothing — running the drain twice a day does
-  not nag it.
+* **The two cards that legitimately rest here are left alone, and cost nothing.**
+  One is artefact-only — no commit on its branch (`art`, or a branch never cut) —
+  and its check is a single `git rev-list` before any spend. The other has already
+  been reviewed `ok` and carries `## Merge`, meaning its branch would not rebase
+  onto the integration tip: the review is finished and a person is the blocker, so
+  buying that verdict again on every pass would be pure repricing. Both are skipped
+  in a sweep and both are reviewed anyway when named with `--card`, because an
+  explicit request is a decision — the same waiver `runner --card` makes.
 * **The money rule is checked before each review, never once for the pass.** A
   fan-out that begins with headroom can lose it partway, and a review cannot be
   un-started.
@@ -101,6 +104,14 @@ from nightshift.manifest import find_root
 
 #: The lane this drains, and the one a degraded review leaves a card in.
 LANE = "review"
+
+#: The section `runner.settle` writes onto a card that came back `ok` and whose branch
+#: would then not rebase onto the integration tip. Its presence means the review is
+#: **done** and what is left is a conflict only a person can resolve — so a sweep skips
+#: it, for the same reason it skips an artefact-only card. Found by the first real pass:
+#: the card it drained reviewed `ok` in 94 seconds for $0.82 and then hit a genuine
+#: conflict, and nothing would have stopped the next pass buying that verdict again.
+BLOCKED_SECTION = "Merge"
 
 #: What happened to one card in a pass.
 #:   REVIEWED      — the reviewer said ok; `settle` merged it and moved it on
@@ -187,6 +198,18 @@ def drain(root: Path, base: str, *, card_id: str = "", limit: int = 0,
                 card.id, SKIPPED,
                 f"no commits on `{branch}` — nothing to review as a diff; this is "
                 f"where an artefact-only card waits for a human, and it was left alone"))
+            continue
+
+        # Reviewed already, and blocked on something no reviewer can fix. Naming the
+        # card with `--card` overrides this, the same way `runner --card` waives the
+        # checks a sweep applies: an explicit request is a decision, and re-reviewing
+        # after resolving the conflict by hand is a legitimate thing to ask for.
+        if not card_id and board.section(card.text, BLOCKED_SECTION):
+            result.outcomes.append(Outcome(
+                card.id, SKIPPED,
+                f"already reviewed `ok`; `## {BLOCKED_SECTION}` says its branch will not "
+                f"land without a human, and reviewing it again would buy the same verdict "
+                f"at full price. Name it with `--card` to review it anyway"))
             continue
 
         verdict = usage.check(usage.read(), allow_paid=allow_paid)
