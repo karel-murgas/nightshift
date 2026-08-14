@@ -129,6 +129,83 @@ def test_the_working_lanes_are_untouched(payload):
     assert ideas_fence.evaluate(payload, "Board", ("ideas",)) is None
 
 
+# --- moving a private note is not reading it ------------------------------------
+
+
+@pytest.mark.parametrize("command", [
+    "git add -- Board/ideas/x.md",
+    "git commit -m 'board: card edits' -- Board/ideas/x.md",
+    "git add -- Board/ideas/x.md && git commit -m 'board: edits' -- Board/ideas/x.md",
+    "git add -A -- Board/ideas && git push origin test",
+    "git mv Board/ideas/x.md Board/ideas/y.md",
+    "git restore --staged -- Board/ideas/x.md",
+    "git reset -- Board/ideas/x.md",
+    "git rm --cached -- Board/ideas/x.md",
+    r"git add -- Board\ideas\x.md",
+    "git -C /repo add -- Board/ideas/x.md",
+])
+def test_git_may_move_a_private_note_without_opening_it(command):
+    """Karel, 2026-08-14: the lane must be committable. Until then it was not — and by
+    accident: `commit_pathspec` refuses a commit with no pathspec, this fence refused any
+    command carrying one, so between them they forbade an operation neither one meant to."""
+    payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+    assert ideas_fence.evaluate(payload, "Board", ("ideas",)) is None
+
+
+@pytest.mark.parametrize("command", [
+    # git, but it prints the file.
+    "git show HEAD -- Board/ideas/x.md",
+    "git diff -- Board/ideas/x.md",
+    "git log -p -- Board/ideas/x.md",
+    "git grep audio -- Board/ideas",
+    "git blame Board/ideas/x.md",
+    "git cat-file -p HEAD:Board/ideas/x.md",
+    # an allowed subcommand, turned into a reader by a flag.
+    "git add -p -- Board/ideas/x.md",
+    "git add --patch -- Board/ideas/x.md",
+    "git commit -v -m msg -- Board/ideas/x.md",
+    "git commit -vm msg -- Board/ideas/x.md",
+    "git commit -F Board/ideas/x.md -- Board/ideas/x.md",
+    # a second command riding along behind the first.
+    "git add -- Board/ideas/x.md && cat Board/ideas/x.md",
+    "git add -- Board/ideas/x.md; head Board/ideas/x.md",
+    "git add -- Board/ideas/x.md | tee Board/ideas/x.md",
+    "cat Board/ideas/x.md && git add -- Board/ideas/x.md",
+    # shell syntax that can smuggle a reader in.
+    "git add -- $(cat Board/ideas/x.md)",
+    "git commit -m \"`cat Board/ideas/x.md`\" -- Board/ideas/x.md",
+    "git add -- Board/ideas/x.md > Board/ideas/leak.txt",
+    # not git at all.
+    "cp Board/ideas/x.md /tmp/x.md",
+])
+def test_the_carve_out_does_not_let_a_reader_through(command):
+    """An allowlist of subcommands and a raw-string check for shell substitution. Anything
+    uncertain — unknown subcommand, non-git segment, `$(`, a redirection — denies."""
+    payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+    assert ideas_fence.evaluate(payload, "Board", ("ideas",)) is not None
+
+
+def test_an_unbalanced_quote_is_denied_rather_than_guessed_at():
+    """`shlex` cannot tokenise it, so the fence does not get to decide it is harmless."""
+    payload = {"tool_name": "Bash",
+               "tool_input": {"command": "git commit -m 'unclosed -- Board/ideas/x.md"}}
+    assert ideas_fence.evaluate(payload, "Board", ("ideas",)) is not None
+
+
+def test_the_denial_says_that_committing_the_lane_is_allowed():
+    """A refusal that reads as "you may never touch this lane" sends the next actor
+    looking for a workaround for something that already works."""
+    reason = ideas_fence.evaluate(_read("Board/ideas/x.md"), "Board", ("ideas",))
+    assert reason is not None
+    assert "git add" in reason and "push" in reason
+
+
+def test_the_carve_out_is_bash_only():
+    """`Read` naming a path is an open, whatever the path looks like."""
+    payload = {"tool_name": "Read", "tool_input": {"file_path": "Board/ideas/git add.md"}}
+    assert ideas_fence.evaluate(payload, "Board", ("ideas",)) is not None
+
+
 def test_a_lane_named_as_a_substring_of_another_word_is_not_matched():
     """`Board/ideas-archive/` is a different directory from `Board/ideas/`."""
     payload = _read("Board/inbox/my-ideas-note.md")

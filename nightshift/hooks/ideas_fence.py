@@ -35,6 +35,31 @@ content. It does **not** stop a repo-wide content grep from surfacing a matching
 passing; blocking every unscoped search would break ordinary work, and the residual is
 recorded here rather than papered over.
 
+**Moving a private note is not reading it** (Karel, 2026-08-14: *"I want you to be able
+to commit and push cards in ideas folder. I just want you to not use text from them for
+any game planning, game concepts etc."*). Until then the lane was uncommittable, and not
+by anyone's decision: `commit_pathspec` refuses a `git commit` that does not name its
+paths, this fence refuses any `Bash` command that does — so the two guards together
+forbade an operation neither was written to forbid. A `Bash` call is therefore allowed
+past when **every** segment of it is a `git` invocation whose subcommand only ever moves
+a path around (`_MOVE_SUBCOMMANDS`) and carries no flag that would print what is inside
+it (`_SHOWS_CONTENT`). `git add`, `git commit -m … --`, `git push` go through; `git show`,
+`git diff`, `git log -p`, `git grep`, and anything that is not git at all, do not.
+
+Three properties of that carve-out are deliberate, and all three point the same way:
+
+* **Allowlist, not denylist.** A subcommand nobody thought of lands on the denied side.
+* **Every segment must be git.** `git add -- Board/ideas/x.md && cat Board/ideas/x.md`
+  is one `Bash` call, and only checking the first command in it would be no check at all.
+* **Conservative on shell syntax.** A command containing `$(`, a backtick, or a
+  redirection is denied rather than parsed, so a substitution cannot smuggle a reader in.
+  The cost is that a commit message containing those characters is refused; reword it.
+
+The residual is the one the paragraph above already names: an unscoped `git diff` or
+`git show` prints private content without naming the lane, exactly as an unscoped grep
+does. Scoping those is the same trade — it would break ordinary work — and it is left
+open on the same terms.
+
 **Off if it cannot be sure.** No repo root, no `board.py`, an unparseable `LANES`, or a
 `LANES` that comes back empty ⇒ the fence does not arm. The alternative — treating every
 board directory as private when the parse fails — would deny all board access on a
@@ -57,6 +82,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -68,6 +95,76 @@ _WATCHED = ("Read", "Grep", "Glob", "Bash")
 # Where each tool names the thing it is about. Checked as strings so an absolute path, a
 # repo-relative one and a shell command are all covered by one rule.
 _FIELDS = ("file_path", "path", "pattern", "glob", "command", "notebook_path")
+
+# --- the git carve-out ----------------------------------------------------------
+# `git` subcommands that can name a path without printing what is inside it. An
+# allowlist, so a subcommand nobody thought of is denied rather than waved through.
+_MOVE_SUBCOMMANDS = frozenset({"add", "commit", "push", "mv", "rm", "restore", "reset"})
+
+# Flags that turn one of the above into a content reader. `git add -p` and `git commit -v`
+# both put the diff in front of the caller; `-F`/`-t` read a file in as the message.
+_SHOWS_CONTENT = frozenset({"-p", "--patch", "-i", "--interactive", "-v", "--verbose",
+                            "-e", "--edit", "-F", "--file", "-t", "--template"})
+
+# Shell forms that can smuggle a reader past a token-level check. Matched against the raw
+# string, quotes and all: deciding whether `$(…)` is quoted needs a shell parser, and a
+# fence does not get to guess.
+_SMUGGLERS = ("$(", "`", "<(", "${")
+
+# Command separators. Splitting the raw string over-splits a quoted message containing
+# one of these, which yields a segment that is not a git call, which denies — the safe
+# direction, and the reason this is a regex over the raw text rather than a token walk.
+_SEPARATORS = re.compile(r"&&|\|\||>>|[;&|<>\n]")
+
+# git's own global options, which sit before the subcommand. `-C` and `-c` take a value.
+_GLOBAL_TAKES_VALUE = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path")
+
+
+def _subcommand(tokens: list[str]) -> str | None:
+    """The subcommand of a `git …` token list, skipping git's global options."""
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _GLOBAL_TAKES_VALUE:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token
+    return None
+
+
+def _moves_without_reading(command: str) -> bool:
+    """Is `command` nothing but git calls that relocate a path without showing it?
+
+    False on anything uncertain — an unparseable quote, a non-git segment, an unknown
+    subcommand, a flag that prints content. Same direction as every other decision here.
+    """
+    if any(smuggler in command for smuggler in _SMUGGLERS):
+        return False
+    segments = [segment for segment in _SEPARATORS.split(command) if segment.strip()]
+    if not segments:
+        return False
+    for segment in segments:
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            return False
+        if not tokens or Path(tokens[0]).name not in ("git", "git.exe"):
+            return False
+        subcommand = _subcommand(tokens)
+        if subcommand not in _MOVE_SUBCOMMANDS:
+            return False
+        # Only flags before `--`; past it every token is a pathspec by definition.
+        for token in tokens[:tokens.index("--")] if "--" in tokens else tokens:
+            if token in _SHOWS_CONTENT:
+                return False
+            # Bundled short flags: `-am`, `-pv`. Not `--patch-with-stat`, not a value.
+            if re.fullmatch(r"-[A-Za-z]+", token) and len(token) > 2:
+                if any(f"-{letter}" in _SHOWS_CONTENT for letter in token[1:]):
+                    return False
+    return True
 
 
 def _repo_root() -> Path | None:
@@ -143,6 +240,11 @@ def evaluate(payload: dict, board: str, lanes: tuple[str, ...]) -> str | None:
         return None
     for lane in lanes:
         if _mentions(haystack, board, lane):
+            # Staging, committing and pushing a private note moves it without opening it,
+            # and the lane was uncommittable until this existed — see the docstring.
+            if (payload.get("tool_name") == "Bash"
+                    and _moves_without_reading(str(tool_input.get("command", "")))):
+                return None
             return _deny_text(board, lane)
     return None
 
@@ -156,6 +258,10 @@ def _deny_text(board: str, lane: str) -> str:
         f"`reconcile.py`, which reads one frontmatter field and never the body.\n"
         f"If you need context for a card, use `{board}/inbox/`, the card itself, and the "
         f"codebase — that is what the note you were given was built from.\n"
+        f"Committing and pushing the lane *is* allowed — `git add`/`commit`/`push` naming "
+        f"these paths goes through, because moving a note is not reading it. What is "
+        f"refused is anything that prints the contents: `git show`, `git diff`, `git log "
+        f"-p`, `cat`.\n"
         f"If `{lane}` is in fact a working lane, the fix is to add it to `nightshift.board.LANES`, "
         f"not to read around this.\n"
         f"(nightshift.hooks.{NAME})"
