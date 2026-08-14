@@ -16,7 +16,7 @@ given, so `_run_worker` takes `prompt=` and writes it down the child's pipe. The
 is no size ceiling left on that path.
 
 **Why a gate and not a comment.** There were five call sites, not one — four in
-`runner.py` (`run_checker`, `run_reviewer`, `run_stale_check`, `run_producer`) and
+`runner.py` (`run_checker`, `review_branch`, `run_stale_check`, `run_producer`) and
 one in `fix.py` — and the set is still growing: a chartered audio worker and a
 second checker stage are both scoped. The sixth will be written by copying the
 nearest existing one, and if that one still spelled `-p prompt` the bug would come

@@ -850,3 +850,105 @@ def test_check_junit_still_reports_counts_when_no_testcase_detail_exists(tmp_pat
     clause."""
     ok, why = suite.check_junit(_junit(tmp_path / "j.xml", (15, 1, 0)))
     assert not ok and "1 failure(s)" in why and "15 test(s)" in why
+
+
+# --- touched: the narrow slice a batch may use -------------------------------
+#
+# The condition on this selection is the whole of its safety: it is only sound for
+# a caller that runs the full suite over the merged result afterwards. These pin
+# the two halves of that — that it really does narrow, and that every case it
+# cannot reason about falls back to `select` rather than to something smaller.
+
+
+def _module(root: Path, dotted: str, body: str = "") -> None:
+    path = root / Path(dotted.replace(".", "/") + ".py")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+
+
+@pytest.fixture
+def graphed(repo: Path) -> Path:
+    """`hud` imports `theme`; `combat` imports nothing. Two tests, one per side."""
+    _module(repo, "myapp.theme", "COLOUR = 1\n")
+    _module(repo, "myapp.hud", "from myapp.theme import COLOUR\n")
+    _module(repo, "myapp.combat", "DAMAGE = 2\n")
+    _tests_dir(repo, "test_hud.py", body="from myapp.hud import COLOUR\n")
+    _tests_dir(repo, "test_combat.py", body="import myapp.combat\n")
+    return repo
+
+
+def test_only_the_tests_that_reach_the_change_are_selected(graphed):
+    picked = suite.touched({"myapp/combat.py"}, graphed)
+    assert picked.bucket == suite.TOUCHED
+    assert picked.files == ("test_combat.py",)
+    assert picked.pytest_args(graphed / "tests") == ["tests/test_combat.py"]
+
+
+def test_a_transitively_reached_test_is_selected(graphed):
+    """`test_hud` imports `hud`, which imports `theme`. Nothing in that test's own
+    text mentions `theme`, so a name-matching or direct-import-only answer would
+    drop the one test that can actually break."""
+    picked = suite.touched({"myapp/theme.py"}, graphed)
+    assert picked.files == ("test_hud.py",)
+
+
+def test_a_changed_test_file_always_runs_itself(graphed):
+    picked = suite.touched({"tests/test_combat.py"}, graphed)
+    assert "test_combat.py" in picked.files
+
+
+def test_documentation_alongside_code_does_not_widen_the_slice(graphed):
+    """The common shape: a chore edits a module and the note that documents it.
+    A doc carries no test weight, so it must not drag the run back up to a half
+    of the suite — `select` ignores such paths for the same reason."""
+    picked = suite.touched({"myapp/combat.py", "docs/notes.md"}, graphed)
+    assert picked.bucket == suite.TOUCHED and picked.files == ("test_combat.py",)
+
+
+def test_a_path_it_cannot_reason_about_falls_back_rather_than_narrowing(graphed):
+    """System code, board cards and non-Python files under the source tree are
+    all outside the import graph this reads. Every one of them must widen the
+    answer to `select`'s, never shrink it."""
+    for path in (".ai/runner.py", "Board/tasks/x.md", "myapp/assets/icon.png"):
+        picked = suite.touched({"myapp/combat.py", path}, graphed)
+        assert picked.bucket != suite.TOUCHED, path
+        assert picked == suite.select({"myapp/combat.py", path}, graphed), path
+
+
+def test_a_change_nothing_imports_runs_the_ordinary_slice_not_nothing(graphed):
+    """An unreachable module is far likelier to be reached through a string — a
+    registry, a fixture path, an entry point — than to be dead. "Run no tests" is
+    never the answer this gives to a code diff."""
+    _module(graphed, "myapp.orphan", "X = 1\n")
+    picked = suite.touched({"myapp/orphan.py"}, graphed)
+    assert picked.bucket == suite.GAME and picked.files == ()
+
+
+def test_a_relative_import_is_still_an_edge(repo):
+    """`from . import theme` inside the package is the same dependency as the
+    absolute form. Resolving it wrongly loses the edge silently, which is the
+    quiet direction: the test would simply not be selected."""
+    _module(repo, "myapp.theme", "COLOUR = 1\n")
+    _module(repo, "myapp.hud", "from . import theme\n")
+    _tests_dir(repo, "test_hud.py", body="import myapp.hud\n")
+    assert suite.touched({"myapp/theme.py"}, repo).files == ("test_hud.py",)
+
+
+def test_a_package_init_is_named_by_its_package(repo):
+    _module(repo, "myapp.pack.__init__", "from myapp.pack.inner import X\n")
+    _module(repo, "myapp.pack.inner", "X = 1\n")
+    _tests_dir(repo, "test_pack.py", body="import myapp.pack\n")
+    assert suite.module_of("myapp/pack/__init__.py", suite.layout(repo)) == "myapp.pack"
+    assert suite.touched({"myapp/pack/inner.py"}, repo).files == ("test_pack.py",)
+
+
+def test_touched_never_returns_an_empty_run(graphed):
+    """`pytest_args` returning `[]` means NONE — skip pytest and report a pass.
+    That is a real answer for board notes and must never be reachable from here."""
+    for changed in ({"myapp/combat.py"}, {"myapp/theme.py"}, {"tests/test_hud.py"}):
+        picked = suite.touched(changed, graphed)
+        assert picked.pytest_args(graphed / "tests"), changed
+
+
+def test_without_a_root_there_is_no_graph_to_read_so_it_falls_back():
+    assert suite.touched({"myapp/combat.py"}, None) == suite.select({"myapp/combat.py"})

@@ -42,24 +42,31 @@ budget as the mechanical backstop, because effort does track simplicity.
 **The worker tier for a chore is the cheap one.** Decided 2026-08-14: a one-prompter
 does not want the session's top model, and the definition of the kind — no fork, one
 obvious home, a visible failure — is exactly the description of work a mid tier does
-well. The model is not a constant here on purpose: nothing in this module dispatches
-yet, and an unread constant is what `dead_code` exists to catch. It belongs in the
-execution half, as a short alias rather than a dated id.
+well. Resolved through the tier table by *name* (`CHORE_TIER`) rather than off the
+card, so a hand-edited `tier:` cannot pull a batch onto the expensive model — and as
+a short alias, never a dated id, because an alias survives a CLI release and a pinned
+id rots.
 
-**Not yet wired: the execution half.** Selection, the effort budget, the bisect
-decision and the report live here and are tested. Driving worktrees, merges and the
-suite runs means changing the dispatcher's per-card verification into the two phases
-above, which is surgery on the module that runs unattended overnight — done separately,
-on purpose, rather than hastily alongside this.
+**The money rule is checked before every dispatch, not once per batch.** A fan-out
+that starts with headroom can lose it partway, and a dispatch cannot be un-started.
+The default is stop; only an explicit per-invocation opt-in continues onto paid
+credits.
+
+**Where the two phases live.** Everything that drives a worktree, a merge or a suite
+run is `runner`'s — this module calls into it and never grows a second copy. What is
+here is the batch's own arithmetic: which items go in, when one has stopped being a
+one-prompter, what to merge, what to bisect when the combined result reddens, and
+what to put in front of a human at the end.
 """
 from __future__ import annotations
 
 import argparse
 import datetime as dt
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import board, textio
+from nightshift import board, gitmerge, manifest, runner, suite, textio, tiers, usage
 from nightshift.runner import repo_root
 
 #: Written at the repo root next to the digest, because that is the vault root.
@@ -78,9 +85,32 @@ MAX_WALL_S = 20 * 60
 
 #: A chore gets one attempt. A failed one-prompter is worth a human's eye, not a second
 #: dispatch, and it keeps the arithmetic honest: 8 chores x 3 attempts is a night.
-MAX_ATTEMPTS = 1
+#: Defined in `runner` beside the full-card limit, because the dispatcher's queue
+#: selection and its retirement rule both read it and must not disagree.
+MAX_ATTEMPTS = runner.CHORE_MAX_ATTEMPTS
 
-KIND = "chore"
+KIND = board.KIND_CHORE
+
+#: The tier a chore dispatches at, resolved through the project's own tier table.
+#: By name, not off the card: `eligible` already refuses `tier: lead`, and naming it
+#: here means a hand-edited card cannot pull the whole batch onto the expensive model.
+CHORE_TIER = "worker"
+
+#: The batch branch's namespace. Deliberately not under `ai/`, which is the per-card
+#: namespace `publish` and the rescue-branch machinery scan: a batch branch is not a
+#: card's branch and must not be swept up as one.
+BATCH_NAMESPACE = "chores"
+
+#: How many times the combined result may come back red before the whole batch is
+#: handed to a human instead of being narrowed further. Two, because the second red
+#: is evidence about *routing* — items are reaching the batch that are not chores —
+#: and more bisecting does not answer that. Each red costs one suite run plus about
+#: log2(n) probes, so this is also what bounds the pathological night.
+MAX_RED_ROUNDS = 2
+
+#: Seconds for one full-suite run over the merged batch. Longer than a card's default
+#: because this is the whole suite by definition, not a slice.
+BATCH_TEST_TIMEOUT_S = 1800
 
 
 @dataclass(frozen=True)
@@ -103,6 +133,9 @@ class Outcome:
     verify: str = "play"
     surface: str = ""
     title: str = ""
+    #: The worker's scenario, carried from its verdict to the card when the batch
+    #: lands. Only the worker that built the thing knows which door it is behind.
+    how_to_test: str = ""
 
     @property
     def needs_an_eye(self) -> bool:
@@ -150,7 +183,7 @@ def eligible(card: board.Card) -> str:
     Kept separate from `select` so the reason can be reported per card. A chore that is
     silently absent from a batch is indistinguishable from one that was never written.
     """
-    if card.fields.get("kind") != KIND:
+    if card.kind != KIND:
         return "not a chore"
     if card.tier == "lead":
         # `card_schema` already refuses this combination; checked again because a
@@ -176,7 +209,7 @@ def select(root: Path, *, limit: int = DEFAULT_BATCH,
     chosen: list[board.Card] = []
     skipped: list[Skipped] = []
     for card in board.cards(root, lane):
-        if card.fields.get("kind") != KIND:
+        if card.kind != KIND:
             continue                      # not a chore at all: not "skipped", just other work
         why = eligible(card)
         if why:
@@ -247,8 +280,9 @@ def report(batch: Batch, now: dt.datetime, *, branch: str = "",
 
     for state, title, blurb in (
         ("bounced", "Bounced - not chores after all",
-         "The worker opened the code and found a decision, or the change was not where "
-         "the note implied. This is the routing signal, not a failure."),
+         "The worker opened the code and found a decision, the change was not where "
+         "the note implied, or it took far more than one prompt's effort. This is the "
+         "routing signal, not a failure."),
         ("parked", "Parked - failed their own checks",
          "One attempt each, by design. Read them rather than re-running them."),
         ("blocked", "Not reached",
@@ -270,31 +304,588 @@ def report(batch: Batch, now: dt.datetime, *, branch: str = "",
     return "\n".join(lines) + "\n"
 
 
+# ---------------------------------------------------------------- phase 1: per chore
+#
+# Own worktree, own worker, then the gates and only the tests that reach what it
+# changed. **Not the suite** — that is phase 2's job, once, over the merged result,
+# and it is what makes a narrow pass here safe rather than optimistic. A failure
+# drops the item from the batch; it never reaches the branch the others merge onto.
+
+
+def _guard(allow_paid: bool, what: str) -> usage.Verdict:
+    """The money rule, checked immediately before spending on `what`.
+
+    Before *every* dispatch and not once at the top: a batch that starts with
+    headroom can lose it four items in, and there is no way to un-start the fifth.
+    """
+    verdict = usage.check(usage.read(), allow_paid=allow_paid)
+    if not verdict.allow:
+        print(f"  REFUSED before {what} - {verdict.reason}")
+        if verdict.resume_at:
+            print(f"    resume at {verdict.resume_at:%Y-%m-%d %H:%M}")
+        if verdict.refused_for_money:
+            print("    override: re-run with --allow-paid")
+    elif not verdict.metered:
+        print(f"  (unmetered - {verdict.reason})")
+    return verdict
+
+
+def _outcome_for(card: board.Card) -> Outcome:
+    """A pending outcome carrying the card's own labels, read before it is dispatched.
+
+    Read here rather than at the end because the card object is rewritten and moved
+    between lanes by then, and the checklist needs the title, the surface and the
+    verification route whatever became of the item.
+    """
+    return Outcome(card_id=card.id, title=card.title, verify=card.verify,
+                   surface=card.surface)
+
+
+def run_one(work: Path, card: board.Card, base: str, model: str, *,
+            card_budget: float, test_timeout: int) -> tuple[Outcome, runner.Dispatch]:
+    """Dispatch one chore and judge it on the gates plus the tests it can reach.
+
+    Returns the batch outcome *and* the raw dispatch, because the caller needs the
+    second for facts about the night rather than about the item — a usage wall rides
+    home on it and decides whether the batch goes on at all.
+
+    The four states, and each is a different answer to a different question:
+
+    * `done` — gates green, reachable tests green. A survivor; it merges in phase 2.
+    * `bounced` — the routing was wrong, and the worker is the only actor that could
+      find that out. Either it parked with a question, or it finished but overran the
+      effort budget, which says the same thing with a number instead of a sentence.
+    * `parked` — it failed its own checks. One attempt, so it is a human's to read.
+    * `blocked` — nothing was decided about the item: a wall, a crashed gate harness,
+      a dropped connection. The attempt is given back and the batch stops.
+    """
+    out = _outcome_for(card)
+    result = runner.dispatch(work, card, base, model, card_budget, test_timeout,
+                             test_selector=suite.touched)
+
+    if result.outcome in ("limited", "blocked", "interrupted"):
+        out.state, out.detail = "blocked", result.detail
+        print("  " + runner.settle(work, card.id, result))
+        return out, result
+
+    telemetry = runner.read_telemetry(runner.run_dir(work, card, card.attempts))
+    out.turns = int(telemetry.get("turns", 0))
+    out.wall_s = float(telemetry.get("wall_s", 0.0))
+
+    if result.outcome == "parked":
+        out.state = "bounced"
+        out.detail = result.detail or "the worker parked it; its question is on the card"
+        print("  " + runner.settle(work, card.id, result))
+        return out, result
+
+    if result.outcome != "review":
+        out.state, out.detail = "parked", result.detail
+        print("  " + runner.settle(work, card.id, result))
+        return out, result
+
+    # Green — but "green" and "was a one-prompter" are different claims, and the
+    # second one is what decides whether this belongs in a batch at all. An overrun
+    # keeps its branch and goes to a human at `review/`: the diff is gated and
+    # tested, so throwing it away would be waste, and merging it into a batch it has
+    # already disproved membership of would hide the signal.
+    overran = effort_exceeded(out.turns, out.wall_s)
+    if overran:
+        out.state, out.detail = "bounced", overran
+        print(f"  {card.id}: {overran} - kept on its branch for a look")
+        print("  " + runner.settle(work, card.id, result))
+        return out, result
+
+    out.state, out.detail = "done", result.detail
+    return out, result
+
+
+# ------------------------------------------------------------- phase 2: per batch
+#
+# One branch, the survivors merged onto it in order, then the gates and the **whole**
+# suite once. On red the merge commits are already there, one per chore, so
+# attribution is a binary search rather than a guess.
+
+
+def batch_branch(now: dt.datetime) -> str:
+    """The batch's branch name. Timestamped so two batches in one day do not collide,
+    and outside the per-card namespace so nothing that scans it sees a batch."""
+    return f"{BATCH_NAMESPACE}/{now:%Y%m%d-%H%M}"
+
+
+def _merge_prefix(work: Path, tree: Path, base: str,
+                  order: list[str]) -> tuple[list[str], list[tuple[str, str]]]:
+    """Reset the batch branch to `base` and merge `order`'s card branches onto it.
+
+    Returns `(merged ids, [(id, why) refused])`. A branch that will not apply is
+    dropped from the batch and named — never left half-applied, and never silently
+    absent, which is the same rule `select` follows for a card left out.
+
+    Rebuilding from `base` each time rather than un-merging is what makes the bisect
+    below simple: every probe is one deterministic replay of a prefix.
+    """
+    runner._git(tree, "reset", "--hard", base)
+    merged: list[str] = []
+    refused: list[tuple[str, str]] = []
+    for card_id in order:
+        ref = f"ai/{card_id}"
+        if runner._git(work, "rev-parse", "--verify", ref).returncode != 0:
+            refused.append((card_id, f"`{ref}` no longer exists"))
+            continue
+        applied = runner._git(tree, "merge", *gitmerge.STRATEGY_ARGS, "--no-ff",
+                              "-m", f"chore {card_id}", ref)
+        if applied.returncode != 0:
+            runner._git(tree, "merge", "--abort")
+            refused.append((card_id, gitmerge.failure_detail(applied)))
+            continue
+        merged.append(card_id)
+    return merged, refused
+
+
+def _verify_tree(work: Path, tree: Path, out_dir: Path, tag: str,
+                 test_timeout: int) -> tuple[bool, str, int]:
+    """Gates plus the **whole** suite over the merged result. `(ok, why, tests run)`.
+
+    The full suite by construction, not a selection: this run is the reason phase 1
+    is allowed to be narrow, so narrowing it too would remove the backstop and leave
+    nothing checking the combination. Judged by the JUnit report, like every other
+    pytest this package runs.
+    """
+    status, why = runner._run_gates(work, tree, out_dir / f"{tag}-gates.txt")
+    if status != runner.GATE_PASS:
+        return False, why, 0
+    junit = out_dir / f"{tag}-junit.xml"
+    whole = suite.Selection(suite.ALL, "the merged batch - everything, once")
+    try:
+        ok, why, _ = runner._run_tests(
+            tree, out_dir / f"{tag}-pytest.txt", test_timeout, junit,
+            whole.pytest_args(tree / suite.tests_rel(work)))
+    except subprocess.TimeoutExpired:
+        return False, f"pytest: timed out after {test_timeout}s", 0
+    return ok, why, suite.junit_total(junit)
+
+
+def bisect(work: Path, tree: Path, branch: str, base: str, order: list[str],
+           out_dir: Path, test_timeout: int) -> str | None:
+    """Which chore reddened the batch — by replaying prefixes, never by guessing.
+
+    The dispatcher holds one merge commit per chore, so this is a binary search over
+    the merge order rather than an attribution problem. `next_probe` picks the
+    midpoint rather than the last-merged, because a batch is as likely to have broken
+    early as late.
+
+    The **last** suspect is never probed: its prefix is the whole batch, which is
+    already known red, so testing it would spend a suite run to learn nothing — and
+    would not narrow the window, which is how this loop would fail to terminate.
+
+    `None` when the suspects run out, which means the red is not attributable to any
+    one item: the caller hands the whole batch over rather than blaming one.
+    """
+    suspects = list(order)
+    while len(suspects) > 1:
+        probe = next_probe(suspects[:-1])
+        if probe is None:
+            return None
+        through = order[:order.index(probe) + 1]
+        print(f"    bisect: replaying {len(through)} of {len(order)} "
+              f"(up to and including {probe})")
+        _merge_prefix(work, tree, base, through)
+        ok, why, _ = _verify_tree(work, tree, out_dir, f"bisect-{probe}", test_timeout)
+        index = suspects.index(probe)
+        if ok:
+            suspects = suspects[index + 1:]
+        else:
+            print(f"      red at {probe} - {why[:110]}")
+            suspects = suspects[:index + 1]
+    return suspects[0] if suspects else None
+
+
+# ------------------------------------------------- phase 3: one review, one landing
+
+
+def _review_context(cards: dict[str, board.Card], order: list[str]) -> tuple[str, str]:
+    """The `(criteria, intent)` blocks for a review of several cards at once.
+
+    Numbered and attributed, because the reviewer's question for a batch is *"did
+    any of these do something needing a decision"* and an unattributed answer is
+    not actionable. Nothing else about the review changes: it still sees the diff,
+    the criteria and the repo, and nothing about how any of it was made.
+    """
+    criteria: list[str] = [
+        f"This branch carries {len(order)} independent one-prompter changes. Each is "
+        f"listed below with its own criteria; judge them together, and say so if two "
+        f"of them interact.", ""]
+    intent: list[str] = []
+    for n, card_id in enumerate(order, 1):
+        card = cards[card_id]
+        said = (board.section(card.text, "Acceptance")
+                or board.section(card.text, "Acceptance criteria")
+                or "(none stated on the card)")
+        criteria += [f"### {n}. {card.title} (`{card_id}`)", "", said, ""]
+        intent += [f"### {n}. {card.title} (`{card_id}`)", "",
+                   board.section(card.text, "Intent") or "(none stated on the card)", ""]
+    return "\n".join(criteria), "\n".join(intent)
+
+
+def _land(work: Path, card: board.Card, outcome: Outcome, branch: str,
+          remote: str) -> str:
+    """Move one landed chore to its final lane and reap its branch.
+
+    Where it goes is the card's own `verify:` declaration, exactly as `settle` reads
+    it for a full card: `play` has a surface to exercise and lands in `testing/`
+    carrying the batch checklist's row; `review` has none — a gate, an encoding fix,
+    inner wiring — so the gates and the suite were its acceptance and it goes
+    straight to `done/`. That is what keeps the checklist short enough to be read.
+    """
+    card.write({"started": None, "finished": runner._now()})
+    card.write_section("Summary", outcome.detail or "landed as part of a chore batch")
+    if card.verify == "play":
+        card.write_section("How to test", outcome.how_to_test or
+                           "The worker recorded no scenario - that is itself a defect on a "
+                           f"`verify: play` card; the diff is on `{branch}`.")
+    lane = "testing" if card.verify == "play" else "done"
+    board.move(work, card, lane)
+
+    ref = f"ai/{card.id}"
+    runner._delete_remote_branch(work, remote, ref)
+    # `-d`, not `-D`: the safe form refuses a branch that is not actually merged,
+    # which is exactly the check wanted here. Nothing was rebased, so the branch's
+    # own tip really is an ancestor of the integration branch once the batch landed.
+    dropped = runner._git(work, "branch", "-d", ref)
+    if dropped.returncode != 0:
+        print(f"  ! landed {card.id} but could not delete {ref} - "
+              f"{(dropped.stderr or dropped.stdout or '').strip()[:120]}")
+    return f"{card.id}: -> {lane}/"
+
+
+def _hand_over(work: Path, card: board.Card, branch: str, why: str) -> str:
+    """A survivor whose batch did not land. Its diff is green on its own branch and
+    the batch's is not its fault, so it goes to `review/` — "gates green, waiting on
+    something else" is exactly what that lane means — with the reason on the card."""
+    card.write({"started": None, "finished": runner._now()})
+    card.write_section("Merge", why)
+    board.move(work, card, "review")
+    return f"{card.id}: -> review/ (the batch did not land)"
+
+
+# --------------------------------------------------------------------- the driver
+
+
+def _workspace(root: Path, base: str) -> tuple[Path, str]:
+    """Where the board and git work happen, or `(root, reason)` on a refusal.
+
+    The same topology `run()` establishes and for the same reason: when the launch
+    checkout is on the integration branch the batch works in place, otherwise it
+    uses the runner's dedicated checkout and leaves the working copy alone.
+    """
+    if runner.current_branch(root) == base:
+        return root, ""
+    try:
+        work = runner.ensure_integration_checkout(root, base)
+    except RuntimeError as exc:
+        return root, str(exc)
+    if dirty := runner.dirty_outside_board(work):
+        shown = ", ".join(dirty[:4]) + (f" (+{len(dirty) - 4} more)" if len(dirty) > 4 else "")
+        return root, (f"the dedicated `{base}` checkout is dirty outside the board: "
+                      f"{shown}. It is runner-owned; commit or discard those changes "
+                      f"in {work} and re-run.")
+    return work, ""
+
+
+def execute(root: Path, *, limit: int = DEFAULT_BATCH, allow_paid: bool = False,
+            card_budget: float = 0.0, test_timeout: int = 600,
+            batch_test_timeout: int = BATCH_TEST_TIMEOUT_S,
+            now: dt.datetime | None = None) -> tuple[int, Batch]:
+    """Run one batch end to end. Returns `(exit code, batch)`.
+
+    Exit codes: 0 the batch landed (or there was nothing to do), 1 a refusal before
+    anything was dispatched, 3 the money rule stopped it, 4 work was done but the
+    batch did not land and is waiting on a human.
+    """
+    now = now or dt.datetime.now()
+    try:
+        base = runner.default_base(root)
+    except manifest.ManifestError as exc:
+        # A repo that was never set up, or one whose config names no integration
+        # branch. Caught rather than allowed to propagate because this is a CLI and
+        # an unhandled traceback is the least actionable refusal available.
+        print(f"refusing to run - {exc}")
+        return 1, Batch()
+
+    check = runner.preflight(root, base, dry_run=False)
+    if not check.ok:
+        for reason in check.reasons:
+            print(f"refusing to run - {reason}")
+        return 1, Batch()
+
+    if not runner.acquire_lock(root):
+        return 1, Batch()
+    try:
+        work, why = _workspace(root, base)
+        if why:
+            print(f"refusing to run - {why}")
+            return 1, Batch()
+
+        chosen, skipped = select(work, limit=limit)
+        batch = Batch(skipped=list(skipped))
+        print(f"chores: {len(chosen)} selected, {len(skipped)} left out")
+        for entry in skipped:
+            print(f"  - {entry.card_id}: {entry.reason}")
+        if not chosen:
+            textio.write_text_lf(work / OUT, report(batch, now))
+            print(f"  nothing to dispatch; wrote {OUT}")
+            return 0, batch
+
+        try:
+            model = tiers.resolve(work, CHORE_TIER)
+        except tiers.TierError as exc:
+            print(f"refusing to run - {exc}")
+            return 1, Batch()
+
+        # Headless `-p` has no trust dialog, so an untrusted workspace makes every
+        # dispatch fail with no useful message. Same precondition the runner sets.
+        runner.ensure_workspace_trusted(root)
+        print(f"dispatching {len(chosen)} chore(s) at tier {CHORE_TIER} ({model})")
+
+        # --- phase 1 ---------------------------------------------------------
+        cards: dict[str, board.Card] = {}
+        stopped = ""
+        for index, card in enumerate(chosen):
+            if (work / runner.STOP_FILE).is_file():
+                stopped = "the kill switch appeared"
+            elif not _guard(allow_paid, f"dispatching {card.id}").allow:
+                stopped = "the usage window closed"
+            if stopped:
+                for later in chosen[index:]:
+                    out = _outcome_for(later)
+                    out.state, out.detail = "blocked", stopped
+                    batch.outcomes.append(out)
+                break
+            cards[card.id] = card
+            outcome, result = run_one(work, card, base, model,
+                                      card_budget=card_budget, test_timeout=test_timeout)
+            outcome.how_to_test = result.how_to_test
+            batch.outcomes.append(outcome)
+            if outcome.state == "blocked":
+                stopped = outcome.detail
+                for later in chosen[index + 1:]:
+                    skipped_out = _outcome_for(later)
+                    skipped_out.state, skipped_out.detail = "blocked", stopped
+                    batch.outcomes.append(skipped_out)
+                break
+
+        survivors = [o.card_id for o in batch.survivors]
+        print(f"phase 1: {len(survivors)} survivor(s), "
+              f"{len(batch.by_state('bounced'))} bounced, "
+              f"{len(batch.by_state('parked'))} parked, "
+              f"{len(batch.by_state('blocked'))} not reached")
+        if not survivors:
+            textio.write_text_lf(work / OUT, report(batch, now))
+            print(f"  nothing survived to merge; wrote {OUT}")
+            return 0, batch
+
+        code = _land_the_batch(work, base, batch, cards, survivors, now,
+                               allow_paid=allow_paid, card_budget=card_budget,
+                               batch_test_timeout=batch_test_timeout,
+                               stopped_early=bool(stopped))
+        return code, batch
+    finally:
+        runner.release_lock(root)
+
+
+def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.Card],
+                    survivors: list[str], now: dt.datetime, *, allow_paid: bool,
+                    card_budget: float, batch_test_timeout: int,
+                    stopped_early: bool) -> int:
+    """Phases 2 and 3: merge the survivors, verify once, review once, land once."""
+    branch = batch_branch(now)
+    out_dir = work / runner.RUNS / "_chores" / f"{now:%Y%m%d-%H%M}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    remote = str(runner.host_setting(work, "publish_remote", "")).strip()
+
+    runner._git(work, "branch", "-f", branch, base)
+    tree = runner.worktree_root(work) / f"_batch-{now:%Y%m%d-%H%M}"
+    if tree.exists() or runner._worktree_registered(work, tree):
+        runner._git(work, "worktree", "remove", "--force", str(tree))
+    runner._git(work, "worktree", "prune")
+    tree.parent.mkdir(parents=True, exist_ok=True)
+
+    landed = False
+    green = False
+    why = ""
+    total = 0
+    order = list(survivors)
+    try:
+        made = runner._worktree_add(work, str(tree), branch)
+        if made.returncode != 0:
+            why = (f"could not cut a worktree for `{branch}`: "
+                   f"{(made.stderr or made.stdout or '').strip()[:150]}")
+            order = []
+        for _round in range(MAX_RED_ROUNDS):
+            if not order:
+                break
+            order, refused = _merge_prefix(work, tree, base, order)
+            for card_id, reason in refused:
+                _drop(work, batch, cards, card_id,
+                      f"its branch would not merge onto the batch: {reason}")
+            if not order:
+                why = "no surviving branch would merge onto the batch"
+                break
+            print(f"phase 2: {len(order)} chore(s) merged onto {branch} - "
+                  f"gates and the whole suite, once")
+            ok, why, total = _verify_tree(work, tree, out_dir, "batch",
+                                          batch_test_timeout)
+            if ok:
+                green = True
+                break
+            print(f"  the batch is red - {why[:140]}")
+            culprit = bisect(work, tree, branch, base, order, out_dir,
+                             batch_test_timeout)
+            if culprit is None:
+                why = (f"the combined result is red and no single item accounts for it: "
+                       f"{why}")
+                break
+            print(f"  bisect names {culprit}; dropping it and re-verifying")
+            _drop(work, batch, cards, culprit,
+                  f"reddened the batch suite; found by bisecting the merge order. {why}")
+            order = [c for c in order if c != culprit]
+        else:
+            # Out of rounds without a green result. A second red is evidence about
+            # *routing* — items are reaching the batch that are not chores — and
+            # more bisecting does not answer that. Whatever is still in `order` is
+            # green on its own branch and is handed over below rather than dropped.
+            why = (f"the batch came back red {MAX_RED_ROUNDS} times; that is a routing "
+                   f"finding, not a bisecting one - read the items rather than "
+                   f"re-running them. Last: {why}")
+
+        if green:
+            print(f"  green: {total} test(s) over the merged batch")
+            if stopped_early:
+                why = ("the batch is green but phase 1 stopped early, so the window "
+                       "cannot be trusted to hold a review; nothing merges unreviewed")
+            elif not _guard(allow_paid, f"reviewing {branch}").allow:
+                why = ("the batch is green but the money rule stopped the review; "
+                       "nothing merges without a review")
+            else:
+                why = _review(work, base, branch, out_dir, cards, order, card_budget)
+                if not why:
+                    landed, why = runner.merge_branch(work, branch, base, label=branch)
+    finally:
+        runner._git(work, "worktree", "remove", "--force", str(tree))
+        runner._git(work, "worktree", "prune")
+
+    suite_line = f"{total} test(s), green" if landed else (why or "not run")
+    if landed:
+        print(f"phase 3: {branch} merged into {base}")
+        for card_id in order:
+            outcome = next(o for o in batch.outcomes if o.card_id == card_id)
+            print("  " + _land(work, cards[card_id], outcome, branch, remote))
+        runner._git(work, "branch", "-d", branch)
+    else:
+        print(f"the batch did not land - {why}")
+        for card_id in order:
+            print("  " + _hand_over(
+                work, cards[card_id], branch,
+                f"This chore is green on `ai/{card_id}` and was merged onto the batch "
+                f"branch `{branch}`, which did not land: {why}. The batch branch still "
+                f"exists; resolve it there, or merge this card's branch by hand."))
+
+    textio.write_text_lf(work / OUT, report(batch, now, branch=branch, suite=suite_line))
+    board.commit_board(work, f"chores: batch {branch}", extra_paths=(str(OUT),))
+    runner.publish(work, remote, base)
+    print(f"  wrote {OUT}")
+    return 0 if landed else 4
+
+
+def _drop(work: Path, batch: Batch, cards: dict[str, board.Card], card_id: str,
+          detail: str) -> None:
+    """Take one chore out of the batch, and settle its card so it leaves `tasks/`.
+
+    The settle is not bookkeeping tidiness — it is the same hole `attempt_limit`
+    closes one path over. A dropped chore has already spent its single attempt, so
+    the batch will not re-queue it and the night will not dispatch it either: left
+    in `tasks/` it would be a card nothing picks up and nothing reports. It goes to
+    `failed/` with the reason on it, and its branch survives for whoever reads it.
+
+    The recorded outcome is *mutated* rather than joined by a second entry: an item
+    appearing twice on the report is worse than one in the wrong bucket, because
+    the counts stop adding up and nothing says which entry is current.
+    """
+    for outcome in batch.outcomes:
+        if outcome.card_id == card_id:
+            outcome.state, outcome.detail = "parked", detail
+            break
+    card = cards.get(card_id)
+    if card is not None:
+        print("  " + runner.settle(work, card_id, runner.Dispatch("failed", detail)))
+
+
+def _review(work: Path, base: str, branch: str, out_dir: Path,
+            cards: dict[str, board.Card], order: list[str],
+            card_budget: float) -> str:
+    """One review over the whole batch diff. Returns why it must not merge, or `""`.
+
+    Once, not per item, and that is not only an economy: the reviewer's question for
+    a chore is *"did any of these do something needing a decision"*, which is
+    answerable across the set, and a reviewer holding the combined diff can see an
+    interaction between two items that per-item review structurally cannot.
+
+    A `needs_decision` about one item stops the **whole** batch. That is the price of
+    reviewing a batch as one unit and it is paid deliberately: merging past a request
+    for a decision is the one thing no stage here is allowed to do, and splitting the
+    batch on the reviewer's say-so would mean guessing which items its question was
+    about. The branch survives, so the answer is a merge by hand rather than lost work.
+    """
+    try:
+        model = tiers.resolve(work, "lead")
+    except tiers.TierError as exc:
+        return f"the reviewer's tier could not be resolved: {exc}"
+    criteria, intent = _review_context(cards, order)
+    print(f"phase 3: reviewing {branch} as one diff ({model})")
+    verdict, _cost, wall = runner.review_branch(
+        work, f"batch-{branch.replace('/', '-')}", out_dir, model, base, branch,
+        card_budget, BATCH_TEST_TIMEOUT_S, criteria=criteria, intent=intent)
+    called = str(verdict.get("verdict", "")).lower()
+    print(f"  {called or '(no verdict)'} - {str(verdict.get('notes', ''))[:100]}")
+    if called == "ok":
+        return ""
+    if called == "needs_decision":
+        question = str(verdict.get("question", "")).strip()
+        return ("the reviewer flagged something for a decision: "
+                + (question or "it stated no question, which is itself worth a look"))
+    if wall is not None:
+        return "the review hit a usage limit before it reached a verdict"
+    return "the review returned no usable verdict"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Select and report the next batch of chores.")
+        description="Dispatch and verify the next batch of chores.")
     parser.add_argument("--root", type=Path, default=None)
     parser.add_argument("--limit", type=int, default=DEFAULT_BATCH,
                         help=f"chores per batch (default {DEFAULT_BATCH})")
     parser.add_argument("--plan", action="store_true",
                         help="list the batch and what was left out; dispatch nothing")
+    parser.add_argument("--allow-paid", action="store_true",
+                        help="proceed even if a dispatch would draw on paid credits "
+                             "(the explicit 'continue nevertheless' decision)")
+    parser.add_argument("--card-budget", type=float, default=0.0,
+                        help="optional USD cap handed to each worker process")
+    parser.add_argument("--test-timeout", type=int, default=600,
+                        help="seconds allowed for one chore's own test slice")
     args = parser.parse_args(argv)
+
+    if not args.plan:
+        return execute(args.root or repo_root(), limit=args.limit,
+                       allow_paid=args.allow_paid, card_budget=args.card_budget,
+                       test_timeout=args.test_timeout)[0]
 
     root = args.root or repo_root()
     chosen, skipped = select(root, limit=args.limit)
-
     print(f"chores: {len(chosen)} selected, {len(skipped)} left out")
     for card in chosen:
         print(f"  + {card.id}")
     for entry in skipped:
         print(f"  - {entry.card_id}: {entry.reason}")
-
-    if not args.plan:
-        # Deliberately not a silent no-op: the execution half is a separate change to
-        # the dispatcher, and pretending otherwise here would be the worst outcome.
-        print("\nexecution is not wired yet - re-run with --plan, or dispatch the "
-              "cards individually. See this module's docstring.")
-        return 2
 
     batch = Batch(skipped=list(skipped))
     textio.write_text_lf(root / OUT, report(batch, dt.datetime.now()))

@@ -238,12 +238,14 @@ def test_plan_writes_the_report_and_dispatches_nothing(tmp_path, capsys):
     assert b"\r\n" not in (root / chores.OUT).read_bytes()
 
 
-def test_without_plan_it_refuses_loudly_rather_than_doing_nothing_quietly(tmp_path, capsys):
-    """The execution half is a separate change; a silent no-op would be the worst
-    outcome, because it looks like the batch ran and found nothing to do."""
-    root = _repo(tmp_path, {"id": "a"})
-    assert chores.main(["--root", str(root)]) == 2
-    assert "not wired yet" in capsys.readouterr().out
+def test_a_real_run_refuses_with_a_reason_rather_than_doing_nothing_quietly(tmp_path,
+                                                                            capsys):
+    """A batch that cannot run says which precondition stopped it. The silent
+    no-op is the worst outcome available here, because it is indistinguishable
+    from a batch that ran and found nothing to do."""
+    root = _repo(tmp_path, {"id": "a"})           # not a git repo, no tier binding
+    assert chores.main(["--root", str(root)]) == 1
+    assert "refusing to run" in capsys.readouterr().out
 
 
 def test_the_cli_reports_what_was_left_out(tmp_path, capsys):

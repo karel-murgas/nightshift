@@ -12,6 +12,11 @@ whether it passed":
 3. **How to judge it** (`check_junit`) — pytest's own JUnit report, not an exit
    code and not a claim that the suite ran.
 
+There is a fourth, `touched`, and it is deliberately not in that list: it is a
+*narrower* answer to question 1 that is only sound for a caller which runs the
+whole suite afterwards anyway. Part 1b states the condition; no caller gets it by
+default.
+
 Keeping all three here is what lets the preflight run *exactly* what the runner
 runs. They used to be spread across three files with the preflight having none
 of them: it shelled a plain full-suite `pytest tests/ -q` and judged the exit
@@ -402,6 +407,12 @@ class Selection:
     bucket: str            # the derived label: game | system | board | board+game | all | none
     reason: str
     parts: frozenset = frozenset()   # the reduced test-bearing parts this run covers
+    # An explicit list of test filenames, set only by `touched` (see part 1b). When
+    # present it *is* the run and `parts` is not consulted — the union below answers
+    # "which half of the suite", and this answers a strictly narrower question the
+    # halves cannot express. Empty on every `select` result, so the ordinary path is
+    # byte-for-byte what it was.
+    files: tuple[str, ...] = ()
 
     @classmethod
     def for_parts(cls, parts, reason: str) -> "Selection":
@@ -431,7 +442,14 @@ class Selection:
         `["tests/"]`, so an empty result is an unambiguous "skip pytest, report a
         pass" signal each caller checks before building a pytest command (board
         notes only, whose validity is a gate's job — see the module docstring).
+
+        A selection carrying explicit `files` (`touched`) names them and stops.
+        `touched` never produces an empty file list — it falls back to `select`
+        rather than narrowing to nothing — so this cannot become a silent
+        zero-collected run, which `check_junit` would fail anyway.
         """
+        if self.files:
+            return [f"{tests_dir.name}/{name}" for name in self.files]
         parts = self._parts()
         if not parts:
             return []
@@ -537,6 +555,231 @@ def select(changed: set[str], repo_root: Path | None = None) -> Selection:
                                "validity is the card_schema gate's job, no pytest applies")
     return Selection(ALL, "diff touches no classifiable code — running everything to be safe",
                      _ALL_PARTS)
+
+
+# --- 1b. Narrower still: only the tests that reach what changed ---------------
+#
+# `select` answers "which half of the suite", and for a change confined to the
+# project's own code that half is most of the suite. That is the right answer for
+# a card whose one verification decides whether it lands — running too few tests
+# is the only unsafe direction, and there is nothing downstream to catch a miss.
+#
+# **A batch changes that arithmetic, and it is the only thing that does.** A batch
+# merges its members onto one branch and runs the *whole* suite over the combined
+# result before any of it lands, so a miss here is caught there. That makes a
+# narrow per-item slice safe in exactly one situation and unsafe everywhere else:
+# the backstop is what buys the narrowing, so a caller without one must keep using
+# `select`. Nothing in this module decides that — `touched` is offered, never
+# defaulted to, and `select` remains what every single-item caller uses.
+#
+# What it buys: eight items verified against `select` cost eight passes over the
+# same half of the suite, most of which cannot reach what any of them changed. The
+# measured complaint (2026-08-14) was that verifying a batch of one-prompters took
+# longer than doing them.
+#
+# **Reachability, not name-matching.** A test that imports a module which imports
+# the changed one is affected and its filename says nothing about that, so the
+# import graph of the project's own code is walked transitively. Only the project's
+# code is walked: a change inside a third-party package is not something this
+# selection is being asked about.
+#
+# What it deliberately cannot see: a test that reaches the change through a string
+# — a plugin registry, a fixture path, an entry point — imports nothing that names
+# it and will not be selected. That is the residual risk, it is real, and it is
+# precisely what the batch suite is for.
+
+#: The bucket label for a `touched` selection. Not in `_BUCKET_PARTS` on purpose:
+#: this selection is defined by its file list, and a bare `Selection(TOUCHED, "")`
+#: with no files falls through to the ALL default, which is the safe direction.
+TOUCHED = "touched"
+
+
+def module_of(path: str, where: Layout) -> str:
+    """The dotted import name of a changed source file, or `""`.
+
+    `dungeoneer/core/i18n.py` → `dungeoneer.core.i18n`; a package's `__init__.py`
+    → the package itself. Only the *last* segment of a source dir survives,
+    because that is what the module is imported as: `src/game/core/x.py` is
+    `game.core.x`, matching `Layout.source_packages`.
+    """
+    p = path.replace("\\", "/")
+    if not p.endswith(".py"):
+        return ""
+    for directory in where.source_dirs:
+        prefix = f"{directory}/"
+        if not p.startswith(prefix):
+            continue
+        rest = p[len(prefix):-len(".py")]
+        parts = [Path(directory).name, *[s for s in rest.split("/") if s]]
+        if parts[-1] == "__init__":
+            parts.pop()
+        return ".".join(parts)
+    return ""
+
+
+def _dotted_imports(path: Path, own: str = "") -> frozenset[str]:
+    """Every dotted module name a file imports, as written.
+
+    `from a.b import c` yields **both** `a.b` and `a.b.c`, because that syntax
+    cannot say which of the two `c` is without importing it, and guessing the
+    narrow one would drop a real dependency. Over-naming costs a test in the
+    slice; under-naming loses coverage.
+
+    Relative imports are resolved against `own` — a source module's own dotted
+    name. Without it a `from . import x` inside the project resolves to nothing
+    and the edge disappears from the graph, which is the quiet direction of wrong.
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except (SyntaxError, ValueError, OSError):
+        return frozenset()
+    package = own.rsplit(".", 1)[0] if "." in own else ""
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                base = node.module or ""
+            else:
+                # `from . import x` inside `a.b.c` is `a.b`; each extra dot climbs one.
+                segments = package.split(".") if package else []
+                climbed = segments[:len(segments) - (node.level - 1)] if node.level > 1 \
+                    else segments
+                base = ".".join([*climbed, node.module] if node.module else climbed)
+            if not base:
+                continue
+            found.add(base)
+            found.update(f"{base}.{alias.name}" for alias in node.names if alias.name != "*")
+    return frozenset(found)
+
+
+def _resolve(imported: str, known: frozenset[str]) -> str:
+    """The project module an import names, or `""`.
+
+    The longest known prefix wins: `dungeoneer.core.i18n.t` is an attribute of
+    `dungeoneer.core.i18n` when that module exists, and of `dungeoneer.core` when
+    it does not. Walking prefixes rather than scanning `known` keeps this O(depth)
+    on a graph that is rebuilt for every batch item.
+    """
+    parts = imported.split(".")
+    while parts:
+        candidate = ".".join(parts)
+        if candidate in known:
+            return candidate
+        parts.pop()
+    return ""
+
+
+def _source_graph(repo_root: Path, where: Layout) -> dict[str, frozenset[str]]:
+    """Every project module mapped to the dotted names it imports."""
+    graph: dict[str, frozenset[str]] = {}
+    for directory in where.source_dirs:
+        base = repo_root / directory
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*.py"):
+            rel = path.relative_to(repo_root).as_posix()
+            name = module_of(rel, where)
+            if name:
+                graph[name] = _dotted_imports(path, name)
+    return graph
+
+
+def _impacted(changed: set[str], graph: dict[str, frozenset[str]]) -> set[str]:
+    """`changed` plus every project module that transitively imports one of them.
+
+    A breadth-first walk of the reverse import graph. The reverse edges are built
+    once here rather than re-derived per step, because the forward graph is what
+    is cheap to read off disk and the reverse is what the question needs.
+    """
+    known = frozenset(graph)
+    importers: dict[str, set[str]] = {}
+    for module, imports in graph.items():
+        for imported in imports:
+            target = _resolve(imported, known)
+            if target and target != module:
+                importers.setdefault(target, set()).add(module)
+
+    reached = set(changed)
+    queue = list(changed)
+    while queue:
+        for importer in importers.get(queue.pop(), ()):
+            if importer not in reached:
+                reached.add(importer)
+                queue.append(importer)
+    return reached
+
+
+def touched(changed: set[str], repo_root: Path | None) -> Selection:
+    """The test files that reach what this diff changed — **only for a caller with
+    a full-suite backstop.** See part 1b above for why that condition is not
+    optional.
+
+    Falls back to `select` — never to something narrower — whenever the diff holds
+    a path this cannot reason about: anything outside the project's own `.py`
+    files and its tests, a missing root, or a narrowing that came out empty. Paths
+    carrying no test weight at all (docs, memory notes, board notes) are ignored
+    rather than triggering the fallback, exactly as `select` ignores them; a chore
+    that edits a module and its documentation is the common case, not an exception.
+    """
+    fallback = select(changed, repo_root)
+    if repo_root is None or not changed:
+        return fallback
+
+    where = layout(repo_root)
+    if not where.source_dirs:
+        return fallback
+
+    tests_prefix = f"{where.tests_dir}/"
+    changed_modules: set[str] = set()
+    named_tests: set[str] = set()
+    for path in changed:
+        p = path.replace("\\", "/")
+        if p.startswith("./"):
+            p = p[2:]
+        name = p.rsplit("/", 1)[-1]
+        if p.startswith(tests_prefix) and name.startswith("test_") and name.endswith(".py"):
+            named_tests.add(name)
+            continue
+        module = module_of(p, where)
+        if module:
+            changed_modules.add(module)
+            continue
+        if classify(p, repo_root) in (NOTE, "other"):
+            continue        # carries no test weight — the same paths `select` ignores
+        return fallback     # system code, board cards, assets: not this function's question
+
+    if not changed_modules and not named_tests:
+        return fallback
+
+    tests_dir = repo_root / where.tests_dir
+    if not tests_dir.is_dir():
+        return fallback
+
+    graph = _source_graph(repo_root, where)
+    reached = _impacted(changed_modules, graph)
+    known = frozenset(graph)
+    files = set(named_tests)
+    for path in sorted(tests_dir.glob("test_*.py")):
+        if path.name in files:
+            continue
+        for imported in _dotted_imports(path):
+            if _resolve(imported, known) in reached:
+                files.add(path.name)
+                break
+
+    if not files:
+        # Nothing imports what changed. That is a real answer, but "run no tests"
+        # is never one this module gives on a code diff — an unreachable module is
+        # far more likely to be reached through a string than to be dead.
+        return fallback
+    return Selection(
+        TOUCHED,
+        f"{len(changed_modules)} changed module(s) reach {len(files)} test file(s) "
+        f"— the batch suite covers everything else",
+        files=tuple(sorted(files)),
+    )
 
 
 # --- 2. How to run it ---------------------------------------------------------

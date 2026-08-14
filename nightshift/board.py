@@ -92,6 +92,12 @@ PRIVATE_LANE = "ideas"
 # 03_board.md §2. Appended in this order when absent.
 RUNNER_FIELDS: tuple[str, ...] = ("attempts", "branch", "started", "finished")
 
+# The one non-default `kind:`, owned here for the same reason `LANES` is: it is the
+# board's vocabulary, and the schema gate, the dispatcher and the batch driver all
+# have to agree on the spelling. Absent means a full card, so no card written
+# before this existed changes meaning.
+KIND_CHORE = "chore"
+
 # The one frontmatter-block regex for the board (`board-parser-convergence`).
 # `digest.py` calls through `parse_fields`/`section` below and never needs this
 # directly. `reconcile.py` still hand-splices just the `state:` line — its
@@ -203,6 +209,24 @@ class Card:
         second pair of eyes is a property of the deliverable, not of who made it.
         """
         return self.fields.get("checker", "none")
+
+    @property
+    def kind(self) -> str:
+        """What sort of work item this is — `chore`, or `""` for a full card.
+
+        A property rather than a `fields.get` at each site because three separate
+        mechanisms branch on it (the dispatcher skips chores, the attempt limit
+        differs, the worker prompt gains a bounce instruction), and a misspelled
+        literal in any one of them would silently take the full-card path.
+        """
+        return self.fields.get("kind", "")
+
+    @property
+    def surface(self) -> str:
+        """Where in the running application this change shows up — free text the
+        project supplies, never a vocabulary this package invents. The batch
+        checklist groups by it so one pass through the app covers several items."""
+        return self.fields.get("surface", "")
 
     @property
     def recipe(self) -> str:

@@ -301,6 +301,77 @@ def test_a_card_at_the_attempt_limit_is_skipped(tmp_path):
     assert not _select(root)["burnt"].dispatchable
 
 
+# --- chores are a different queue, not a different kind of night ------------
+#
+# `kind: chore` is dispatched in a batch (`nightshift.chores`): a cheap per-item
+# pass, then one full suite run over the merged result. The night must therefore
+# leave chores alone — dispatching one here would give it the full per-card
+# treatment the batch exists to avoid, and three attempts instead of one. Two
+# rules, and they have to agree: what selection refuses to queue, retirement must
+# take out of `tasks/`, or the card is one nothing ever picks up again.
+
+
+def test_a_chore_is_not_dispatched_by_the_ordinary_night(tmp_path):
+    root = _repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "small", kind="chore")
+    candidate = _select(root)["small"]
+    assert not candidate.dispatchable
+    assert "batch" in candidate.reason
+
+
+def test_naming_a_chore_by_name_still_runs_it(tmp_path):
+    """`--card` is a human asking for this one item, which is the same warrant
+    that waives `unattended: false` and the attempt limit."""
+    root = _repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "small", kind="chore")
+    forced = {c.card.id: c for c in runner.select(root, set(), {}, forced="small")}
+    assert forced["small"].dispatchable
+
+
+def test_a_chore_gets_one_attempt_and_a_full_card_gets_three(tmp_path):
+    root = _repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "small", kind="chore")
+    _card(root, "tasks", "big")
+    assert runner.attempt_limit(board.find(root, "small")) == runner.CHORE_MAX_ATTEMPTS
+    assert runner.attempt_limit(board.find(root, "big")) == runner.MAX_ATTEMPTS
+
+
+def test_a_failed_chore_retires_instead_of_waiting_in_tasks_for_a_retry(tmp_path):
+    """The half of the one-attempt rule that is easy to leave out. Selection
+    already refuses a spent chore, so a chore left in `tasks/` after its single
+    failure is invisible to both queues at once."""
+    root = _repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "small", kind="chore", attempts="1")
+    runner.settle(root, "small", runner.Dispatch("failed", "the tests went red"))
+    assert board.find(root, "small").lane == "failed"
+
+
+def test_a_chores_prompt_tells_the_worker_to_bounce_and_a_full_cards_does_not(
+        tmp_path, monkeypatch):
+    """The routing guess is made without opening the code; the worker is the only
+    actor that does open it, so it is the only place the guess can be checked. The
+    condition is the card's `kind:`, which a charter cannot see — hence the prompt."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "small", kind="chore")
+    _card(root, "tasks", "big")
+    seen = _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
+
+    prompts = {}
+    for card_id in ("small", "big"):
+        runner.dispatch(root, board.find(root, card_id), "development_team",
+                        "sonnet", 0.0, 120)
+        out = runner.run_dir(root, board.find(root, card_id), 1)
+        prompts[card_id] = (out / "prompt-1.md").read_text(encoding="utf-8")
+    assert seen["argv"]
+    assert "one-prompter" in prompts["small"]
+    assert "one-prompter" not in prompts["big"]
+
+
 def test_a_recently_failed_card_waits_for_its_backoff(tmp_path):
     root = _repo(tmp_path)
     _charter(root, "code-thread")
@@ -2340,7 +2411,7 @@ def test_only_the_spawn_functions_may_execute_the_claude_cli():
     to do (select, recover, settle, backoff) may reach for it.
 
     Four functions now: `run_producer`, `run_checker`, `run_stale_check` and
-    `run_reviewer` (automate-review-step). Each *starts a worker* — a producer,
+    `review_branch` (automate-review-step). Each *starts a worker* — a producer,
     its checker, `stale-hunter` on one doc, or the diff reviewer on one finished
     branch — and none of them *decides* anything: `review_stage` reads the
     reviewer's verdict and routes on it (a file-state lookup), exactly as the card
@@ -2348,13 +2419,19 @@ def test_only_the_spawn_functions_may_execute_the_claude_cli():
     the point — its context is built here rather than by the worker, which is what
     makes §16's blindness structural instead of a charter instruction.
 
+    `review_branch` is where the reviewer's spawn now lives; `run_reviewer` is the
+    one-card wrapper that lifts `## Acceptance`/`## Intent` off a card and calls
+    it. The split is what lets the chore batch review a branch carrying several
+    cards' work as one diff, and it does not widen this list — the spawn moved
+    down one frame, it did not multiply.
+
     `preflight` deliberately does not count: it calls `claude_binary()`, which is
     a `shutil.which` lookup. Checking that a file exists is not an LLM call, and
     checking it *before* a card's `attempts` is spent is the reason it is there.
     """
     source = _RUNNER_SOURCE.read_text(encoding="utf-8")
     assert _functions_spawning(source, "binary") == {
-        "run_producer", "run_checker", "run_stale_check", "run_reviewer"}
+        "run_producer", "run_checker", "run_stale_check", "review_branch"}
 
 
 # Spawn sites whose wall path is allowed NOT to consult
@@ -2385,7 +2462,7 @@ def test_every_spawn_sites_wall_path_routes_through_the_shared_helper():
     """The second-order guard for `wall-on-review-wrapup-discards-a-verdict`.
 
     The spawn sites are a *growing* set — there were two, then three, then four
-    (`run_reviewer` arrived with `automate-review-step`). A fix that patched
+    (the diff reviewer arrived with `automate-review-step`). A fix that patched
     three `if wall is not None:` branches by hand would be silently wrong the day
     a fifth judge stage lands: it would copy the ordering from its neighbours,
     and nothing would error. So the honour-the-artefact decision lives in one
@@ -3270,11 +3347,12 @@ def _stub_reviewer(monkeypatch, verdict: dict, cost: float = 0.2,
                    wall: "limits.Wall | None" = None) -> list:
     spawned: list = []
 
-    def fake(root, card, out_dir, model, base, branch, card_budget, timeout):
+    def fake(root, label, out_dir, model, base, branch, card_budget, timeout,
+             *, criteria, intent):
         spawned.append(branch)
         return verdict, cost, wall
 
-    monkeypatch.setattr(runner, "run_reviewer", fake)
+    monkeypatch.setattr(runner, "review_branch", fake)
     return spawned
 
 
@@ -3891,7 +3969,7 @@ def test_a_night_lands_a_reviewed_ok_card_in_testing(tmp_path, monkeypatch):
     merge)."""
     root = _loaded_board(tmp_path, "feat")
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "done"})
-    monkeypatch.setattr(runner, "run_reviewer",
+    monkeypatch.setattr(runner, "review_branch",
                         lambda *a, **k: ({"verdict": "ok", "notes": "clean"}, 0.1, None))
     monkeypatch.setattr(runner, "rebase_and_merge",
                         lambda r, card, branch, base, test_timeout=600, remote="":
@@ -4561,7 +4639,7 @@ def test_a_run_uses_a_dedicated_checkout_and_leaves_the_launch_copy_alone(tmp_pa
     root, path = _split_repo(tmp_path, "feat")
     (root / "scratch.py").write_text("wip = 1\n", encoding="utf-8")   # Karel mid-edit
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "done"})
-    monkeypatch.setattr(runner, "run_reviewer",
+    monkeypatch.setattr(runner, "review_branch",
                         lambda *a, **k: ({"verdict": "ok", "notes": "clean"}, 0.1, None))
 
     runner.run(root, runner._parser(root).parse_args(
@@ -4581,7 +4659,7 @@ def test_on_base_the_runner_works_in_place_and_cuts_no_dedicated_checkout(tmp_pa
     in-place exactly as before and cuts no sibling checkout."""
     root = _loaded_board(tmp_path, "feat")            # HEAD on development_team
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
-    monkeypatch.setattr(runner, "run_reviewer",
+    monkeypatch.setattr(runner, "review_branch",
                         lambda *a, **k: ({"verdict": "needs_decision", "question": "q?"},
                                          0.0, None))
 

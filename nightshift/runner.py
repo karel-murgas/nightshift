@@ -49,6 +49,7 @@ import sys
 import threading
 import time
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -134,6 +135,14 @@ def neighbours_dir(root: Path) -> Path | None:
 # A card gets this many dispatches before it is filed as failed. Three is not a
 # tuned number — it is "one flake, one real retry, then stop burning the night."
 MAX_ATTEMPTS = 3
+# A `kind: chore` gets exactly one, and the arithmetic is the argument: a batch of
+# eight one-prompters at three attempts each is a night, at one attempt each it is
+# an hour. A failed one-prompter is also the more useful artefact — it is worth a
+# human's eye, because a second dispatch of a prompt that already produced the
+# wrong thing usually produces it again. Read by `select` (which refuses to
+# re-queue a spent chore) and by `settle` (which retires one on its first failure
+# rather than leaving it in `tasks/` where nothing would ever pick it up again).
+CHORE_MAX_ATTEMPTS = 1
 # Producer→checker iterations *inside* one dispatch, for a card that names a
 # `checker:`. Distinct from MAX_ATTEMPTS on purpose: an attempt is a dispatch of
 # the card and is what backoff and `failed/` count; a round is one make-then-judge
@@ -769,6 +778,18 @@ def _backoff_remaining(card: board.Card) -> int:
     return max(0, int(wait - elapsed))
 
 
+def attempt_limit(card: board.Card) -> int:
+    """How many dispatches this card gets before it is retired to `failed/`.
+
+    One function rather than a `MAX_ATTEMPTS` literal at each site, because the
+    two places that read it — queue selection and retirement — must agree. They
+    disagreeing is the failure this exists to prevent: a chore that selection
+    refuses to re-queue but retirement leaves in `tasks/` is a card nothing will
+    ever pick up and nothing will ever report.
+    """
+    return CHORE_MAX_ATTEMPTS if card.kind == board.KIND_CHORE else MAX_ATTEMPTS
+
+
 def select(root: Path, capabilities: set[str], bad_schema: dict[str, list[str]],
            forced: str | None = None) -> list[Candidate]:
     """Every card in `tasks/`, each with a yes/no and the reason.
@@ -811,6 +832,15 @@ def select(root: Path, capabilities: set[str], bad_schema: dict[str, list[str]],
 
         if card.id in bad_schema:
             no(f"card_schema: {len(bad_schema[card.id])} violation(s) — not a finished card")
+        elif card.kind == board.KIND_CHORE and not forced_now:
+            # Not a refusal — a routing fact. A chore is verified as part of a
+            # batch (`nightshift.chores`): a cheap per-item pass, then one full
+            # suite run over the merged result. Dispatching it here would give it
+            # the full per-card treatment the batch exists to avoid, and three
+            # attempts instead of one. Waived for `--card`, which is a human
+            # asking for this one item by name.
+            no("kind: chore — dispatched as part of a batch by `python -m "
+               "nightshift.chores`, not one card at a time")
         elif not card.unattended and not forced_now:
             no("unattended: false — declared as needing a human")
         elif card.worker == "none":
@@ -820,7 +850,7 @@ def select(root: Path, capabilities: set[str], bad_schema: dict[str, list[str]],
         elif card.requires and card.requires not in capabilities:
             no(f"requires: {card.requires} — {socket.gethostname()} does not declare it "
                f"(.ai/hosts.json)")  # gate-ok(source_reference_liveness): same HOSTS_FILE as above
-        elif card.attempts >= MAX_ATTEMPTS and not forced_now:
+        elif card.attempts >= attempt_limit(card) and not forced_now:
             no(f"attempts: {card.attempts} — at the limit, belongs in failed/")
         elif (wait := _backoff_remaining(card)) > 0 and not forced_now:
             no(f"backoff: {wait} more minute(s) after attempt {card.attempts}")
@@ -911,7 +941,7 @@ class WorktreePathTooLong(RuntimeError):
     `nightshift-worktree-paths-not-defensive-on-windows` produced — Windows'
     260-char `MAX_PATH`, not a bug in git or in this checkout. Callers that
     already raise on a worktree-add failure need no further handling: this is
-    already a `RuntimeError`. Callers that degrade gracefully (`run_reviewer`,
+    already a `RuntimeError`. Callers that degrade gracefully (`review_branch`,
     the rebase merge, `merge_check.check_branch`) catch this specifically and
     fold its message into their existing failure path.
     """
@@ -1677,6 +1707,43 @@ finish, replace that WIP commit with a real commit** (e.g. `git reset --soft HEA
 commit properly) so the branch does not carry a `wip:` commit into review.
 """
 
+# A `kind: chore` is a one-prompter: the note already said what to change and what
+# the result should be, so there is nothing to elaborate and no fork to resolve.
+# Whether that is *true* of any given item is a routing guess made without opening
+# the code, and the worker is the only actor that does open it — so the worker is
+# the only place the guess can be checked. That is what this note asks for, and
+# saying it here rather than in each charter is deliberate: the condition is the
+# card's `kind:`, which a charter cannot see, and a per-charter copy would be one
+# more thing to remember when a new worker is added.
+#
+# A bounce is cheap and a wrong batch is not: a parked chore costs one dispatch and
+# tells the router it misfired, which is the feedback that makes routing tunable.
+# Guessing instead produces a green diff nobody asked for, inside a batch that
+# lands as one unit.
+_CHORE_NOTE = """\
+
+--- this card is a one-prompter ---
+It was routed here as work with **nothing to decide**: the change has one obvious \
+home, the intent is the whole approach, and a wrong result would be visible rather \
+than subtle. It runs in a batch with other items like it, and the batch lands as one \
+unit.
+
+You are the first actor to open the code, so you are the only one who can find out \
+that the routing was wrong. **Stop and park — do not proceed — the moment any of \
+these turns out to be true**: the change needs a design decision; the thing to change \
+is not where the card implies; doing it properly means touching considerably more than \
+the card describes; or finishing it would need an answer nobody is awake to give.
+
+Parking here is not a failure and costs almost nothing — it is the signal that this \
+was not a one-prompter, and it is worth more than a plausible guess. Write what you \
+found into `## Question` as usual. Do **not** widen the change to make it fit, and do \
+not do a reduced version of it without saying so.
+
+Effort is the other half of the same check: this is budgeted as a single prompt's \
+work. If you find yourself many turns in and still exploring, that is itself the \
+finding — park and say so.
+"""
+
 _FEEDBACK = """\
 
 --- round {round_no} of {max_rounds}: what the checker said about your last attempt ---
@@ -2198,16 +2265,28 @@ def run_checker(root: Path, card: board.Card, out_dir: Path, round_no: int,
     return _read_verdict(verdict_path), cost, wall
 
 
-def run_reviewer(root: Path, card: board.Card, out_dir: Path, model: str, base: str,
-                 branch: str, card_budget: float,
-                 timeout: int) -> tuple[dict, float, limits.Wall | None]:
-    """Spawn the diff reviewer on one card's finished branch (automate-review-step).
+def card_review_context(card: board.Card) -> tuple[str, str]:
+    """The `(criteria, intent)` a single card hands the diff reviewer.
+
+    Lifted verbatim off the card — never summarised, never rephrased — because
+    the reviewer's whole job is judging the diff against what was *asked for*,
+    and a paraphrase is already a judgment about that.
+    """
+    criteria = board.section(card.text, "Acceptance") or \
+        board.section(card.text, "Acceptance criteria") or "(none stated on the card)"
+    return criteria, board.section(card.text, "Intent") or "(none stated on the card)"
+
+
+def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
+                  branch: str, card_budget: float, timeout: int, *,
+                  criteria: str, intent: str) -> tuple[dict, float, limits.Wall | None]:
+    """Spawn the diff reviewer on a finished branch (automate-review-step).
 
     **The reviewer's context is constructed here, and that is the whole point** —
     the same structural blindness as `run_checker` (§16). It is given the diff
-    (`git diff base...branch`, on disk), the acceptance criteria and intent lifted
-    verbatim off the card, and the code to read surrounding context. It is *not*
-    given the worker's prompt, transcript or reasoning.
+    (`git diff base...branch`, on disk), the acceptance criteria and intent of
+    whatever produced the branch, and the code to read surrounding context. It is
+    *not* given the worker's prompt, transcript or reasoning.
 
     Blindness made structural rather than promised: the review runs inside a
     **throwaway detached checkout of the branch**, and that is the only directory
@@ -2216,19 +2295,23 @@ def run_reviewer(root: Path, card: board.Card, out_dir: Path, model: str, base: 
     disk from which the reviewer could read how the change was made, not merely a
     charter rule telling it not to look. Same worktree discipline as `merge_check`.
 
-    Returns `(verdict, cost, wall)`, all lookups — `{}` (no verdict file, a
-    timeout, no CLI, or a worktree that would not cut) degrades in `review_stage`
-    to the pre-existing landing in review/, never to a guessed routing (§12).
-    """
-    criteria = board.section(card.text, "Acceptance") or \
-        board.section(card.text, "Acceptance criteria") or "(none stated on the card)"
-    intent = board.section(card.text, "Intent") or "(none stated on the card)"
+    **A branch, not a card.** One card's branch is the ordinary case
+    (`review_stage`, with `card_review_context` supplying the two blocks), but the
+    chore batch hands over a branch carrying several cards' work and reviews the
+    combined diff once — which is the only way to see an interaction between two
+    items that per-item review structurally cannot. `label` names the throwaway
+    worktree and the log lines: a card id in the first case, a batch name in the
+    second.
 
+    Returns `(verdict, cost, wall)`, all lookups — `{}` (no verdict file, a
+    timeout, no CLI, or a worktree that would not cut) degrades in the caller to
+    a human's eye, never to a guessed routing (§12).
+    """
     binary = claude_binary()
     if not binary:
         return {}, 0.0, None
 
-    tree = worktree_root(root) / f"_review-{card.id}"
+    tree = worktree_root(root) / f"_review-{label}"
     if tree.exists() or _worktree_registered(root, tree):
         _git(root, "worktree", "remove", "--force", str(tree))
     _git(root, "worktree", "prune")
@@ -2236,10 +2319,10 @@ def run_reviewer(root: Path, card: board.Card, out_dir: Path, model: str, base: 
     try:
         made = _worktree_add(root, "--detach", str(tree), branch)
     except WorktreePathTooLong as exc:
-        _log(f"    review worktree for {card.id} would not cut — {exc}")
+        _log(f"    review worktree for {label} would not cut — {exc}")
         return {}, 0.0, None
     if made.returncode != 0:
-        _log(f"    review worktree for {card.id} would not cut — {made.stderr.strip()[:120]}")
+        _log(f"    review worktree for {label} would not cut — {made.stderr.strip()[:120]}")
         return {}, 0.0, None
 
     try:
@@ -3037,7 +3120,8 @@ def run_producer(root: Path, card: board.Card, tree: Path, out_dir: Path, branch
             verdict_path=verdict_path.resolve().as_posix(),
             tool_economy=worker_prompt.TOOL_ECONOMY,
             card_body=card.text,
-        ) + continue_note + feedback
+        ) + (_CHORE_NOTE if card.kind == board.KIND_CHORE else "") \
+          + continue_note + feedback
 
     def _argv(session: str) -> list[str]:
         """Flags only — the prompt reaches the child on stdin (`_run_worker`)."""
@@ -3162,8 +3246,18 @@ def _limit_reached(root: Path, card: board.Card, tree: Path, branch: str,
 
 
 def dispatch(root: Path, card: board.Card, base: str, model: str,
-             card_budget: float, test_timeout: int) -> Dispatch:
+             card_budget: float, test_timeout: int,
+             test_selector: Callable[[set[str], Path], suite.Selection]
+             = suite.select) -> Dispatch:
     """One attempt. Every exit path leaves the card's runner fields consistent.
+
+    `test_selector` is how the gates-green diff picks its pytest slice, and it
+    defaults to the only answer that is safe on its own: `suite.select`, the
+    game/system split. A caller that runs the **whole** suite over the result
+    afterwards — the chore batch is the one that does — may pass
+    `suite.touched` for a narrower first pass; part 1b of `suite.py` states why
+    that condition is not optional. A seam rather than a boolean because the two
+    are both selections and the choice is which one, not whether.
 
     A card naming a `checker:` runs a **producer→checker loop inside this one
     attempt** (`00_architecture.md` §16's second seam), bounded by `MAX_ROUNDS`.
@@ -3455,7 +3549,7 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
         # `tree`, not `root`, is what the classification resolves against: a
         # changed test file is judged by what it imports, and the version that
         # matters is the one in the worktree pytest is about to run.
-        selection = suite.select(changed, tree)
+        selection = test_selector(changed, tree)
         _log(f"    gates clean — {selection.bucket} test slice "
              f"({selection.reason})")
         _status(root, phase="pytest", card=card.id, attempt=attempt, branch=branch,
@@ -3762,8 +3856,10 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
     out_dir = run_dir(root, card, card.attempts)
     _status(root, phase="review", card=card.id, branch=branch, model=model, since=_now())
     _log(f"    reviewing {card.id} → {REVIEWER_AGENT} @ {model}")
-    verdict, cost, wall = run_reviewer(root, card, out_dir, model, base, branch,
-                                       card_budget, timeout * 3)
+    criteria, intent = card_review_context(card)
+    verdict, cost, wall = review_branch(root, card.id, out_dir, model, base, branch,
+                                        card_budget, timeout * 3,
+                                        criteria=criteria, intent=intent)
     total = result.cost_usd + cost
 
     # The artefact before the process's exit. A reviewer's *entire* output is its
@@ -4194,7 +4290,7 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
         board.move(root, card, "review")
         return f"{card_id}: → review/ (reviewed ok but {branch} will not rebase-merge — {why})"
 
-    retiring = card.attempts >= MAX_ATTEMPTS
+    retiring = card.attempts >= attempt_limit(card)
     card.write_section("Error", _error_section(card_id, card.attempts, result,
                                               retiring=retiring))
     if retiring:
