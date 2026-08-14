@@ -2952,6 +2952,20 @@ def _run_worker(argv: list[str], cwd: Path, timeout: int,
                                        "".join(out_lines), "".join(err_lines))
 
 
+#: Supported name for the seam above, for callers outside this module.
+#:
+#: `ingest.py` dispatches the CLI too, and the docstring's claim — *the one place the
+#: Claude CLI is executed* — is worth keeping literally true rather than nearly true.
+#: A second copy of the `Popen` + two-draining-threads dance is exactly the drift this
+#: avoids: that pattern is not defensive tidiness, it is the fix for a deadlock that
+#: took a whole overnight queue on 2026-08-06, and a copy would not carry the reason.
+#:
+#: An alias rather than a move: relocating 180 lines and its logger out of this module
+#: is a refactor with its own risk, and nothing needs it yet. When a third caller
+#: appears, extract properly instead of adding a second alias.
+run_cli = _run_worker
+
+
 def _worker_env(root: Path, tree: Path, out_dir: Path) -> dict[str, str]:
     """The environment a dispatched worker runs under.
 
