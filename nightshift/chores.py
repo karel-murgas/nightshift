@@ -39,6 +39,13 @@ does not track simplicity. The enforcement is the worker's own bounce — it is 
 actor that opens the code, so it is the one that discovers the truth — with an *effort*
 budget as the mechanical backstop, because effort does track simplicity.
 
+**The worker tier for a chore is the cheap one.** Decided 2026-08-14: a one-prompter
+does not want the session's top model, and the definition of the kind — no fork, one
+obvious home, a visible failure — is exactly the description of work a mid tier does
+well. The model is not a constant here on purpose: nothing in this module dispatches
+yet, and an unread constant is what `dead_code` exists to catch. It belongs in the
+execution half, as a short alias rather than a dated id.
+
 **Not yet wired: the execution half.** Selection, the effort budget, the bisect
 decision and the report live here and are tested. Driving worktrees, merges and the
 suite runs means changing the dispatcher's per-card verification into the two phases
