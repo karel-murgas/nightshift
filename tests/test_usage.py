@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import usage
+from nightshift import manifest, usage
 
 
 # --------------------------------------------------------------------------- helpers
@@ -304,6 +304,65 @@ def test_headroom_never_goes_negative():
     assert _bucket("over", 143.0).headroom_pct == 0.0
 
 
+# -------------------------------------------------------------------------- identity
+
+def _identity_file(tmp_path: Path, *, email: str = "karel@example.com",
+                   account_uuid: str = "acct-1", org_uuid: str = "org-1",
+                   extra: bool = False, key: str = "oauthAccount") -> Path:
+    body = {key: {"emailAddress": email, "accountUuid": account_uuid,
+                  "organizationUuid": org_uuid, "hasExtraUsageEnabled": extra}}
+    path = tmp_path / ".claude.json"
+    path.write_text(json.dumps(body), encoding="utf-8")
+    return path
+
+
+def test_identity_reads_the_oauth_account_block(tmp_path: Path):
+    path = _identity_file(tmp_path, email="karel@example.com", extra=True)
+    identity = usage.read_identity(path)
+    assert identity.fetched is True
+    assert identity.email == "karel@example.com"
+    assert identity.account_uuid == "acct-1"
+    assert identity.org_uuid == "org-1"
+    assert identity.has_extra_usage_enabled is True
+
+
+def test_identity_missing_file_fails_open_with_a_reason(tmp_path: Path):
+    identity = usage.read_identity(tmp_path / "nope.json")
+    assert identity.fetched is False
+    assert "no identity file" in identity.reason
+
+
+def test_identity_unreadable_json_fails_open(tmp_path: Path):
+    path = tmp_path / ".claude.json"
+    path.write_text("{not json", encoding="utf-8")
+    identity = usage.read_identity(path)
+    assert identity.fetched is False
+    assert "unreadable" in identity.reason
+
+
+def test_identity_non_object_payload_fails_open(tmp_path: Path):
+    path = tmp_path / ".claude.json"
+    path.write_text("[1, 2, 3]", encoding="utf-8")
+    identity = usage.read_identity(path)
+    assert identity.fetched is False
+
+
+def test_identity_missing_oauth_account_key_fails_open(tmp_path: Path):
+    path = _identity_file(tmp_path, key="somethingElse")
+    identity = usage.read_identity(path)
+    assert identity.fetched is False
+    assert "oauthAccount" in identity.reason
+
+
+def test_describe_identity_reports_the_spend_flag(tmp_path: Path):
+    on = usage.describe_identity(usage.read_identity(_identity_file(tmp_path, extra=True)))
+    assert any("ENABLED" in line for line in on)
+    off = usage.describe_identity(usage.read_identity(_identity_file(tmp_path, extra=False)))
+    assert not any("ENABLED" in line for line in off)
+    unfetched = usage.describe_identity(usage.Identity(reason="boom"))
+    assert unfetched == ["identity unavailable - boom"]
+
+
 # ------------------------------------------------------------------------ the CLI
 
 def test_cli_exit_codes_distinguish_refusal_from_error(tmp_path: Path, capsys,
@@ -320,6 +379,70 @@ def test_cli_exit_codes_distinguish_refusal_from_error(tmp_path: Path, capsys,
     assert "override: re-run with --allow-paid" in capsys.readouterr().out
 
     assert usage.main(["--allow-paid"]) == 0        # the explicit decision
+
+
+def test_cli_config_dir_reads_that_directory_not_the_ambient_account(
+        tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch):
+    """An override directory holds both files directly — no nested `.claude/` —
+    which is the asymmetry `_account_paths` exists to get right."""
+    _creds(tmp_path)
+    _identity_file(tmp_path, email="alt@example.com")
+    _serve(monkeypatch, _LIVE)
+
+    usage.main(["--config-dir", str(tmp_path), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["identity"]["email"] == "alt@example.com"
+
+
+def test_cli_account_resolves_the_label_through_the_manifest(
+        tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch):
+    _creds(tmp_path)
+    _identity_file(tmp_path, email="work@example.com")
+    _serve(monkeypatch, _LIVE)
+    declared = manifest.Manifest(
+        root=tmp_path,
+        accounts=(manifest.Account(label="work", config_dir=str(tmp_path),
+                                   dispatch="never"),))
+    monkeypatch.setattr(usage.manifest, "load", lambda *a, **k: declared)
+
+    usage.main(["--account", "work", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["identity"]["email"] == "work@example.com"
+    assert payload["account_label"] == "work"
+    assert payload["account_dispatch"] == "never"
+
+
+def test_cli_unknown_account_label_is_a_usage_error(
+        tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch):
+    declared = manifest.Manifest(
+        root=tmp_path, accounts=(manifest.Account(label="work", config_dir="~/x"),))
+    monkeypatch.setattr(usage.manifest, "load", lambda *a, **k: declared)
+
+    with pytest.raises(SystemExit) as exc:
+        usage.main(["--account", "ghost"])
+    assert exc.value.code == 2
+    assert "ghost" in capsys.readouterr().err
+
+
+def test_cli_text_mode_names_the_account_and_its_dispatch_stance(
+        tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch):
+    _creds(tmp_path)
+    _identity_file(tmp_path)
+    _serve(monkeypatch, _LIVE)
+    declared = manifest.Manifest(
+        root=tmp_path,
+        accounts=(manifest.Account(label="work", config_dir=str(tmp_path),
+                                   dispatch="never"),))
+    monkeypatch.setattr(usage.manifest, "load", lambda *a, **k: declared)
+
+    usage.main(["--account", "work"])
+    assert "work (dispatch: never)" in capsys.readouterr().out
+
+
+def test_cli_config_dir_and_account_are_mutually_exclusive():
+    with pytest.raises(SystemExit) as exc:
+        usage.main(["--config-dir", "x", "--account", "y"])
+    assert exc.value.code == 2
 
 
 def test_cli_json_carries_the_verdict(tmp_path: Path, capsys,

@@ -119,10 +119,16 @@ def manifest_fields() -> str:
     or a new one it starts accepting, cannot silently leave this table wrong."""
     lines = ["| Table | Fields | Purpose |", "|---|---|---|"]
     for table, known_fields in _manifest.schema().items():
+        table_label = f"[{table}]"
         if table == "layering":
             row_fields = [f.name for f in dataclasses.fields(_manifest.LayeringRule)]
             cells = f"`forbid = [{{{', '.join(row_fields)}}}]`"
             purpose = _first_sentence(_manifest.LayeringRule.__doc__)
+        elif table == "accounts":
+            table_label = "[[accounts]]"
+            row_fields = [f.name for f in dataclasses.fields(_manifest.Account)]
+            cells = f"one row per account: `{{{', '.join(row_fields)}}}`"
+            purpose = _first_sentence(_manifest.Account.__doc__)
         else:
             cls = _TABLE_CLASSES[table]
             by_name = {f.name: f for f in dataclasses.fields(cls)}
@@ -135,7 +141,7 @@ def manifest_fields() -> str:
                     parts.append(f"`{name}={f.default!r}`")
             cells = ", ".join(parts)
             purpose = _first_sentence(cls.__doc__)
-        lines.append(f"| `[{table}]` | {cells} | {purpose} |")
+        lines.append(f"| `{table_label}` | {cells} | {purpose} |")
     return "\n".join(lines)
 
 
