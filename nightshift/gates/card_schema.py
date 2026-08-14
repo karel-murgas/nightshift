@@ -83,7 +83,31 @@ _AUTHOR_FIELDS: tuple[str, ...] = (
     "unattended",
     "created",
 )
-_OPTIONAL_FIELDS = frozenset({"requires", "checker", "verify"})
+_OPTIONAL_FIELDS = frozenset({"requires", "checker", "verify", "kind", "surface"})
+
+# Where in the running application this change shows up — free text, deliberately not
+# a vocabulary this package invents, because "hub" and "combat" are one project's
+# nouns. `chores.report()` groups a batch's checklist by it, which is what lets one
+# pass through the app exercise several items instead of one per card; that grouping
+# is the whole reason a batch is cheaper to verify than its parts. Unset groups under
+# "unsorted", which is honest rather than wrong.
+
+# What sort of work item this is, when it is not the default full card.
+#
+#   chore   a one-prompter: the note already said what to change and what the
+#           result should be, there is no fork, and the change has one obvious
+#           home. Dispatched in a batch and verified as a batch.
+#
+# The only thing the schema relaxes for a chore is `## Approach`, and the reason is
+# specific rather than a convenience: for a one-prompter the *intent is* the
+# approach, so a mandated second section gets filled with a restatement of the
+# first. That is worse than its absence — it reads as a considered "how" and is
+# not one, and the digest inlines it as though it were. Everything else a card
+# owes stays owed.
+#
+# Absent means "a full card", so no existing card changes meaning by this field
+# arriving.
+_KINDS = frozenset({"chore"})
 
 # How a finished card gets verified, and therefore where a `reviewed` verdict
 # lands it. Author-owned like `tier:`, decided at triage, consumed by `settle()`
@@ -270,6 +294,16 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
         bad("tier", f"`tier: {fields['tier']}` — must be one of {sorted(_TIERS)}; the dispatcher resolves the tier to a model and never guesses one")
     if "unattended" in fields and fields["unattended"].lower() not in _BOOLS:
         bad("unattended", f"`unattended: {fields['unattended']}` — must be true or false")
+    if "kind" in fields and fields["kind"] not in _KINDS:
+        bad("kind", f"`kind: {fields['kind']}` — must be one of {sorted(_KINDS)}, or absent "
+                    f"for a full card; an unknown kind would relax the wrong checks")
+    # A chore is by definition work with no fork in it, so `tier: lead` is a
+    # contradiction rather than a combination — and it is the shape a misrouted note
+    # takes, which makes this the cheapest place to catch one.
+    if fields.get("kind") == "chore" and fields.get("tier") == "lead":
+        bad("kind", "`kind: chore` with `tier: lead` — a chore is work with nothing to "
+                    "decide; if it needs judgment it is not a chore, so drop the kind or "
+                    "route the note to triage")
     if "verify" in fields and fields["verify"] not in _VERIFY:
         bad("verify", f"`verify: {fields['verify']}` — must be one of {sorted(_VERIFY)}; "
                       f"`settle()` reads it to decide whether a finished card lands in "
@@ -357,14 +391,18 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
     # not prose (03_board.md §12b). Only `tasks/`, not every actionable lane:
     # archived cards predate the rule and must not be retroactively reddened, and
     # a card carries the section forward once it advances out of `tasks/`.
-    if lane == "tasks" and not _has_section(sections, "approach", "subject"):
+    # `kind: chore` is exempt: see `_KINDS` on why a mandated one-paragraph "how" on a
+    # one-prompter produces a restatement of `## Intent` rather than a second thought.
+    if (lane == "tasks" and fields.get("kind") != "chore"
+            and not _has_section(sections, "approach", "subject")):
         out.append(
             Violation(
                 rel,
                 1,
                 "card_schema: missing `## Approach` — a `tasks/` code card must state the "
                 "core of how the change works in one paragraph (or `## Subject` for an "
-                "art/audio card); it is what the digest shows the maintainer",
+                "art/audio card, or `kind: chore` for a one-prompter whose intent *is* "
+                "its approach); it is what the digest shows the maintainer",
             )
         )
 

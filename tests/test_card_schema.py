@@ -316,3 +316,76 @@ def test_ideas_is_not_enumerated_at_all(tmp_path):
     root = _board(tmp_path, "ideas", "---\ntier: nonsense\n---\nrough czech note\n")
     assert card_schema.check(root) == []
     assert not [lane for _, lane in card_schema.cards(root) if lane == "ideas"]
+
+
+# --- card_schema: `kind: chore` --------------------------------------------
+#
+# A chore is a one-prompter: the note said what to change and what the result should
+# be, there is no fork, and the change has one obvious home. The only thing the
+# schema relaxes for it is `## Approach`, and these tests pin *only* that — the
+# tempting over-relaxation (a chore is small, so let it skip acceptance too) is what
+# would make a chore card dispatchable with nothing to check it against.
+
+_CHORE = """---
+id: probe
+title: "A chore"
+state: tasks
+kind: chore
+tier: worker
+worker: code-thread
+recipe: none
+unattended: true
+verify: review
+created: 2026-08-14
+---
+
+## Intent
+
+Change the one obvious thing. Not the other things.
+
+## Acceptance criteria
+
+- it is done
+
+## Open questions
+
+None. Card is ready to execute.
+"""
+
+
+def test_a_chore_may_omit_approach_because_its_intent_is_its_approach(tmp_path):
+    assert card_schema.check(_board(tmp_path, "tasks", _CHORE)) == []
+
+
+def test_a_full_card_still_owes_approach(tmp_path):
+    """The relaxation must be scoped to the kind, not leak into every card."""
+    body = _CHORE.replace("kind: chore\n", "")
+    assert "missing `## Approach`" in _rules(card_schema.check(_board(tmp_path, "tasks", body)))
+
+
+@pytest.mark.parametrize("section", ["## Intent", "## Acceptance criteria",
+                                    "## Open questions"])
+def test_a_chore_still_owes_intent_acceptance_and_open_questions(tmp_path, section):
+    """Small is not the same as unchecked: a chore with no acceptance would be
+    dispatchable with nothing to fail against, which is the whole hazard."""
+    cut = _CHORE.index(section)
+    body = _CHORE[:cut] + _CHORE[cut:].replace(section, "## Removed", 1)
+    assert card_schema.check(_board(tmp_path, "tasks", body)) != [], \
+        f"a chore missing {section} should not pass"
+
+
+def test_an_unknown_kind_is_rejected_rather_than_ignored(tmp_path):
+    """An unrecognised kind would silently relax whichever checks it was guessed to."""
+    body = _CHORE.replace("kind: chore", "kind: errand")
+    assert "must be one of" in _rules(card_schema.check(_board(tmp_path, "tasks", body)))
+
+
+def test_a_chore_at_lead_tier_is_a_contradiction(tmp_path):
+    """The shape a misrouted note takes, and the cheapest place to catch it."""
+    body = _CHORE.replace("tier: worker", "tier: lead")
+    assert "nothing to decide" in _rules(card_schema.check(_board(tmp_path, "tasks", body)))
+
+
+def test_absent_kind_means_a_full_card_so_no_existing_card_changes_meaning(tmp_path):
+    root = _board(tmp_path, "tasks", _GOOD.format(id="probe", lane="tasks"))
+    assert card_schema.check(root) == []
