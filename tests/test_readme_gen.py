@@ -71,9 +71,13 @@ def test_board_lanes_names_every_real_lane():
 
 
 def test_manifest_fields_lists_every_schema_table():
+    """Every schema table gets a row, named the way it is actually written —
+    `[[accounts]]` is a repeatable array of tables, not a single `[accounts]`
+    table, and a row claiming otherwise would teach a reader the wrong TOML."""
     body = readme_gen.manifest_fields()
     for table in manifest.schema():
-        assert f"`[{table}]`" in body
+        label = "[[accounts]]" if table == "accounts" else f"[{table}]"
+        assert f"`{label}`" in body
 
 
 def test_manifest_fields_marks_a_required_field(tmp_path):

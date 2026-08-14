@@ -50,10 +50,21 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from nightshift import manifest
+
 # The credential the interactive clients write. Read-only here; refreshing it is
 # the CLI's job, and a token this module finds expired is reported as such rather
 # than renewed behind the user's back.
 CREDENTIALS = Path.home() / ".claude" / ".credentials.json"
+
+# The identity file — a different file from `CREDENTIALS`, verified against the
+# shipped VS Code extension bundle (2.1.232, `extension.js`) to resolve an
+# override **asymmetrically** from the credential path: `CLAUDE_CONFIG_DIR` (or
+# `~/.claude`) is where `.credentials.json` lives, but `.claude.json` joins
+# `CLAUDE_CONFIG_DIR` (or `Path.home()` directly — no implicit `.claude/`
+# segment). Getting this join wrong under an account override reads the wrong
+# account's identity while the meters still read the right one, silently.
+IDENTITY_FILE = Path.home() / ".claude.json"
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
@@ -127,6 +138,27 @@ class Snapshot:
             return ""
         amount = self.paid_used_minor / (10 ** self.paid_exponent)
         return f"{amount:.2f} {self.paid_currency}".strip()
+
+
+@dataclass(frozen=True)
+class Identity:
+    """Which account this is — beside `Snapshot`, not folded into it, because a
+    meter reading and an identity reading are a different file and a different
+    failure mode. `Snapshot.subscription` carries the plan tier; it carries no
+    identity, which is the gap this fills.
+
+    `has_extra_usage_enabled` is the same fact `Snapshot.paid_enabled` reports
+    from the network endpoint, readable here from a local file before any HTTP
+    call — the account this rule must veto is identifiable even when the usage
+    endpoint is unreachable.
+    """
+
+    email: str = ""
+    account_uuid: str = ""
+    org_uuid: str = ""
+    has_extra_usage_enabled: bool = False
+    fetched: bool = False
+    reason: str = ""          # why not fetched; "" when it was
 
 
 @dataclass(frozen=True)
@@ -327,6 +359,39 @@ def read(credentials: Path | None = None, *,
                     paid_exponent=exponent, subscription=subscription, fetched=True)
 
 
+def read_identity(path: Path | None = None) -> Identity:
+    """Which account `path` (default `IDENTITY_FILE`) belongs to.
+
+    Local and offline — no network, no dependency on the usage endpoint being
+    reachable. Never raises: a missing file, unreadable JSON, or a payload
+    carrying no `oauthAccount` all come back as `fetched=False` with a reason,
+    the same fail-open shape `read()` uses for the meters.
+    """
+    path = path or IDENTITY_FILE
+
+    if not path.is_file():
+        return Identity(reason=f"no identity file at {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return Identity(reason=f"identity file unreadable: {exc}")
+
+    if not isinstance(payload, dict):
+        return Identity(reason=f"{path} is not a JSON object")
+
+    account = payload.get("oauthAccount")
+    if not isinstance(account, dict):
+        return Identity(reason=f"{path} declares no oauthAccount")
+
+    return Identity(
+        email=str(account.get("emailAddress") or ""),
+        account_uuid=str(account.get("accountUuid") or ""),
+        org_uuid=str(account.get("organizationUuid") or ""),
+        has_extra_usage_enabled=bool(account.get("hasExtraUsageEnabled")),
+        fetched=True,
+    )
+
+
 def check(snapshot: Snapshot, *, allow_paid: bool = False,
           margin_pct: float = START_MARGIN_PCT) -> Verdict:
     """Whether a new dispatch may start, given what the meters said.
@@ -384,11 +449,46 @@ def describe(snapshot: Snapshot) -> list[str]:
     return lines
 
 
+def describe_identity(identity: Identity) -> list[str]:
+    """Human-readable identity lines, for a log, a digest or a panel."""
+    if not identity.fetched:
+        return [f"identity unavailable - {identity.reason}"]
+    lines = [f"account: {identity.email or '(no email on file)'}"]
+    if identity.has_extra_usage_enabled:
+        lines.append("API spend ENABLED on this account")
+    return lines
+
+
+def _account_paths(config_dir: Path | None) -> tuple[Path, Path]:
+    """The credential path and the identity path for an optional override
+    directory — asymmetrically, per the module docstring on `IDENTITY_FILE`:
+    an override directory holds both files directly, but with no override the
+    two defaults (`CREDENTIALS`, `IDENTITY_FILE`) disagree on whether `.claude/`
+    sits between `Path.home()` and the filename.
+
+    Reads the module-level `CREDENTIALS`/`IDENTITY_FILE` names (not a captured
+    `Path.home()`) so a test that monkeypatches either one is still honoured
+    when no override is given.
+    """
+    if config_dir is None:
+        return CREDENTIALS, IDENTITY_FILE
+    return config_dir / ".credentials.json", config_dir / ".claude.json"
+
+
 def main(argv: list[str] | None = None) -> int:
-    """`python -m nightshift.usage` — the meters and the verdict.
+    """`python -m nightshift.usage` — the meters, the identity, and the verdict.
 
     Exit 0 allow, 3 refuse, 1 usage error. A distinct refusal code is what lets a
     shell script or the runner branch on the verdict without parsing prose.
+
+    Reads the ambient account (whatever `CLAUDE_CONFIG_DIR` already selects, or
+    `~/.claude` when unset) by default. `--config-dir`/`--account` are the
+    selector item 13 adds: a raw override directory, or a label resolved
+    through this project's `[[accounts]]` config — neither one sets
+    `CLAUDE_CONFIG_DIR` for anything else. Selecting an account for a *dispatch*
+    is the caller's job (`runner._worker_env` already inherits whatever
+    `CLAUDE_CONFIG_DIR` is in this process's environment); this flag only
+    changes which account's meters this one invocation reads.
     """
     parser = argparse.ArgumentParser(
         description="Show this account's plan usage and whether a dispatch may start.")
@@ -399,13 +499,50 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"headroom%% required to start when paid overage is on "
                              f"(default {START_MARGIN_PCT})")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
+    selector = parser.add_mutually_exclusive_group()
+    selector.add_argument("--config-dir", metavar="PATH",
+                          help="read this CLAUDE_CONFIG_DIR directory's account instead "
+                               "of the ambient one")
+    selector.add_argument("--account", metavar="LABEL",
+                          help="read the account labelled LABEL in [[accounts]] "
+                               "(.ai/manifest.toml) instead of the ambient one")
     args = parser.parse_args(argv)
 
-    snapshot = read()
+    config_dir: Path | None = None
+    account_label = ""
+    account_dispatch = ""
+    if args.account:
+        try:
+            declared = manifest.load().accounts
+        except manifest.ManifestError as exc:
+            parser.error(str(exc))
+        match = next((a for a in declared if a.label == args.account), None)
+        if match is None:
+            known = ", ".join(a.label for a in declared) or "(none configured)"
+            parser.error(f"no account named {args.account!r} in [[accounts]] "
+                        f"- known: {known}")
+        config_dir = Path(match.config_dir).expanduser()
+        account_label, account_dispatch = match.label, match.dispatch
+    elif args.config_dir:
+        config_dir = Path(args.config_dir).expanduser()
+
+    credentials_path, identity_path = _account_paths(config_dir)
+    snapshot = read(credentials=credentials_path)
+    identity = read_identity(identity_path)
     verdict = check(snapshot, allow_paid=args.allow_paid, margin_pct=args.margin)
 
     if args.json:
         print(json.dumps({
+            "account_label": account_label,
+            "account_dispatch": account_dispatch,
+            "identity": {
+                "fetched": identity.fetched,
+                "reason": identity.reason,
+                "email": identity.email,
+                "account_uuid": identity.account_uuid,
+                "org_uuid": identity.org_uuid,
+                "has_extra_usage_enabled": identity.has_extra_usage_enabled,
+            },
             "fetched": snapshot.fetched,
             "reason": snapshot.reason,
             "subscription": snapshot.subscription,
@@ -421,6 +558,10 @@ def main(argv: list[str] | None = None) -> int:
             "resume_at": verdict.resume_at.isoformat() if verdict.resume_at else None,
         }, indent=2))
     else:
+        if account_label:
+            print(f"  account: {account_label} (dispatch: {account_dispatch})")
+        for line in describe_identity(identity):
+            print(f"  {line}")
         for line in describe(snapshot):
             print(f"  {line}")
         print()

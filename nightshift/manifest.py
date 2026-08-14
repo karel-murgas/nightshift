@@ -52,9 +52,14 @@ from pathlib import Path
 __all__ = [
     "AI_DIR", "MANIFEST_NAME", "ManifestError",
     "Manifest", "Project", "Tests", "Branches", "Board", "Worker",
-    "Memory", "FreshnessRule", "LayeringRule", "I18n", "DeadCode", "Audit", "Problem",
+    "Memory", "FreshnessRule", "LayeringRule", "I18n", "DeadCode", "Audit", "Account", "Problem",
     "find_root", "manifest_path", "load", "parse", "validate", "require", "schema",
 ]
+
+#: Valid values for `Account.dispatch`. See the class docstring for the asymmetry
+#: this encodes: config may add a `"never"`, it may never add an `"always"` that
+#: overrides `hasExtraUsageEnabled`.
+_DISPATCH_STANCES = ("always", "never")
 
 # The consuming project's config directory. A framework convention, not a project
 # fact, so it is a constant here rather than a manifest field — a manifest that
@@ -318,6 +323,32 @@ class Audit:
 
 
 @dataclass(frozen=True)
+class Account:
+    """One Claude account this project's tooling may know about.
+
+    `config_dir` is the `CLAUDE_CONFIG_DIR` that selects this account's
+    credentials — a machine path, not a repo-relative one, and it is deliberately
+    **not** existence-checked by `validate()`: a manifest is shared across
+    machines and Karel's own machines, and an account's directory legitimately
+    exists on only one of them at a time.
+
+    **Config may only ever exclude, never promote** (`feedback_account_dispatch`).
+    `dispatch = "never"` is a fact recorded here about an account with API spend
+    enabled that must not receive automated work; the live `hasExtraUsageEnabled`
+    signal (`usage.Identity`) may veto an account this table forgot to mark, but
+    nothing may flip a `"never"` entry back to dispatchable — that is Karel's
+    call, per invocation, never a config edit.
+    """
+    label: str
+    config_dir: str
+    dispatch: str = "always"
+
+    @property
+    def dispatch_never(self) -> bool:
+        return self.dispatch == "never"
+
+
+@dataclass(frozen=True)
 class Tiers:
     """Which document carries the `tier: → model` binding block.
 
@@ -363,6 +394,7 @@ class Manifest:
     i18n: I18n | None = None
     dead_code: DeadCode = field(default_factory=DeadCode)
     audit: Audit = field(default_factory=Audit)
+    accounts: tuple[Account, ...] = ()
     tiers: Tiers = field(default_factory=Tiers)
 
     # --- resolved paths, so no caller re-joins them ---------------------------
@@ -467,7 +499,7 @@ def _unknown(table: dict, known: tuple[str, ...], where: str) -> list[Problem]:
 
 
 _KNOWN_TABLES = ("project", "tests", "branches", "board", "worker", "memory",
-                 "layering", "i18n", "dead_code", "audit", "tiers")
+                 "layering", "i18n", "dead_code", "audit", "accounts", "tiers")
 _KNOWN: dict[str, tuple[str, ...]] = {
     "project": ("name", "source_dirs", "extra_source_dirs", "tooling_dirs", "doc_files"),
     "tests": ("dir", "parallel"),
@@ -479,6 +511,7 @@ _KNOWN: dict[str, tuple[str, ...]] = {
     "i18n": ("adapter", "base", "targets", "untranslated_allowlist", "loanwords_denylist"),
     "dead_code": ("paths", "min_confidence"),
     "audit": ("matrix", "infra_gates"),
+    "accounts": ("label", "config_dir", "dispatch"),
     "tiers": ("binding_doc",),
 }
 
@@ -532,6 +565,24 @@ def parse(data: dict, root: Path) -> Manifest:
         layering.append(LayeringRule(
             str(row["importer"]), str(row["imports"]),
             _as_str_tuple(row.get("exempt", []), "layering.forbid.exempt")))
+
+    accounts_raw = data.get("accounts", [])
+    if not isinstance(accounts_raw, list):
+        raise ManifestError("[[accounts]] must be an array of tables")
+    accounts = []
+    for row in accounts_raw:
+        if not isinstance(row, dict) or "label" not in row or "config_dir" not in row:
+            raise ManifestError("[[accounts]] rows must be { label = ..., config_dir = ... }")
+        unknown = sorted(set(row) - {"label", "config_dir", "dispatch"})
+        if unknown:
+            raise ManifestError(
+                f"[[accounts]] row has unknown key(s) {', '.join(unknown)} — "
+                f"known keys are label, config_dir, dispatch")
+        dispatch = str(row.get("dispatch", "always"))
+        if dispatch not in _DISPATCH_STANCES:
+            raise ManifestError(
+                f"[[accounts]] `dispatch` must be one of {_DISPATCH_STANCES}, not {dispatch!r}")
+        accounts.append(Account(str(row["label"]), str(row["config_dir"]), dispatch))
 
     # `[i18n]` absent means "this project has no localisation", which is a real and
     # supported answer — not a table to fill with defaults. See the class docstring.
@@ -617,6 +668,7 @@ def parse(data: dict, root: Path) -> Manifest:
             matrix=str(audit_t.get("matrix", "")),
             infra_gates=tuple(sorted(infra.items())),
         ),
+        accounts=tuple(accounts),
         tiers=Tiers(
             binding_doc=str(_table(data, "tiers").get("binding_doc",
                                                       Tiers.binding_doc)),
@@ -726,6 +778,15 @@ def validate(manifest: Manifest, data: dict | None = None) -> list[Problem]:
     if manifest.memory.budget_bytes is not None and manifest.memory.budget_bytes <= 0:
         problems.append(Problem("error", "memory.budget_bytes",
                                 "must be positive; omit the key to leave the gate off"))
+
+    seen_labels: dict[str, int] = {}
+    for i, account in enumerate(manifest.accounts):
+        seen_labels.setdefault(account.label, i)
+        if seen_labels[account.label] != i:
+            problems.append(Problem("error", f"accounts[{i}].label",
+                                    f"{account.label!r} is already used by "
+                                    f"accounts[{seen_labels[account.label]}] — "
+                                    f"labels must be unique"))
 
     if manifest.branches.integration == manifest.branches.stable:
         problems.append(Problem("warning", "branches.integration",

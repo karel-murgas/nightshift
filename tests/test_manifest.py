@@ -263,6 +263,76 @@ def test_errors_sort_before_warnings(tmp_path):
     assert [p.level for p in problems] == sorted((p.level for p in problems), key=lambda l: l != "error")
 
 
+# --- [[accounts]] -------------------------------------------------------------
+
+def test_an_account_row_defaults_dispatch_to_always(tmp_path):
+    _write(tmp_path, "[[accounts]]\nlabel = 'personal'\nconfig_dir = '~/.claude'\n")
+    manifest = m.load(tmp_path)
+    assert len(manifest.accounts) == 1
+    account = manifest.accounts[0]
+    assert account.label == "personal"
+    assert account.config_dir == "~/.claude"
+    assert account.dispatch == "always"
+    assert account.dispatch_never is False
+
+
+def test_an_account_marked_never_is_read_and_flagged(tmp_path):
+    _write(tmp_path,
+           "[[accounts]]\nlabel = 'spend-enabled'\nconfig_dir = '~/.claude-work'\n"
+           "dispatch = 'never'\n")
+    manifest = m.load(tmp_path)
+    assert manifest.accounts[0].dispatch_never is True
+
+
+def test_an_account_row_missing_config_dir_raises(tmp_path):
+    _write(tmp_path, "[[accounts]]\nlabel = 'personal'\n")
+    with pytest.raises(m.ManifestError, match="label = ..., config_dir"):
+        m.load(tmp_path)
+
+
+def test_an_account_row_with_an_unknown_key_raises(tmp_path):
+    _write(tmp_path,
+           "[[accounts]]\nlabel = 'personal'\nconfig_dir = '~/.claude'\nmachine = 'laptop'\n")
+    with pytest.raises(m.ManifestError, match="machine"):
+        m.load(tmp_path)
+
+
+def test_an_account_dispatch_value_outside_always_or_never_raises(tmp_path):
+    _write(tmp_path,
+           "[[accounts]]\nlabel = 'personal'\nconfig_dir = '~/.claude'\n"
+           "dispatch = 'sometimes'\n")
+    with pytest.raises(m.ManifestError, match="dispatch"):
+        m.load(tmp_path)
+
+
+def test_accounts_not_a_table_array_raises(tmp_path):
+    _write(tmp_path, "accounts = 'oops'\n")
+    with pytest.raises(m.ManifestError, match="accounts"):
+        m.load(tmp_path)
+
+
+def test_a_duplicate_account_label_is_an_error(tmp_path):
+    _write(tmp_path,
+           "[[accounts]]\nlabel = 'personal'\nconfig_dir = '~/.claude'\n\n"
+           "[[accounts]]\nlabel = 'personal'\nconfig_dir = '~/.claude-work'\n"
+           "dispatch = 'never'\n")
+    problems = m.validate(m.load(tmp_path))
+    assert any(p.level == "error" and p.where == "accounts[1].label" for p in problems)
+
+
+def test_no_accounts_table_is_a_working_configuration(tmp_path):
+    """Absence is meaningful here too — a project that has not configured any
+    accounts yet gets an empty tuple, not an error."""
+    _write(tmp_path, "")
+    manifest = m.load(tmp_path)
+    assert manifest.accounts == ()
+    assert not any(p.where.startswith("accounts") for p in m.validate(manifest))
+
+
+def test_schema_includes_accounts(tmp_path):
+    assert m.schema()["accounts"] == ("label", "config_dir", "dispatch")
+
+
 # --- finding the root --------------------------------------------------------
 
 def test_the_root_is_found_by_the_manifest_before_the_ai_dir_or_the_git_dir(tmp_path):

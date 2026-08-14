@@ -527,6 +527,7 @@ marker for the same purpose.
 | `[i18n]` | `adapter` (required), `base='en'`, `targets=()`, `untranslated_allowlist=''`, `loanwords_denylist=''` | Present only if the project has localisation; `Manifest.i18n` is `None` otherwise and a project's i18n gates find nothing to check. |
 | `[dead_code]` | `paths=()`, `min_confidence=80` | What `nightshift.gates.dead_code` points `vulture` at, and how sure it must be before it speaks. |
 | `[audit]` | `matrix=''`, `infra_gates=()` | Where this project keeps its rule-enforcement matrix, and which of its own gates that matrix is not expected to have a row for. |
+| `[[accounts]]` | one row per account: `{label, config_dir, dispatch}` | One Claude account this project's tooling may know about. |
 | `[tiers]` | `binding_doc='docs/tier-binding.md'` | Which document carries the `tier: → model` binding block. |
 <!-- /generated:manifest-fields -->
 
