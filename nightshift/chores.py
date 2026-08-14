@@ -35,9 +35,13 @@ suite, which is not true of a narrow slice on a lone card.
 **What defines a chore is the shape of the request, not the size of the diff.** A
 line-count cap was proposed and rejected: a mechanical edit across three translation
 dicts is 200 lines and trivial, a subtle off-by-one is four lines and hard. Output size
-does not track simplicity. The enforcement is the worker's own bounce — it is the only
-actor that opens the code, so it is the one that discovers the truth — with an *effort*
-budget as the mechanical backstop, because effort does track simplicity.
+does not track simplicity. **Nor does effort**, which is the correction this module took
+on 2026-08-14: a turn budget sat here as a mechanical backstop on the reasoning that
+effort tracks simplicity, and it does not — a turn is a tool round-trip, so the count
+measures how much of the repo had to be walked. The enforcement is the worker's own
+bounce, alone: it is the only actor that opens the code, so it is the only one that
+discovers the truth, and it says so in words. `cost_note` records what an item cost and
+nothing weighs it.
 
 **The worker tier for a chore is the cheap one.** Decided 2026-08-14: a one-prompter
 does not want the session's top model, and the definition of the kind — no fork, one
@@ -79,11 +83,11 @@ OUT = Path(board.CHORES_VIEW)
 #: stops being true somewhere past a screenful.
 DEFAULT_BATCH = 8
 
-#: The mechanical backstop on "was this actually a one-prompter". Effort, not output:
-#: a chore that takes 40 turns was not a chore whatever its diff looks like. Generous
-#: on purpose — this catches runaways, and the bounce catches misroutes.
-MAX_TURNS = 40
-MAX_WALL_S = 20 * 60
+#: There is deliberately **no effort budget here** — no turn cap, no wall cap of this
+#: module's own. `cost_note` records what an item cost and nothing weighs it. The
+#: runaway that a cap was meant to stop is bounded where it can still be stopped: the
+#: wall-clock timeout on the worker's own process, inside `runner._run_worker`. See
+#: `cost_note` for the two measurements that removed the budget that used to sit here.
 
 #: A chore gets one attempt. A failed one-prompter is worth a human's eye, not a second
 #: dispatch, and it keeps the arithmetic honest: 8 chores x 3 attempts is a night.
@@ -164,19 +168,40 @@ class Batch:
         return self.by_state("done")
 
 
-def effort_exceeded(turns: int, wall_s: float, *, max_turns: int = MAX_TURNS,
-                    max_wall_s: float = MAX_WALL_S) -> str:
-    """Why this chore overran its budget, or `""` if it did not.
+def cost_note(turns: int, wall_s: float) -> str:
+    """What this chore cost, as one phrase, or `""` when there is nothing notable.
 
-    Returns prose rather than a bool because the reason lands on the card, and "it took
-    too long" without a number is a finding nobody can act on.
+    **Recorded, never a verdict.** This used to be `effort_exceeded`, which failed a
+    chore that exceeded a turn budget and dropped it from the batch as "not a
+    one-prompter". Two things were wrong with that, and the second is the one that
+    matters:
+
+    1. **Turns measure the repo, not the request.** A turn is one assistant step that
+       used a tool, so the count is dominated by how many files must be opened to be
+       sure and how often the suite runs — properties of the codebase. Measured
+       2026-08-14: a two-line edit in two files plus one new gate took 48 turns and 3.4M
+       tokens of cache reads in a 1,900-test project, and was failed by a budget of 40.
+       Maintainer, on being shown it: *"the question is if the work is straightforward
+       (=simple) not if it needs X turns or modify X files."* Correct, and the plan's
+       claim that "effort does track simplicity" was the wrong half of it.
+    2. **A cap read after the work finished protects nothing.** By the time the turn
+       count is known the time is already spent. Runaway protection has to interrupt,
+       and it already does: `_run_worker` bounds every attempt with a wall-clock timeout
+       on the process, which is what stops an item eating the night. A second check
+       afterwards could only throw away a finished, gated, tested result — which is
+       exactly what it did.
+
+    So there is no effort verdict at all now. The bounce is the whole detector, as
+    `03_board.md` and this module's own docstring always said: the worker is the only
+    actor that opens the code, so it is the only one that can find out the routing was
+    wrong, and it reports that in words rather than in a number.
     """
-    if turns > max_turns:
-        return f"took {turns} turns (budget {max_turns}) - not a one-prompter"
-    if wall_s > max_wall_s:
-        return (f"ran {wall_s / 60:.0f} min (budget {max_wall_s / 60:.0f} min) "
-                f"- not a one-prompter")
-    return ""
+    parts = []
+    if turns:
+        parts.append(f"{turns} turns")
+    if wall_s:
+        parts.append(f"{wall_s / 60:.0f} min")
+    return ", ".join(parts)
 
 
 def eligible(card: board.Card) -> str:
@@ -282,9 +307,9 @@ def report(batch: Batch, now: dt.datetime, *, branch: str = "",
 
     for state, title, blurb in (
         ("bounced", "Bounced - not chores after all",
-         "The worker opened the code and found a decision, the change was not where "
-         "the note implied, or it took far more than one prompt's effort. This is the "
-         "routing signal, not a failure."),
+         "The worker opened the code and found a decision, or the change was not where "
+         "the note implied. This is the routing signal, not a failure - and it is always "
+         "something the worker read in the code, never a number about what it cost."),
         ("parked", "Parked - failed their own checks",
          "One attempt each, by design. Read them rather than re-running them."),
         ("blocked", "Not reached",
@@ -355,8 +380,9 @@ def run_one(work: Path, card: board.Card, base: str, model: str, *,
 
     * `done` — gates green, reachable tests green. A survivor; it merges in phase 2.
     * `bounced` — the routing was wrong, and the worker is the only actor that could
-      find that out. Either it parked with a question, or it finished but overran the
-      effort budget, which says the same thing with a number instead of a sentence.
+      find that out: it parked with a question, because it opened the code and the note
+      turned out to hide a fork. There is no numeric route into this state, deliberately
+      — a cost cannot tell you a request was not straightforward.
     * `parked` — it failed its own checks. One attempt, so it is a human's to read.
     * `blocked` — nothing was decided about the item: a wall, a crashed gate harness,
       a dropped connection. The attempt is given back and the batch stops.
@@ -385,19 +411,14 @@ def run_one(work: Path, card: board.Card, base: str, model: str, *,
         print("  " + runner.settle(work, card.id, result))
         return out, result
 
-    # Green — but "green" and "was a one-prompter" are different claims, and the
-    # second one is what decides whether this belongs in a batch at all. An overrun
-    # keeps its branch and goes to a human at `review/`: the diff is gated and
-    # tested, so throwing it away would be waste, and merging it into a batch it has
-    # already disproved membership of would hide the signal.
-    overran = effort_exceeded(out.turns, out.wall_s)
-    if overran:
-        out.state, out.detail = "bounced", overran
-        print(f"  {card.id}: {overran} - kept on its branch for a look")
-        print("  " + runner.settle(work, card.id, result))
-        return out, result
-
+    # Green: gates clean and every test that reaches the diff passing. It merges, and
+    # what it cost is recorded beside it rather than being weighed against a cap — see
+    # `cost_note` on why the cap that used to sit here could only discard good work.
+    # An item that was in truth too big for a batch is caught where the evidence is:
+    # the worker's own bounce above, or the batch suite in phase 2.
     out.state, out.detail = "done", result.detail
+    if note := cost_note(out.turns, out.wall_s):
+        print(f"  {card.id}: green ({note})")
     return out, result
 
 

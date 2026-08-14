@@ -122,22 +122,29 @@ def test_selection_on_an_empty_board_is_empty_not_an_error(tmp_path):
     assert chores.select(root) == ([], [])
 
 
-# --------------------------------------------------------------------- effort budget
+# ------------------------------------------------------------------------ cost, noted
 
-def test_effort_is_measured_in_turns_and_time_not_diff_size():
-    assert chores.effort_exceeded(5, 60.0) == ""
-    assert "turns" in chores.effort_exceeded(chores.MAX_TURNS + 1, 60.0)
-    assert "min" in chores.effort_exceeded(3, chores.MAX_WALL_S + 1)
-
-
-def test_the_overrun_reason_carries_the_number_because_it_lands_on_the_card():
-    reason = chores.effort_exceeded(999, 0.0)
-    assert "999" in reason and str(chores.MAX_TURNS) in reason
+def test_what_a_chore_cost_is_reported_with_its_numbers():
+    note = chores.cost_note(48, 420.0)
+    assert "48" in note and "turns" in note and "7 min" in note
 
 
-def test_the_budget_is_tunable_and_actually_read():
-    assert chores.effort_exceeded(10, 0.0, max_turns=5) != ""
-    assert chores.effort_exceeded(10, 0.0, max_turns=50) == ""
+def test_nothing_is_said_when_there_is_nothing_to_say():
+    assert chores.cost_note(0, 0.0) == ""
+
+
+def test_cost_is_a_note_and_never_a_verdict():
+    """The whole point of the rewrite. `cost_note` returns prose for a report; there
+    is no threshold, no bool, and no second return value a caller could branch on —
+    so no call site can turn a big number back into a failed chore.
+
+    Measured 2026-08-14: 48 turns for a two-line edit in two files plus one gate, in a
+    ~1,900-test project. Turns count tool round-trips, so the number tracks how much
+    of the repo had to be walked, not whether the request was straightforward.
+    """
+    assert isinstance(chores.cost_note(10_000, 90_000.0), str)
+    assert not hasattr(chores, "effort_exceeded")
+    assert not hasattr(chores, "MAX_TURNS")
 
 
 # ------------------------------------------------------------------------- bisecting

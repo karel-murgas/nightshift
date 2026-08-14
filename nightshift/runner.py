@@ -1748,9 +1748,10 @@ was not a one-prompter, and it is worth more than a plausible guess. Write what 
 found into `## Question` as usual. Do **not** widen the change to make it fit, and do \
 not do a reduced version of it without saying so.
 
-Effort is the other half of the same check: this is budgeted as a single prompt's \
-work. If you find yourself many turns in and still exploring, that is itself the \
-finding — park and say so.
+**Judge that by what you still do not know, not by how long you have taken.** Reading a \
+lot of a large codebase to place a small change is ordinary and is not a finding. Being \
+unable to say where the change goes, or which of several places is the right one, is — \
+park and say so.
 """
 
 _FEEDBACK = """\

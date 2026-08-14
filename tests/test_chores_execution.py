@@ -1,7 +1,7 @@
 """The chore batch's execution half — worktrees, merges, the two-phase suite runs.
 
 `test_chores.py` covers the decisions this module makes on paper: who is in the
-batch, when effort says it was not a one-prompter, where the probe goes. This
+batch, what an item's cost is reported as, where the probe goes. This
 covers the part that touches git and spends money, and it is written around the
 four ways a batch could quietly do the wrong thing:
 
@@ -337,20 +337,44 @@ def test_the_money_rule_is_checked_before_every_dispatch_not_once(tmp_path,
     assert calls["n"] >= 2, "the guard was consulted once for the whole fan-out"
 
 
-def test_a_chore_that_overran_its_effort_budget_is_bounced_though_it_went_green(
-        tmp_path, monkeypatch):
-    """Forty turns means it was not a one-prompter whatever the diff looks like.
-    Its work is gated and tested, so it keeps its branch and goes to a human —
-    dropping green work would be waste, and merging it would hide the signal."""
+def test_a_green_chore_lands_however_many_turns_it_took(tmp_path, monkeypatch):
+    """A turn count cannot fail a chore, and this is the case that used to.
+
+    There was a 40-turn budget here, and it did two things wrong. Turns count tool
+    round-trips, so in a large repo the number measures how many files had to be opened
+    to be sure — a property of the codebase, not of the request. And it was read *after*
+    the worker finished, when the time was already spent: the only thing a post-hoc cap
+    can still do is discard a result that is gated and tested. Runaway protection is the
+    wall-clock timeout on the worker's own process, which interrupts while that matters.
+    """
     root = _repo(tmp_path, ("a", "review", "x"))
-    _Worker(edits={"a": _touch("a")},
-            turns={"a": chores.MAX_TURNS + 1}).install(monkeypatch)
+    _Worker(edits={"a": _touch("a")}, turns={"a": 500}).install(monkeypatch)
     _, batch = chores.execute(root)
 
     outcome = batch.outcomes[0]
-    assert outcome.state == "bounced" and "turns" in outcome.detail
-    assert board.find(root, "a").lane == "review"
-    assert _git(root, "rev-parse", "--verify", "ai/a").returncode == 0
+    assert outcome.state == "done", "500 turns is a cost, not a verdict"
+    assert outcome.turns == 500, "and it is still recorded"
+    assert board.find(root, "a").lane == "done"
+
+
+def test_a_long_green_chore_is_never_left_where_no_reviewer_will_look(tmp_path,
+                                                                     monkeypatch):
+    """The stranding the turn budget caused, pinned so it cannot come back.
+
+    An overrun used to move the card to `review/` and drop it from the batch. Nothing
+    drains that lane on its own — the batch's single review runs over the *merged* diff,
+    and both the batch selector and the night take their queue from `tasks/` — so a
+    green, gated, tested diff sat there with no reviewer scheduled and no way to notice.
+    A chore that goes green must therefore reach a settled lane in the same batch.
+    """
+    root = _repo(tmp_path, ("a", "review", "x"), ("b", "play", "y"))
+    _Worker(edits={"a": _touch("a"), "b": _touch("b")},
+            turns={"a": 500, "b": 500}).install(monkeypatch)
+    _, batch = chores.execute(root)
+
+    for card_id in ("a", "b"):
+        assert board.find(root, card_id).lane in ("done", "testing"), (
+            f"{card_id} must not be parked in review/ by a cost measurement")
 
 
 def test_a_parked_chore_is_a_routing_signal_and_carries_its_question(tmp_path,
