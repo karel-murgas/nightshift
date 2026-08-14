@@ -166,6 +166,31 @@ def waiting(root: Path, card_id: str = "") -> list[board.Card]:
     return [c for c in cards if c.id == card_id] if card_id else cards
 
 
+def skip_reason(root: Path, base: str, card: board.Card, *, named: bool = False) -> str:
+    """Why `card` would not be reviewed this pass, or `""` if it would be.
+
+    **One predicate, two readers.** The pass consults it before spending anything, and
+    `--dry-run` prints it. Those were two separate checks for exactly one commit, and a
+    dry run that disagrees with the pass is worse than no dry run at all — its entire
+    job is to say what the pass will do, and the blocked-card skip landed in one of
+    them and not the other.
+
+    `named` is what `--card` buys: an explicit request is a decision, so the checks a
+    sweep applies to protect an at-rest card are waived, the same way `runner --card`
+    waives `unattended:`, backoff and the attempt limit. The commits check is *not*
+    waived — there is genuinely nothing to review, and no request makes a diff exist.
+    """
+    branch = branch_of(card)
+    if not runner.branch_has_commits(root, base, branch):
+        return (f"no commits on `{branch}` — nothing to review as a diff; this is where an "
+                f"artefact-only card waits for a human, and it was left alone")
+    if not named and board.section(card.text, BLOCKED_SECTION):
+        return (f"already reviewed `ok`; `## {BLOCKED_SECTION}` says its branch will not "
+                f"land without a human, and reviewing it again would buy the same verdict "
+                f"at full price. Name it with `--card` to review it anyway")
+    return ""
+
+
 def drain(root: Path, base: str, *, card_id: str = "", limit: int = 0,
           allow_paid: bool = False, card_budget: float = 0.0,
           test_timeout: int = 600) -> Pass:
@@ -189,27 +214,11 @@ def drain(root: Path, base: str, *, card_id: str = "", limit: int = 0,
             break
 
         branch = branch_of(card)
-        # Before the money check and before anything is spawned: an artefact-only
-        # card is the lane's legitimate long-term resident, and a pass over it must
-        # cost nothing at all or it becomes a nightly tax on a card nobody asked to
-        # be re-reviewed.
-        if not runner.branch_has_commits(root, base, branch):
-            result.outcomes.append(Outcome(
-                card.id, SKIPPED,
-                f"no commits on `{branch}` — nothing to review as a diff; this is "
-                f"where an artefact-only card waits for a human, and it was left alone"))
-            continue
-
-        # Reviewed already, and blocked on something no reviewer can fix. Naming the
-        # card with `--card` overrides this, the same way `runner --card` waives the
-        # checks a sweep applies: an explicit request is a decision, and re-reviewing
-        # after resolving the conflict by hand is a legitimate thing to ask for.
-        if not card_id and board.section(card.text, BLOCKED_SECTION):
-            result.outcomes.append(Outcome(
-                card.id, SKIPPED,
-                f"already reviewed `ok`; `## {BLOCKED_SECTION}` says its branch will not "
-                f"land without a human, and reviewing it again would buy the same verdict "
-                f"at full price. Name it with `--card` to review it anyway"))
+        # Before the money check and before anything is spawned: the two cards that
+        # legitimately rest in this lane must cost nothing at all, or the drain becomes
+        # a tax on the cards nobody asked to have re-reviewed.
+        if reason := skip_reason(root, base, card, named=bool(card_id)):
+            result.outcomes.append(Outcome(card.id, SKIPPED, reason))
             continue
 
         verdict = usage.check(usage.read(), allow_paid=allow_paid)
@@ -336,10 +345,9 @@ def main(argv: list[str] | None = None) -> int:
         cards = waiting(root, args.card)
         print(f"drain: {len(cards)} card(s) in {board.board_rel(root).as_posix()}/{LANE}")
         for card in cards:
-            branch = branch_of(card)
-            has = runner.branch_has_commits(root, base, branch)
-            print(f"  {'review' if has else 'leave ':6} {card.id} — "
-                  f"{branch}{'' if has else ' (no commits; artefact-only or never cut)'}")
+            reason = skip_reason(root, base, card, named=bool(args.card))
+            print(f"  {'leave ' if reason else 'review'} {card.id} — "
+                  f"{reason or branch_of(card)}")
         print("\n(dry run — nothing dispatched)")
         return 0
 
