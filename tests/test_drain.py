@@ -310,6 +310,47 @@ def test_a_card_whose_branch_never_existed_is_treated_the_same_way(tmp_path, mon
     assert [o.state for o in result.outcomes] == [drain.SKIPPED]
 
 
+def test_a_card_already_reviewed_and_blocked_on_a_merge_is_not_reviewed_again(
+        tmp_path, monkeypatch):
+    """The other card that legitimately rests in this lane, and the one the first real
+    pass found: reviewed `ok`, then its branch would not rebase onto the tip, so
+    `settle` sent it back here with `## Merge`. The review is *finished*; the blocker
+    is a person. A sweep that re-reviewed it would buy the same verdict at full price
+    every time — measured at $0.82 for 94 seconds on the card that exposed this."""
+    root = _repo(tmp_path, ("blocked", "review"))
+    _branch_with_a_commit(root, "blocked")
+    card = root / "Board" / LANE_DIR / "blocked.md"
+    card.write_text(card.read_text(encoding="utf-8")
+                    + "\n## Merge\n\nReviewed `ok`, but the branch will not rebase.\n",
+                    encoding="utf-8", newline="")
+    reviewer = _Reviewer().install(monkeypatch)
+
+    result = drain.drain(root, BASE)
+
+    assert reviewer.reviewed == [], "a finished review was bought a second time"
+    assert [o.state for o in result.outcomes] == [drain.SKIPPED]
+    assert result.cost_usd == 0.0
+    assert "--card" in result.outcomes[0].detail, (
+        "the skip must name its own override, or it reads as a refusal")
+
+
+def test_naming_a_blocked_card_reviews_it_anyway(tmp_path, monkeypatch):
+    """`--card` is an explicit human request, and after resolving the conflict by hand
+    asking for another review is a legitimate thing to want. Same waiver `runner --card`
+    makes for `unattended:`, backoff and the attempt limit."""
+    root = _repo(tmp_path, ("blocked", "review"))
+    _branch_with_a_commit(root, "blocked")
+    card = root / "Board" / LANE_DIR / "blocked.md"
+    card.write_text(card.read_text(encoding="utf-8")
+                    + "\n## Merge\n\nReviewed `ok`, but the branch will not rebase.\n",
+                    encoding="utf-8", newline="")
+    reviewer = _Reviewer().install(monkeypatch)
+
+    drain.drain(root, BASE, card_id="blocked")
+
+    assert reviewer.reviewed == ["blocked"]
+
+
 def test_a_second_pass_over_an_artefact_only_card_changes_nothing(tmp_path, monkeypatch):
     """'Not re-attempted' means the second pass is indistinguishable from the
     first — same lane, same file, still nothing spawned."""
