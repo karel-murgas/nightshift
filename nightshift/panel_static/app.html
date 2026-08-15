@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{TITLE}}</title>
+<style>
+  :root {
+    --bg: #0a0f0c;
+    --bg-raised: #0f1712;
+    --border: #1e2e24;
+    --prose: #b9c9bd;
+    --data: #39ff8f;
+    --data-dim: #1f9457;
+    --warn: #e0b23c;
+    --danger: #d9564a;
+    --dim: #5c6b62;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--prose);
+    font-family: "Segoe UI", system-ui, sans-serif;
+    margin: 0;
+    padding: 0;
+  }
+  code, .data, input, textarea, select, button {
+    font-family: "Consolas", "Cascadia Mono", monospace;
+  }
+  .topnav {
+    display: flex;
+    gap: 0;
+    background: var(--bg-raised);
+    border-bottom: 1px solid var(--border);
+  }
+  .topnav a {
+    color: var(--prose);
+    text-decoration: none;
+    padding: 0.75em 1.25em;
+    border-right: 1px solid var(--border);
+  }
+  .topnav a.active {
+    color: var(--data);
+    background: var(--bg);
+  }
+  .topnav a:hover { color: var(--data); }
+  .rail {
+    background: var(--bg-raised);
+    border-bottom: 1px solid var(--border);
+    padding: 0.5em 1.25em;
+    font-size: 0.9em;
+  }
+  .rail-row { padding: 0.15em 0; }
+  .data { color: var(--data); }
+  .warn { color: var(--warn); }
+  .danger { color: var(--danger); }
+  .dim { color: var(--dim); }
+  main {
+    padding: 1.25em 1.5em 3em;
+    max-width: 60em;
+  }
+  h1 { color: var(--data); font-weight: 600; margin-top: 0; }
+  h2 {
+    color: var(--prose);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.25em;
+    margin-top: 1.75em;
+  }
+  h3 { color: var(--dim); margin-bottom: 0.25em; }
+  ul { list-style: none; padding-left: 0; }
+  li {
+    padding: 0.4em 0.6em;
+    border-bottom: 1px solid var(--border);
+  }
+  li:hover { background: var(--bg-raised); }
+  button {
+    background: var(--bg);
+    color: var(--data);
+    border: 1px solid var(--data-dim);
+    padding: 0.3em 0.8em;
+    cursor: pointer;
+    border-radius: 3px;
+  }
+  button:hover { background: var(--data-dim); color: var(--bg); }
+  input, textarea, select {
+    background: var(--bg);
+    color: var(--prose);
+    border: 1px solid var(--border);
+    padding: 0.3em;
+  }
+  #toast {
+    position: fixed;
+    bottom: 1em;
+    right: 1em;
+    background: var(--bg-raised);
+    border: 1px solid var(--data-dim);
+    color: var(--prose);
+    padding: 0.6em 1em;
+    border-radius: 4px;
+    max-width: 28em;
+    display: none;
+  }
+  #toast.error { border-color: var(--danger); color: var(--danger); }
+</style>
+</head>
+<body>
+{{NAV}}
+{{RAIL}}
+<main>
+{{CONTENT}}
+</main>
+<div id="toast"></div>
+<script>
+function toast(message, isError) {
+  var el = document.getElementById('toast');
+  el.textContent = message;
+  el.className = isError ? 'error' : '';
+  el.style.display = 'block';
+  clearTimeout(window._toastTimer);
+  window._toastTimer = setTimeout(function () { el.style.display = 'none'; }, 6000);
+}
+function post(path, body) {
+  return fetch(path, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body || {})
+  }).then(function (r) { return r.json().then(function (data) { return {ok: r.ok, data: data}; }); })
+    .then(function (result) {
+      toast(result.data.message || (result.ok ? 'done' : 'refused'), !result.ok);
+      if (result.ok) setTimeout(function () { location.reload(); }, 800);
+      return result;
+    })
+    .catch(function (err) { toast(String(err), true); });
+}
+function selectAccount(label) { post('/api/account', {label: label}); }
+function openTerminal(kind) { post('/api/' + kind, {}); }
+function createNote() {
+  var name = document.getElementById('note-name').value;
+  var body = document.getElementById('note-body').value;
+  post('/api/note', {name: name, body: body});
+}
+function createIdea() {
+  var name = document.getElementById('idea-name').value;
+  var body = document.getElementById('idea-body').value;
+  post('/api/note', {name: name, body: body, lane: 'ideas'});
+}
+</script>
+</body>
+</html>

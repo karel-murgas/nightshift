@@ -46,6 +46,7 @@ No LLM anywhere in here (`00_architecture.md` §12) — it is a file mover.
     python -m nightshift.boardcmd verified <card-id>
     python -m nightshift.boardcmd promote <note.md>
     python -m nightshift.boardcmd note <note.md> --body-file -
+    python -m nightshift.boardcmd note <note.md> --lane ideas --body-file -
     python -m nightshift.boardcmd edit <path-under-the-board> --body-file -
 
 The sixth verb the panel needs — reviewing a card sitting in `review/` — is not
@@ -191,24 +192,42 @@ def promote(root: Path, name: str) -> str:
     return f"{filename}: {board.PRIVATE_LANE}/ → {INBOX}/"
 
 
-def create_note(root: Path, name: str, body: str) -> str:
-    """Verb 4 — write a new bare note into `inbox/`.
+#: Where `create_note` may write. `inbox/` is the ordinary case; `ideas/` is
+#: Karel's own private lane, and writing a *new* file into it reads nothing and
+#: prints nothing back — the same boundary `promote` already keeps, just in the
+#: other direction. No other lane is a legitimate target for a bare, schema-free
+#: note, so the CLI flag is restricted to exactly these two rather than taking
+#: an arbitrary lane name.
+_NOTE_LANES = (INBOX, board.PRIVATE_LANE)
+
+
+def create_note(root: Path, name: str, body: str, lane: str = INBOX) -> str:
+    """Verb 4 — write a new bare note into `inbox/` (or, by request, `ideas/`).
 
     Bare on purpose: no frontmatter, no `state:`, no schema. That is what a note
     typed into the lane by hand looks like (`03_board.md` §1), and a note that
     arrived through a panel must be indistinguishable from one that did not —
     otherwise the classifier is looking at two shapes of the same thing. The
-    next `reconcile` stamps `state: inbox` on it, same as any other.
+    next `reconcile` stamps `state: inbox` on it, same as any other — `ideas/`
+    is never reconciled, matching every other private-lane rule here.
+
+    `lane` defaults to `inbox/` for every existing caller; `ideas/` is additive.
+    The body is written and committed sight-unseen either way — this verb reads
+    nothing back out of what it just wrote, which is what makes it safe to point
+    at the private lane at all (`hooks.ideas_fence`, and `promote`'s docstring).
     """
+    if lane not in _NOTE_LANES:
+        raise BoardCommandError(f"{lane!r} is not a lane a bare note may be written "
+                                f"into — only {_NOTE_LANES}")
     filename = _bare_name(name)
-    target = board.board_dir(root) / INBOX / filename
+    target = board.board_dir(root) / lane / filename
     if target.exists():
-        raise BoardCommandError(f"{INBOX}/{filename} already exists — "
+        raise BoardCommandError(f"{lane}/{filename} already exists — "
                                 f"use `edit` to replace its body")
     target.parent.mkdir(parents=True, exist_ok=True)
     textio.write_text_lf(target, _ends_with_newline(body))
-    board.commit_board(root, f"board: new note {filename} in {INBOX}/")
-    return f"{filename}: written to {INBOX}/ ({len(body)} B)"
+    board.commit_board(root, f"board: new note {filename} in {lane}/")
+    return f"{filename}: written to {lane}/ ({len(body)} B)"
 
 
 def edit_body(root: Path, target: str | Path, body: str) -> str:
@@ -295,8 +314,10 @@ def _parser() -> argparse.ArgumentParser:
     moved = subs.add_parser("promote", help=f"move one note into {INBOX}/ without reading it")
     moved.add_argument("name", help="the note's filename, no path")
 
-    note = subs.add_parser("note", help=f"write a new bare note into {INBOX}/")
+    note = subs.add_parser("note", help=f"write a new bare note into {INBOX}/ (or {board.PRIVATE_LANE}/)")
     note.add_argument("name", help="the note's filename, no path")
+    note.add_argument("--lane", choices=_NOTE_LANES, default=INBOX,
+                      help=f"which lane to write into (default {INBOX})")
 
     edit = subs.add_parser("edit", help="replace a board file's body, keeping its frontmatter")
     edit.add_argument("path", help="path to the file, absolute or relative to the repo root")
@@ -326,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.verb == "promote":
             print(promote(root, args.name))
         elif args.verb == "note":
-            print(create_note(root, args.name, _body(args)))
+            print(create_note(root, args.name, _body(args), lane=args.lane))
         elif args.verb == "edit":
             print(edit_body(root, args.path, _body(args)))
     except BoardCommandError as exc:

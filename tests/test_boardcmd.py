@@ -280,6 +280,26 @@ def test_a_new_note_refuses_to_overwrite_an_existing_one(tmp_path):
     assert (root / "Board" / "inbox" / "idea.md").read_text(encoding="utf-8") == "first\n"
 
 
+def test_a_new_note_may_target_the_private_lane_and_reads_nothing_back(tmp_path, capsys):
+    """The panel's Ideas page needs a `new` action, and writing a fresh file into
+    `ideas/` reads nothing — the same boundary `promote` keeps in the other
+    direction. The printed confirmation must not echo the body."""
+    root = _repo(tmp_path)
+
+    message = boardcmd.create_note(root, "thought", "pomeranian-carburettor",
+                                   lane=board.PRIVATE_LANE)
+
+    path = root / "Board" / board.PRIVATE_LANE / "thought.md"
+    assert path.read_text(encoding="utf-8") == "pomeranian-carburettor\n"
+    assert "pomeranian-carburettor" not in message
+
+
+def test_a_new_note_refuses_a_lane_that_is_not_inbox_or_ideas(tmp_path):
+    root = _repo(tmp_path)
+    with pytest.raises(boardcmd.BoardCommandError, match="not a lane"):
+        boardcmd.create_note(root, "sneaky", "x", lane="tasks")
+
+
 # ------------------------------------------------------------------ verb 5
 
 
