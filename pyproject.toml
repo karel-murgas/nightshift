@@ -36,12 +36,17 @@ include = ["nightshift*"]
 # The templates are data, not code, so `packages.find` does not see them. Without
 # this a wheel install ships an `init` that cannot write anything -- the failure
 # would be a traceback about a missing file, on the one command a new user runs first.
+# `panel_static/*` is the same class of gap for a different command: `panel.py`
+# reads `app.html` off disk at request time rather than embedding it as a string,
+# so a wheel install without this entry would serve a FileNotFoundError on the
+# first page load instead of a traceback about a missing file at import time.
 [tool.setuptools.package-data]
 nightshift = [
     "templates/*",
     "templates/*/*",
     "templates/*/*/*",
     "templates/*/*/*/*",
+    "panel_static/*",
 ]
 
 [tool.pytest.ini_options]
