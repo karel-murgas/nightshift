@@ -73,7 +73,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from nightshift import board, drain, freshness, ingest, manifest, run_record, textio, usage
+from nightshift import (board, drain, freshness, ingest, init, manifest, run_record,
+                        textio, update, usage)
 from nightshift.manifest import ManifestError, find_root
 from nightshift.runner import (
     RUNS,
@@ -99,7 +100,7 @@ DEFAULT_PORT = 8765
 STATIC_DIR = Path(__file__).resolve().parent / "panel_static"
 TEMPLATE = STATIC_DIR / "app.html"
 
-PAGES = ("now", "verify", "inbox", "ideas", "run")
+PAGES = ("now", "verify", "inbox", "ideas", "run", "system")
 
 #: The run's phases, as the pills across the status rail: `(status.json value, label)`.
 #: `starting` and `checker` fold onto `worker` because they are the same span of the run
@@ -471,10 +472,34 @@ class Context:
             "inbox": len(self.notes),
             "ideas": len(self.ideas),
             "run": len(_latest_record(self.root).get("dispatched", [])),
+            # What the System page would ask you to look at: files needing an update
+            # or a decision. Deliberately not "everything nightshift could do here" —
+            # a rail number that is never zero is a rail number nobody reads.
+            "system": system_attention(self.root),
         }
 
 
 def read_context(root: Path, *, fetch_freshness: bool = False) -> Context:
+    """Everything a page reads. Renders in a repo nightshift has never been installed in.
+
+    **That last property is load-bearing and was not free.** `bootstrap` writes the
+    launchers before the install, so the first thing a new project does is open this
+    panel in a repo with no `.ai/manifest.toml` — and the Setup page is what runs the
+    install. Several reads below degrade on their own (`board_root` falls back to
+    `Board`, `_accounts` catches), which is what made it *look* as though the whole
+    function already did. `default_base` does not: it goes through
+    `branches.integration`, which raises **on purpose** rather than guessing, because
+    every card is built on whatever it returns.
+
+    So the uninstalled case is answered here, once, rather than by asking each read to
+    tolerate it: no manifest means no board, no queue and no branch role, so the honest
+    context is an empty one. `base` is left empty rather than defaulted — inventing an
+    integration branch is precisely what `branches.integration` refuses to do, and this
+    is not the place to do it on its behalf.
+    """
+    if not installed(root):
+        return Context(root=root, rail=read_rail(root, fetch_freshness=fetch_freshness),
+                       base="")
     return Context(
         root=root,
         rail=read_rail(root, fetch_freshness=fetch_freshness),
@@ -1348,8 +1373,221 @@ def _render_run(ctx: Context) -> str:
     return "".join(out)
 
 
+# --------------------------------------------------------------------------
+# System — the framework maintaining itself
+# --------------------------------------------------------------------------
+#
+# **Why this page exists at all.** Every verb below already worked from a command
+# line and none of them was discoverable: nothing in any document mentioned the
+# Command Center, `update` did not exist, and the closest thing to a health check
+# was remembering that `nightshift doctor` is a thing. A framework whose
+# maintenance is folklore gets maintained by whoever remembers the folklore.
+#
+# **It renders in a repo that has no install**, which is what makes the Setup
+# section useful rather than decorative: a repo holding nothing but the two
+# launchers `bootstrap` wrote can open this page, and the page is what runs the
+# install. That is a property of `read_context`'s early return, not something the
+# module got for free — see its docstring, and the correction it came from. Every
+# section below therefore checks `installed()` and renders nothing when it is
+# False, rather than assuming a board, a manifest or a queue is there to read.
+
+
+def installed(root: Path) -> bool:
+    """Whether nightshift is installed here — judged on the manifest, not the receipt.
+
+    **The receipt is the wrong test and it took a live check to notice.** `bootstrap`
+    writes one, because it stages the install skill and the launchers through the same
+    `Plan` so `uninstall` can take them back. So a repo that has done nothing but
+    bootstrap *has* a receipt, and keying on it made this page report a finished install
+    and then fail rendering on the manifest that was never written.
+
+    `.ai/manifest.toml` is the honest marker: it is what `init` writes, what every
+    branch, board and gate read resolves through, and the one file whose absence means
+    none of them can answer.
+    """
+    return (root / manifest.AI_DIR / manifest.MANIFEST_NAME).is_file()
+
+
+def system_attention(root: Path) -> int:
+    """The rail's count: files an update would change, plus ones needing a decision.
+
+    Zero for an uninstalled repo — the Setup section is an offer, not a backlog, and
+    a permanent `1` beside a page nobody has installed yet is noise. Never raises:
+    this is on the rail, so it is on the critical path of every page.
+    """
+    try:
+        found = update.survey(root)
+    except (update.UpdateError, OSError):
+        return 0
+    return found.changes + len(found.by(update.CONFLICT))
+
+
+def _system_setup(ctx: Context) -> str:
+    """Install if there is none; otherwise what the install was and how to update it."""
+    if not installed(ctx.root):
+        body = (
+            "<b>nightshift is not installed in this repo.</b>"
+            "<p class='note'>The button opens an interactive Claude session running "
+            "the install skill. It asks you two things that are never guessed — the "
+            "branch work merges into, and what a dispatched worker may do on this "
+            "machine — then writes the manifest, the board, the gates and the hooks.</p>")
+        acts = _act("Set up nightshift", onclick="post('/api/setup')", primary=True)
+        return _section("Setup", 1, _row(marker="+", body=body, acts=acts),
+                        note="This page works before the install. That is the point.")
+
+    receipt = init.read_receipt(ctx.root) or {}
+    created = init.receipt_created(receipt)
+    rows = _row(marker="=", body=(
+        f"<b>Installed</b><p class='note'>{len(created)} file(s) written by nightshift, "
+        f"recorded in {_e(init.RECEIPT)} — that record is what lets an update tell your "
+        f"edits from ours.</p>"))
+    return _section("Setup", 0, rows, note="What this install put in the repo.")
+
+
+def _system_files(ctx: Context) -> str:
+    """The update survey: what moved, what you changed, what needs deciding."""
+    if not installed(ctx.root):
+        return ""
+    try:
+        found = update.survey(ctx.root)
+    except update.UpdateError as exc:
+        return _section("Project files", 0, "", empty=str(exc))
+
+    rows = []
+    for finding in found.by(update.STALE, update.MISSING):
+        label = ("the template moved; you never edited this" if finding.verdict
+                 == update.STALE else "ours, and missing from disk")
+        rows.append(_row(marker="+", body=(
+            f"<b>{_e(finding.rel)}</b><p class='note'>{label}</p>")))
+    for finding in found.by(update.CONFLICT):
+        # Four actions, one per `update` verb. The panel owns no resolution logic:
+        # every button below POSTs to a flag that already works from a terminal.
+        acts = "".join([
+            _act("Diff", href=f"/update-diff?path={finding.rel}"),
+            _act("Take theirs", onclick=f"post('/api/update/take',"
+                                        f"{{path:'{_attr(finding.rel)}'}})"),
+            _act("Keep mine", onclick=f"post('/api/update/keep',"
+                                      f"{{path:'{_attr(finding.rel)}'}})"),
+            _act("Merge", onclick=f"post('/api/update/merge',"
+                                  f"{{path:'{_attr(finding.rel)}'}})"),
+        ])
+        rows.append(_row(marker="!", body=(
+            f"<b>{_e(finding.rel)}</b><p class='note'>you edited this and the template "
+            f"moved — nothing is overwritten until you say which wins</p>"), acts=acts))
+
+    bar = ""
+    if found.changes:
+        bar = (f'<div class="barbox"><p>{found.changes} safe change(s) — conflicts are '
+               f'never included</p><div class="acts">'
+               f'{_act("Update these", onclick="post(&#39;/api/update/apply&#39;)", primary=True)}'
+               f'</div></div>')
+    note = (f"{len(found.by(update.CURRENT))} current, "
+            f"{len(found.by(update.YOURS))} edited by you, "
+            f"{len(found.by(update.DECLINED))} declined, "
+            f"{len(found.by(update.FROZEN_V))} frozen")
+    return _section("Project files", found.changes + len(found.by(update.CONFLICT)),
+                    "".join(rows), note=note, bar=bar,
+                    empty="Every file nightshift owns here matches its template.")
+
+
+#: The read-only and repair verbs, as one table rather than five near-identical
+#: blocks. `(id, label, button, blurb, dispatches)` — `dispatches` is what decides
+#: whether the account veto applies, because it is what decides whether it spends.
+SYSTEM_VERBS = (
+    ("doctor", "Health", "Run doctor",
+     "Per-machine preconditions and drift between the manifest and the tree. "
+     "Reports; changes nothing.", False),
+    ("gates", "Gates", "Run gates",
+     "The gate suite, exactly as the save hook and preflight run it.", False),
+    ("preflight", "Preflight", "Run preflight",
+     "Gates, the audit matrix, the corrections check and the test slice this branch "
+     "can affect. Required before a push, and it writes the receipt that unblocks one.",
+     False),
+    ("fix", "Repair", "Dispatch fix",
+     "Runs every check, then dispatches an agent to repair what failed — up to three "
+     "rounds. It never weakens a check to make it pass, and never commits.", True),
+)
+
+
+def _system_verbs(ctx: Context) -> str:
+    if not installed(ctx.root):
+        return ""
+    rows = []
+    for ident, label, button, blurb, dispatches in SYSTEM_VERBS:
+        note = blurb + (" Spends on the account in force." if dispatches else "")
+        rows.append(_row(marker="&middot;", body=f"<b>{_e(label)}</b>"
+                                                 f"<p class='note'>{_e(note)}</p>",
+                         acts=_act(button, onclick=f"post('/api/system/{ident}')")))
+    return _section("Checks and repair", 0, "".join(rows),
+                    note="Each one is the command you would have typed.")
+
+
+def _system_danger(ctx: Context) -> str:
+    """Uninstall. Shown last, and armed only by typing the project's own name.
+
+    A dry run is always what the button produces first — `uninstall` is dry-run by
+    default and that default is not overridden here. The typed confirmation is for the
+    second step, because this is the one control on the page that removes work, and
+    because it takes the launcher and the manifest with it: the panel serving this page
+    stops answering immediately afterwards, which is confusing rather than dangerous
+    but is worth being told before rather than after.
+    """
+    if not installed(ctx.root):
+        return ""
+    name = ctx.root.name
+    body = ("<b>Uninstall nightshift from this repo</b>"
+            "<p class='note'>Removes what the install wrote, strips our hook entries "
+            "out of settings.json and leaves your own files — including the corrections "
+            "log, if it has anything in it. It also deletes the launcher and the "
+            "manifest, so this page stops working the moment it succeeds.</p>")
+    acts = "".join([
+        _act("Show what it would remove", onclick="post('/api/system/uninstall')"),
+        _act("Uninstall", onclick=f"confirmUninstall('{_attr(name)}')"),
+    ])
+    return _section("Danger", 0, _row(marker="!", body=body, acts=acts),
+                    note="Nothing here runs without a second, typed confirmation.")
+
+
+def _system_verb(name: str, root: Path, *, waived: bool, body: dict) -> str:
+    """One of the System page's buttons, each shelling out to its own module.
+
+    Split by *how long it takes and whether it spends*, which is the only distinction
+    that matters to an HTTP handler: `doctor` and `gates` answer in seconds and their
+    output is the point, so they are captured; `preflight` runs a test suite and `fix`
+    dispatches an agent for up to three rounds, so they are detached and report a pid.
+    Holding a request open for either would time the browser out and, worse, tie a run
+    to a page nobody promised to leave open.
+    """
+    if name == "doctor":
+        return _verb(run_command("doctor", [], root, timeout=180))
+    if name == "gates":
+        return _verb(run_command("gates.run", [], root, timeout=300))
+    if name == "preflight":
+        return f"preflight started (pid {spawn_background('preflight', [], root)})"
+    if name == "fix":
+        _guard_dispatch_account(waived)
+        return f"fix pass started (pid {spawn_background('fix', [], root)})"
+    if name == "uninstall":
+        # Dry run unless the operator retyped the project's own name. `uninstall` is
+        # dry-run by default and that default is honoured rather than worked around:
+        # `--yes` is added only when the confirmation matches.
+        if str(body.get("confirm", "")) == root.name:
+            return _verb(run_command("uninstall", ["--yes"], root, timeout=180))
+        return _verb(run_command("uninstall", [], root, timeout=180))
+    raise PanelError(f"no such system verb: {name}")
+
+
+def _render_system(ctx: Context) -> str:
+    return "".join([
+        _system_setup(ctx),
+        _system_files(ctx),
+        _system_verbs(ctx),
+        _system_danger(ctx),
+    ])
+
+
 _RENDER = {"now": _render_now, "verify": _render_verify, "inbox": _render_inbox,
-           "ideas": _render_ideas, "run": _render_run}
+           "ideas": _render_ideas, "run": _render_run, "system": _render_system}
 
 
 # --------------------------------------------------------------------------
@@ -1597,8 +1835,12 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.strip("/")
         if path == "":
+            # An uninstalled repo lands on the page that can do something about it.
+            # `/now` in a repo with no board is five empty sections and no hint that
+            # the install never happened — which is exactly the state a first-time
+            # visitor arrives in, having opened the launcher `bootstrap` just wrote.
             self.send_response(302)
-            self.send_header("Location", "/now")
+            self.send_header("Location", "/now" if installed(self.root) else "/system")
             self.end_headers()
             return
         if path in _RENDER:
@@ -1651,6 +1893,32 @@ class Handler(BaseHTTPRequestHandler):
                 self.root, title=f"{card.id} · diff", subtitle=f"{base}...{branch}",
                 body=f"<pre>{_e(diff)}</pre>",
                 acts=_act("Read card", href=f"/card/{card.id}")).encode("utf-8"))
+            return
+        if path == "update-diff":
+            # Your installed copy against today's template, framed like any other
+            # document rather than dumped as text — reading a conflict is the step
+            # before deciding it, so it happens inside the panel.
+            target = parse_qs(parsed.query).get("path", [""])[0]
+            try:
+                found = update.survey(self.root)
+                finding = update.find(found, target)
+                text = update.diff(finding, self.root)
+            except update.UpdateError as exc:
+                self._send_text(400, str(exc))
+                return
+            acts = "".join([
+                _act("Take theirs", onclick=f"post('/api/update/take',"
+                                            f"{{path:'{_attr(finding.rel)}'}})"),
+                _act("Keep mine", onclick=f"post('/api/update/keep',"
+                                          f"{{path:'{_attr(finding.rel)}'}})"),
+                _act("Merge", onclick=f"post('/api/update/merge',"
+                                      f"{{path:'{_attr(finding.rel)}'}})"),
+            ])
+            self._send(200, render_document(
+                self.root, title=f"{finding.rel} · diff",
+                subtitle="yours (-) against nightshift's (+)",
+                body=f"<pre>{_e(text or 'identical')}</pre>",
+                acts=acts).encode("utf-8"))
             return
         self._send_text(404, "not found")
 
@@ -1766,6 +2034,39 @@ class Handler(BaseHTTPRequestHandler):
             stop.parent.mkdir(parents=True, exist_ok=True)
             textio.write_text_lf(stop, "stop\n")
             return f"{STOP_FILE.as_posix()} written — the run stops after the card it is on"
+
+        if path == "api/setup":
+            # The install, driven the one way it has ever been driven: the skill, in an
+            # interactive session. Not a `-p` dispatch — two of its four questions are
+            # never guessed by policy and a headless agent cannot ask them — and not a
+            # form on this page, which would be a second install driver competing with
+            # the first. The panel launches; the skill installs.
+            open_terminal(root, "claude", "/install-nightshift")
+            return ("opened a terminal running `/install-nightshift` — answer its two "
+                    "questions, then reload this page")
+
+        if path == "api/update/apply":
+            return _verb(run_command("update", ["--apply"], root))
+
+        if path in ("api/update/take", "api/update/keep"):
+            verb = path.rsplit("/", 1)[1]
+            target = str(body.get("path", ""))
+            if not target:
+                raise PanelError("no path given")
+            return _verb(run_command("update", [f"--{verb}", target], root))
+
+        if path == "api/update/merge":
+            # A real agent session on a real file: a spending verb, so it answers to
+            # the account veto exactly as a card dispatch does.
+            _guard_dispatch_account(waived)
+            target = str(body.get("path", ""))
+            if not target:
+                raise PanelError("no path given")
+            return (f"merging {target} (pid "
+                    f"{spawn_background('update', ['--merge', target], root)})")
+
+        if path.startswith("api/system/"):
+            return _system_verb(path.rsplit("/", 1)[1], root, waived=waived, body=body)
 
         if path == "api/session":
             open_terminal(root, "claude")

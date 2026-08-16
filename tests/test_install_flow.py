@@ -1212,7 +1212,7 @@ def test_a_receipt_claiming_a_path_init_never_writes_is_not_obeyed(tmp_path):
     _install(repo)
     path = repo / init.RECEIPT
     receipt = json.loads(path.read_text(encoding="utf-8"))
-    receipt["created"].append("pkg/core.py")
+    receipt["created"]["pkg/core.py"] = init.content_hash("whatever it likes")
     path.write_text(json.dumps(receipt), encoding="utf-8")
 
     removal = uninstall.plan(repo)

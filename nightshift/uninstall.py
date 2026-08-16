@@ -162,11 +162,7 @@ def _installed_branch(root: Path) -> str:
 
 def _receipt(root: Path) -> dict | None:
     """The install receipt, or None if this install predates receipts."""
-    try:
-        data = json.loads((root / init.RECEIPT).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return data if isinstance(data, dict) else None
+    return init.read_receipt(root)
 
 
 def _ours_by_content(root: Path, rel: str, staged: str) -> bool:
@@ -202,7 +198,13 @@ def plan(root: Path) -> Removal:
     receipt = _receipt(root)
     if receipt is not None:
         out.receipted = True
-        claimed = [rel for rel in receipt.get("created", []) if isinstance(rel, str)]
+        # Paths only. `created` is a path→hash map from receipt version 2 on and a bare
+        # list before it; `receipt_created` flattens both, and what matters here is
+        # unchanged either way — uninstall deletes by path, and never asked what the
+        # content was. Reading it through the shared helper is what keeps this working
+        # against an install made by any version, which is the one thing an uninstall
+        # must do: it is what you reach for when an old install is in the way.
+        claimed = list(init.receipt_created(receipt))
         # Intersected with `owned` rather than trusted: the receipt is a committed file
         # like any other, and a hand-edited one naming `src/` must not turn this into an
         # arbitrary delete. A claim outside what `init` can write is reported, not obeyed.
@@ -217,7 +219,7 @@ def plan(root: Path) -> Removal:
         for rel, content in sorted(owned.items()):
             # gate-ok(source_reference_liveness): `rel` is joined onto `root`, the
             # project being uninstalled from — never this checkout's own tree.
-            if rel == ".claude/settings.json" or not (root / rel).is_file():
+            if rel == init.SETTINGS or not (root / rel).is_file():
                 continue
             if _ours_by_content(root, rel, content):
                 out.files.append(rel)
@@ -237,7 +239,7 @@ def plan(root: Path) -> Removal:
     claimed_appends = set(receipt.get("appended", [])) if receipt else set()
     for rel in sorted(set(owned) | claimed_appends):
         # gate-ok(source_reference_liveness): same `root`-relative comparison as above.
-        if rel in out.files or rel == ".claude/settings.json":
+        if rel in out.files or rel == init.SETTINGS:
             continue
         path = root / rel
         if not path.is_file():
@@ -306,7 +308,7 @@ def plan(root: Path) -> Removal:
                     # gate-ok(source_reference_liveness): the same `root`-relative
                     # settings file as above, queued for removal from the project
                     # being uninstalled from.
-                    out.files.append(".claude/settings.json")
+                    out.files.append(init.SETTINGS)
                 else:
                     out.settings = json.dumps(merged, indent=2) + "\n"
     return out

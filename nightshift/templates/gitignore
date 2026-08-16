@@ -28,6 +28,13 @@ __pycache__/
 # The stop file. Its presence halts the runner, so it must never arrive by pull.
 .ai/STOP
 
+# `nightshift update`'s working files. `--take` keeps what it replaced as `-old` so an
+# overwrite is recoverable; `--merge` hands the agent the template as `-new` and removes
+# it afterwards. Both are per-machine scratch on the way to a decision, and a committed
+# one is a copy of a file that also exists properly, three directories away.
+*.nightshift-old
+*.nightshift-new
+
 # Obsidian's window state: which panes are open, which tab is active, where each
 # one is scrolled. Rewritten on almost every interaction, including just looking at
 # the board -- so a tracked one is dirty again seconds after you commit it, and the

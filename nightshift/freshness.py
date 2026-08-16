@@ -45,13 +45,14 @@ No LLM: a fetch, two rev-list counts and a string comparison.
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import nightshift
-from nightshift.manifest import ManifestError
+from nightshift.manifest import ManifestError, find_root
 
 #: Seconds a fetch may take before it is abandoned. A freshness reading is a
 #: convenience on the way to something else, so a slow or absent network must cost
@@ -176,15 +177,58 @@ def read(checkout: Path | None = None, *, fetch: bool = True) -> Freshness:
                      ahead=int(parts[1]), dirty=dirty, known=True)
 
 
-def refuse_pull(state: Freshness) -> str:
+def run_is_live(project_root: Path) -> bool:
+    """Whether a runner is mid-flight in the consuming repo right now.
+
+    Two conditions, not one: the status file has to name a phase that is not finished
+    **and** its pid has to still be alive. A status file alone is not evidence — a run
+    killed at the terminal leaves the last phase it reached sitting on disk forever
+    (`live-pid-is-not-a-live-run`, logged in this repo's own corrections).
+
+    `runner` is imported here rather than at module scope on purpose. It pulls in the
+    board, the digest, the merge machinery and half the package; this module is
+    consulted on the way to a push and on every panel page load, and neither should pay
+    for that import to answer a question they will usually not ask.
+    """
+    from nightshift import runner
+
+    try:
+        status = json.loads((project_root / runner.STATUS_FILE).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(status, dict):
+        return False
+    if str(status.get("phase") or "") in ("finished", "digest", ""):
+        return False
+    try:
+        pid = int(status.get("pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    return runner._pid_alive(pid)
+
+
+def refuse_pull(state: Freshness, project_root: Path | None = None) -> str:
     """Why pulling would not be the routine fast-forward, or `""` if it would be.
 
     Every one of these means the same thing: someone is in the middle of something
     here, and finishing it for them is where a helpful automation does damage. Said
     rather than resolved.
+
+    **The live-run refusal is the one that protects real work, and it lives here rather
+    than in the caller for a reason.** Moving the framework under a run that is already
+    using it is the exact failure `doctor.framework_version` names in its own docstring
+    — the night that died when `nightshift:main` shifted beneath it. The Command Center
+    is what made this reachable by a click, but a rule that only the panel enforced
+    would be one the command line could walk straight past, so the check belongs to the
+    verb and every caller inherits it. `project_root` is optional because a bare reading
+    has no consuming repo in hand; when it is absent, this refusal simply cannot fire.
     """
     if not state.known:
         return state.reason or "nothing is known about this checkout"
+    if project_root is not None and run_is_live(project_root):
+        return ("a run is live in this repo — pulling now would move the framework out "
+                "from under a night that is already using it, which is how a run dies "
+                "half-finished. Wait for it, or stop it first")
     if state.dirty:
         return (f"{state.dirty} uncommitted change(s) in {state.checkout} — a pull "
                 f"here is not the routine one; commit or stash them first")
@@ -199,14 +243,14 @@ def refuse_pull(state: Freshness) -> str:
     return ""
 
 
-def pull(state: Freshness) -> tuple[bool, str]:
+def pull(state: Freshness, project_root: Path | None = None) -> tuple[bool, str]:
     """Take the offer. Fast-forward only, and only from a state `refuse_pull` clears.
 
     `--ff-only` is the whole safety of this: it cannot create a merge commit, it
     cannot rewrite anything, and it fails loudly if the situation changed between
     the reading and the act.
     """
-    why = refuse_pull(state)
+    why = refuse_pull(state, project_root)
     if why:
         return False, why
     merged = _git(state.checkout, "merge", "--ff-only", "@{upstream}")
@@ -288,7 +332,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.pull:
         return 0
-    done, detail = pull(state)
+    # The consuming repo, so the live-run refusal has something to look at. A reading
+    # taken outside any repo is still a reading; it just cannot answer that question.
+    try:
+        here = find_root()
+    except ManifestError:
+        here = None
+    done, detail = pull(state, here)
     print(f"  {'pulled' if done else 'not pulled'} - {detail}")
     return 0 if done else 2
 

@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import freshness
+from nightshift import freshness, runner
 
 _MANIFEST = """
 [project]
@@ -247,3 +247,62 @@ def test_the_paired_check_does_not_touch_the_network(checkout, monkeypatch):
 
     monkeypatch.setattr(freshness, "_git", no_fetch)
     doctor.paired_branches(checkout.parent / "work", checkout)
+
+
+# --- not while a run is using it ----------------------------------------------
+
+
+def _status(root, phase="worker", pid=None):
+    """A runner heartbeat in `root`, naming this process so the pid check passes."""
+    import json as _json
+    import os as _os
+    path = root / "/".join(runner.STATUS_FILE.parts)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_json.dumps({"phase": phase, "pid": pid or _os.getpid()}),
+                    encoding="utf-8")
+
+
+def test_a_pull_is_refused_while_a_run_is_live(tmp_path, checkout):
+    """The failure this exists for is on the record: a night died when the framework's
+    default branch moved beneath it. The Command Center made that reachable by a click,
+    but the rule lives in `refuse_pull` so the command line cannot walk past it either.
+    """
+    _advance_remote(checkout, 1)
+    project = tmp_path / "project"
+    project.mkdir()
+    _status(project)
+
+    state = freshness.read(checkout)
+    assert freshness.refuse_pull(state) == "", "the pull was not otherwise routine"
+
+    why = freshness.refuse_pull(state, project)
+    assert "run is live" in why
+    done, detail = freshness.pull(state, project)
+    assert not done and "run is live" in detail
+
+
+def test_a_finished_run_does_not_block_a_pull(tmp_path, checkout):
+    _advance_remote(checkout, 1)
+    project = tmp_path / "project"
+    project.mkdir()
+    _status(project, phase="finished")
+
+    assert freshness.refuse_pull(freshness.read(checkout), project) == ""
+
+
+def test_a_stale_status_file_is_not_a_live_run(tmp_path, checkout):
+    """A run killed at the terminal leaves its last phase on disk forever. Treating
+    that as live would refuse every pull from then on — `live-pid-is-not-a-live-run`,
+    already logged in this repo's own corrections."""
+    _advance_remote(checkout, 1)
+    project = tmp_path / "project"
+    project.mkdir()
+    _status(project, phase="worker", pid=999_999_998)
+
+    assert freshness.refuse_pull(freshness.read(checkout), project) == ""
+
+
+def test_no_project_root_means_the_question_simply_is_not_asked(tmp_path, checkout):
+    """A bare reading has no consuming repo in hand, and must still be a reading."""
+    _advance_remote(checkout, 1)
+    assert freshness.refuse_pull(freshness.read(checkout)) == ""

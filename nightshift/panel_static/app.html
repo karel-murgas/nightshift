@@ -652,6 +652,23 @@ function post(path, body, opts) {
   }).catch(function (err) { toast(String(err), true); });
 }
 
+/* ---- uninstall: the one action that asks you to type something ----
+   Every other control on the System page is either a report or something a further
+   `update` can undo. This one removes the install, and takes the launcher and the
+   manifest with it — so the panel stops answering the moment it succeeds. A typed
+   project name is the cheapest confirmation that cannot be given by a stray click,
+   and the server checks it too (`_system_verb`): the dialog is a courtesy, not the
+   guard. */
+function confirmUninstall(name) {
+  var typed = window.prompt(
+    "This removes nightshift from " + name + ", including the Command Center " +
+    "launcher and the manifest — this page will stop working.\n\n" +
+    "Type the project name to confirm:");
+  if (typed === null) { return; }
+  if (typed !== name) { toast("that is not " + name + " — nothing was removed", true); return; }
+  post("/api/system/uninstall", { confirm: typed });
+}
+
 /* ---- drag to reorder, renumber, and persist kanban_order ---- */
 
 function renumber(list) {

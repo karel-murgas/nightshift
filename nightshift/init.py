@@ -28,7 +28,9 @@ incomplete install.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import socket
 import subprocess
@@ -533,28 +535,30 @@ def _accept(root: Path, proposals: list[discover.Proposal],
     return tables
 
 
-def build_plan(root: Path, *, integration: str | None,
-               proposals: list[discover.Proposal] | None = None,
-               optional: set[str] | None = None,
-               permission_mode: str = "default",
-               capabilities: list[str] | None = None,
-               budget_bytes: int | None = None) -> Plan:
-    """Every file `init` would create, with its final content. Writes nothing.
+def stage_templates(plan: Plan, root: Path, tables: dict[str, dict], *,
+                    permission_mode: str = "default",
+                    capabilities: list[str] | None = None) -> None:
+    """Render every file the framework owns into `plan`, from `tables`.
 
-    `optional` is the set of non-required `CONFIRM` keys the operator accepted.
-    Omitted means none, which is the correct non-interactive answer.
+    **Split out of `build_plan` so `update` can reach it.** `build_plan` does two
+    separable jobs: it *decides* the manifest tables from discovery and the interview,
+    and it *renders* the templates from whatever those tables turned out to be.
+    `update` needs the second with the first already answered — it must render today's
+    templates against the manifest the project already has, and must never re-run
+    `discover.survey()`, which could propose a different `[project].name` and silently
+    re-render every template with a changed token.
 
-    The last three are the interview's answers to the questions that used to be
-    printed as advice: they land in `.ai/hosts.json` and `[memory].budget_bytes`
-    rather than in a note telling the operator to edit a file.
+    Two orderings inside here are load-bearing and were preserved through the move:
+    `[tiers].binding_doc` and `[memory].orientation` are *decided during* this pass, and
+    the manifest is staged **last** so it records them. For `update` those are already
+    set in the manifest it read, so the same writes are no-ops.
+
+    `permission_mode` and `capabilities` are the interview's answers, and they reach only
+    `.ai/hosts.json`. `update` never rewrites that file — it is one of the three the
+    updater holds frozen, being a record of decisions rather than a copy of a template —
+    so it passes the defaults and they go nowhere.
     """
-    proposals = proposals if proposals is not None else discover.survey(root)
-    tables = _accept(root, proposals, integration, optional)
-    if budget_bytes is not None:
-        tables.setdefault("memory", {})["budget_bytes"] = budget_bytes
-    plan = Plan(root=root, tables=tables)
     values = tokens(root, tables)
-    by_key = {p.key: p for p in proposals}
 
     def stage(rel: str, content: str) -> None:
         plan.staged[rel] = content
@@ -731,6 +735,12 @@ def build_plan(root: Path, *, integration: str | None,
         stage(f".claude/skills/{skill.parent.name}/SKILL.md",
               render(skill.read_text(encoding="utf-8"), values))
 
+    # Staged here as well as by `bootstrap_plan`, so a repo installed before the
+    # launchers existed picks them up from `update`. `stage()` reports the second
+    # writer's copy as `kept`, so the two paths cannot fight over the file.
+    for name, body in launcher_files().items():
+        stage(name, body)
+
     # The tier binding: a document is written only if none already carries the
     # block. Writing a second one would create the exact duplicate §16 forbids.
     # gate-ok(source_reference_liveness): the default location `nightshift init` writes
@@ -779,6 +789,37 @@ def build_plan(root: Path, *, integration: str | None,
         else:
             plan.kept.append(".claude/settings.json")  # gate-ok(source_reference_liveness): see the block comment above
 
+
+def build_plan(root: Path, *, integration: str | None,
+               proposals: list[discover.Proposal] | None = None,
+               optional: set[str] | None = None,
+               permission_mode: str = "default",
+               capabilities: list[str] | None = None,
+               budget_bytes: int | None = None) -> Plan:
+    """Every file `init` would create, with its final content. Writes nothing.
+
+    `optional` is the set of non-required `CONFIRM` keys the operator accepted.
+    Omitted means none, which is the correct non-interactive answer.
+
+    The last three are the interview's answers to the questions that used to be
+    printed as advice: they land in `.ai/hosts.json` and `[memory].budget_bytes`
+    rather than in a note telling the operator to edit a file.
+
+    This decides the tables; `stage_templates` renders them. The notes below are the
+    part that is genuinely `init`'s and not `update`'s: they are about *discovery* —
+    what was guessed and declined, what this machine's checkout looks like — and there
+    is nothing for an update to say about either.
+    """
+    proposals = proposals if proposals is not None else discover.survey(root)
+    tables = _accept(root, proposals, integration, optional)
+    if budget_bytes is not None:
+        tables.setdefault("memory", {})["budget_bytes"] = budget_bytes
+    plan = Plan(root=root, tables=tables)
+    by_key = {p.key: p for p in proposals}
+
+    stage_templates(plan, root, tables, permission_mode=permission_mode,
+                    capabilities=capabilities)
+
     # A guess that was not accepted is worth one line, or the operator never learns
     # the gate behind it is switched off — which is the quiet half of "absence is
     # meaningful". Says what it would have written, so adding it by hand is a copy.
@@ -807,6 +848,23 @@ def build_plan(root: Path, *, integration: str | None,
     return plan
 
 
+#: The Command Center launchers, one per platform. Both are written, always: an
+#: install is a property of the repo rather than of the machine that ran it — the same
+#: reasoning that puts the receipt under version control — and these are committed, so
+#: a clone should work wherever it lands rather than only where it was installed.
+LAUNCHERS = ("command-center.bat", "command-center.sh")
+
+
+def launcher_files() -> dict[str, str]:
+    """The launchers, path → content. No tokens: neither one names the project.
+
+    `python -m nightshift.panel` finds the repo root itself, which is what lets one
+    verbatim file serve every project — and is why these are copied rather than
+    rendered.
+    """
+    return {name: (TEMPLATES / name).read_text(encoding="utf-8") for name in LAUNCHERS}
+
+
 INSTALL_SKILL = ".claude/skills/install-nightshift/SKILL.md"
 # gate-ok(source_reference_liveness): the path `bootstrap_plan` writes into the project
 # being installed, rendered from nightshift/templates/skills/install-nightshift/SKILL.md
@@ -814,26 +872,39 @@ INSTALL_SKILL = ".claude/skills/install-nightshift/SKILL.md"
 
 
 def bootstrap_plan(root: Path) -> Plan:
-    """One file: the skill that drives the install.
+    """The skill that drives the install, and the launchers that open the panel.
 
     **Why this is a separate command.** The install is meant to be driven by an agent,
     not read off a checklist by a person — but a skill is discovered from the project,
     and the project does not have one yet. That is the whole chicken-and-egg: `init`
-    installs skills, and you want a skill to run `init`. So this writes exactly the one
-    file that breaks the cycle and touches nothing else, which makes
+    installs skills, and you want a skill to run `init`. So this writes exactly the
+    files that break the cycle and touches nothing else, which makes
     `pip install -e … && nightshift bootstrap` the entire manual part of an install.
 
-    It stages through the same `Plan`, so the receipt records it and `uninstall` takes it
-    back like anything else.
+    **The launchers are here, before the install, and that is deliberate.** They used to
+    be nowhere — the Command Center shipped with no way into it that was not a module
+    path, and nothing in any document mentioned it existed. Writing them at `init` time
+    would have been the obvious fix and the wrong one: the panel renders perfectly well
+    in a repo with no `.ai/` (`find_root` falls back to `.git/`, `board_root` catches
+    `ManifestError`), so it can host the install rather than wait for it. Bootstrapping
+    them means the next thing after two commands is a window with a button in it.
+
+    It stages through the same `Plan`, so the receipt records everything and `uninstall`
+    takes it back like anything else.
     """
     plan = Plan(root=root)
-    content = (TEMPLATES / "skills" / "install-nightshift" / "SKILL.md").read_text(
-        encoding="utf-8")
-    plan.staged[INSTALL_SKILL] = content
-    if (root / INSTALL_SKILL).exists():
-        plan.kept.append(INSTALL_SKILL)
-    else:
-        plan.writes[INSTALL_SKILL] = content
+
+    def stage(rel: str, content: str) -> None:
+        plan.staged[rel] = content
+        if (root / rel).exists():
+            plan.kept.append(rel)
+        else:
+            plan.writes[rel] = content
+
+    stage(INSTALL_SKILL, (TEMPLATES / "skills" / "install-nightshift" / "SKILL.md"
+                          ).read_text(encoding="utf-8"))
+    for name, body in launcher_files().items():
+        stage(name, body)
     return plan
 
 
@@ -854,17 +925,24 @@ def bootstrap_main(argv: list[str] | None = None) -> int:
 
     plan = bootstrap_plan(root)
     apply(plan)
-    if plan.kept:
-        print(f"\n  {INSTALL_SKILL} was already here; left as it is.")
-    else:
-        print(f"\n  wrote {INSTALL_SKILL}")
+    print()
+    for rel in sorted(plan.staged):
+        print(f"  {'wrote' if rel in plan.writes else 'kept '}  {rel}")
 
-    print("\n  Next, inside Claude Code in this repo:")
+    launcher = "command-center.bat" if os.name == "nt" else "./command-center.sh"
+    print("\n  Next: open the Command Center.")
+    print(f"\n      {launcher}")
+    print("\n  It runs before nightshift is installed — that is the point. The panel")
+    print("  needs no manifest to render, so its Setup page is what performs the")
+    print("  install, and afterwards the same page is where you update this repo's")
+    print("  files, run the checks and repair what they find.")
+    print("\n  The Setup button opens an interactive Claude session running the install")
+    print("  skill. Starting that yourself is the identical thing:")
     print("\n      /install-nightshift")
-    print("\n  It establishes the facts, asks you the two questions that are genuinely")
-    print("  yours (the integration branch, and what a worker may do on this machine),")
-    print("  runs the install, then diagnoses and fixes what the checks report and")
-    print("  files cards for anything needing your decision.")
+    print("\n  Either way it establishes the facts, asks you the two questions that are")
+    print("  genuinely yours (the integration branch, and what a worker may do on this")
+    print("  machine), runs the install, then diagnoses and fixes what the checks")
+    print("  report and files cards for anything needing your decision.")
     print("\n  If the skill is not offered, start the session again — skills are read")
     # gate-ok(source_reference_liveness): same INSTALL_SKILL path as above, quoted for
     # the operator to read in the project just installed, not in this checkout.
@@ -873,8 +951,65 @@ def bootstrap_main(argv: list[str] | None = None) -> int:
     return 0
 
 
+#: The receipt schema this code writes and `update` requires. Bumped from 1 when
+#: `created` grew from a list of paths to a path→hash map — see `content_hash`.
+RECEIPT_VERSION = 2
+
+#: The one file that is merged rather than written, on the way in and on the way out.
+#: A constant because four modules ask about it — `init` merges hooks into it,
+#: `uninstall` strips them back out, `update` does both, and the receipt records
+#: whether we created it — and the framework spends most of its gates preventing a
+#: string like this from existing in four places and drifting in one.
+SETTINGS = ".claude/settings.json"  # gate-ok(source_reference_liveness): names a file in
+# the project being installed, never this framework's own checkout, which has none.
+
+
+def content_hash(text: str) -> str:
+    """The identity of a file's *content*, LF-normalised first.
+
+    **The normalisation is the whole point, not a tidy-up.** `textio.write_text_lf`
+    writes LF, but a Windows checkout with `* text=auto eol=lf` hands the same bytes
+    back as CRLF — so a hash over raw bytes reports every file on this machine as
+    locally edited, and `update` would see nothing but conflicts. `_exists_and_differs`
+    already compares normalised for exactly this reason; this is the same rule applied
+    to a digest instead of an equality test.
+    """
+    return hashlib.sha256(text.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+
+
+def receipt_created(receipt: dict) -> dict[str, str | None]:
+    """A receipt's `created` as path → content hash, whatever shape it is on disk.
+
+    Version 1 wrote a bare list of paths, which is all `uninstall` ever needed: it
+    deletes by path and the content was never part of the question. `update` cannot
+    work from that — without the hash there is no way to tell "you edited this" from
+    "the template moved" — so it requires version 2 outright rather than guessing.
+
+    This reader stays permissive on purpose, and it is not a compatibility path being
+    kept alive: `uninstall` must go on working in a repo installed by any version,
+    because uninstalling is exactly what you reach for when an old install is in the
+    way. A `None` hash means "known to be ours, content unrecorded".
+    """
+    raw = receipt.get("created")
+    if isinstance(raw, dict):
+        return {rel: (h if isinstance(h, str) else None)
+                for rel, h in raw.items() if isinstance(rel, str)}
+    if isinstance(raw, list):
+        return {rel: None for rel in raw if isinstance(rel, str)}
+    return {}
+
+
+def read_receipt(root: Path) -> dict | None:
+    """`.ai/install.json` as a dict, or `None` if there is not a readable one."""
+    try:
+        loaded = json.loads((root / RECEIPT).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
 def receipt_text(plan: Plan) -> str:
-    """The record of what this run created, for `uninstall` to read back.
+    """The record of what this run created, for `uninstall` and `update` to read back.
 
     **Why a file rather than a recomputation.** `uninstall` used to ask `build_plan`
     what `init` writes and delete the intersection with the disk. That is wrong in one
@@ -884,6 +1019,12 @@ def receipt_text(plan: Plan) -> str:
     intersection deletes the operator's work. Only the run that wrote a file knows it
     wrote it, so the run says so.
 
+    **Why the content and not just the path.** The path answers "may this be deleted",
+    which is `uninstall`'s question. It cannot answer `update`'s: a file that differs
+    from today's template is either one the operator edited or one whose template moved,
+    and those want opposite treatment. Recording what was *written* is what separates
+    them, and nothing else can — the disk alone has no memory of what it used to hold.
+
     `settings_created` is separate because that path is a merge, not a write: if the
     file was already there, uninstall takes its hook entries back out and leaves the
     rest, and only a file `init` itself created may be removed outright.
@@ -891,10 +1032,11 @@ def receipt_text(plan: Plan) -> str:
     A second `init` on the same repo has almost nothing left to write, so the receipt
     *accumulates* rather than replacing: it records every file nightshift ever created
     here. Overwriting would leave a repo whose receipt truthfully says this run created
-    nothing, and therefore an uninstall with nothing to remove.
+    nothing, and therefore an uninstall with nothing to remove. With hashes that becomes
+    a merge rather than a union — a file this run left alone keeps the hash from the run
+    that did write it, which is the reading `update` needs.
     """
-    settings = ".claude/settings.json"  # gate-ok(source_reference_liveness): the project this
-    # receipt describes, not this framework's own checkout — see the docstring above.
+    settings = SETTINGS
     # `.obsidian/` is excluded for the same reason as `settings.json`, one step
     # further: those two files are merges into the operator's vault config, and
     # unlike a hook entry there is nothing here worth taking back. A plugin toggle
@@ -902,28 +1044,55 @@ def receipt_text(plan: Plan) -> str:
     # Bases or did they" is unanswerable, and switching off a plugin somebody has
     # been using for months to tidy up after ourselves is the worse error. So
     # uninstall leaves the vault exactly as it found it.
-    created = {rel for rel in plan.writes
+    created = {rel: content_hash(body) for rel, body in plan.writes.items()
                if rel != settings and not rel.startswith(".obsidian/")}
     appended = set(plan.appends)
     settings_created = settings in plan.writes and plan.settings_created
-    try:
-        before = json.loads((plan.root / RECEIPT).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        pass
-    else:
-        if isinstance(before, dict):
-            created |= {rel for rel in before.get("created", []) if isinstance(rel, str)}
-            appended |= {rel for rel in before.get("appended", []) if isinstance(rel, str)}
-            settings_created = settings_created or bool(before.get("settings_created"))
+    declined: dict[str, str] = {}
+    before = read_receipt(plan.root)
+    # Only a v2 receipt is carried forward. An older one records paths without
+    # content, and merging those in as `None` would hand `update` a file it cannot
+    # classify while looking exactly like one it can — so a re-init over an old
+    # install starts the record cleanly rather than half-populated.
+    if before is not None and before.get("version") == RECEIPT_VERSION:
+        for rel, digest in receipt_created(before).items():
+            created.setdefault(rel, digest)
+        appended |= {rel for rel in before.get("appended", []) if isinstance(rel, str)}
+        settings_created = settings_created or bool(before.get("settings_created"))
+        stored = before.get("declined")
+        if isinstance(stored, dict):
+            declined = {rel: h for rel, h in stored.items()
+                        if isinstance(rel, str) and isinstance(h, str)}
     return json.dumps({
         "tool": "nightshift",
-        "version": 1,
-        "created": sorted(created),
+        "version": RECEIPT_VERSION,
+        "created": dict(sorted(created.items())),
         # Files that were the project's before we touched them. Listed separately
         # because they may never be deleted — only the marked block comes back out.
-        "appended": sorted(appended - created),
+        "appended": sorted(appended - set(created)),
+        # Template versions the operator looked at and chose their own file over.
+        # Written by `update --keep`; carried through here so a later `init` does not
+        # silently reopen a question that was already answered.
+        "declined": dict(sorted(declined.items())),
         "settings_created": settings_created,
     }, indent=2) + "\n"
+
+
+def make_executable(path: Path) -> None:
+    """Give a `.sh` the bit that makes it a launcher rather than a text file.
+
+    A no-op on Windows, where the mode bits are not what decides this — but the
+    install is a property of the *repo*, not of the machine that ran it, and
+    `command-center.sh` is committed. Without this, the file written on Karel's box
+    is the file a Linux clone cannot run, and the failure ("permission denied" on
+    the one command the README told them to type) looks like a broken install.
+    """
+    if path.suffix != ".sh":
+        return
+    try:
+        path.chmod(path.stat().st_mode | 0o111)
+    except OSError:
+        pass  # a filesystem with no mode bits is exactly the case this is a no-op for
 
 
 def apply(plan: Plan) -> None:
@@ -939,6 +1108,7 @@ def apply(plan: Plan) -> None:
             path.touch()
         else:
             textio.write_text_lf(path, content)
+        make_executable(path)
 
     # Appends come after writes and never create: the file was the project's already,
     # and the only thing this run may claim afterwards is the block between the markers.
@@ -1255,12 +1425,19 @@ def next_steps(plan: Plan, *, integration: str | None, permission_mode: str) -> 
     print("     `--dry-run` shows the diagnosis and the exact prompt, dispatching")
     print("     nothing.\n")
 
+    launcher = "command-center.bat" if os.name == "nt" else "./command-center.sh"
+    print(f"  To LOOK at any of this: {launcher}")
+    print("  The Command Center — the board as pages, and a System page carrying the")
+    print("  maintenance you would otherwise have to remember: `nightshift update`")
+    print("  (this repo's nightshift files, as the framework moves on), the doctor,")
+    print("  the gates, preflight and the fix pass.\n")
+
     # Deliberately not a third numbered step: the two commands above are the
     # install, and this is the one piece neither of them can do, because it is a
     # click in another application. Called out anyway because the failure is
     # silent-looking and self-inflicted — you open the board you were just told
     # you have, and Obsidian says `Unknown view type: kanban`.
-    print("  To LOOK at the board: open this repo as an Obsidian vault, then install")
+    print("  For the board in Obsidian instead: open this repo as a vault, then install")
     print("  the Base Board community plugin (Settings → Community plugins → Browse).")
     print("  Bases is core and gives the tables; the Kanban view type is Base Board's,")
     print("  and without it Obsidian reports `Unknown view type: kanban`. Nothing in")

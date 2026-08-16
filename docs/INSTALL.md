@@ -8,8 +8,19 @@ pip install -e <path-to-nightshift>
 nightshift bootstrap
 ```
 
-`bootstrap` writes exactly one file — `.claude/skills/install-nightshift/SKILL.md` — and
-nothing else. Then, inside Claude Code in your project:
+`bootstrap` writes three files and nothing else: that skill, and the two Command Center
+launchers. Then open the panel —
+
+```
+command-center.bat          # Windows
+./command-center.sh         # macOS / Linux
+```
+
+— and press **Set up nightshift** on its System page. The panel renders in a repo that
+has no `.ai/` yet, which is what lets it host its own install; the button opens an
+interactive Claude session running the skill.
+
+Starting that session yourself is the identical thing, if you would rather:
 
 ```
 /install-nightshift

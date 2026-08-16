@@ -1066,3 +1066,138 @@ def test_the_rail_offers_the_switch_even_with_no_accounts_configured(server):
     base, root = server
     _, text = _get(base, "now")
     assert "Switch account" in text
+
+
+# ------------------------------------------------- the System page (install, update)
+
+
+def test_the_panel_renders_in_a_repo_with_no_install(tmp_path, monkeypatch):
+    """The whole panel-first install rests on this. `bootstrap` writes the launchers
+    *before* `init`, so the first thing a new project does is open this panel in a repo
+    with no `.ai/manifest.toml` — and the Setup page is what performs the install.
+
+    It did not hold when first written: `read_context` reaches `default_base`, which
+    goes through `branches.integration` and raises rather than guessing. Caught by
+    running it, not by reading it.
+    """
+    root = tmp_path / "fresh"
+    root.mkdir()
+    _git(root, "init", "-q")
+    from nightshift import init as _init
+    _init.apply(_init.bootstrap_plan(root))
+
+    assert not panel.installed(root), "a bootstrap receipt is not an install"
+    html = panel.render_page("system", root)
+    assert "Set up nightshift" in html
+    assert "/api/setup" in html
+    # ...and the ordinary pages must not explode either; the rail is on all of them.
+    assert panel.render_page("now", root)
+
+
+def test_root_goes_to_system_when_there_is_no_install(tmp_path):
+    """`/now` in an uninstalled repo is five empty sections and no hint that the
+    install never happened — which is exactly the state a first visitor is in."""
+    root = tmp_path / "fresh"
+    root.mkdir()
+    _git(root, "init", "-q")
+
+    panel.Handler.root = root
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), panel.Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        # Followed, like `test_root_redirects_to_now` — where it *lands* is the claim,
+        # and asserting on the 302 itself would pass just as well if /system 404'd.
+        with urllib.request.urlopen(f"{base}/", timeout=5) as resp:
+            assert resp.geturl().endswith("/system")
+            assert resp.status == 200
+    finally:
+        httpd.shutdown()
+        thread.join(timeout=5)
+
+
+def test_setup_launches_the_install_skill_and_does_not_perform_it(server, monkeypatch):
+    """Two of the install's four questions are never guessed by policy, and a headless
+    `-p` agent cannot ask them. So the button opens an interactive session running the
+    one install driver there has ever been — it does not become a second one."""
+    base, root = server
+    opened = {}
+    monkeypatch.setattr(panel, "open_terminal",
+                        lambda r, *cmd: opened.setdefault("cmd", list(cmd)))
+
+    status, data = _post(base, "api/setup", {})
+
+    assert status == 200, data
+    assert opened["cmd"] == ["claude", "/install-nightshift"]
+
+
+def test_every_update_write_is_a_subprocess_not_an_import(server, monkeypatch):
+    """The panel may *read* the survey to render the page — that is arithmetic and
+    file I/O, the same licence `board` and `usage` have. Every verb that writes goes
+    out as the command a person would have typed."""
+    base, root = server
+    seen = []
+    monkeypatch.setattr(panel, "run_command",
+                        lambda module, args, r, **kw: seen.append((module, args))
+                        or subprocess.CompletedProcess([], 0, "ok", ""))
+
+    _post(base, "api/update/apply", {})
+    _post(base, "api/update/take", {"path": ".claude/agents/code-thread.md"})
+    _post(base, "api/update/keep", {"path": ".claude/agents/code-thread.md"})
+
+    assert seen == [("update", ["--apply"]),
+                    ("update", ["--take", ".claude/agents/code-thread.md"]),
+                    ("update", ["--keep", ".claude/agents/code-thread.md"])]
+
+
+def test_the_panel_does_not_resolve_a_conflict_in_process():
+    """`survey`, `find` and `diff` are reads and are allowed. `apply`, `take`, `keep`
+    and `merge` change the tree, and the panel owns no logic that does that."""
+    source = Path(panel.__file__).read_text(encoding="utf-8")
+    for forbidden in ("update.apply(", "update.take(", "update.keep(", "update.merge("):
+        assert forbidden not in source, (
+            f"{forbidden!r} found — resolving a conflict must go out as "
+            f"`python -m nightshift.update`, not happen inside the server")
+
+
+def test_merging_a_file_answers_to_the_account_veto(server, monkeypatch):
+    """A merge is a real agent session on a real file, so it spends — and a spending
+    verb is refused server-side, not merely hidden in the UI."""
+    base, root = server
+    monkeypatch.setattr(panel, "_guard_dispatch_account",
+                        lambda waived=False: (_ for _ in ()).throw(
+                            panel.PanelError("account refused")))
+
+    status, data = _post(base, "api/update/merge", {"path": "x.md"})
+
+    assert status == 400, data
+    assert "account refused" in data["message"]
+
+
+def test_uninstall_needs_the_project_name_typed_before_it_does_anything(server, monkeypatch):
+    """The dialog is a courtesy; this is the guard. A crafted POST must fail exactly
+    where a browser click would have declined to send one."""
+    base, root = server
+    seen = []
+    monkeypatch.setattr(panel, "run_command",
+                        lambda module, args, r, **kw: seen.append((module, args))
+                        or subprocess.CompletedProcess([], 0, "ok", ""))
+
+    _post(base, "api/system/uninstall", {})
+    _post(base, "api/system/uninstall", {"confirm": "not-the-name"})
+    assert seen == [("uninstall", []), ("uninstall", [])], "a dry run is all that may run"
+
+    _post(base, "api/system/uninstall", {"confirm": root.name})
+    assert seen[-1] == ("uninstall", ["--yes"])
+
+
+def test_the_repair_pass_answers_to_the_account_veto(server, monkeypatch):
+    base, root = server
+    monkeypatch.setattr(panel, "_guard_dispatch_account",
+                        lambda waived=False: (_ for _ in ()).throw(
+                            panel.PanelError("account refused")))
+
+    status, data = _post(base, "api/system/fix", {})
+
+    assert status == 400, data
