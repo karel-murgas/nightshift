@@ -22,15 +22,24 @@ and the reload-after-an-action behaviour every button depends on, and it means a
 only its own reads — the Verify page's per-card `git` calls are not paid for by someone
 looking at Ideas. The *appearance* is the mockup's; only the mechanism differs.
 
-**Account selection lives here, in memory, and nowhere else.** `_ACCOUNT` is process-wide and
-reset on restart — deliberately not persisted, the same shape as `usage`'s `--allow-paid`
-(`feedback_account_dispatch`): a "spend on this account" decision that outlived the click that
-made it is the foot-gun the whole rule exists to prevent. Selecting an account sets
-`CLAUDE_CONFIG_DIR` for this process's own dispatch subprocesses only — `runner._worker_env`
-already inherits the environment wholesale, so nothing downstream needs to know a selector
-exists. An account carrying `dispatch: never`, **or one whose live `hasExtraUsageEnabled` says
-API spend is on**, is refused server-side (`_guard_dispatch_account`), not merely hidden in the
-UI: a crafted request must fail exactly where a browser click would have declined to send one.
+**Two ways to be on a different account, and the panel owns neither of them.** A repo may
+declare `[[accounts]]`, each naming its own `CLAUDE_CONFIG_DIR`; selecting one sets that
+variable for this process's dispatch subprocesses only (`runner._worker_env` inherits the
+environment wholesale, so nothing downstream needs to know a selector exists). But the
+ordinary gesture is `claude auth login` against the *one* config directory you already have —
+settings, history and MCP servers stay put and only the signed-in identity swaps. That is a
+browser flow, so the panel launches it and stops; what it owns is **reading who is logged in,
+on every page load and never from a cache**, so the rail cannot name the wrong account. The
+meter cache is keyed on the account for the same reason.
+
+**`_ACCOUNT` is process-wide and reset on restart** — deliberately not persisted, the same
+shape as `usage`'s `--allow-paid` (`feedback_account_dispatch`): a "spend on this account"
+decision that outlived the click that made it is the foot-gun the whole rule exists to
+prevent. An account carrying `dispatch: never`, **or one whose live `hasExtraUsageEnabled`
+says API spend is on**, is refused server-side (`_guard_dispatch_account`), not merely hidden
+in the UI: a crafted request must fail exactly where a browser click would have declined to
+send one. A human may waive that per request and never persistently, which is the rule
+satisfied rather than bypassed — the property protected is *who decides*.
 
 **Framework freshness fetches only on an explicit Refresh, never on page load** (§3.4's own
 rule) — `read_rail` always calls `freshness.read(fetch=False)`; only `/api/freshness/refresh`
@@ -354,29 +363,39 @@ class Rail:
 #: shorter than the windows being metered (five hours, seven days) and long
 #: enough that browsing costs nothing.
 METERS_CACHED_FOR = dt.timedelta(seconds=60)
-_METERS: tuple[dt.datetime, usage.Snapshot] | None = None
+#: `(taken at, whose, reading)`.
+_METERS: tuple[dt.datetime, str, usage.Snapshot] | None = None
 
 
-def read_meters(credentials: Path | None, *, force: bool = False) -> usage.Snapshot:
-    """The usage snapshot, reused for `METERS_CACHED_FOR`.
+def read_meters(credentials: Path | None, *, account_key: str = "",
+                force: bool = False) -> usage.Snapshot:
+    """The usage snapshot, reused for `METERS_CACHED_FOR` — per account.
 
     Only the *network* read is cached. `usage.read_identity` is a local file and
     is never cached anywhere — it is what `_guard_dispatch_account` vetoes on, and
     a safety check answering from a minute-old copy is not a safety check.
+
+    **`account_key` is not decoration.** The ordinary way to change accounts here
+    is `claude auth login` against the *same* config directory, so the credential
+    path never changes and a cache keyed on time alone would keep serving the
+    previous account's headroom under the new account's name for up to a minute
+    after a switch.
     """
     global _METERS
     now = dt.datetime.now()
-    if not force and _METERS is not None and now - _METERS[0] < METERS_CACHED_FOR:
-        return _METERS[1]
+    if (not force and _METERS is not None and _METERS[1] == account_key
+            and now - _METERS[0] < METERS_CACHED_FOR):
+        return _METERS[2]
     snapshot = usage.read(credentials)
-    _METERS = (now, snapshot)
+    _METERS = (now, account_key, snapshot)
     return snapshot
 
 
 def read_rail(root: Path, *, fetch_freshness: bool = False) -> Rail:
     credentials, identity_path = _account_paths(_ACCOUNT)
     identity = usage.read_identity(identity_path)
-    snapshot = read_meters(credentials)
+    snapshot = read_meters(credentials,
+                           account_key=identity.account_uuid or identity.email)
     verdict = usage.check(snapshot)
     fresh = freshness.read(fetch=fetch_freshness)
     return Rail(
@@ -874,6 +893,14 @@ def _account_html(ctx: Context) -> str:
     email = rail.identity.email if rail.identity.fetched else "identity unavailable"
     never = (' <span class="chip bad">dispatch: never</span>'
              if rail.account_label and rail.account_dispatch == "never" else "")
+    # Two different ways to be on a different account, and only one of them is a
+    # dropdown. `[[accounts]]` + `CLAUDE_CONFIG_DIR` points at a *separate config
+    # directory*, which is a per-invocation choice this server can make. The
+    # ordinary way, though, is `claude auth login` against the one config
+    # directory you already have — settings and history stay put and the logged-in
+    # identity swaps underneath. That needs a browser, so the panel can only
+    # *launch* it; what it does own is reading who is logged in now, on every page
+    # load, so the answer is never stale.
     selector = ""
     if rail.accounts:
         options = ['<option value="">(ambient)</option>']
@@ -881,7 +908,9 @@ def _account_html(ctx: Context) -> str:
             selected = " selected" if account.label == rail.account_label else ""
             options.append(f'<option value="{_e(account.label)}"{selected}>'
                            f'{_e(account.label)}</option>')
-        selector = ('<br><select onchange="post(\'/api/account\',{label:this.value})">'
+        selector = ('<br><select title="Accounts declared in [[accounts]], each a '
+                    'separate CLAUDE_CONFIG_DIR" '
+                    'onchange="post(\'/api/account\',{label:this.value})">'
                     + "".join(options) + "</select>")
     # The override lives here, next to the account it waives and on every page —
     # §3.4 is explicit that the account in force must be visible *at the moment of
@@ -895,9 +924,14 @@ def _account_html(ctx: Context) -> str:
                 'limits.py stops it reactively after a wall — so the money half cannot '
                 'change what a night does.">'
                 '<input type="checkbox" id="allowpaid"> Override, this once</label>')
+    switch = _act("Switch account", onclick="post('/api/switch-account',{})",
+                  extra='title="Opens a terminal running `claude auth login`. The '
+                        'sign-in is a browser flow, so the panel launches it and does '
+                        'not carry it out; reload this page afterwards and the rail '
+                        'will name whoever is logged in then."')
     return (f'<p class="account">account <b>{_e(label)}</b>{never}<br>{_e(email)}'
             f'{selector}</p><div class="acts" style="justify-content:flex-start">'
-            f'{override}</div>')
+            f'{switch}{override}</div>')
 
 
 def _statusrail_html(ctx: Context) -> str:
@@ -1712,6 +1746,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "api/account":
             state = select_account(root, str(body.get("label", "")))
             return f"account: {state.label or '(ambient)'}"
+
+        if path == "api/switch-account":
+            # A browser sign-in against the one config directory. The panel is a
+            # launcher: it opens the terminal and stops there. The cached meters go
+            # with the old account, so they are dropped rather than left to be
+            # served under the new one's name.
+            global _METERS
+            _METERS = None
+            open_terminal(root, "claude", "auth", "login")
+            return ("opened a terminal running `claude auth login` — sign in, then "
+                    "reload this page to see which account is in force")
 
         if path == "api/stop":
             # The kill switch the runner already watches for (`runner.STOP_FILE`),

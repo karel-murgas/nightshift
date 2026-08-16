@@ -1018,3 +1018,51 @@ def test_the_override_reaches_the_commands_that_check_the_money_rule(server, mon
 
     assert status == 200, data
     assert seen["args"] == ["--allow-paid"]
+
+
+# ------------------------------------------- switching by signing in, not by config
+
+
+def test_meters_are_cached_per_account_not_just_per_minute(monkeypatch):
+    """`claude auth login` swaps the identity under the *same* config directory,
+    so the credential path never changes. A cache keyed on time alone would serve
+    the previous account's headroom under the new account's name."""
+    calls = []
+    monkeypatch.setattr(panel.usage, "read",
+                        lambda creds=None, **k: calls.append(1) or panel.usage.Snapshot())
+    panel.read_meters(None, account_key="account-a")
+    panel.read_meters(None, account_key="account-a")
+    assert len(calls) == 1
+    panel.read_meters(None, account_key="account-b")
+    assert len(calls) == 2, "the reading for one account was reused for another"
+
+
+def test_switching_account_launches_the_sign_in_and_does_not_perform_it(server, monkeypatch):
+    """The panel is a launcher. A browser sign-in is not something it can carry
+    out, and it must not pretend to."""
+    base, root = server
+    opened = {}
+    monkeypatch.setattr(panel, "open_terminal",
+                        lambda r, *cmd: opened.setdefault("cmd", list(cmd)))
+
+    status, data = _post(base, "api/switch-account", {})
+
+    assert status == 200, data
+    assert opened["cmd"] == ["claude", "auth", "login"]
+    assert "reload" in data["message"]
+
+
+def test_switching_account_drops_the_cached_meters(server, monkeypatch):
+    base, root = server
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: None)
+    panel._METERS = (dt.datetime.now(), "old-account", panel.usage.Snapshot())
+    _post(base, "api/switch-account", {})
+    assert panel._METERS is None
+
+
+def test_the_rail_offers_the_switch_even_with_no_accounts_configured(server):
+    """One config directory is the ordinary case; the dropdown is for the other
+    one and must not be the only way to change account."""
+    base, root = server
+    _, text = _get(base, "now")
+    assert "Switch account" in text
