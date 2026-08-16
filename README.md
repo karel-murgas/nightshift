@@ -588,7 +588,7 @@ marker for the same purpose.
 | Table | Fields | Purpose |
 |---|---|---|
 | `[project]` | `name=''`, `source_dirs=()`, `extra_source_dirs=()`, `tooling_dirs=()`, `doc_files=('CLAUDE.md',)` | What the code under test is called and where it lives. |
-| `[tests]` | `dir='tests'`, `parallel=True` | `dir` is where pytest is pointed. |
+| `[tests]` | `dir='tests'`, `parallel=True`, `timeout_s=0` | `dir` is where pytest is pointed. |
 | `[branches]` | `integration=None`, `stable='main'`, `forbidden_extra=()` | `integration` has no default on purpose (module docstring). |
 | `[board]` | `root='Board'` | Lane names are framework config, not project facts (D5), so they are not here — only where the board lives, and who signs a decision on it. |
 | `[worker]` | `harvest_dirs=()`, `fence_env=''`, `integration_checkout_dir=''` | The three constants that were the entire project-specific content of `runner.py`'s 3,597 lines. |

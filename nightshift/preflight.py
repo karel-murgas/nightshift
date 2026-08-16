@@ -100,7 +100,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import branches, suite, textio  # textio: LF-pinned writes (gate write_newline)
+from nightshift import branches, manifest, suite, textio  # textio: LF-pinned writes (gate write_newline)
 from nightshift.manifest import ManifestError, find_root
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -117,6 +117,16 @@ RECEIPT_KEEP = 20
 # gitignored and is where every other run's logs go, with a leading underscore to
 # match `merge_check`'s `_merge-check` — a directory that is not a card id.
 RUN_DIR = Path(".ai") / "runs" / "_preflight"
+
+#: Wall-clock ceiling on the pytest subprocess, after which it is killed and
+#: reported as a failure rather than waited on forever. **Not a performance
+#: budget** — it is set far above any suite this framework runs (the largest
+#: measured is ~13 min) precisely so that reaching it means something is wrong
+#: rather than something is big. The failure it exists for is a hung xdist
+#: session, which consumes no CPU and produces no output, and so is
+#: indistinguishable from a slow one until somebody thinks to sample the stacks.
+#: Overridable per project with `[tests].timeout_s`.
+DEFAULT_PYTEST_TIMEOUT_S = 2400
 
 
 def _receipt_path(root: Path) -> Path:
@@ -384,6 +394,20 @@ def _cache_hit(record: dict | None, fp: str) -> bool:
     return bool(record) and record.get("ok") is True and record.get("fp") == fp
 
 
+def pytest_timeout(root: Path) -> int:
+    """This project's ceiling on one pytest run, or the default it declines to set.
+
+    Never raises: an unreadable manifest is `doctor`'s finding to report, and a
+    timeout that could not be looked up must not be the thing that stops a suite
+    running.
+    """
+    try:
+        declared = manifest.load(root).tests.timeout_s
+    except Exception:
+        return DEFAULT_PYTEST_TIMEOUT_S
+    return int(declared) if declared and declared > 0 else DEFAULT_PYTEST_TIMEOUT_S
+
+
 def _run_subset(root: Path, parts: frozenset, reason: str) -> tuple[bool, int, str, str]:
     """Run pytest over exactly `parts` (a non-empty part set) and judge it by its
     own JUnit report. Returns `(ok, total, why, mode)`.
@@ -396,6 +420,7 @@ def _run_subset(root: Path, parts: frozenset, reason: str) -> tuple[bool, int, s
     """
     selection = suite.Selection.for_parts(parts, reason)
     argv_paths = selection.pytest_args(tests_dir(root))
+    limit = pytest_timeout(root)
 
     out_dir = root / RUN_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -410,8 +435,34 @@ def _run_subset(root: Path, parts: frozenset, reason: str) -> tuple[bool, int, s
     parallel = suite.parallel_args()
     argv = [sys.executable, "-m", "pytest", *argv_paths,
             "-q", *parallel, f"--junitxml={junit}"]
-    tests = subprocess.run(argv, cwd=root, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace")
+    try:
+        tests = subprocess.run(argv, cwd=root, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace",
+                               timeout=limit)
+    except subprocess.TimeoutExpired:
+        # **A parallel suite can fail by hanging, and a hang looks exactly like
+        # slowness.** Observed twice in one day, 2026-08-16, in a project whose full
+        # suite normally takes 3 minutes: a worker died, xdist respawned it ~95s
+        # later, and the replacement never rejoined — workers parked on a
+        # `threading.Event` waiting for the controller, the controller parked on
+        # `queue.get()` waiting for a worker. Nothing computes and nothing reports.
+        #
+        # The runner has had a timeout on this since it was written, and
+        # `merge_check` catches `TimeoutExpired` and says so. Preflight — the one a
+        # person runs interactively, and the one that gates every push — was the
+        # single caller without one, so its failure mode was an unbounded wait with
+        # no output, and the correct-looking response to that is to keep waiting.
+        textio.write_text_lf(out_dir / "pytest.txt",
+                             " ".join(argv) + f"\n\nTIMED OUT after {limit}s\n")
+        mode = "parallel" if parallel else "serial"
+        return False, 0, (
+            f"pytest: no result in {limit // 60} min and killed. If the "
+            f"machine was idle while it ran, this is the xdist worker-respawn "
+            f"deadlock, not slowness — confirm next time with `py-spy dump --pid "
+            f"<pytest pid>`: all-idle stacks mean deadlock. Re-running usually "
+            f"succeeds (worker count is probed against free memory, so it is "
+            f"load-correlated). Raise [tests].timeout_s if this suite is genuinely "
+            f"this slow."), mode
     stdout, stderr = tests.stdout or "", tests.stderr or ""
     textio.write_text_lf(out_dir / "pytest.txt", " ".join(argv) + "\n\n" + stdout + stderr)
 

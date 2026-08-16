@@ -122,6 +122,12 @@ class Tests:
     """
     dir: str = "tests"
     parallel: bool = True
+    #: Wall-clock ceiling on one pytest subprocess, seconds. `0` means the caller's
+    #: own default. Not a performance budget: it exists so that a suite which HANGS
+    #: — an xdist session whose worker died and whose replacement never rejoined
+    #: consumes no CPU and prints nothing — is reported instead of waited on. Set it
+    #: above the slowest honest run of this suite, not near it.
+    timeout_s: int = 0
 
 
 @dataclass(frozen=True)
@@ -502,7 +508,7 @@ _KNOWN_TABLES = ("project", "tests", "branches", "board", "worker", "memory",
                  "layering", "i18n", "dead_code", "audit", "accounts", "tiers")
 _KNOWN: dict[str, tuple[str, ...]] = {
     "project": ("name", "source_dirs", "extra_source_dirs", "tooling_dirs", "doc_files"),
-    "tests": ("dir", "parallel"),
+    "tests": ("dir", "parallel", "timeout_s"),
     "branches": ("integration", "stable", "forbidden_extra"),
     "board": ("root",),
     "worker": ("harvest_dirs", "fence_env", "integration_checkout_dir"),
@@ -637,6 +643,7 @@ def parse(data: dict, root: Path) -> Manifest:
         ),
         tests=Tests(
             dir=str(tests_t.get("dir", "tests")),
+            timeout_s=int(tests_t.get("timeout_s", 0) or 0),
             parallel=bool(tests_t.get("parallel", True)),
         ),
         branches=Branches(

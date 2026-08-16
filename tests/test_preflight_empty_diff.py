@@ -230,3 +230,58 @@ def test_explicit_no_corrections_still_wins_on_an_empty_diff(tmp_path):
     corrections = next(c for c in result.checks if c.name == "corrections")
     assert corrections.ok
     assert "explicit zero" in corrections.detail
+
+
+# --- a suite that hangs must fail, not be waited on -----------------------------
+
+
+def test_a_hung_pytest_is_killed_and_reported(tmp_path, monkeypatch):
+    """Observed twice on 2026-08-16 in a project whose full suite takes 3 minutes:
+    an xdist worker died, the replacement never rejoined, and the session parked —
+    workers on a `threading.Event`, the controller on `queue.get()`. No CPU, no
+    output, no end.
+
+    The runner has always had a timeout here and `merge_check` catches
+    `TimeoutExpired`; preflight — the one a person runs interactively, and the one
+    gating every push — was the single caller without one. So its failure mode was
+    an unbounded silent wait, which is indistinguishable from slowness, and the
+    reasonable response to slowness is to keep waiting.
+    """
+    import subprocess as sp
+    from nightshift import preflight
+
+    root = tmp_path / "repo"
+    (root / "tests").mkdir(parents=True)
+
+    def hang(argv, **kwargs):
+        assert kwargs.get("timeout"), "no timeout passed — a hang would be unbounded"
+        raise sp.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(preflight.subprocess, "run", hang)
+    monkeypatch.setattr(preflight, "tests_dir", lambda r: r / "tests")
+
+    ok, total, why, _ = preflight._run_subset(root, frozenset({"system"}), "test")
+
+    assert not ok, "a hung suite reported as a pass"
+    assert total == 0
+    assert "no result" in why and "deadlock" in why, why
+
+
+def test_the_timeout_is_a_ceiling_not_a_budget(tmp_path):
+    """It must sit far above any honest run, or it becomes a flake generator on a
+    slow machine. The largest suite measured under this framework is ~13 min."""
+    from nightshift import preflight
+
+    assert preflight.DEFAULT_PYTEST_TIMEOUT_S >= 20 * 60
+    assert preflight.pytest_timeout(tmp_path) == preflight.DEFAULT_PYTEST_TIMEOUT_S
+
+
+def test_a_project_may_declare_its_own_ceiling(tmp_path):
+    from nightshift import preflight
+
+    root = tmp_path / "repo"
+    (root / ".ai").mkdir(parents=True)
+    (root / ".ai" / "manifest.toml").write_text(
+        '[project]\nname = "x"\n\n[tests]\ndir = "tests"\ntimeout_s = 999\n', encoding="utf-8")
+
+    assert preflight.pytest_timeout(root) == 999
