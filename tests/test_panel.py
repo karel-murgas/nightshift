@@ -18,6 +18,12 @@ declined to send one at all.
 Refresh does. And **the Ideas page enumerates filenames only, never bodies** —
 the same boundary `boardcmd.promote`/`edit_body` already keep.
 
+**A finished run does not read as a live one.** `status.json` is a file and
+outlives the process that wrote it, and pids are recycled — the first look at
+this panel showed a two-day-old heartbeat as a 41-hour dispatch in progress,
+because the only question asked was whether the pid was alive and something else
+had since been given that pid. Three tests pin the three signals.
+
 Real git repositories throughout, and a real `ThreadingHTTPServer` on a loopback
 port for the route-level tests, matching the framework's own precedent
 (`test_boardcmd.py`, `test_drain.py`) of exercising the real thing rather than a
@@ -25,7 +31,10 @@ mock of it.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
+import os
+import re
 import subprocess
 import sys
 import threading
@@ -119,10 +128,13 @@ def _repo(tmp_path: Path) -> Path:
     return root
 
 
-def _card(root: Path, lane: str, card_id: str, *, unattended: str = "true") -> Path:
+def _card(root: Path, lane: str, card_id: str, *, unattended: str = "true",
+          order: str = "") -> Path:
     path = root / "Board" / lane / f"{card_id}.md"
-    path.write_text(CARD.format(id=card_id, state=lane, unattended=unattended),
-                    encoding="utf-8", newline="")
+    text = CARD.format(id=card_id, state=lane, unattended=unattended)
+    if order:
+        text = text.replace("verify: play", f"verify: play\nkanban_order: {order}")
+    path.write_text(text, encoding="utf-8", newline="")
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", f"card {card_id}")
     return path
@@ -131,10 +143,13 @@ def _card(root: Path, lane: str, card_id: str, *, unattended: str = "true") -> P
 @pytest.fixture(autouse=True)
 def _reset_account():
     """`_ACCOUNT` is process-wide, in-memory state (by design — see the module
-    docstring). A test that selected one must not leak it into the next."""
+    docstring). A test that selected one must not leak it into the next, and the
+    same goes for the cached meter reading."""
     panel._ACCOUNT = panel.AccountState()
+    panel._METERS = None
     yield
     panel._ACCOUNT = panel.AccountState()
+    panel._METERS = None
 
 
 # ------------------------------------------------------ no logic in the server
@@ -469,3 +484,340 @@ def test_read_rail_fetches_only_when_explicitly_asked(tmp_path, monkeypatch):
     monkeypatch.setattr(panel.freshness, "read", spy)
     panel.read_rail(root, fetch_freshness=True)
     assert calls == [True]
+
+
+# ----------------------------------------------------- the meters are not re-fetched
+
+
+def test_the_meter_reading_is_reused_rather_than_refetched_on_every_page(monkeypatch):
+    """The meters are ambient, so without a cache every click is another HTTP
+    call — which is how the endpoint started answering 429 while this was being
+    looked at, and the rail went from numbers to an error line."""
+    calls = []
+    monkeypatch.setattr(panel.usage, "read",
+                        lambda creds=None, **k: calls.append(1) or panel.usage.Snapshot())
+    panel.read_meters(None)
+    panel.read_meters(None)
+    panel.read_meters(None)
+    assert len(calls) == 1
+
+
+def test_the_meter_reading_can_be_forced(monkeypatch):
+    calls = []
+    monkeypatch.setattr(panel.usage, "read",
+                        lambda creds=None, **k: calls.append(1) or panel.usage.Snapshot())
+    panel.read_meters(None)
+    panel.read_meters(None, force=True)
+    assert len(calls) == 2
+
+
+def test_switching_account_throws_the_cached_meters_away(tmp_path, monkeypatch):
+    """A cached reading belongs to the account it was taken for; carrying it
+    across a switch would show one account's headroom under another's name."""
+    root = _repo(tmp_path)
+    calls = []
+    monkeypatch.setattr(panel.usage, "read",
+                        lambda creds=None, **k: calls.append(1) or panel.usage.Snapshot())
+    panel.read_meters(None)
+    panel.select_account(root, "main")
+    panel.read_meters(None)
+    assert len(calls) == 2
+
+
+def test_the_identity_read_is_never_cached(tmp_path, monkeypatch):
+    """It is what the dispatch veto reads. A safety check answering from a
+    minute-old copy is not a safety check."""
+    calls = []
+    monkeypatch.setattr(panel.usage, "read_identity",
+                        lambda path: calls.append(1) or panel.usage.Identity(fetched=True))
+    panel._guard_dispatch_account()
+    panel._guard_dispatch_account()
+    assert len(calls) == 2
+
+
+# ------------------------------------------------- a finished run is not a live one
+
+
+def _beat(minutes_ago: float = 0.0, pid: int | None = None) -> dict:
+    when = dt.datetime.now() - dt.timedelta(minutes=minutes_ago)
+    return {"pid": os.getpid() if pid is None else pid, "card": "a-card",
+            "phase": "worker", "updated": when.isoformat(), "since": when.isoformat()}
+
+
+def test_a_finished_record_beats_a_heartbeat_nobody_cleared():
+    """Nothing clears `status.json` on the way out, so the last phase of a
+    completed run sits there forever. The record knows it ended."""
+    beat = _beat(minutes_ago=1)
+    record = {"complete": True, "finished": dt.datetime.now().isoformat()}
+    assert panel.run_is_live(beat, record) is False
+
+
+def test_a_heartbeat_older_than_the_trust_window_is_not_believed():
+    """The case that was actually on screen: a two-day-old file whose pid had been
+    recycled to an unrelated process, rendered as a 41-hour dispatch in progress.
+    The pid check alone says `True` here — the age is what catches it."""
+    stale = _beat(minutes_ago=panel.HEARTBEAT_TRUSTED_FOR.total_seconds() / 60 + 5)
+    assert panel._pid_alive(stale["pid"]), "this test needs a pid that IS alive"
+    assert panel.run_is_live(stale, {"complete": False}) is False
+
+
+def test_a_fresh_heartbeat_from_a_live_pid_is_live():
+    assert panel.run_is_live(_beat(minutes_ago=1), {"complete": False}) is True
+
+
+def test_a_dead_pid_is_not_live():
+    assert panel.run_is_live(_beat(minutes_ago=1, pid=999_999_999), {}) is False
+
+
+def test_no_status_file_at_all_is_not_live():
+    assert panel.run_is_live({}, {}) is False
+
+
+def test_a_stale_heartbeat_does_not_render_as_running(server):
+    """The whole point, end to end: the rail must not claim a run is in flight."""
+    base, root = server
+    _card(root, "tasks", "a-card")
+    stale = _beat(minutes_ago=panel.HEARTBEAT_TRUSTED_FOR.total_seconds() / 60 + 5)
+    status = root / ".ai" / "runs"
+    status.mkdir(parents=True, exist_ok=True)
+    (status / "status.json").write_text(json.dumps(stale), encoding="utf-8")
+
+    _, text = _get(base, "now")
+
+    assert "No run in progress" in text
+    # The class is always in the stylesheet; what must be absent is the element.
+    assert '<span class="live-dot">' not in text, "the dot claims a run is in flight"
+    assert "Running now" not in text
+
+
+# ------------------------------------------------------------- the roster reads
+
+
+def test_the_lane_column_keeps_the_lane_and_drops_settles_whole_sentence():
+    entry = {"landed": "a-card: → testing/ (reviewed ok, rebased ai/a-card onto test "
+                       "and merged)", "outcome": "reviewed"}
+    assert panel._landed_lane(entry) == "→ testing/"
+
+
+def test_the_lane_column_falls_back_to_the_outcome_when_nothing_landed():
+    assert panel._landed_lane({"outcome": "failed"}) == "failed"
+
+
+def test_a_long_detail_is_cut_rather_than_stretching_the_table():
+    """Rendered whole, one worker's `detail` pushed every other column of the
+    roster into a two-character ribbon and ran off the side of the window."""
+    entry = {"detail": "word " * 200}
+    said = panel._said(entry)
+    assert len(said) <= 90
+    assert said.endswith("…")
+
+
+def test_a_short_detail_is_left_alone():
+    assert panel._said({"detail": "reviewed ok"}) == "reviewed ok"
+
+
+# ------------------------------------------------------------ rows and their meta
+
+
+def test_every_meta_fact_is_its_own_element():
+    """`.meta` is a flex row and its `gap` only separates *children*, so two bare
+    strings render as `code-threadverify: play`. Found by looking at the page."""
+    assert panel._meta(["code-thread", "verify: play"]) == (
+        '<div class="meta"><span>code-thread</span><span>verify: play</span></div>')
+
+
+def test_meta_leaves_an_element_that_is_already_one_alone():
+    assert panel._meta([panel._chip("running", "ok")]).count("<span") == 1
+
+
+def test_a_section_carrying_reorderable_rows_gets_the_id_the_dragging_binds_to():
+    """Without it the drag handlers and the take-first slider bind to nothing and
+    the whole selection model is silently dead — which is how it first shipped."""
+    assert 'id="queue"' in panel._section("Tonight", 1, "<div></div>", rows_id="queue")
+    assert 'id=' not in panel._section("Decide", 1, "<div></div>")
+
+
+# --------------------------------------------------- what the other machine takes
+
+
+def test_a_card_needing_a_human_is_not_filed_under_the_other_machine(tmp_path):
+    """`requires: gpu-box` **and** `unattended: false` needs a person wherever it
+    runs, so promising that another machine will take it is a lie about both."""
+    root = _repo(tmp_path)
+    path = root / "Board" / "tasks" / "both.md"
+    path.write_text(CARD.format(id="both", state="tasks", unattended="false").replace(
+        "verify: play", "verify: play\nrequires: gpu-box"), encoding="utf-8", newline="")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "both")
+
+    ctx = panel.read_context(root)
+
+    assert [c.card.id for c in ctx.elsewhere] == []
+    assert "both" in [c.card.id for c in ctx.do_now]
+
+
+# ------------------------------------------------- running a chosen subset, in order
+
+
+def test_night_with_card_ids_spawns_the_sequencer_not_the_whole_queue(server, monkeypatch):
+    base, root = server
+    seen = {}
+    monkeypatch.setattr(panel, "spawn_sequence",
+                        lambda ids, r: seen.setdefault("ids", list(ids)) or 4242)
+    monkeypatch.setattr(panel, "spawn_background",
+                        lambda *a, **k: pytest.fail("a subset must not start the whole queue"))
+    monkeypatch.setattr(panel.usage, "read_identity",
+                        lambda path: panel.usage.Identity(fetched=True,
+                                                          has_extra_usage_enabled=False))
+
+    status, data = _post(base, "api/night", {"card_ids": ["b", "a", "c"]})
+
+    assert status == 200, data
+    assert seen["ids"] == ["b", "a", "c"], "the panel's order is the run's order"
+
+
+def test_night_with_no_ids_still_runs_the_whole_queue(server, monkeypatch):
+    base, root = server
+    seen = {}
+    monkeypatch.setattr(panel, "spawn_background",
+                        lambda module, args, r: seen.setdefault("call", (module, list(args)))
+                        or 7)
+    monkeypatch.setattr(panel.usage, "read_identity",
+                        lambda path: panel.usage.Identity(fetched=True,
+                                                          has_extra_usage_enabled=False))
+
+    status, data = _post(base, "api/night", {})
+
+    assert status == 200, data
+    assert seen["call"] == ("runner", [])
+
+
+def test_dispatch_cards_runs_the_runners_own_per_card_path_in_order(tmp_path, monkeypatch):
+    root = _repo(tmp_path)
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert panel.dispatch_cards(["first", "second"], root) == 0
+    assert [c[-1] for c in calls] == ["first", "second"]
+    assert all("nightshift.runner" in c for c in calls), \
+        "each card must go through the runner, not through anything this module owns"
+
+
+def test_dispatch_cards_stops_at_the_first_failure(tmp_path, monkeypatch):
+    root = _repo(tmp_path)
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert panel.dispatch_cards(["first", "second"], root) == 1
+    assert len(calls) == 1, "the second card ran after the first had failed"
+
+
+# ------------------------------------------------------------------ drag persistence
+
+
+def test_reordering_writes_only_the_cards_whose_order_actually_moved(server):
+    """A drag posts every row. Writing them all would commit the whole lane every
+    time one card moves."""
+    base, root = server
+    _card(root, "tasks", "one", order="V0001")
+    _card(root, "tasks", "two", order="V0002")
+
+    status, data = _post(base, "api/reorder-many", {"writes": [
+        {"card_id": "one", "order": "V0001"},      # unchanged
+        {"card_id": "two", "order": "V0009"},      # moved
+    ]})
+
+    assert status == 200, data
+    assert "1 card" in data["message"]
+    assert "kanban_order: V0001" in (root / "Board" / "tasks" / "one.md").read_text(
+        encoding="utf-8")
+    assert "kanban_order: V0009" in (root / "Board" / "tasks" / "two.md").read_text(
+        encoding="utf-8")
+
+
+def test_reordering_nothing_says_so_rather_than_committing(server):
+    base, root = server
+    _card(root, "tasks", "one", order="V0001")
+    status, data = _post(base, "api/reorder-many",
+                         {"writes": [{"card_id": "one", "order": "V0001"}]})
+    assert status == 200
+    assert "unchanged" in data["message"]
+
+
+# ------------------------------------------------------- reading a body to edit it
+
+
+def test_a_body_can_be_read_back_for_the_person_editing_it(tmp_path):
+    root = _repo(tmp_path)
+    note = root / "Board" / "inbox" / "thought.md"
+    note.write_text("half a thought\n", encoding="utf-8")
+    assert panel.read_body(root, "Board/inbox/thought.md") == "half a thought\n"
+
+
+def test_an_idea_can_be_read_back_too_because_the_editor_is_the_persons_own(tmp_path):
+    """`ideas_fence` stops an *agent* opening a private note; `boardcmd edit` exists
+    because editing one has to be an act the human drives, "with the text arriving
+    from their editor". A textarea in their browser is that editor, and it cannot
+    be prefilled without this read."""
+    root = _repo(tmp_path)
+    idea = root / "Board" / board.PRIVATE_LANE / "spark.md"
+    idea.write_text("pomeranian-carburettor\n", encoding="utf-8")
+    assert panel.read_body(root, f"Board/{board.PRIVATE_LANE}/spark.md") == \
+        "pomeranian-carburettor\n"
+
+
+def test_reading_a_body_outside_the_board_is_refused(tmp_path):
+    root = _repo(tmp_path)
+    (root / "secrets.txt").write_text("no\n", encoding="utf-8")
+    with pytest.raises(panel.PanelError, match="not inside the board"):
+        panel.read_body(root, "secrets.txt")
+
+
+def test_reading_a_body_outside_the_board_is_refused_over_http(server):
+    base, root = server
+    (root / "secrets.txt").write_text("no\n", encoding="utf-8")
+    request = urllib.request.Request(f"{base}/api/body?path=../secrets.txt")
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        payload = json.loads(exc.read())
+    assert payload.get("ok") is False
+
+
+@pytest.mark.parametrize("page, name", [
+    ("inbox", "Regenerate soundtrack.md"),
+    ("ideas", "Animation – attack.md"),
+])
+def test_an_editor_id_survives_a_real_filename(server, page, name):
+    """Real note names carry spaces, capitals and en dashes. An id with a space in
+    it is not a valid id, and `getElementById` never finds it — so the editor
+    would silently refuse to open for exactly the notes most in need of editing."""
+    base, root = server
+    lane = "inbox" if page == "inbox" else board.PRIVATE_LANE
+    (root / "Board" / lane / name).write_text("body\n", encoding="utf-8")
+
+    _, text = _get(base, page)
+
+    ids = re.findall(r'<div class="editor" id="([^"]+)"', text)
+    assert ids, "the page rendered no editor at all"
+    for found in ids:
+        assert " " not in found, f"id {found!r} contains a space"
+        assert found == found.strip()
+
+
+def test_the_ideas_page_still_shows_no_bodies_even_though_one_can_be_fetched(server):
+    base, root = server
+    (root / "Board" / board.PRIVATE_LANE / "spark.md").write_text(
+        "pomeranian-carburettor\n", encoding="utf-8")
+    _, text = _get(base, "ideas")
+    assert "spark.md" in text
+    assert "pomeranian-carburettor" not in text

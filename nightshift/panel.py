@@ -2,32 +2,46 @@
 """The Command Center — a launcher, a registry and a tail, never a chat client.
 
 `.claude/plans/dispatch-cost-and-control-panel.md` (a Dungeoneer doc) §3.4 is the design
-session this implements; the plan itself is project-side because it is Dungeoneer's own
+session this implements; the plan itself is project-side because it is that project's own
 programme, but the panel is framework — any project with a board can run one.
 
-**Every verb already exists as a CLI command** (items 11-13 of that plan built them for
-exactly this reason), so **the server owns no logic**. Every POST that changes anything goes
-through `run_command`/`spawn_background`, which shell out to `python -m nightshift.<module>
-<args>` — the same command a person would type. This mirrors the framework's own precedent:
-`boardcmd`'s test suite states outright that "the panel will not import this module — it will
-run it" (`tests/test_boardcmd.py`), and this module holds to that for every board- or
-dispatch-shaped verb. Reading board/usage/freshness state to *render* a page is not "logic" in
-that sense — `drain.py` and `ingest.py` already import `board`/`usage` directly for the same
-reason — so GET handlers read via the ordinary Python API and only POST handlers shell out.
+**Every verb already exists as a CLI command**, so **the server owns no logic**. Every POST
+that changes anything goes through `run_command`/`spawn_background`, which shell out to
+`python -m nightshift.<module> <args>` — the same command a person would type. This mirrors
+the framework's own precedent: `boardcmd`'s test suite states outright that "the panel will
+not import this module — it will run it", and this module holds to that for every board- or
+dispatch-shaped verb. Reading board/usage/freshness state to *render* a page is not "logic"
+in that sense — `drain.py` and `ingest.py` already import `board`/`usage` directly for the
+same reason — so GET handlers read via the ordinary Python API and only POST handlers shell
+out.
+
+**Pages are server-rendered, one URL each.** The approved mockup switches its five pages
+with JavaScript because a static mockup has no server; here `/now`, `/verify`, `/inbox`,
+`/ideas` and `/run` are real addresses, so the left rail is links. That keeps deep-linking
+and the reload-after-an-action behaviour every button depends on, and it means a page costs
+only its own reads — the Verify page's per-card `git` calls are not paid for by someone
+looking at Ideas. The *appearance* is the mockup's; only the mechanism differs.
 
 **Account selection lives here, in memory, and nowhere else.** `_ACCOUNT` is process-wide and
 reset on restart — deliberately not persisted, the same shape as `usage`'s `--allow-paid`
 (`feedback_account_dispatch`): a "spend on this account" decision that outlived the click that
 made it is the foot-gun the whole rule exists to prevent. Selecting an account sets
 `CLAUDE_CONFIG_DIR` for this process's own dispatch subprocesses only — `runner._worker_env`
-already inherits the environment wholesale, confirmed in item 13, so nothing downstream needs
-to know a selector exists. An account carrying `dispatch: never` is refused server-side
-(`_guard_dispatch_account`), not merely hidden in the UI: a crafted request must fail exactly
-where a browser click would have declined to send one.
+already inherits the environment wholesale, so nothing downstream needs to know a selector
+exists. An account carrying `dispatch: never`, **or one whose live `hasExtraUsageEnabled` says
+API spend is on**, is refused server-side (`_guard_dispatch_account`), not merely hidden in the
+UI: a crafted request must fail exactly where a browser click would have declined to send one.
 
 **Framework freshness fetches only on an explicit Refresh, never on page load** (§3.4's own
 rule) — `read_rail` always calls `freshness.read(fetch=False)`; only `/api/freshness/refresh`
 passes `fetch=True`.
+
+**The money rule is left exactly where it is.** `chores`, `ingest` and `drain` each check
+`usage` before they spend, and they take `--allow-paid`; `runner` does not consult `usage` at
+all — a night is protected reactively by `limits.py` after a wall, by design. So the override
+checkbox is wired to the commands that can honour it and is inert for the night, which is
+stated on the control rather than hidden behind it. Adding a money check here instead would be
+this server growing the one kind of logic it must not have.
 
 No LLM anywhere in this module. Reading board/usage state is arithmetic and file I/O; every
 LLM-touching action is a subprocess this module starts and does not wait on.
@@ -39,6 +53,7 @@ import datetime as dt
 import html
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -46,18 +61,28 @@ import webbrowser
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
-from nightshift import board, drain, freshness, ingest, manifest, usage
+from nightshift import board, drain, freshness, ingest, manifest, run_record, textio, usage
 from nightshift.manifest import ManifestError, find_root
 from nightshift.runner import (
+    RUNS,
     STATUS_FILE,
+    STOP_FILE,
     Candidate,
-    claude_binary,
+    branch_has_commits,
+    current_branch,
     default_base,
     host_capabilities,
+    read_telemetry,
     schema_violations,
 )
+# Private, and imported rather than reimplemented on purpose: "is this pid still
+# alive" carries a Windows-specific subtlety (`tasklist`, not a signal) that
+# `print_status` already got right, and a second copy here would be the same
+# question answered twice. It is the one thing standing between a heartbeat file
+# and the claim that a run is live.
+from nightshift.runner import _pid_alive
 from nightshift.runner import select as select_candidates
 
 DEFAULT_PORT = 8765
@@ -66,9 +91,22 @@ TEMPLATE = STATIC_DIR / "app.html"
 
 PAGES = ("now", "verify", "inbox", "ideas", "run")
 
+#: The run's phases, as the pills across the status rail: `(status.json value, label)`.
+#: `starting` and `checker` fold onto `worker` because they are the same span of the run
+#: from the outside. `merge` is last and is never itself a live phase — `settle` merges
+#: without a heartbeat — so it lights only once the run has moved past `review`, which is
+#: honest about what is known rather than inventing a phase the runner does not report.
+PHASE_STEPS: tuple[tuple[str, str], ...] = (
+    ("worker", "dispatch"), ("gates", "gates"), ("pytest", "tests"),
+    ("review", "review"), ("merge", "merge"),
+)
+_PHASE_ALIASES = {"starting": "worker", "checker": "worker"}
+#: Phases that mean the run is past every step above.
+_PHASE_DONE = frozenset({"digest", "finished"})
+
+
 # --------------------------------------------------------------------------
-# The account in force — process-wide, in-memory, never persisted (see module
-# docstring). A fresh server always starts on the ambient account.
+# The account in force — process-wide, in-memory, never persisted.
 # --------------------------------------------------------------------------
 
 
@@ -100,7 +138,10 @@ def select_account(root: Path, label: str) -> AccountState:
     server process itself inherited, or `~/.claude` if unset) — not a fourth
     hardcoded default, just "stop overriding".
     """
-    global _ACCOUNT
+    global _ACCOUNT, _METERS
+    # A different account has different meters, so the cached reading is not just
+    # stale, it is about someone else.
+    _METERS = None
     if not label:
         _ACCOUNT = AccountState()
         return _ACCOUNT
@@ -108,7 +149,8 @@ def select_account(root: Path, label: str) -> AccountState:
     if match is None:
         known = ", ".join(a.label for a in _accounts(root)) or "(none configured)"
         raise PanelError(f"no account named {label!r} in [[accounts]] — known: {known}")
-    _ACCOUNT = AccountState(label=match.label, config_dir=match.config_dir, dispatch=match.dispatch)
+    _ACCOUNT = AccountState(label=match.label, config_dir=match.config_dir,
+                            dispatch=match.dispatch)
     return _ACCOUNT
 
 
@@ -140,11 +182,10 @@ def _guard_dispatch_account() -> None:
 
     **Config may only ever exclude, never promote** (`feedback_account_dispatch`):
     `[[accounts]]` may be missing an entry for the account actually in force — it
-    was, on the very first live run of this module, against Karel's own board —
-    so the config check alone would have let automated work reach the one account
-    the whole rule exists to protect. The live identity read is what `usage.py`'s
-    own docstring calls the veto config forgot to mark, so it is checked
-    unconditionally here, not only when `[[accounts]]` names the account.
+    was, on the very first live run of this module — so the config check alone
+    would have let automated work reach the one account the whole rule exists to
+    protect. The live identity read is the veto config forgot to mark, so it is
+    checked unconditionally, not only when `[[accounts]]` names the account.
     """
     if _ACCOUNT.dispatch == "never":
         raise PanelError(
@@ -165,7 +206,7 @@ def _guard_dispatch_account() -> None:
 
 # --------------------------------------------------------------------------
 # The one command-running helper. Every write/dispatch verb goes through one
-# of these two functions — never a re-implementation of board or runner logic.
+# of these — never a re-implementation of board or runner logic.
 # --------------------------------------------------------------------------
 
 
@@ -173,7 +214,8 @@ def _module_argv(module: str, *args: str) -> list[str]:
     return [sys.executable, "-m", f"nightshift.{module}", *args]
 
 
-def run_command(module: str, args: list[str], root: Path, *, timeout: int = 120) -> subprocess.CompletedProcess:
+def run_command(module: str, args: list[str], root: Path, *,
+                timeout: int = 120) -> subprocess.CompletedProcess:
     """Run `python -m nightshift.<module> <args>` to completion and capture it.
 
     For the short verbs — a board write, a plan, a dry-run — that return in well
@@ -189,23 +231,67 @@ def run_command(module: str, args: list[str], root: Path, *, timeout: int = 120)
 def spawn_background(module: str, args: list[str], root: Path) -> int:
     """Start `python -m nightshift.<module> <args>` detached and return its pid.
 
-    For a verb that may dispatch an actual LLM session and run for minutes — a
-    card, a night, a chore batch, a classify pass, a review. The HTTP request
-    returns immediately; progress is read from the files the command itself
-    already writes (`.ai/runs/status.json`, `Board/Chores.md`, `Board/Routing.md`),
-    never from this function holding the connection open.
+    For a verb that may dispatch an actual LLM session and run for minutes. The
+    HTTP request returns immediately; progress is read from the files the command
+    itself already writes (`.ai/runs/status.json`, the run records), never from
+    this function holding the connection open. Detached on purpose: closing the
+    panel must not kill a night.
     """
-    kwargs: dict[str, object] = {}
-    if os.name == "nt":
-        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        kwargs["start_new_session"] = True
     proc = subprocess.Popen(
         _module_argv(module, *args), cwd=root, env=_dispatch_env(),
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        **kwargs,
+        **_detached(),
     )
     return proc.pid
+
+
+def spawn_sequence(card_ids: list[str], root: Path) -> int:
+    """Dispatch each card in turn, in the order given, detached from this process.
+
+    This is what "run the ticked cards" means, and it deliberately owns **no
+    dispatch logic**: it runs `python -m nightshift.panel --dispatch-cards a b c`,
+    whose whole body is a loop calling `runner --card` — the runner's own per-card
+    path, once per card, in the panel's order. A subset could not otherwise be
+    expressed: `runner` with no arguments takes the whole queue, and there is no
+    flag for "these five".
+
+    Its own module is the sequencer for the same reason the verbs are commands:
+    the thing the button does can be typed into a terminal and watched.
+    """
+    argv = [sys.executable, "-m", "nightshift.panel", "--dispatch-cards", *card_ids]
+    proc = subprocess.Popen(
+        argv, cwd=root, env=_dispatch_env(),
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        **_detached(),
+    )
+    return proc.pid
+
+
+def _detached() -> dict[str, object]:
+    """The platform's "outlive this process" flags for `Popen`."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.DETACHED_PROCESS
+                | subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def dispatch_cards(card_ids: list[str], root: Path) -> int:
+    """`--dispatch-cards`: run `runner --card <id>` for each id, in order.
+
+    Stops at the first card whose run exits non-zero — a night that could not
+    finish card 2 has no business starting card 3 on the same assumption, and the
+    runner's own exit code is the only judgment consulted. Nothing here reads a
+    board, moves a card or decides an outcome.
+    """
+    for card_id in card_ids:
+        print(f"panel: dispatching {card_id}", flush=True)
+        result = subprocess.run(_module_argv("runner", "--card", card_id), cwd=root,
+                                check=False)
+        if result.returncode != 0:
+            print(f"panel: {card_id} exited {result.returncode} — stopping the sequence",
+                  flush=True)
+            return result.returncode
+    return 0
 
 
 def open_terminal(root: Path, *command: str) -> None:
@@ -215,13 +301,13 @@ def open_terminal(root: Path, *command: str) -> None:
     launcher, a registry and a tail — never a chat client"*). `claude --resume
     <session_id>` is the concrete case `runner.py` already supports (the session id
     is captured per attempt); triage is `claude --agent triage` — deliberately
-    interactive, because triage is real investigative work Karel drives, not a
-    one-shot `-p` dispatch this module could run for him.
+    interactive, because triage is investigative work a person drives, not a
+    one-shot `-p` dispatch this module could run for them.
     """
     if os.name == "nt":
         subprocess.Popen(["cmd", "/c", "start", "Command Center", "cmd", "/k", *command],
                          cwd=root)  # gate-ok(subprocess_result_checked): a detached, visible
-                                    # console window that Karel drives from here on — there is
+                                    # console window the user drives from here on — there is
                                     # nothing this function could do with an exit code from a
                                     # window that has not been interacted with yet
     else:
@@ -231,8 +317,7 @@ def open_terminal(root: Path, *command: str) -> None:
 
 
 # --------------------------------------------------------------------------
-# Page data — reads only. `board.cards`/`usage.read`/`freshness.read` etc are
-# the framework's own read API; no second parser is grown here.
+# Reading — the framework's own read API, never a second parser.
 # --------------------------------------------------------------------------
 
 
@@ -242,157 +327,251 @@ class Rail:
     snapshot: usage.Snapshot
     verdict: usage.Verdict
     freshness_line: str
+    freshness_known: bool
     account_label: str
     account_dispatch: str
     accounts: tuple[manifest.Account, ...]
     run_status: dict = field(default_factory=dict)
 
 
+#: How long a meter reading is reused before the endpoint is asked again.
+#: The meters are ambient — they are on every page — so without this every click
+#: in the rail is another HTTP call, and the endpoint starts answering 429, which
+#: is exactly what it did after a few minutes of paging around. A minute is far
+#: shorter than the windows being metered (five hours, seven days) and long
+#: enough that browsing costs nothing.
+METERS_CACHED_FOR = dt.timedelta(seconds=60)
+_METERS: tuple[dt.datetime, usage.Snapshot] | None = None
+
+
+def read_meters(credentials: Path | None, *, force: bool = False) -> usage.Snapshot:
+    """The usage snapshot, reused for `METERS_CACHED_FOR`.
+
+    Only the *network* read is cached. `usage.read_identity` is a local file and
+    is never cached anywhere — it is what `_guard_dispatch_account` vetoes on, and
+    a safety check answering from a minute-old copy is not a safety check.
+    """
+    global _METERS
+    now = dt.datetime.now()
+    if not force and _METERS is not None and now - _METERS[0] < METERS_CACHED_FOR:
+        return _METERS[1]
+    snapshot = usage.read(credentials)
+    _METERS = (now, snapshot)
+    return snapshot
+
+
 def read_rail(root: Path, *, fetch_freshness: bool = False) -> Rail:
     credentials, identity_path = _account_paths(_ACCOUNT)
     identity = usage.read_identity(identity_path)
-    snapshot = usage.read(credentials)
+    snapshot = read_meters(credentials)
     verdict = usage.check(snapshot)
     fresh = freshness.read(fetch=fetch_freshness)
-
-    status_path = root / STATUS_FILE
-    run_status: dict = {}
-    if status_path.is_file():
-        try:
-            run_status = json.loads(status_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, ValueError):
-            run_status = {}
-
     return Rail(
         identity=identity, snapshot=snapshot, verdict=verdict,
-        freshness_line=freshness.describe(fresh),
+        freshness_line=freshness.describe(fresh), freshness_known=fresh.known,
         account_label=_ACCOUNT.label, account_dispatch=_ACCOUNT.dispatch,
-        accounts=_accounts(root), run_status=run_status,
+        accounts=_accounts(root), run_status=_read_json(root / STATUS_FILE),
     )
 
 
-@dataclass
-class NowPage:
-    decisions: list[board.Card]
-    tonight: list[Candidate]
-    elsewhere: list[Candidate]
-    do_now: list[Candidate]
-    routing_view_exists: bool
-    routing_view_mtime: dt.datetime | None
-
-
-def read_now(root: Path) -> NowPage:
-    decisions = board.cards(root, "needs-decision")
-    capabilities = host_capabilities(root)
-    bad_schema = schema_violations(root)
-    candidates = select_candidates(root, capabilities, bad_schema)
-
-    tonight = [c for c in candidates if c.dispatchable]
-    elsewhere = [c for c in candidates
-                 if not c.dispatchable and c.card.requires and c.card.requires not in capabilities]
-    do_now = [c for c in candidates if not c.dispatchable and c not in elsewhere]
-
-    routing_path = root / board.ROUTING_VIEW
-    exists = routing_path.is_file()
-    mtime = dt.datetime.fromtimestamp(routing_path.stat().st_mtime) if exists else None
-    return NowPage(decisions=decisions, tonight=tonight, elsewhere=elsewhere, do_now=do_now,
-                  routing_view_exists=exists, routing_view_mtime=mtime)
+def _read_json(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 @dataclass
-class VerifyPage:
-    by_surface: dict[str, list[board.Card]]
-    review_cards: list[board.Card]
-    review_skip_reason: dict[str, str]
+class Context:
+    """Everything the five pages read, gathered once per request.
+
+    One object rather than each `_render_*` reaching for the board itself: the
+    left rail carries a count for every page, so a single page load needs all
+    five answers anyway, and reading the lanes three times to produce them would
+    be the same board parsed three times.
+    """
+
+    root: Path
+    rail: Rail
+    base: str
+    candidates: list[Candidate] = field(default_factory=list)
+    decisions: list[board.Card] = field(default_factory=list)
+    testing: list[board.Card] = field(default_factory=list)
+    review: list[board.Card] = field(default_factory=list)
+    notes: list[ingest.Note] = field(default_factory=list)
+    ideas: list[str] = field(default_factory=list)
+
+    @property
+    def tonight(self) -> list[Candidate]:
+        return [c for c in self.candidates if c.dispatchable]
+
+    @property
+    def elsewhere(self) -> list[Candidate]:
+        """Work whose *only* blocker is this machine — a `requires:` it does not
+        declare. Not "do now": it is *Tonight, on the other machine*.
+
+        `unattended` is part of the test, and it has to be: a card that is both
+        `requires: gpu-box` and `unattended: false` needs a person wherever it
+        runs, so filing it under "the other machine will take it" would promise
+        something no machine is going to do.
+        """
+        capabilities = host_capabilities(self.root)
+        return [c for c in self.candidates
+                if not c.dispatchable and c.card.requires
+                and c.card.requires not in capabilities and c.card.unattended]
+
+    @property
+    def do_now(self) -> list[Candidate]:
+        """Everything else the night will not take — `unattended: false`,
+        `worker: none`, a broken schema. Which is the same list as the inline
+        notes: it needs a person present."""
+        elsewhere = {id(c) for c in self.elsewhere}
+        return [c for c in self.candidates if not c.dispatchable and id(c) not in elsewhere]
+
+    def counts(self) -> dict[str, int]:
+        return {
+            "now": len(self.decisions) + len(self.do_now) + len(self.tonight)
+                   + len(self.elsewhere),
+            "verify": len(self.testing) + len(self.review),
+            "inbox": len(self.notes),
+            "ideas": len(self.ideas),
+            "run": len(_latest_record(self.root).get("dispatched", [])),
+        }
 
 
-def read_verify(root: Path) -> VerifyPage:
-    testing_cards = board.cards(root, "testing")
-    by_surface: dict[str, list[board.Card]] = {}
-    for card in testing_cards:
-        by_surface.setdefault(card.surface or "unsorted", []).append(card)
-
-    base = default_base(root)
-    review_cards = drain.waiting(root)
-    skip = {c.id: drain.skip_reason(root, base, c) for c in review_cards}
-    return VerifyPage(by_surface=by_surface, review_cards=review_cards, review_skip_reason=skip)
-
-
-@dataclass
-class InboxPage:
-    notes: list[ingest.Note]
-    routing_view_exists: bool
-    routing_view_mtime: dt.datetime | None
-
-
-def read_inbox(root: Path) -> InboxPage:
-    found = ingest.notes(root)
-    routing_path = root / board.ROUTING_VIEW
-    exists = routing_path.is_file()
-    mtime = dt.datetime.fromtimestamp(routing_path.stat().st_mtime) if exists else None
-    return InboxPage(notes=found, routing_view_exists=exists, routing_view_mtime=mtime)
+def read_context(root: Path, *, fetch_freshness: bool = False) -> Context:
+    return Context(
+        root=root,
+        rail=read_rail(root, fetch_freshness=fetch_freshness),
+        base=default_base(root),
+        candidates=select_candidates(root, host_capabilities(root), schema_violations(root)),
+        decisions=board.cards(root, "needs-decision"),
+        testing=board.cards(root, "testing"),
+        review=board.cards(root, "review"),
+        notes=ingest.notes(root),
+        ideas=read_ideas(root),
+    )
 
 
 def read_ideas(root: Path) -> list[str]:
-    """Filenames only, in the private lane — never a body. See the module
-    docstring's account-selection note and `nightshift.hooks.ideas_fence`: this
-    reads names from the filesystem, the same act `promote` already performs, and
-    never opens a file inside `ideas/`."""
+    """Filenames only. The private lane is enumerated here and never summarised;
+    a body reaches the browser only when the person asks for one to edit
+    (`/api/body`), which is the same act `boardcmd edit` exists to serve."""
     lane = board.board_dir(root) / board.PRIVATE_LANE
     if not lane.is_dir():
         return []
     return sorted(p.name for p in lane.glob("*.md"))
 
 
-def list_claude_agents(root: Path) -> list[dict]:
-    """`claude agents --json --all --cwd <root>` (§5) — the cheap job-supervisor
-    reading. No wrapper exists in the package for this (it is the `claude` CLI's
-    own subcommand, not a nightshift one), so this is the one place panel.py talks
-    to a binary outside the package, via the same resolver the package itself uses.
+def _latest_record(root: Path) -> dict:
+    records = run_record.read_all(root)
+    return records[0] if records else {}
+
+
+def attempt_dir(root: Path, card_id: str, attempt: int) -> Path:
+    """Where one attempt's artefacts are. Deliberately **not** `runner.run_dir`,
+    which creates the directory: a page load must not leave a trail of empty
+    folders behind for cards it merely rendered."""
+    return root / RUNS / card_id / f"attempt-{attempt}"
+
+
+def session_id(out_dir: Path) -> str:
+    """The CLI session behind one attempt, for `claude --resume`."""
+    for path in sorted(out_dir.glob("worker-*.json"), reverse=True):
+        data = _read_json(path)
+        found = data.get("session_id")
+        if isinstance(found, str) and found:
+            return found
+    return ""
+
+
+def diff_stat(root: Path, base: str, branch: str) -> str:
+    """`+38 −12 · 2 files`, or `""` when git cannot say.
+
+    Read rather than stored: the card carries no diff stat, and the branch is
+    right there. A failure is silence — a missing stat must not be able to stop
+    a page rendering.
     """
-    binary = claude_binary()
-    if not binary:
-        return []
     try:
-        result = subprocess.run(
-            [binary, "agents", "--json", "--all", "--cwd", str(root)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
-        )
+        done = subprocess.run(["git", "diff", "--shortstat", f"{base}...{branch}"],
+                              cwd=root, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=10, check=False)
     except (OSError, subprocess.SubprocessError):
-        return []
-    if result.returncode != 0:
-        return []
+        return ""
+    if done.returncode != 0:
+        return ""
+    text = done.stdout.strip()
+    if not text:
+        return ""
+    files = insertions = deletions = 0
+    for part in text.split(","):
+        part = part.strip()
+        number = part.split(" ", 1)[0]
+        if not number.isdigit():
+            continue
+        if "file" in part:
+            files = int(number)
+        elif "insertion" in part:
+            insertions = int(number)
+        elif "deletion" in part:
+            deletions = int(number)
+    return f"+{insertions} −{deletions} · {files} file{'s' if files != 1 else ''}"
+
+
+def elapsed_since(stamp: str) -> str:
+    """`6:12` — minutes and seconds since an ISO stamp, or `""`."""
     try:
-        data = json.loads(result.stdout)
-    except ValueError:
-        return []
-    return data if isinstance(data, list) else []
+        started = dt.datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return ""
+    seconds = int((dt.datetime.now() - started).total_seconds())
+    if seconds < 0:
+        return ""
+    return f"{seconds // 60}:{seconds % 60:02d}"
 
 
-@dataclass
-class RunPage:
-    status: dict
-    candidates: list[Candidate]
-    agents: list[dict]
+def span(started: str, finished: str) -> str:
+    """`2 h 11 min` between two ISO stamps, or `""`."""
+    try:
+        first = dt.datetime.fromisoformat(started)
+        last = dt.datetime.fromisoformat(finished)
+    except (TypeError, ValueError):
+        return ""
+    minutes = int((last - first).total_seconds() // 60)
+    if minutes < 0:
+        return ""
+    return f"{minutes // 60} h {minutes % 60} min" if minutes >= 60 else f"{minutes} min"
 
 
-def read_run(root: Path) -> RunPage:
-    capabilities = host_capabilities(root)
-    bad_schema = schema_violations(root)
-    candidates = select_candidates(root, capabilities, bad_schema)
-    status_path = root / STATUS_FILE
-    status: dict = {}
-    if status_path.is_file():
-        try:
-            status = json.loads(status_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, ValueError):
-            status = {}
-    return RunPage(status=status, candidates=candidates, agents=list_claude_agents(root))
+def machine_lines(root: Path) -> list[str]:
+    """The small block at the foot of the rail: which box, what it can do, and
+    which two commits are actually in play."""
+    capabilities = sorted(host_capabilities(root))
+    fresh = freshness.read(fetch=False)
+    sha = _git_out(freshness.framework_checkout(), "rev-parse", "--short", "HEAD")
+    return [
+        f"<b>{_e(socket.gethostname())}</b>",
+        _e(", ".join(capabilities) if capabilities else "no declared capabilities"),
+        _e(f"{current_branch(root) or '?'} @ {_git_out(root, 'rev-parse', '--short', 'HEAD') or '?'}"),
+        _e(f"nightshift {fresh.branch or '?'} @ {sha or '?'}"),
+    ]
+
+
+def _git_out(cwd: Path, *args: str) -> str:
+    try:
+        done = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
 
 
 # --------------------------------------------------------------------------
-# Rendering — one HTML file, slots filled with html-escaped text. No template
-# dependency: the placeholders are literal `{{name}}` tokens, replaced once.
+# Rendering. One HTML file with `{{SLOT}}` placeholders; everything below
+# builds escaped fragments to drop into them.
 # --------------------------------------------------------------------------
 
 
@@ -400,242 +579,677 @@ def _e(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
-def _nav(active: str) -> str:
-    links = "".join(
-        f'<a href="/{p}" class="{"active" if p == active else ""}">{p.capitalize()}</a>'
-        for p in PAGES
+def _attr(value: object) -> str:
+    """A value safe to sit inside a single-quoted JS string in an attribute."""
+    return html.escape(str(value), quote=True).replace("'", "&#39;")
+
+
+def _chip(text: str, kind: str = "mute") -> str:
+    return f'<span class="chip {kind}">{_e(text)}</span>'
+
+
+def _act(label: str, *, onclick: str = "", href: str = "", primary: bool = False,
+         disabled: bool = False, extra: str = "") -> str:
+    classes = "act primary" if primary else "act"
+    if href:
+        return f'<a class="{classes}" href="{_e(href)}" {extra}>{_e(label)}</a>'
+    state = " disabled" if disabled else ""
+    return (f'<button type="button" class="{classes}"{state} '
+            f'onclick="{onclick}" {extra}>{_e(label)}</button>')
+
+
+def _row(*, body: str, acts: str = "", marker: str = "&middot;", grip: bool = False,
+         control: str = "", card_id: str = "") -> str:
+    """One register line: grip · control · marker · body · actions."""
+    classes = "row" if grip else "row no-grip"
+    grip_cell = ('<span class="grip" title="Drag to reorder">&#x2059;</span>'
+                 if grip else '<span class="grip">&nbsp;</span>')
+    data = f' data-id="{_e(card_id)}"' if card_id else ""
+    draggable = ' draggable="true"' if grip else ""
+    return (f'<div class="{classes}"{draggable}{data}>{grip_cell}'
+            f'{control or "<span></span>"}'
+            f'<span class="marker">{marker}</span>'
+            f'<div class="body">{body}</div>'
+            f'<div class="acts">{acts}</div></div>')
+
+
+def _meta(items: list[str]) -> str:
+    """The small mono facts under a row.
+
+    Every item is wrapped in its own element even when it is already one: `.meta`
+    is a flex row and its `gap` only separates *children*, so a bare text node
+    lands flush against its neighbour — which is how `code-thread` and
+    `verify: play` rendered as `code-threadverify: play` the first time this was
+    looked at.
+    """
+    if not items:
+        return ""
+    cells = "".join(item if item.startswith("<span") else f"<span>{item}</span>"
+                    for item in items if item)
+    return f'<div class="meta">{cells}</div>'
+
+
+def _card_body(card: board.Card, *, meta: list[str] | None = None, why: str = "") -> str:
+    out = [f'<span class="id">{_e(card.id)}</span>']
+    if card.title and card.title != card.id:
+        out.append(f'<span class="title">{_e(card.title)}</span>')
+    if why:
+        out.append(f'<p class="why">{_e(why)}</p>')
+    out.append(_meta(meta or []))
+    return "".join(out)
+
+
+def _section(title: str, count: int, rows: str, *, note: str = "", sub: str = "",
+             bar: str = "", empty: str = "", rows_id: str = "") -> str:
+    head = [f'<div class="sec-head"><h2>{_e(title)}</h2>'
+            f'<span class="count">{count}</span>']
+    if note:
+        head.append(f'<p class="note">{_e(note)}</p>')
+    head.append("</div>")
+    out = ["<section>", "".join(head)]
+    if sub:
+        out.append(f'<p class="sec-sub">{sub}</p>')
+    # The id is what the drag-and-drop and the take-first slider bind to; a
+    # section that carries reorderable rows and no id is a section whose rows
+    # silently cannot be dragged.
+    ident = f' id="{_e(rows_id)}"' if rows_id else ""
+    out.append(f'<div class="rows"{ident}>{rows}</div>' if rows
+               else f'<div class="empty">{_e(empty or "Nothing here.")}</div>')
+    if bar:
+        out.append(bar)
+    out.append("</section>")
+    return "".join(out)
+
+
+def _group(label: str) -> str:
+    return f'<div class="group-label">{_e(label)}</div>'
+
+
+def _rail_html(ctx: Context, active: str) -> str:
+    counts = ctx.counts()
+    try:
+        project = manifest.load(ctx.root).project.name
+    except ManifestError:
+        project = ctx.root.name
+    links = []
+    for page in PAGES:
+        current = ' aria-current="page"' if page == active else ""
+        links.append(f'<a href="/{page}"{current}>{page.capitalize()} '
+                     f'<span class="n">{counts[page]}</span></a>')
+    links = "".join(links)
+    return (
+        '<nav class="rail">'
+        f'<div class="wordmark"><b>Command Center</b><span>{_e(project)}</span></div>'
+        f'<div class="pages">{links}</div>'
+        f'<div class="machine">{"<br>".join(machine_lines(ctx.root))}</div>'
+        '</nav>'
     )
-    return f'<nav class="topnav">{links}</nav>'
 
 
-def _rail_html(rail: Rail, root: Path) -> str:
-    account = rail.account_label or "(ambient — default credential)"
-    dispatch_note = ""
-    if rail.account_label and rail.account_dispatch == "never":
-        dispatch_note = ' <span class="warn">dispatch: never — inline only</span>'
-    identity_line = (
-        f"{_e(rail.identity.email)}" if rail.identity.fetched and rail.identity.email
-        else "(identity unavailable)"
-    )
-    spend_note = ""
-    if rail.identity.fetched and rail.identity.has_extra_usage_enabled:
-        spend_note = ' <span class="warn">API spend ENABLED on this account</span>'
+def _phases_html(phase: str) -> str:
+    """The five pills, with the current one filled and everything before it dim
+    green. An unknown phase lights nothing rather than guessing."""
+    current = _PHASE_ALIASES.get(phase, phase)
+    names = [name for name, _ in PHASE_STEPS]
+    index = names.index(current) if current in names else (
+        len(names) if phase in _PHASE_DONE else -1)
+    out = []
+    for position, (_, label) in enumerate(PHASE_STEPS):
+        state = "done" if position < index else ("now" if position == index else "")
+        out.append(f'<span class="phase {state}">{_e(label)}</span>')
+    return f'<div class="phases">{"".join(out)}</div>'
 
-    meters = ""
-    if rail.snapshot.fetched:
-        worst = rail.snapshot.worst
-        if worst is not None:
-            cls = "danger" if worst.exhausted else ("warn" if worst.headroom_pct < 15 else "data")
-            meters = f'<span class="{cls}">{_e(worst.name)} {worst.utilization:.0f}%</span>'
-        if rail.snapshot.paid_enabled:
-            meters += ' <span class="warn">paid overage ENABLED</span>'
+
+#: How old a heartbeat may be and still be believed. The runner rewrites
+#: `status.json` at every phase change and its longest legitimate phase is the
+#: worker, bounded by a wall-clock timeout of an hour — so two hours is past
+#: anything a live run can produce, without being so tight that a slow card
+#: reads as dead.
+HEARTBEAT_TRUSTED_FOR = dt.timedelta(hours=2)
+
+
+def run_is_live(status: dict, record: dict) -> bool:
+    """Whether `status.json` describes a run that is *still going*.
+
+    The heartbeat is a file, and a file outlives the process that wrote it: a run
+    that ended — or was killed — leaves its last phase behind forever. Rendering
+    that as "Running now" with a pulsing dot is the same class of lie as showing
+    `paid overage enabled` in green, and worse than showing nothing, because the
+    elapsed time keeps climbing.
+
+    **The pid alone cannot answer it, which is the trap this walked into.**
+    `print_status` asks only whether the pid is alive, and pids are recycled: the
+    first time this panel was looked at, the pid in a two-day-old status file had
+    been reassigned to an unrelated process, so `_pid_alive` said yes and the rail
+    reported a 41-hour dispatch as live. So three things are asked, cheapest last:
+
+    * a **finished record** supersedes the heartbeat — the run said it was done,
+      and nothing clears `status.json` on the way out;
+    * a heartbeat older than `HEARTBEAT_TRUSTED_FOR` is not believed at all;
+    * and only then, is the pid still there.
+
+    What survives: a run killed within the last two hours whose pid was recycled
+    inside that window still reads as live. That needs the runner to record its
+    own death, which it cannot do when it is killed — so it is left, rather than
+    papered over with a shorter window that would call slow cards dead.
+    """
+    if not status:
+        return False
+    updated = str(status.get("updated") or "")
+    if record.get("complete") and str(record.get("finished") or "") >= updated:
+        return False
+    try:
+        if dt.datetime.now() - dt.datetime.fromisoformat(updated) > HEARTBEAT_TRUSTED_FOR:
+            return False
+    except (TypeError, ValueError):
+        return False
+    try:
+        return _pid_alive(int(status.get("pid") or 0))
+    except (TypeError, ValueError):
+        return False
+
+
+def _runbox_html(ctx: Context) -> str:
+    status = ctx.rail.run_status
+    record = _latest_record(ctx.root)
+    card_id = str(status.get("card") or "") if run_is_live(status, record) else ""
+    landed = len(run_record.landed(record))
+    failed = len(run_record.failures(record))
+    queued = len(ctx.tonight)
+
+    if not card_id:
+        last = str(status.get("card") or "")
+        when = str(status.get("updated") or "")
+        tail = (f"Last was {last} at {when[11:16]}." if last and when else
+                "Nothing has dispatched on this machine yet.")
+        head = ('<p class="eyebrow">No run in progress</p>'
+                f'<div class="runline"><span class="dim">{_e(tail)}</span></div>')
     else:
-        meters = f'<span class="dim">usage unknown ({_e(rail.snapshot.reason)})</span>'
+        attempt = status.get("attempt")
+        telemetry = read_telemetry(attempt_dir(ctx.root, card_id, int(attempt or 1)))
+        facts = [("worker", status.get("worker", "?")), ("model", status.get("model", "?"))]
+        if attempt:
+            facts.append(("attempt", str(attempt)))
+        if elapsed := elapsed_since(str(status.get("since") or "")):
+            facts.append(("elapsed", elapsed))
+        if telemetry.get("turns"):
+            facts.append(("turns", str(telemetry["turns"])))
+        pairs = "".join(f"<dt>{_e(k)}</dt><dd>{_e(v)}</dd>" for k, v in facts)
+        head = (
+            '<p class="eyebrow"><span class="live-dot"></span> Running now</p>'
+            f'<div class="runline"><span class="card-id">{_e(card_id)}</span>'
+            f'<dl>{pairs}</dl></div>'
+            + _phases_html(str(status.get("phase") or ""))
+        )
+    tally = (f'<p class="tallyline"><b>{landed}</b> landed &middot; '
+             f'<b>{failed}</b> back in tasks &middot; <b>{queued}</b> queued'
+             f'{_act("Run detail", href="/run")}</p>')
+    return f'<div class="runbox">{head}{tally}</div>'
 
-    status = rail.run_status
-    if status.get("card"):
-        tally = f'running: <span class="data">{_e(status.get("card"))}</span> ({_e(status.get("phase", "?"))})'
-    else:
-        tally = '<span class="dim">no run in progress</span>'
 
+def _meters_html(ctx: Context) -> str:
+    snapshot = ctx.rail.snapshot
+    out = ['<p class="eyebrow">Allowance</p>']
+    if not snapshot.fetched:
+        out.append(f'<p class="resets">{_e(snapshot.reason or "no reading")}</p>')
+    for bucket in snapshot.buckets:
+        fill = min(100.0, max(0.0, bucket.utilization))
+        kind = "bad" if bucket.exhausted else ("warn" if bucket.headroom_pct <= 15 else "")
+        resets = (f'<p class="resets">resets {bucket.resets_at:%d %b %H:%M}</p>'
+                  if bucket.resets_at else "")
+        out.append(
+            f'<div class="meter"><div class="meter-head">'
+            f'<span>{_e(bucket.name.replace("_", " "))}</span>'
+            f'<span>{bucket.utilization:.0f}%</span></div>'
+            f'<div class="track"><i class="{kind}" style="width:{fill:.0f}%"></i></div>'
+            f'{resets}</div>'
+        )
+
+    spend = []
+    if snapshot.paid_enabled:
+        used = snapshot.paid_used_display
+        spend.append(_chip(f"paid overage on{f' · {used}' if used else ''}", "warn"))
+    elif snapshot.fetched:
+        spend.append(_chip("paid overage off", "ok"))
+    if ctx.rail.identity.fetched and ctx.rail.identity.has_extra_usage_enabled:
+        spend.append(_chip("API spend enabled — dispatch refused", "bad"))
+    out.append(f'<div class="spend">{"".join(spend)}{_account_html(ctx)}</div>')
+    return f'<div class="meters">{"".join(out)}</div>'
+
+
+def _account_html(ctx: Context) -> str:
+    rail = ctx.rail
+    label = rail.account_label or "ambient"
+    email = rail.identity.email if rail.identity.fetched else "identity unavailable"
+    never = (' <span class="chip bad">dispatch: never</span>'
+             if rail.account_label and rail.account_dispatch == "never" else "")
     selector = ""
     if rail.accounts:
         options = ['<option value="">(ambient)</option>']
-        for a in rail.accounts:
-            selected = " selected" if a.label == rail.account_label else ""
-            options.append(f'<option value="{_e(a.label)}"{selected}>{_e(a.label)}</option>')
-        selector = f'<select id="account-select" onchange="selectAccount(this.value)">{"".join(options)}</select>'
+        for account in rail.accounts:
+            selected = " selected" if account.label == rail.account_label else ""
+            options.append(f'<option value="{_e(account.label)}"{selected}>'
+                           f'{_e(account.label)}</option>')
+        selector = ('<br><select onchange="post(\'/api/account\',{label:this.value})">'
+                    + "".join(options) + "</select>")
+    return (f'<p class="account">account <b>{_e(label)}</b>{never}<br>{_e(email)}'
+            f'{selector}</p>')
 
+
+def _statusrail_html(ctx: Context) -> str:
+    fresh_class = "" if ctx.rail.freshness_known else "warn"
     return (
-        '<div class="rail">'
-        f'<div class="rail-row">{tally}</div>'
-        f'<div class="rail-row">account: <span class="data">{_e(account)}</span>{dispatch_note} '
-        f'&middot; {identity_line}{spend_note} {selector}</div>'
-        f'<div class="rail-row">{meters}</div>'
-        f'<div class="rail-row">{_e(rail.freshness_line)} '
-        f'<button onclick="post(\'/api/freshness/refresh\',{{}})">Refresh</button> '
-        f'<button onclick="post(\'/api/freshness/pull\',{{}})">Pull</button></div>'
+        '<div class="statusrail"><div class="top">'
+        + _runbox_html(ctx) + _meters_html(ctx) +
+        '</div>'
+        f'<p class="tallyline" style="padding:0 1.5rem 0.9rem;margin:0">'
+        f'<span class="{fresh_class}">{_e(ctx.rail.freshness_line)}</span>'
+        f'{_act("Refresh", onclick="post(\'/api/freshness/refresh\',{})")}'
+        f'{_act("Pull", onclick="post(\'/api/freshness/pull\',{})")}</p>'
         '</div>'
     )
 
 
-def _candidate_row(candidate: Candidate, *, action: str) -> str:
-    card = candidate.card
-    btn = ""
-    if action == "dispatch":
-        btn = f'<button onclick="post(\'/api/dispatch\',{{card_id:\'{_e(card.id)}\'}})">Dispatch</button>'
-    return (
-        f'<li><span class="data">{_e(card.id)}</span> — {_e(card.title)} '
-        f'<span class="dim">({_e(candidate.reason)})</span> {btn}</li>'
+# ------------------------------------------------------------------ the pages
+
+
+def _render_now(ctx: Context) -> str:
+    out = []
+
+    rows = "".join(
+        _row(marker="?", body=_card_body(
+                card, meta=[_e(f"in needs-decision/ · {card.fields.get('created', '')}")]),
+             acts=_act("Read card", href=f"/card/{card.id}"))
+        for card in ctx.decisions
     )
+    out.append(_section("Decide", len(ctx.decisions), rows,
+                        note="Nothing else moves until this does.",
+                        empty="Nothing is waiting on a decision."))
+
+    do_now = ctx.do_now
+    inline_rows = []
+    for candidate in do_now:
+        card = candidate.card
+        meta = [_chip(candidate.reason.split(";")[0][:70])]
+        if card.attempts:
+            meta.append(_e(f"{card.attempts} attempt(s)"))
+        inline_rows.append(_row(
+            marker="&rsaquo;", body=_card_body(card, meta=meta),
+            acts=_act("Read card", href=f"/card/{card.id}")
+                 + _act("Start session", onclick="post('/api/session',{})", primary=True)))
+    inline_rows = "".join(inline_rows)
+    out.append(_section("Do now", len(do_now),
+                        (_group("Cards the night cannot take") + inline_rows) if inline_rows else "",
+                        note="Work that needs you at the keyboard.",
+                        empty="Nothing needs you at the keyboard."))
+
+    tonight = ctx.tonight
+    # The same liveness question the rail asks, asked once here: a stale heartbeat
+    # must not grey out a card's Dispatch button for a run that ended days ago.
+    live_card = (str(ctx.rail.run_status.get("card") or "")
+                 if run_is_live(ctx.rail.run_status, _latest_record(ctx.root)) else "")
+    queue_rows = []
+    for position, candidate in enumerate(tonight, start=1):
+        card = candidate.card
+        meta = [_e(card.worker), _e(f"verify: {card.verify}")]
+        if card.attempts:
+            meta.append(_e(f"attempt {card.attempts + 1}"))
+        running = live_card == card.id
+        if running:
+            meta.append(_chip("running", "ok"))
+        control = (f'<input type="checkbox" class="pick" data-id="{_e(card.id)}" checked '
+                   f'aria-label="include {_e(card.id)}">')
+        acts = _act("Read card", href=f"/card/{card.id}")
+        acts += (_act("Running", disabled=True) if running else
+                 _act("Dispatch", onclick=f"post('/api/dispatch',{{card_id:'{_attr(card.id)}'}})",
+                      primary=True))
+        queue_rows.append(_row(grip=True, card_id=card.id, control=control,
+                               marker=str(position), body=_card_body(card, meta=meta),
+                               acts=acts))
+
+    elsewhere_rows = "".join(
+        _row(marker="&mdash;", body=_card_body(
+                c.card, meta=[_chip(f"requires {c.card.requires}"), _e("waits for the other machine")]),
+             acts=_act("Read card", href=f"/card/{c.card.id}"))
+        for c in ctx.elsewhere
+    )
+    body = "".join(queue_rows)
+    if elsewhere_rows:
+        body += _group(f"Dispatchable, but not here — {len(ctx.elsewhere)}") + elsewhere_rows
+
+    bar = (
+        '<div class="barbox">'
+        '<p>Order is saved to each card as you drag. <span id="picked">0 of 0</span> ticked.</p>'
+        '<label class="takefirst">Take first'
+        f'<input type="range" id="takefirst" min="0" max="{len(tonight)}" value="{len(tonight)}">'
+        '<output for="takefirst" id="takefirstout">0</output></label>'
+        '<div class="acts">'
+        '<label class="override" title="Honoured by the chore batch, which checks the money '
+        'rule before it spends. A night is not gated on headroom at all — limits.py stops it '
+        'reactively — so this cannot change what a night does.">'
+        '<input type="checkbox" id="allowpaid"> Allow paid</label>'
+        + _act("Run chores", onclick="runChores()")
+        + _act("Run the whole queue", onclick="runNight()")
+        + _act("Run the ticked", onclick="runTicked()", primary=True)
+        + '</div></div>'
+    )
+    out.append(_section("Tonight", len(tonight), body, rows_id="queue",
+                        note="Drag to set the order. Ticked cards are what a run takes.",
+                        bar=bar if tonight else "",
+                        empty="Nothing is dispatchable here right now."))
+
+    triage_note = ("Routing.md names what triage would take. Launched one at a time, "
+                   "deliberately — it is the expensive route.")
+    routing = ctx.root / board.ROUTING_VIEW
+    triage_rows = _row(
+        marker="&rsaquo;",
+        body=('<span class="id">Routing.md</span>'
+              f'<div class="meta"><span>{_e(_stamp_of(routing))}</span></div>'),
+        acts=_act("Launch triage", onclick="post('/api/triage',{})", primary=True),
+    ) if routing.is_file() else ""
+    out.append(_section("Waiting on triage", 1 if triage_rows else 0, triage_rows,
+                        note=triage_note,
+                        empty="No routing view yet — classify the inbox first."))
+
+    out.append(f'<footer>Board on {_e(current_branch(ctx.root))} &middot; '
+               f'{_e(ctx.rail.freshness_line)}</footer>')
+    return "".join(out)
 
 
-def _render_now(root: Path) -> str:
-    page = read_now(root)
-    out = ['<h1>Now</h1>']
-
-    out.append("<h2>Decide</h2><ul>")
-    if not page.decisions:
-        out.append("<li class='dim'>nothing waiting on a decision</li>")
-    for card in page.decisions:
-        out.append(f"<li><span class='data'>{_e(card.id)}</span> — {_e(card.title)}</li>")
-    out.append("</ul>")
-
-    out.append("<h2>Do now</h2><ul>")
-    if not page.do_now:
-        out.append("<li class='dim'>nothing needs you at the keyboard</li>")
-    for c in page.do_now:
-        out.append(_candidate_row(c, action="none"))
-    out.append("</ul>")
-
-    out.append("<h2>Tonight</h2><ul>")
-    if not page.tonight:
-        out.append("<li class='dim'>nothing dispatchable right now</li>")
-    for c in page.tonight:
-        out.append(_candidate_row(c, action="dispatch"))
-    out.append('</ul><button onclick="post(\'/api/night\',{})">Start tonight\'s run</button>')
-
-    if page.elsewhere:
-        out.append("<h2>Tonight, on the other machine</h2><ul>")
-        for c in page.elsewhere:
-            out.append(_candidate_row(c, action="none"))
-        out.append("</ul>")
-
-    out.append("<h2>Waiting on triage</h2>")
-    if page.routing_view_exists:
-        out.append(
-            f"<p>see <code>Routing.md</code> (updated {page.routing_view_mtime:%Y-%m-%d %H:%M}) "
-            f"— <button onclick=\"openTerminal('triage')\">Launch triage</button></p>"
-        )
-    else:
-        out.append("<p class='dim'>no routing view yet — run classify the inbox first</p>")
-
-    return "\n".join(out)
+def _stamp_of(path: Path) -> str:
+    try:
+        return f"written {dt.datetime.fromtimestamp(path.stat().st_mtime):%d %b %H:%M}"
+    except OSError:
+        return ""
 
 
-def _render_verify(root: Path) -> str:
-    page = read_verify(root)
-    out = ["<h1>Verify</h1>", "<h2>Testing, by surface</h2>"]
-    if not page.by_surface:
-        out.append("<p class='dim'>nothing waiting to be played</p>")
-    for surface, cards in sorted(page.by_surface.items()):
-        out.append(f"<h3>{_e(surface)}</h3><ul>")
+def _render_verify(ctx: Context) -> str:
+    out = []
+    by_surface: dict[str, list[board.Card]] = {}
+    for card in ctx.testing:
+        by_surface.setdefault(card.surface or "unsorted", []).append(card)
+
+    rows = []
+    for surface in sorted(by_surface):
+        cards = by_surface[surface]
+        rows.append(_group(f"{surface} — {len(cards)}"))
         for card in cards:
-            out.append(
-                f"<li><span class='data'>{_e(card.id)}</span> — {_e(card.title)} "
-                f"<button onclick=\"post('/api/verified',{{card_id:'{_e(card.id)}'}})\">Mark OK</button></li>"
-            )
-        out.append("</ul>")
+            branch = card.fields.get("branch") or f"ai/{card.id}"
+            # The diff stat is only available while the branch still exists, and a
+            # card reaches `testing/` by merging — after which the branch is deleted
+            # by the standing cleanup rule. So it is shown when it can be and the
+            # row falls back to the facts the card itself carries, rather than
+            # rendering an empty meta line for every card that actually landed.
+            meta = []
+            if stat := diff_stat(ctx.root, ctx.base, branch):
+                meta.append(_e(stat))
+            elif card.worker != "none":
+                meta.append(_e(card.worker))
+            if card.attempts:
+                meta.append(_e(f"{card.attempts} attempt(s)"))
+            if card.verify == "review":
+                meta.append(_chip("verify: review", "ok"))
+            control = (f'<input type="checkbox" class="tick" data-id="{_e(card.id)}" '
+                       f'aria-label="{_e(card.id)} verified">')
+            acts = (_act("Diff", href=f"/diff/{card.id}")
+                    + _act("Mark OK", onclick=f"markOK(this,'{_attr(card.id)}')", primary=True))
+            rows.append(_row(control=control, marker="&nbsp;", acts=acts,
+                             body=_card_body(card, meta=meta)))
 
-    out.append("<h2>Stuck in review</h2><ul>")
-    if not page.review_cards:
-        out.append("<li class='dim'>nothing at rest in review/</li>")
-    for card in page.review_cards:
-        reason = page.review_skip_reason.get(card.id, "")
-        btn = (f'<button onclick="post(\'/api/review\',{{card_id:\'{_e(card.id)}\'}})">Review</button>'
-               if not reason else f'<span class="dim">{_e(reason)}</span>')
-        out.append(f"<li><span class='data'>{_e(card.id)}</span> — {_e(card.title)} {btn}</li>")
-    out.append("</ul>")
-    return "\n".join(out)
+    bar = ('<div class="barbox">'
+           '<p><span id="ticked">Nothing ticked.</span> Saving reconciles every ticked '
+           'card in one pass.</p><div class="acts">'
+           + _act("Save ticked", onclick="saveTicked()", primary=True)
+           + '</div></div>')
+    out.append(_section("Play through", len(ctx.testing), "".join(rows),
+                        note="Grouped by where in the game you would see it.",
+                        sub=("Everything below is on <code>"
+                             f"{_e(ctx.base)}</code> at once. <b>Mark OK</b> moves that card "
+                             "to <code>done/</code> straight away; ticking several and saving "
+                             "does the same in one go."),
+                        bar=bar if ctx.testing else "",
+                        empty="Nothing is waiting to be played."))
+
+    stuck = []
+    review_rows = []
+    for card in ctx.review:
+        reason = drain.skip_reason(ctx.root, ctx.base, card)
+        branch = card.fields.get("branch") or f"ai/{card.id}"
+        meta = [_e(stat) for stat in [diff_stat(ctx.root, ctx.base, branch)] if stat]
+        if reason:
+            meta.append(_chip("left alone", "mute"))
+        else:
+            stuck.append(card.id)
+        acts = _act("Diff", href=f"/diff/{card.id}")
+        if not reason:
+            acts += _act("Review it", onclick=f"post('/api/review',{{card_id:'{_attr(card.id)}'}})",
+                         primary=True)
+        review_rows.append(_row(marker="!", acts=acts,
+                                body=_card_body(card, meta=meta, why=reason)))
+
+    flag = ""
+    if stuck:
+        flag = ('<div class="flag"><h3>No reviewer is scheduled for '
+                f'{"this one" if len(stuck) == 1 else "these"}</h3>'
+                '<p>The night takes its queue from <code>tasks/</code>, so nothing picks this '
+                'lane up on its own — that is deliberate, and it is why the button is here. '
+                '<b>Review it</b> runs the drain over this one card.</p></div>')
+    out.append(_section("Under review", len(ctx.review), flag + "".join(review_rows),
+                        note="The reviewer's lane, not yours.",
+                        empty="Nothing is at rest in review/."))
+
+    out.append(f'<footer>{len(ctx.testing)} card(s) on {_e(ctx.base)} awaiting a '
+               f'play-through</footer>')
+    return "".join(out)
 
 
-def _render_inbox(root: Path) -> str:
-    page = read_inbox(root)
-    out = ["<h1>Inbox</h1>", "<h2>Notes</h2><ul>"]
-    if not page.notes:
-        out.append("<li class='dim'>inbox is empty</li>")
-    for note in page.notes:
-        out.append(f"<li><span class='data'>{_e(note.name)}</span> ({note.size} B)</li>")
-    out.append("</ul>")
-    out.append(
-        '<button onclick="post(\'/api/ingest\',{scribe:false})">Classify the inbox</button> '
-        '<button onclick="post(\'/api/ingest\',{scribe:true})">Classify + write cards</button>'
-    )
-    if page.routing_view_exists:
-        out.append(f"<p class='dim'>Routing.md last updated {page.routing_view_mtime:%Y-%m-%d %H:%M}</p>")
-    out.append(
-        "<h2>New note</h2>"
-        '<input id="note-name" placeholder="filename.md"><br>'
-        '<textarea id="note-body" rows="4" cols="60"></textarea><br>'
-        '<button onclick="createNote()">Save</button>'
-    )
-    return "\n".join(out)
+def _render_inbox(ctx: Context) -> str:
+    rows = []
+    for position, note in enumerate(ctx.notes, start=1):
+        # Positional, not the filename — real note names carry spaces and capitals
+        # ("Regenerate soundtrack.md"), and whitespace is not allowed in an HTML id.
+        # Same reason the Ideas page numbers its editors.
+        slug = f"note-{position}"
+        rel = _rel(ctx.root, note.path)
+        rows.append(_row(
+            marker="&rsaquo;",
+            body=(f'<span class="id">{_e(note.name)}</span>'
+                  + _meta([f"{note.size} B", _e(_stamp_of(note.path))])),
+            acts=_act("Edit", onclick=f"editBody('{slug}','{_attr(rel)}')")
+                 + _act("Open note", href=f"/body/{rel}")))
+        rows.append(_editor(slug, save=f"saveBody('{slug}','{_attr(rel)}')"))
+    rows = "".join(rows)
+    bar = ('<div class="barbox">'
+           '<p>One cheap dispatch reads every note and sorts it. It reports before '
+           'spending anything else.</p><div class="acts">'
+           + _act("New note", onclick="openEditor('new-note')")
+           + _act("Classify all", onclick="post('/api/ingest',{scribe:false})")
+           + _act("Classify + write cards", onclick="post('/api/ingest',{scribe:true})",
+                  primary=True)
+           + '</div></div>'
+           + _editor("new-note", save="saveNew('new-note','inbox')", named=True,
+                     placeholder="One or two sentences is enough."))
+    routing = ctx.root / board.ROUTING_VIEW
+    note = _stamp_of(routing) if routing.is_file() else "no routing pass yet"
+    return _section("Not yet classified", len(ctx.notes), rows, note=f"Routing.md {note}",
+                    bar=bar, empty="The inbox is empty.") + (
+        f'<footer>{len(ctx.notes)} note(s) in inbox</footer>')
 
 
-def _render_ideas(root: Path) -> str:
-    names = read_ideas(root)
-    out = ["<h1>Ideas</h1><ul>"]
-    if not names:
-        out.append("<li class='dim'>no ideas parked</li>")
-    for name in names:
-        out.append(
-            f"<li><span class='data'>{_e(name)}</span> "
-            f'<button onclick="post(\'/api/promote\',{{name:\'{_e(name)}\'}})">Promote</button></li>'
+def _rel(root: Path, path: Path) -> str:
+    return path.relative_to(root).as_posix()
+
+
+def _editor(slug: str, *, save: str, named: bool = False, placeholder: str = "") -> str:
+    name_field = ('<input type="text" placeholder="filename.md">' if named else "")
+    return (f'<div class="editor" id="ed-{_e(slug)}">{name_field}'
+            f'<textarea placeholder="{_e(placeholder)}"></textarea>'
+            f'<div class="acts">{_act("Save", onclick=save, primary=True)}'
+            f'{_act("Cancel", onclick=f"closeEditor(&#39;{slug}&#39;)")}</div></div>')
+
+
+def _render_ideas(ctx: Context) -> str:
+    rows = []
+    for position, name in enumerate(ctx.ideas, start=1):
+        # The editor's id is positional, never the filename: real idea names carry
+        # spaces, en dashes and diacritics ("Animation – attack.md"), none of which
+        # may appear in an HTML id, and one apostrophe would end the JS string the
+        # button hands it to. The *path* still travels verbatim, url-encoded.
+        slug = f"idea-{position}"
+        path = f"{board.board_rel(ctx.root).as_posix()}/{board.PRIVATE_LANE}/{name}"
+        acts = (_act("Edit", onclick=f"editBody('{slug}','{_attr(path)}')")
+                + _act("Promote", onclick=f"post('/api/promote',{{name:'{_attr(name)}'}})",
+                       primary=True))
+        rows.append(_row(marker=str(position), acts=acts,
+                         body=f'<span class="id">{_e(name)}</span>'))
+        rows.append(_editor(slug, save=f"saveBody('{slug}','{_attr(path)}')"))
+
+    bar = ('<div class="barbox">'
+           '<p>A new idea is one line and a filename. It costs nothing and commits you '
+           'to nothing.</p><div class="acts">'
+           + _act("New idea", onclick="openEditor('new-idea')", primary=True)
+           + '</div></div>'
+           + _editor("new-idea", save="saveNew('new-idea','ideas')", named=True,
+                     placeholder="Half a thought is fine."))
+    sub = ("Yours alone. Nothing reads these but you and this page &mdash; and promoting one "
+           "<em>moves the file</em> rather than summarising it, so no idea's text reaches a "
+           "card except by your hand. <b>They do not drag.</b> An idea is a bare file with "
+           "no frontmatter, so there is no <code>kanban_order</code> to write and no verb "
+           "that could add one without this tool authoring inside the private lane &mdash; "
+           "they are listed by name instead. Cards drag, on Now.")
+    return _section("Ideas", len(ctx.ideas), "".join(rows), note="Edit in place; promote "
+                    "when one is ready.", sub=sub, bar=bar,
+                    empty="No ideas parked.") + (
+        f'<footer>{board.board_rel(ctx.root).as_posix()}/{board.PRIVATE_LANE} &middot; '
+        f'committed and pushed, never read by anything else</footer>')
+
+
+def _landed_lane(entry: dict) -> str:
+    """`→ testing/` out of `settle`'s full sentence.
+
+    `landed` reads *"card-id: → testing/ (reviewed ok, rebased ai/… onto test and
+    merged)"* — the whole account, which is the right thing to keep in the record
+    and the wrong thing to put in a table column. The lane is the part this column
+    is for; the rest is the row's `said`.
+    """
+    landed = str(entry.get("landed") or "")
+    if "→" in landed:
+        return "→ " + landed.split("→", 1)[1].split("(")[0].strip()
+    return str(entry.get("outcome") or "")
+
+
+def _said(entry: dict, limit: int = 90) -> str:
+    """One line of what the reviewer or the failure said, bounded.
+
+    A worker's `detail` can be several paragraphs. Rendered whole it stretched the
+    roster far past the window and pushed every other column into a two-character
+    ribbon — so it is cut to its first line, and to `limit` characters of that.
+    """
+    text = " ".join(str(entry.get("detail") or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _render_run(ctx: Context) -> str:
+    record = _latest_record(ctx.root)
+    out = []
+    dispatched = record.get("dispatched", [])
+
+    body = []
+    for entry in dispatched:
+        outcome = str(entry.get("outcome", ""))
+        if outcome in run_record.LANDED_OUTCOMES:
+            mark = '<td class="mark m-ok">&check;</td>'
+        elif outcome in run_record.FAILED_OUTCOMES:
+            mark = '<td class="mark m-bad">&times;</td>'
+        elif outcome in run_record.DECISION_OUTCOMES:
+            mark = '<td class="mark m-now">?</td>'
+        else:
+            mark = '<td class="mark m-wait">&middot;</td>'
+        cost = entry.get("cost_usd") or 0
+        out_dir = attempt_dir(ctx.root, str(entry.get("card", "")),
+                              int(entry.get("attempt") or 1))
+        telemetry = read_telemetry(out_dir)
+        session = session_id(out_dir)
+        talk = (_act("Talk", onclick=f"post('/api/talk',{{session_id:'{_attr(session)}'}})")
+                if session else "")
+        took = f"{telemetry['wall_s'] / 60:.0f} min" if telemetry.get("wall_s") else ""
+        body.append(
+            f'<tr>{mark}<td class="card">{_e(entry.get("card", ""))}</td>'
+            f'<td class="lane">{_e(_landed_lane(entry))}</td>'
+            f'<td class="num">{_e(took)}</td>'
+            f'<td class="num">${cost:.2f}</td>'
+            f'<td class="said">{_e(_said(entry))}</td>'
+            f'<td class="num">{talk}</td></tr>'
         )
-    out.append("</ul>")
-    out.append(
-        "<h2>New idea</h2>"
-        '<input id="idea-name" placeholder="filename.md"><br>'
-        '<textarea id="idea-body" rows="4" cols="60"></textarea><br>'
-        '<button onclick="createIdea()">Save</button>'
+    for candidate in ctx.tonight:
+        if any(d.get("card") == candidate.card.id for d in dispatched):
+            continue
+        body.append(f'<tr class="pend"><td class="mark m-wait">&middot;</td>'
+                    f'<td class="card">{_e(candidate.card.id)}</td>'
+                    f'<td class="lane">queued</td><td class="num"></td>'
+                    f'<td class="num"></td><td class="said"></td>'
+                    f'<td class="num"></td></tr>')
+
+    started = str(record.get("started", ""))
+    note = (f"Started {started[11:16]} on {_e(record.get('host', '?'))} · "
+            f"{'complete' if record.get('complete') else 'in flight'}") if started else ""
+    bar = ('<div class="barbox">'
+           f'<p>Spent so far this run: <b>${record.get("cost_usd", 0) or 0:.2f}</b>. '
+           'Stopping lets the current card finish and merges nothing after it.</p>'
+           '<div class="acts">'
+           + _act("Stop after this card", onclick="post('/api/stop',{})")
+           + '</div></div>') if record else ""
+    out.append(_section("This run", len(dispatched),
+                        f'<div class="roster"><table><tbody>{"".join(body)}</tbody></table></div>'
+                        if body else "", note=note, bar=bar,
+                        sub="What the morning digest would have told you, except now.",
+                        empty="No run has been recorded on this machine yet."))
+
+    skipped = record.get("skipped", [])
+    rows = "".join(
+        _row(body=(f'<span class="id">{_e(item.get("card", ""))}</span>'
+                   f'<div class="meta"><span>{_e(item.get("reason", ""))}</span></div>'),
+             acts=_act("Read card", href=f"/card/{item.get('card', '')}"))
+        for item in skipped
     )
-    return "\n".join(out)
+    out.append(_section("Not taken", len(skipped), rows,
+                        note="Never silent — a card left out says why.",
+                        empty="Every card on the board was dispatchable."))
 
-
-def _render_run(root: Path) -> str:
-    page = read_run(root)
-    out = ["<h1>Run</h1>"]
-    status = page.status
-    if status.get("card"):
-        out.append(
-            f"<p>phase <span class='data'>{_e(status.get('phase', '?'))}</span> "
-            f"on <span class='data'>{_e(status.get('card'))}</span>, "
-            f"attempt {_e(status.get('attempt', '?'))}, "
-            f"model {_e(status.get('model', '?'))}</p>"
+    earlier = run_record.read_all(ctx.root)[1:6]
+    rows = []
+    for old in earlier:
+        mark = ('<td class="mark m-ok">&check;</td>' if old.get("complete")
+                else '<td class="mark m-bad">&times;</td>')
+        when = str(old.get("started", ""))[:16].replace("T", " ")
+        took = span(str(old.get("started", "")), str(old.get("finished") or ""))
+        cost = old.get("cost_usd", 0) or 0
+        said = old.get("stop_reason") or f"{len(old.get('dispatched', []))} dispatched"
+        rows.append(
+            f'<tr>{mark}<td class="card">{_e(when)} &mdash; {_e(old.get("kind", ""))}</td>'
+            f'<td class="num">{_e(took)}</td><td class="num">${cost:.2f}</td>'
+            f'<td class="said">{_e(said)}</td></tr>'
         )
-    else:
-        out.append("<p class='dim'>no run in progress</p>")
+    out.append(_section("Earlier runs", len(earlier),
+                        f'<div class="roster"><table><tbody>{"".join(rows)}</tbody></table></div>'
+                        if rows else "", empty="No earlier runs on this machine."))
 
-    out.append("<h2>Queued</h2><ul>")
-    dispatchable = [c for c in page.candidates if c.dispatchable]
-    if not dispatchable:
-        out.append("<li class='dim'>nothing queued</li>")
-    for c in dispatchable:
-        out.append(f"<li><span class='data'>{_e(c.card.id)}</span> — {_e(c.card.title)}</li>")
-    out.append("</ul>")
-
-    out.append("<h2>Sessions</h2><ul>")
-    if not page.agents:
-        out.append("<li class='dim'>no active or recent sessions</li>")
-    for agent in page.agents:
-        session_id = agent.get("session_id") or agent.get("id") or ""
-        label = agent.get("label") or agent.get("name") or session_id
-        out.append(
-            f"<li>{_e(label)} "
-            f"<button onclick=\"post('/api/talk',{{session_id:'{_e(session_id)}'}})\">Talk to this one</button></li>"
-        )
-    out.append("</ul>")
-    return "\n".join(out)
+    out.append(f'<footer>Records in {run_record.DIR.as_posix()} &middot; transcripts stay '
+               f'on the machine that produced them</footer>')
+    return "".join(out)
 
 
-_RENDER = {
-    "now": _render_now,
-    "verify": _render_verify,
-    "inbox": _render_inbox,
-    "ideas": _render_ideas,
-    "run": _render_run,
-}
+_RENDER = {"now": _render_now, "verify": _render_verify, "inbox": _render_inbox,
+           "ideas": _render_ideas, "run": _render_run}
 
 
 def render_page(page: str, root: Path) -> str:
+    ctx = read_context(root)
     template = TEMPLATE.read_text(encoding="utf-8")
-    rail = read_rail(root)
-    content = _RENDER[page](root)
     out = template.replace("{{TITLE}}", f"Command Center — {page.capitalize()}")
-    out = out.replace("{{NAV}}", _nav(page))
-    out = out.replace("{{RAIL}}", _rail_html(rail, root))
-    out = out.replace("{{CONTENT}}", content)
-    return out
+    out = out.replace("{{RAIL}}", _rail_html(ctx, page))
+    out = out.replace("{{STATUSRAIL}}", _statusrail_html(ctx))
+    return out.replace("{{CONTENT}}", _RENDER[page](ctx))
 
 
 # --------------------------------------------------------------------------
@@ -649,7 +1263,8 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:  # noqa: A002 — stdlib signature
         pass  # the run log and status file are the record; a console tee is noise
 
-    def _send(self, status: int, body: bytes, content_type: str = "text/html; charset=utf-8") -> None:
+    def _send(self, status: int, body: bytes,
+              content_type: str = "text/html; charset=utf-8") -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -659,42 +1274,70 @@ class Handler(BaseHTTPRequestHandler):
     def _send_json(self, status: int, payload: dict) -> None:
         self._send(status, json.dumps(payload).encode("utf-8"), "application/json")
 
+    def _send_text(self, status: int, text: str) -> None:
+        self._send(status, text.encode("utf-8"), "text/plain; charset=utf-8")
+
     def _body(self) -> dict:
         length = int(self.headers.get("Content-Length", 0) or 0)
         if not length:
             return {}
-        raw = self.rfile.read(length)
         try:
-            data = json.loads(raw)
+            data = json.loads(self.rfile.read(length))
         except ValueError:
             return {}
         return data if isinstance(data, dict) else {}
 
     def do_GET(self) -> None:  # noqa: N802 — stdlib method name
-        path = urlparse(self.path).path.strip("/")
+        parsed = urlparse(self.path)
+        path = parsed.path.strip("/")
         if path == "":
             self.send_response(302)
             self.send_header("Location", "/now")
             self.end_headers()
             return
-        if path == "api/rail":
-            rail = read_rail(self.root)
-            self._send_json(200, {
-                "run_status": rail.run_status,
-                "freshness": rail.freshness_line,
-                "account": rail.account_label,
-            })
-            return
         if path in _RENDER:
             self._send(200, render_page(path, self.root).encode("utf-8"))
             return
-        self._send(404, b"not found", "text/plain")
+        if path == "api/body":
+            wanted = parse_qs(parsed.query).get("path", [""])[0]
+            try:
+                self._send_json(200, {"body": read_body(self.root, wanted)})
+            except PanelError as exc:
+                self._send_json(400, {"ok": False, "message": str(exc)})
+            return
+        if path.startswith("card/"):
+            card = board.find(self.root, path[len("card/"):])
+            if card is None:
+                self._send_text(404, "no such card")
+                return
+            self._send_text(200, card.text)
+            return
+        if path.startswith("body/"):
+            try:
+                self._send_text(200, read_body(self.root, path[len("body/"):]))
+            except PanelError as exc:
+                self._send_text(400, str(exc))
+            return
+        if path.startswith("diff/"):
+            card = board.find(self.root, path[len("diff/"):])
+            if card is None:
+                self._send_text(404, "no such card")
+                return
+            branch = card.fields.get("branch") or f"ai/{card.id}"
+            base = default_base(self.root)
+            if not branch_has_commits(self.root, base, branch):
+                self._send_text(200, f"`{branch}` carries no commits against {base}.")
+                return
+            self._send_text(200, _git_out(self.root, "diff", f"{base}...{branch}")
+                            or "(git said nothing)")
+            return
+        self._send_text(404, "not found")
 
     def do_POST(self) -> None:  # noqa: N802 — stdlib method name
         path = urlparse(self.path).path.strip("/")
         body = self._body()
         try:
-            message = self._dispatch_post(path, body)
+            message = self._route(path, body)
         except PanelError as exc:
             self._send_json(400, {"ok": False, "message": str(exc)})
             return
@@ -706,88 +1349,98 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_json(200, {"ok": True, "message": message})
 
-    def _dispatch_post(self, path: str, body: dict) -> str | None:
+    def _route(self, path: str, body: dict) -> str | None:
         root = self.root
+        paid = ["--allow-paid"] if body.get("allow_paid") else []
 
         if path == "api/dispatch":
             _guard_dispatch_account()
             card_id = str(body.get("card_id", ""))
-            pid = spawn_background("runner", ["--card", card_id], root)
-            return f"dispatching {card_id} (pid {pid})"
+            return f"dispatching {card_id} (pid {spawn_background('runner', ['--card', card_id], root)})"
 
         if path == "api/night":
             _guard_dispatch_account()
-            pid = spawn_background("runner", [], root)
-            return f"tonight's run started (pid {pid})"
-
-        if path == "api/chores/plan":
-            result = run_command("chores", ["--plan"], root)
-            return result.stdout or result.stderr
+            ids = [str(i) for i in body.get("card_ids", []) if str(i).strip()]
+            if ids:
+                pid = spawn_sequence(ids, root)
+                return f"running {len(ids)} card(s) in order (pid {pid}): {', '.join(ids)}"
+            return f"tonight's run started (pid {spawn_background('runner', [], root)})"
 
         if path == "api/chores/run":
             _guard_dispatch_account()
-            pid = spawn_background("chores", [], root)
-            return f"chore batch started (pid {pid})"
+            return f"chore batch started (pid {spawn_background('chores', paid, root)})"
 
         if path == "api/ingest":
             _guard_dispatch_account()
-            args = ["--scribe"] if body.get("scribe") else []
-            pid = spawn_background("ingest", args, root)
-            return f"classifying the inbox (pid {pid})"
-
-        if path == "api/reorder":
-            result = run_command("boardcmd", ["reorder", str(body.get("card_id", "")),
-                                              str(body.get("order", ""))], root)
-            return _verb_result(result)
-
-        if path == "api/verified":
-            result = run_command("boardcmd", ["verified", str(body.get("card_id", ""))], root)
-            return _verb_result(result)
-
-        if path == "api/promote":
-            result = run_command("boardcmd", ["promote", str(body.get("name", ""))], root)
-            return _verb_result(result)
-
-        if path == "api/note":
-            lane = str(body.get("lane") or "inbox")
-            result = run_command("boardcmd", ["note", str(body.get("name", "")),
-                                              "--lane", lane,
-                                              "--body", str(body.get("body", ""))], root)
-            return _verb_result(result)
-
-        if path == "api/edit":
-            result = run_command("boardcmd", ["edit", str(body.get("path", "")),
-                                              "--body", str(body.get("body", ""))], root)
-            return _verb_result(result)
+            args = (["--scribe"] if body.get("scribe") else []) + paid
+            return f"classifying the inbox (pid {spawn_background('ingest', args, root)})"
 
         if path == "api/review":
             _guard_dispatch_account()
             card_id = str(body.get("card_id", ""))
-            pid = spawn_background("drain", ["--card", card_id], root)
-            return f"reviewing {card_id} (pid {pid})"
+            args = ["--card", card_id] + paid
+            return f"reviewing {card_id} (pid {spawn_background('drain', args, root)})"
+
+        if path == "api/reorder":
+            return _verb(run_command("boardcmd", ["reorder", str(body.get("card_id", "")),
+                                                  str(body.get("order", ""))], root))
+
+        if path == "api/reorder-many":
+            return _reorder_many(root, body.get("writes", []))
+
+        if path == "api/verified":
+            return _verb(run_command("boardcmd", ["verified", str(body.get("card_id", ""))], root))
+
+        if path == "api/verified-many":
+            done = [_verb(run_command("boardcmd", ["verified", str(cid)], root))
+                    for cid in body.get("card_ids", [])]
+            return f"{len(done)} card(s) marked verified"
+
+        if path == "api/promote":
+            return _verb(run_command("boardcmd", ["promote", str(body.get("name", ""))], root))
+
+        if path == "api/note":
+            lane = str(body.get("lane") or "inbox")
+            return _verb(run_command("boardcmd", ["note", str(body.get("name", "")),
+                                                  "--lane", lane,
+                                                  "--body", str(body.get("body", ""))], root))
+
+        if path == "api/edit":
+            return _verb(run_command("boardcmd", ["edit", str(body.get("path", "")),
+                                                  "--body", str(body.get("body", ""))], root))
 
         if path == "api/reconcile":
-            result = run_command("reconcile", ["--apply", "--commit"], root)
-            return _verb_result(result)
+            return _verb(run_command("reconcile", ["--apply", "--commit"], root))
 
         if path == "api/freshness/refresh":
-            state = freshness.read(fetch=True)
-            return freshness.describe(state)
+            return freshness.describe(freshness.read(fetch=True))
 
         if path == "api/freshness/pull":
-            result = run_command("freshness", ["--pull"], root)
-            return _verb_result(result)
+            return _verb(run_command("freshness", ["--pull"], root))
 
         if path == "api/account":
             state = select_account(root, str(body.get("label", "")))
             return f"account: {state.label or '(ambient)'}"
 
+        if path == "api/stop":
+            # The kill switch the runner already watches for (`runner.STOP_FILE`),
+            # dropped where it looks. Not a signal, not a pid: a file, so it works
+            # across the dedicated integration checkout the runner may be using.
+            stop = root / STOP_FILE
+            stop.parent.mkdir(parents=True, exist_ok=True)
+            textio.write_text_lf(stop, "stop\n")
+            return f"{STOP_FILE.as_posix()} written — the run stops after the card it is on"
+
+        if path == "api/session":
+            open_terminal(root, "claude")
+            return "opened a terminal in this repo"
+
         if path == "api/talk":
-            session_id = str(body.get("session_id", ""))
-            if not session_id:
+            session = str(body.get("session_id", ""))
+            if not session:
                 raise PanelError("no session_id given")
-            open_terminal(root, "claude", "--resume", session_id)
-            return f"opened a terminal resuming {session_id}"
+            open_terminal(root, "claude", "--resume", session)
+            return f"opened a terminal resuming {session}"
 
         if path == "api/triage":
             open_terminal(root, "claude", "--agent", "triage")
@@ -796,7 +1449,52 @@ class Handler(BaseHTTPRequestHandler):
         return None
 
 
-def _verb_result(result: subprocess.CompletedProcess) -> str:
+def read_body(root: Path, target: str) -> str:
+    """One board file's text, for the person editing it in their own browser.
+
+    **This is the human's own read, and it is the only one.** `hooks.ideas_fence`
+    stops an *agent* opening a private note, and `boardcmd edit` exists because of
+    it — its docstring says editing one "has to be an operation the human drives,
+    with the text arriving from their editor". A textarea in the maintainer's
+    browser is that editor, and it cannot be prefilled without reading the file.
+    So the bytes go straight to the person who owns them: nothing summarises them,
+    no model sees them, and they reach no commit message, log line or report.
+
+    Confined to the board for the same reason `boardcmd.edit_body` is — a resolved
+    path outside it is the one failure that could not be undone from the board.
+    """
+    path = Path(target)
+    path = (path if path.is_absolute() else root / path).resolve()
+    lanes = board.board_dir(root).resolve()
+    if lanes not in path.parents:
+        raise PanelError(f"{target} is not inside the board")
+    if not path.is_file():
+        raise PanelError(f"{target} does not exist")
+    return path.read_text(encoding="utf-8")
+
+
+def _reorder_many(root: Path, writes: list) -> str:
+    """Persist a drag: one `boardcmd reorder` per card whose order actually moved.
+
+    The no-op filter is not an optimisation, it is what keeps a drag from
+    rewriting — and committing — every card in the lane every time one moves.
+    """
+    changed = 0
+    for entry in writes:
+        if not isinstance(entry, dict):
+            continue
+        card_id, order = str(entry.get("card_id", "")), str(entry.get("order", ""))
+        if not card_id or not order:
+            continue
+        card = board.find(root, card_id)
+        if card is None or card.fields.get("kanban_order", "") == order:
+            continue
+        _verb(run_command("boardcmd", ["reorder", card_id, order], root))
+        changed += 1
+    return f"{changed} card(s) reordered" if changed else "order unchanged"
+
+
+def _verb(result: subprocess.CompletedProcess) -> str:
     text = (result.stdout or result.stderr or "").strip()
     if result.returncode != 0:
         raise PanelError(text or f"exited {result.returncode}")
@@ -821,12 +1519,23 @@ def serve(root: Path, port: int = DEFAULT_PORT, *, open_browser: bool = True) ->
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="The Command Center: a local web launcher for the board and the runner.")
-    parser.add_argument("--root", type=Path, default=None, help="repo root (default: found from the cwd)")
+    parser.add_argument("--root", type=Path, default=None,
+                        help="repo root (default: found from the cwd)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--no-browser", action="store_true", help="do not open a browser tab")
+    parser.add_argument("--dispatch-cards", nargs="+", metavar="ID", default=None,
+                        help="run `runner --card <id>` for each id, in order, and exit. "
+                             "This is what the panel's 'run the ticked' button spawns; it "
+                             "owns no dispatch logic of its own")
     args = parser.parse_args(argv)
 
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
     root = (args.root or find_root()).resolve()
+    if args.dispatch_cards:
+        return dispatch_cards(list(args.dispatch_cards), root)
     serve(root, args.port, open_browser=not args.no_browser)
     return 0
 
