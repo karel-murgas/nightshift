@@ -463,6 +463,80 @@
 
   .empty { padding: 1.1rem 1.5rem 1.4rem; color: var(--ink-faint); }
 
+  /* a card or a note, read rather than parsed */
+  .doc { padding: 0.4rem 1.5rem 1.4rem; max-width: 78ch; }
+  .fields {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 1.1rem;
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    color: var(--ink-dim);
+    letter-spacing: 0.05em;
+    padding: 0.6rem 0.8rem;
+    margin-bottom: 0.6rem;
+    border: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .fields b { color: var(--ink-faint); font-weight: 500; text-transform: uppercase; }
+  .doc h2, .doc h3, .doc h4, .doc h5, .doc h6 {
+    font-family: var(--mono);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--phosphor);
+    margin: 1.6rem 0 0.5rem;
+    font-weight: 600;
+  }
+  .doc h2 { font-size: var(--step-1); border-bottom: 1px solid var(--line); padding-bottom: 0.3rem; }
+  .doc h3 { font-size: var(--step-0); color: var(--ink); }
+  .doc h4, .doc h5, .doc h6 { font-size: var(--step--1); color: var(--ink-dim); }
+  .doc p { margin: 0.7rem 0; }
+  .doc ul, .doc ol { margin: 0.7rem 0; padding-left: 1.4rem; }
+  .doc ul { list-style: none; }
+  .doc ol { list-style: decimal; }
+  .doc li { padding: 0.12rem 0; border: 0; }
+  .doc ul > li::before {
+    content: "—";
+    color: var(--phosphor-d);
+    margin-left: -1.4rem;
+    margin-right: 0.55rem;
+  }
+  .doc li:hover { background: none; }
+  .doc code {
+    color: var(--phosphor);
+    background: var(--panel-2);
+    padding: 0.05rem 0.3rem;
+    border: 1px solid var(--line-soft);
+  }
+  .doc pre {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-left: 2px solid var(--phosphor-d);
+    padding: 0.8rem 1rem;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    line-height: 1.6;
+    color: var(--ink);
+  }
+  .doc blockquote {
+    margin: 0.8rem 0;
+    padding: 0.2rem 0 0.2rem 1rem;
+    border-left: 2px solid var(--line);
+    color: var(--ink-dim);
+  }
+  .doc hr { border: 0; border-top: 1px solid var(--line); margin: 1.4rem 0; }
+  .doc a { color: var(--phosphor); }
+  .doc b { color: var(--ink); }
+  .doc table { border-collapse: collapse; margin: 0.9rem 0; font-size: var(--step--1); }
+  .doc th, .doc td {
+    border: 1px solid var(--line);
+    padding: 0.3rem 0.6rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  .doc th { font-family: var(--mono); color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.08em; }
+
   .editor { padding: 0 1.5rem 1.1rem; display: none; }
   .editor.open { display: block; }
   .editor textarea {
@@ -553,12 +627,20 @@ function toast(message, bad) {
   window._toastTimer = setTimeout(function () { el.style.display = "none"; }, bad ? 12000 : 5000);
 }
 
+/* The override rides on every request rather than being remembered per button.
+   It is a property of the moment, not of the action, and attaching it in the one
+   place every action goes through is what stops a new button being added without
+   it — the veto would then refuse and the tick beside the account would appear to
+   do nothing. Verbs that do not spend simply ignore the key. */
 function post(path, body, opts) {
   opts = opts || {};
+  body = body || {};
+  var override = document.getElementById("allowpaid");
+  if (override && override.checked) { body.allow_paid = true; }
   return fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body || {})
+    body: JSON.stringify(body)
   }).then(function (r) {
     return r.json().then(function (data) { return { ok: r.ok, data: data }; });
   }).then(function (result) {
@@ -670,19 +752,15 @@ if (slider) {
 }
 countPicked();
 
-function allowPaid() {
-  var box = document.getElementById("allowpaid");
-  return !!(box && box.checked);
-}
-
+/* `post` attaches the override itself, so these say only what they are. */
 function runTicked() {
   var ids = pickedIds();
   if (!ids.length) { toast("nothing ticked — tick a card, or drag the slider", true); return; }
-  post("/api/night", { card_ids: ids, allow_paid: allowPaid() });
+  post("/api/night", { card_ids: ids });
 }
 
-function runNight() { post("/api/night", { allow_paid: allowPaid() }); }
-function runChores() { post("/api/chores/run", { allow_paid: allowPaid() }); }
+function runNight() { post("/api/night", {}); }
+function runChores() { post("/api/chores/run", {}); }
 
 /* ---- verify: mark one OK now, or tick several and save ---- */
 

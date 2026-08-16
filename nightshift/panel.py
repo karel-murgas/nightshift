@@ -53,6 +53,7 @@ import datetime as dt
 import html
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -173,9 +174,9 @@ def _account_paths(state: AccountState) -> tuple[Path | None, Path | None]:
     return base / ".credentials.json", base / ".claude.json"
 
 
-def _guard_dispatch_account() -> None:
+def _guard_dispatch_account(waived: bool = False) -> None:
     """Refuse a dispatch on an account marked `dispatch: never`, or one whose
-    live `hasExtraUsageEnabled` says API spend is on — whichever fires first.
+    live `hasExtraUsageEnabled` says API spend is on — unless a human waived it.
 
     Checked here, not only left to the UI hiding the button — a crafted POST must
     fail exactly where a real click would have declined to send one at all.
@@ -186,12 +187,24 @@ def _guard_dispatch_account() -> None:
     would have let automated work reach the one account the whole rule exists to
     protect. The live identity read is the veto config forgot to mark, so it is
     checked unconditionally, not only when `[[accounts]]` names the account.
+
+    **`waived` is the human saying so, and it is the whole point of the rule.**
+    The exclusion is *"a default, enforced against tooling, waived only by a
+    human"* — Karel, 2026-08-14: *"It may be legitimate ... to allow automated
+    work for dollars on purpose. But the user should decide if the exception will
+    be given."* So this is not a hole in the veto; a veto with no human override
+    would be the tool deciding, which is the thing forbidden. It arrives per
+    request from the override checkbox and is **never persisted** — the same
+    shape as `--allow-paid`, for the reason that file gives: a stored "this
+    account is fine now" outlives the reason it was true.
     """
+    if waived:
+        return
     if _ACCOUNT.dispatch == "never":
         raise PanelError(
             f"the account {_ACCOUNT.label!r} is configured `dispatch: never` in "
             f"[[accounts]] — this panel will not dispatch work to it. Select a "
-            f"different account first."
+            f"different account, or tick the override to allow it this once."
         )
     _, identity_path = _account_paths(_ACCOUNT)
     identity = usage.read_identity(identity_path)
@@ -199,8 +212,8 @@ def _guard_dispatch_account() -> None:
         raise PanelError(
             f"the account in force ({identity.email or '(no email on file)'}) has API "
             f"spend enabled (`hasExtraUsageEnabled`) — this panel will not dispatch "
-            f"automated work to it regardless of [[accounts]]. Select a different "
-            f"account, or mark this one `dispatch: never` and do the work inline."
+            f"automated work to it by default. Select a different account, or tick "
+            f"the override to allow it this once."
         )
 
 
@@ -629,13 +642,24 @@ def _meta(items: list[str]) -> str:
     return f'<div class="meta">{cells}</div>'
 
 
+def _tag_chips(card: board.Card) -> list[str]:
+    """The card's tags, as chips.
+
+    `nightshift` is the one with operational meaning — the deliverable lands in
+    the framework repo, so the runner cannot cut a worktree for it and the card
+    carries `unattended: false` to match. Worth seeing at a glance, since it is
+    the difference between a card the night can take and one it never will.
+    """
+    return [_chip(tag, "warn" if tag == "nightshift" else "mute") for tag in card.tags]
+
+
 def _card_body(card: board.Card, *, meta: list[str] | None = None, why: str = "") -> str:
     out = [f'<span class="id">{_e(card.id)}</span>']
     if card.title and card.title != card.id:
         out.append(f'<span class="title">{_e(card.title)}</span>')
     if why:
         out.append(f'<p class="why">{_e(why)}</p>')
-    out.append(_meta(meta or []))
+    out.append(_meta(_tag_chips(card) + (meta or [])))
     return "".join(out)
 
 
@@ -787,19 +811,46 @@ def _runbox_html(ctx: Context) -> str:
     return f'<div class="runbox">{head}{tally}</div>'
 
 
+#: The two windows worth a permanent meter, and what to call them. The endpoint
+#: returns a dozen-odd others — most null, several with internal codenames that
+#: mean nothing here (`nimbus_quill`, `tangelo`, …) — and a rail that renders all
+#: of them is mostly noise about buckets this plan does not use.
+#:
+#: **The parser still reads every key** (`usage._buckets`, and §4 is emphatic that
+#: hardcoding the list is how a panel goes blank when the names shift). This is a
+#: display choice on top of a complete reading, which is why `shown_buckets` can
+#: still surface an unlisted bucket: one that is actually exhausted is the reason
+#: a dispatch just got refused, and hiding it would leave the refusal unexplained.
+METER_LABELS: dict[str, str] = {"five_hour": "session", "seven_day": "weekly"}
+
+
+def shown_buckets(snapshot: usage.Snapshot) -> list[usage.Bucket]:
+    """The meters to draw: the two named windows, plus anything spent.
+
+    Ordered so the two familiar ones come first and in a stable order — a rail
+    whose rows reshuffle between page loads is unreadable.
+    """
+    by_name = {b.name: b for b in snapshot.buckets}
+    shown = [by_name[name] for name in METER_LABELS if name in by_name]
+    shown += [b for b in snapshot.buckets
+              if b.name not in METER_LABELS and b.exhausted]
+    return shown
+
+
 def _meters_html(ctx: Context) -> str:
     snapshot = ctx.rail.snapshot
     out = ['<p class="eyebrow">Allowance</p>']
     if not snapshot.fetched:
         out.append(f'<p class="resets">{_e(snapshot.reason or "no reading")}</p>')
-    for bucket in snapshot.buckets:
+    for bucket in shown_buckets(snapshot):
         fill = min(100.0, max(0.0, bucket.utilization))
         kind = "bad" if bucket.exhausted else ("warn" if bucket.headroom_pct <= 15 else "")
         resets = (f'<p class="resets">resets {bucket.resets_at:%d %b %H:%M}</p>'
                   if bucket.resets_at else "")
+        label = METER_LABELS.get(bucket.name, bucket.name.replace("_", " "))
         out.append(
             f'<div class="meter"><div class="meter-head">'
-            f'<span>{_e(bucket.name.replace("_", " "))}</span>'
+            f'<span>{_e(label)}</span>'
             f'<span>{bucket.utilization:.0f}%</span></div>'
             f'<div class="track"><i class="{kind}" style="width:{fill:.0f}%"></i></div>'
             f'{resets}</div>'
@@ -832,8 +883,21 @@ def _account_html(ctx: Context) -> str:
                            f'{_e(account.label)}</option>')
         selector = ('<br><select onchange="post(\'/api/account\',{label:this.value})">'
                     + "".join(options) + "</select>")
+    # The override lives here, next to the account it waives and on every page —
+    # §3.4 is explicit that the account in force must be visible *at the moment of
+    # dispatch*, and a waiver parked on one page while the Dispatch buttons sit on
+    # three is the same failure as a switcher that is off-screen when you click.
+    # One control, one state: two copies would be two selections that can disagree.
+    override = ('<label class="override" title="Two waivers, one tick, and neither is '
+                'remembered: the account exclusion (this panel refuses an account with API '
+                'spend enabled) and the money rule (checked by the chore batch, ingest and '
+                'the drain before they spend). A night is not gated on headroom at all — '
+                'limits.py stops it reactively after a wall — so the money half cannot '
+                'change what a night does.">'
+                '<input type="checkbox" id="allowpaid"> Override, this once</label>')
     return (f'<p class="account">account <b>{_e(label)}</b>{never}<br>{_e(email)}'
-            f'{selector}</p>')
+            f'{selector}</p><div class="acts" style="justify-content:flex-start">'
+            f'{override}</div>')
 
 
 def _statusrail_html(ctx: Context) -> str:
@@ -924,10 +988,6 @@ def _render_now(ctx: Context) -> str:
         f'<input type="range" id="takefirst" min="0" max="{len(tonight)}" value="{len(tonight)}">'
         '<output for="takefirst" id="takefirstout">0</output></label>'
         '<div class="acts">'
-        '<label class="override" title="Honoured by the chore batch, which checks the money '
-        'rule before it spends. A night is not gated on headroom at all — limits.py stops it '
-        'reactively — so this cannot change what a night does.">'
-        '<input type="checkbox" id="allowpaid"> Allow paid</label>'
         + _act("Run chores", onclick="runChores()")
         + _act("Run the whole queue", onclick="runNight()")
         + _act("Run the ticked", onclick="runTicked()", primary=True)
@@ -1181,40 +1241,55 @@ def _render_run(ctx: Context) -> str:
             f'<td class="said">{_e(_said(entry))}</td>'
             f'<td class="num">{talk}</td></tr>'
         )
-    for candidate in ctx.tonight:
-        if any(d.get("card") == candidate.card.id for d in dispatched):
-            continue
-        body.append(f'<tr class="pend"><td class="mark m-wait">&middot;</td>'
-                    f'<td class="card">{_e(candidate.card.id)}</td>'
-                    f'<td class="lane">queued</td><td class="num"></td>'
-                    f'<td class="num"></td><td class="said"></td>'
-                    f'<td class="num"></td></tr>')
+    live = run_is_live(ctx.rail.run_status, record)
+    if live:
+        for candidate in ctx.tonight:
+            if any(d.get("card") == candidate.card.id for d in dispatched):
+                continue
+            body.append(f'<tr class="pend"><td class="mark m-wait">&middot;</td>'
+                        f'<td class="card">{_e(candidate.card.id)}</td>'
+                        f'<td class="lane">queued</td><td class="num"></td>'
+                        f'<td class="num"></td><td class="said"></td>'
+                        f'<td class="num"></td></tr>')
 
+    # "This run" is a claim about *now*, and the newest record can be weeks old —
+    # on first inspection this page presented a run from two weeks earlier under
+    # that heading, with a start time and no date, which reads as this morning.
     started = str(record.get("started", ""))
-    note = (f"Started {started[11:16]} on {_e(record.get('host', '?'))} · "
-            f"{'complete' if record.get('complete') else 'in flight'}") if started else ""
+    today = started[:10] == dt.date.today().isoformat()
+    heading = "This run" if live else ("Today's run" if today else "Last run")
+    when = f"{started[:10]} {started[11:16]}" if started else ""
+    note = (f"{when} on {record.get('host', '?')} · "
+            f"{'in flight' if live else ('complete' if record.get('complete') else 'ended without finishing')}"
+            ) if started else ""
     bar = ('<div class="barbox">'
-           f'<p>Spent so far this run: <b>${record.get("cost_usd", 0) or 0:.2f}</b>. '
+           f'<p>Spent this run: <b>${record.get("cost_usd", 0) or 0:.2f}</b>. '
            'Stopping lets the current card finish and merges nothing after it.</p>'
            '<div class="acts">'
            + _act("Stop after this card", onclick="post('/api/stop',{})")
-           + '</div></div>') if record else ""
-    out.append(_section("This run", len(dispatched),
+           + '</div></div>') if live else ""
+    out.append(_section(heading, len(dispatched),
                         f'<div class="roster"><table><tbody>{"".join(body)}</tbody></table></div>'
                         if body else "", note=note, bar=bar,
                         sub="What the morning digest would have told you, except now.",
                         empty="No run has been recorded on this machine yet."))
 
-    skipped = record.get("skipped", [])
+    # Read off the board as it stands, **not** off the record's `skipped` list.
+    # That list belongs to whichever run wrote it, and the newest run here was two
+    # weeks old — so the section confidently listed cards that had since been
+    # finished and moved to `done/`. A card the night will not take is a fact
+    # about `tasks/` right now, and derived this way it cannot name a done card,
+    # because a done card is no longer in the lane.
+    left_out = ctx.do_now + ctx.elsewhere
     rows = "".join(
-        _row(body=(f'<span class="id">{_e(item.get("card", ""))}</span>'
-                   f'<div class="meta"><span>{_e(item.get("reason", ""))}</span></div>'),
-             acts=_act("Read card", href=f"/card/{item.get('card', '')}"))
-        for item in skipped
+        _row(body=_card_body(c.card, meta=[_e(c.reason.split(";")[0][:80])]),
+             acts=_act("Read card", href=f"/card/{c.card.id}"))
+        for c in left_out
     )
-    out.append(_section("Not taken", len(skipped), rows,
-                        note="Never silent — a card left out says why.",
-                        empty="Every card on the board was dispatchable."))
+    out.append(_section("Not taken", len(left_out), rows,
+                        note="As the board stands now — never silent, a card left "
+                             "out says why.",
+                        empty="Every card in tasks/ is dispatchable here."))
 
     earlier = run_record.read_all(ctx.root)[1:6]
     rows = []
@@ -1243,13 +1318,210 @@ _RENDER = {"now": _render_now, "verify": _render_verify, "inbox": _render_inbox,
            "ideas": _render_ideas, "run": _render_run}
 
 
+# --------------------------------------------------------------------------
+# Markdown, enough of it for a card. A card is written to be read, and reading
+# one as raw text means reading its `##` and `**` as noise.
+#
+# Hand-rolled because the package takes no dependency it does not need for a
+# gate (`pyproject.toml`'s own note on `vulture`), and this needs one function,
+# not a library. It is a *subset*, deliberately: the constructs cards actually
+# use. Anything unrecognised falls through as its own paragraph, escaped — the
+# failure mode is "renders plainly", never "renders as markup".
+#
+# **Escaping happens first and once**, before any tag is introduced, so no
+# amount of markdown in a card can inject HTML into this page.
+# --------------------------------------------------------------------------
+
+_MD_FENCE = re.compile(r"^```")
+_MD_HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
+_MD_BULLET = re.compile(r"^\s*[-*]\s+(.*)$")
+_MD_NUMBER = re.compile(r"^\s*\d+\.\s+(.*)$")
+_MD_QUOTE = re.compile(r"^&gt;\s?(.*)$")
+_MD_RULE = re.compile(r"^(-{3,}|\*{3,})$")
+_MD_TABLE_SEP = re.compile(r"^\|[\s:|-]+\|$")
+
+_MD_CODE = re.compile(r"`([^`]+)`")
+_MD_BOLD = re.compile(r"\*\*([^*]+)\*\*")
+_MD_ITALIC = re.compile(r"(?<![*\w])\*([^*\n]+)\*(?!\*)")
+_MD_WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
+_MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+
+
+def _md_inline(text: str) -> str:
+    """Inline spans. Code first, so `**` inside a code span stays literal."""
+    holes: list[str] = []
+
+    def stash(match: re.Match) -> str:
+        holes.append(f"<code>{match.group(1)}</code>")
+        return f"\x00{len(holes) - 1}\x00"
+
+    text = _MD_CODE.sub(stash, text)
+    text = _MD_BOLD.sub(r"<b>\1</b>", text)
+    text = _MD_ITALIC.sub(r"<em>\1</em>", text)
+    # A wikilink names a card on this board, so it becomes a link to it.
+    text = _MD_WIKILINK.sub(r'<a href="/card/\1">\1</a>', text)
+    text = _MD_LINK.sub(r'<a href="\2" rel="noreferrer">\1</a>', text)
+    for index, hole in enumerate(holes):
+        text = text.replace(f"\x00{index}\x00", hole)
+    return text
+
+
+def split_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    """A card's frontmatter and its body, apart.
+
+    Rendered as markdown the block is neither: the `---` fences become rules and
+    the `key: value` lines collapse into one run-on paragraph, which is what the
+    top of every opened card looked like. The fields are data and belong in a
+    strip of their own; the body is the prose.
+    """
+    block = board.FRONTMATTER.match(text)
+    if not block:
+        return {}, text
+    return board.parse_fields(text), text[block.end():]
+
+
+def _fields_html(fields: dict[str, str]) -> str:
+    """The frontmatter as a strip of small facts, in the card's own order."""
+    if not fields:
+        return ""
+    cells = []
+    for key, value in fields.items():
+        if not value:
+            continue
+        shown = value.strip("[]") if key == "tags" else value
+        cells.append(f'<span><b>{_e(key)}</b> {_e(shown)}</span>')
+    return f'<div class="fields">{"".join(cells)}</div>'
+
+
+def markdown(text: str) -> str:
+    """A card as HTML. Input is raw markdown; output is safe to insert."""
+    lines = html.escape(text, quote=False).splitlines()
+    out: list[str] = []
+    para: list[str] = []
+    list_tag = ""
+    in_code = False
+    code: list[str] = []
+    table: list[str] = []
+
+    def close_para() -> None:
+        if para:
+            out.append(f"<p>{_md_inline(' '.join(para))}</p>")
+            para.clear()
+
+    def close_list() -> None:
+        nonlocal list_tag
+        if list_tag:
+            out.append(f"</{list_tag}>")
+            list_tag = ""
+
+    def close_table() -> None:
+        if not table:
+            return
+        rows = []
+        for position, row in enumerate(table):
+            cells = [c.strip() for c in row.strip().strip("|").split("|")]
+            tag = "th" if position == 0 else "td"
+            rows.append("<tr>" + "".join(
+                f"<{tag}>{_md_inline(c)}</{tag}>" for c in cells) + "</tr>")
+        out.append(f"<table>{''.join(rows)}</table>")
+        table.clear()
+
+    def close_all() -> None:
+        close_para()
+        close_list()
+        close_table()
+
+    for line in lines:
+        if _MD_FENCE.match(line):
+            if in_code:
+                out.append(f"<pre>{chr(10).join(code)}</pre>")
+                code.clear()
+            else:
+                close_all()
+            in_code = not in_code
+            continue
+        if in_code:
+            code.append(line)
+            continue
+
+        if line.strip().startswith("|"):
+            close_para()
+            close_list()
+            if not _MD_TABLE_SEP.match(line.strip()):
+                table.append(line)
+            continue
+        close_table()
+
+        if not line.strip():
+            close_all()
+            continue
+        if heading := _MD_HEADING.match(line):
+            close_all()
+            level = min(len(heading.group(1)) + 1, 6)
+            out.append(f"<h{level}>{_md_inline(heading.group(2))}</h{level}>")
+            continue
+        if _MD_RULE.match(line.strip()):
+            close_all()
+            out.append("<hr>")
+            continue
+        if quote := _MD_QUOTE.match(line.strip()):
+            close_all()
+            out.append(f"<blockquote>{_md_inline(quote.group(1))}</blockquote>")
+            continue
+        bullet, number = _MD_BULLET.match(line), _MD_NUMBER.match(line)
+        if bullet or number:
+            close_para()
+            wanted = "ul" if bullet else "ol"
+            if list_tag != wanted:
+                close_list()
+                out.append(f"<{wanted}>")
+                list_tag = wanted
+            item = (bullet or number).group(1)
+            out.append(f"<li>{_md_inline(item)}</li>")
+            continue
+        # An indented line under a list item is that item continuing, not a new
+        # paragraph. Treating it as one closed the list, so the *next* numbered
+        # item opened a fresh `<ol>` and every step in a wrapped list was
+        # numbered "1." — which is what a card's `## Steps` section looked like.
+        if list_tag and line[:1] in (" ", "\t") and out and out[-1].endswith("</li>"):
+            out[-1] = out[-1][: -len("</li>")] + " " + _md_inline(line.strip()) + "</li>"
+            continue
+        close_list()
+        para.append(line.strip())
+
+    if in_code and code:
+        out.append(f"<pre>{chr(10).join(code)}</pre>")
+    close_all()
+    return "".join(out)
+
+
+def render_shell(ctx: Context, *, title: str, active: str, content: str) -> str:
+    """The page furniture around any content — the rail, the status rail, the
+    stylesheet. A card and a diff get the same frame the five pages do, so
+    opening one is still inside the panel rather than a bare text dump."""
+    template = TEMPLATE.read_text(encoding="utf-8")
+    out = template.replace("{{TITLE}}", f"Command Center — {title}")
+    out = out.replace("{{RAIL}}", _rail_html(ctx, active))
+    out = out.replace("{{STATUSRAIL}}", _statusrail_html(ctx))
+    return out.replace("{{CONTENT}}", content)
+
+
 def render_page(page: str, root: Path) -> str:
     ctx = read_context(root)
-    template = TEMPLATE.read_text(encoding="utf-8")
-    out = template.replace("{{TITLE}}", f"Command Center — {page.capitalize()}")
-    out = out.replace("{{RAIL}}", _rail_html(ctx, page))
-    out = out.replace("{{STATUSRAIL}}", _statusrail_html(ctx))
-    return out.replace("{{CONTENT}}", _RENDER[page](ctx))
+    return render_shell(ctx, title=page.capitalize(), active=page,
+                        content=_RENDER[page](ctx))
+
+
+def render_document(root: Path, *, title: str, subtitle: str, body: str,
+                    acts: str = "") -> str:
+    """A card or a diff, framed. `body` is already-safe HTML."""
+    ctx = read_context(root)
+    head = (f'<div class="sec-head"><h2>{_e(title)}</h2>'
+            f'<p class="note">{_e(subtitle)}</p></div>')
+    content = (f'<section>{head}<div class="doc">{body}</div>'
+               f'<div class="barbox"><p></p><div class="acts">{acts}'
+               f'{_act("Back", href="/now")}</div></div></section>')
+    return render_shell(ctx, title=title, active="", content=content)
 
 
 # --------------------------------------------------------------------------
@@ -1310,13 +1582,23 @@ class Handler(BaseHTTPRequestHandler):
             if card is None:
                 self._send_text(404, "no such card")
                 return
-            self._send_text(200, card.text)
+            fields, body = split_frontmatter(card.text)
+            self._send(200, render_document(
+                self.root, title=card.id,
+                subtitle=f"{card.lane}/ · {card.title}",
+                body=_fields_html(fields) + markdown(body),
+                acts=_act("Diff", href=f"/diff/{card.id}")).encode("utf-8"))
             return
         if path.startswith("body/"):
+            target = path[len("body/"):]
             try:
-                self._send_text(200, read_body(self.root, path[len("body/"):]))
+                text = read_body(self.root, target)
             except PanelError as exc:
                 self._send_text(400, str(exc))
+                return
+            self._send(200, render_document(
+                self.root, title=Path(target).name, subtitle=target,
+                body=markdown(text)).encode("utf-8"))
             return
         if path.startswith("diff/"):
             card = board.find(self.root, path[len("diff/"):])
@@ -1325,11 +1607,16 @@ class Handler(BaseHTTPRequestHandler):
                 return
             branch = card.fields.get("branch") or f"ai/{card.id}"
             base = default_base(self.root)
-            if not branch_has_commits(self.root, base, branch):
-                self._send_text(200, f"`{branch}` carries no commits against {base}.")
-                return
-            self._send_text(200, _git_out(self.root, "diff", f"{base}...{branch}")
-                            or "(git said nothing)")
+            if branch_has_commits(self.root, base, branch):
+                diff = _git_out(self.root, "diff", f"{base}...{branch}") or "(git said nothing)"
+            else:
+                diff = (f"`{branch}` carries no commits against {base} — either the card "
+                        f"produced an artefact rather than a diff, or it has already merged "
+                        f"and its branch was deleted.")
+            self._send(200, render_document(
+                self.root, title=f"{card.id} · diff", subtitle=f"{base}...{branch}",
+                body=f"<pre>{_e(diff)}</pre>",
+                acts=_act("Read card", href=f"/card/{card.id}")).encode("utf-8"))
             return
         self._send_text(404, "not found")
 
@@ -1351,15 +1638,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def _route(self, path: str, body: dict) -> str | None:
         root = self.root
-        paid = ["--allow-paid"] if body.get("allow_paid") else []
+        # One checkbox, both waivers (§3.4): the money rule for the commands that
+        # consult it, and the account exclusion for the dispatch guard. Per request,
+        # never stored.
+        waived = bool(body.get("allow_paid"))
+        paid = ["--allow-paid"] if waived else []
 
         if path == "api/dispatch":
-            _guard_dispatch_account()
+            _guard_dispatch_account(waived)
             card_id = str(body.get("card_id", ""))
             return f"dispatching {card_id} (pid {spawn_background('runner', ['--card', card_id], root)})"
 
         if path == "api/night":
-            _guard_dispatch_account()
+            _guard_dispatch_account(waived)
             ids = [str(i) for i in body.get("card_ids", []) if str(i).strip()]
             if ids:
                 pid = spawn_sequence(ids, root)
@@ -1367,16 +1658,16 @@ class Handler(BaseHTTPRequestHandler):
             return f"tonight's run started (pid {spawn_background('runner', [], root)})"
 
         if path == "api/chores/run":
-            _guard_dispatch_account()
+            _guard_dispatch_account(waived)
             return f"chore batch started (pid {spawn_background('chores', paid, root)})"
 
         if path == "api/ingest":
-            _guard_dispatch_account()
+            _guard_dispatch_account(waived)
             args = (["--scribe"] if body.get("scribe") else []) + paid
             return f"classifying the inbox (pid {spawn_background('ingest', args, root)})"
 
         if path == "api/review":
-            _guard_dispatch_account()
+            _guard_dispatch_account(waived)
             card_id = str(body.get("card_id", ""))
             args = ["--card", card_id] + paid
             return f"reviewing {card_id} (pid {spawn_background('drain', args, root)})"

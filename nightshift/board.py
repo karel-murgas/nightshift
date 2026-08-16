@@ -130,19 +130,47 @@ KIND_CHORE = "chore"
 # path) and is not part of that count.
 FRONTMATTER = re.compile(r"\A---\r?\n(.*?)\r?\n---[ \t]*\r?\n?", re.DOTALL)
 _FIELD = re.compile(r"^([A-Za-z_][\w-]*):[ \t]*(.*?)[ \t]*$", re.MULTILINE)
+_BLOCK_ITEM = re.compile(r"^[ \t]+-[ \t]*(.+?)[ \t]*$")
 
 
 def parse_fields(text: str) -> dict[str, str]:
     """Flat `key: value` frontmatter. Values stay raw strings — the schema has
     no nested fields, and a YAML dependency in code that must stay importable
-    in isolation is not worth it (same call `card_schema` made)."""
+    in isolation is not worth it (same call `card_schema` made).
+
+    **YAML's block-list form is flattened to the inline one**, so `tags:`
+    followed by indented `- item` lines reads as `[item]` rather than as the
+    empty string. That is not a nicety: it is the form Obsidian writes by
+    default, and `card_schema._frontmatter` has folded it since
+    `tag-parser-blind-to-block-form` — which means until now the board's own
+    model and the gate checking it disagreed about the contents of the same
+    file, with this side reporting *absent* for a value that was plainly there.
+    A parser that cannot see an input form does not report on it; it approves
+    it, and every rule keyed on that field goes quietly dead.
+    """
     block = FRONTMATTER.match(text)
     if not block:
         return {}
-    return {
-        m.group(1): m.group(2).strip().strip('"').strip("'")
-        for m in _FIELD.finditer(block.group(1))
-    }
+    fields: dict[str, str] = {}
+    key = ""
+    items: list[str] = []
+
+    def flush() -> None:
+        if key and items:
+            fields[key] = "[" + ", ".join(items) + "]"
+
+    for line in block.group(1).splitlines():
+        item = _BLOCK_ITEM.match(line)
+        if item and key and not fields.get(key):
+            items.append(item.group(1).strip('"').strip("'"))
+            continue
+        found = _FIELD.match(line)
+        if found:
+            flush()
+            key, items = found.group(1), []
+            fields[key] = found.group(2).strip().strip('"').strip("'")
+    flush()
+    return fields
 
 
 def set_fields(text: str, values: dict[str, str | None]) -> str:
@@ -242,6 +270,22 @@ class Card:
         literal in any one of them would silently take the full-card path.
         """
         return self.fields.get("kind", "")
+
+    @property
+    def tags(self) -> list[str]:
+        """The card's own classification, in either YAML form.
+
+        The one tag with operational meaning is `nightshift` — a card whose
+        deliverable lands in the framework repo, which the runner cannot cut a
+        worktree for. Surfaced here so a reader (a report, a panel) can say so
+        without re-deriving the grammar; `card_schema` keeps its own copy for
+        the isolation reason its docstring gives.
+        """
+        raw = self.fields.get("tags", "").strip()
+        if not raw:
+            return []
+        return [t.strip().strip('"').strip("'").lstrip("#")
+                for t in raw.strip("[]").split(",") if t.strip()]
 
     @property
     def surface(self) -> str:

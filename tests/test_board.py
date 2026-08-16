@@ -134,3 +134,45 @@ def test_dispatch_order_puts_dragged_cards_first(tmp_path):
         "---\nid: dragged\nstate: tasks\nkanban_order: a1\n---\n\nbody\n", encoding="utf-8")
 
     assert [c.id for c in board.cards(root, "tasks")] == ["probe", "dragged", "undragged"]
+
+
+# ------------------------------------------------------- YAML's other list form
+
+
+def test_a_block_list_reads_the_same_as_an_inline_one():
+    """Obsidian writes `tags:` followed by indented `- item` lines. Read as the
+    empty string — which is what happened until 2026-08-16 — every rule keyed on
+    the field is silently disabled while the file plainly carries it, and this
+    module disagreed with `card_schema`, which has folded the form since
+    `tag-parser-blind-to-block-form`."""
+    block = board.parse_fields(
+        "---\nid: x\ntags:\n  - nightshift\n  - art\nstate: tasks\n---\n\nbody\n")
+    inline = board.parse_fields(
+        "---\nid: x\ntags: [nightshift, art]\nstate: tasks\n---\n\nbody\n")
+    assert block["tags"] == inline["tags"] == "[nightshift, art]"
+    assert block["state"] == "tasks", "the field after the block list was lost"
+
+
+def test_an_empty_value_that_is_not_a_block_list_stays_empty():
+    fields = board.parse_fields("---\nid: x\nchecker:\nstate: tasks\n---\n\nbody\n")
+    assert fields["checker"] == ""
+    assert fields["state"] == "tasks"
+
+
+def test_tags_are_read_in_either_form(tmp_path):
+    root = _repo(tmp_path)
+    lane = root / "Board" / "tasks"
+    (lane / "block.md").write_text(
+        "---\nid: block\nstate: tasks\ntags:\n  - nightshift\n---\n\nbody\n",
+        encoding="utf-8")
+    (lane / "inline.md").write_text(
+        "---\nid: inline\nstate: tasks\ntags: [nightshift]\n---\n\nbody\n",
+        encoding="utf-8")
+    (lane / "none.md").write_text(
+        "---\nid: none\nstate: tasks\n---\n\nbody\n", encoding="utf-8")
+
+    tags = {c.id: c.tags for c in board.cards(root, "tasks")}
+
+    assert tags["block"] == ["nightshift"]
+    assert tags["inline"] == ["nightshift"]
+    assert tags["none"] == []

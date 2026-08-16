@@ -821,3 +821,200 @@ def test_the_ideas_page_still_shows_no_bodies_even_though_one_can_be_fetched(ser
     _, text = _get(base, "ideas")
     assert "spark.md" in text
     assert "pomeranian-carburettor" not in text
+
+
+# ------------------------------------------------------- a card reads as a card
+
+
+def test_markdown_renders_the_constructs_a_card_uses():
+    out = panel.markdown("## Intent\n\nDo **the** thing with `code`.\n\n- one\n- two\n")
+    assert "<h3>Intent</h3>" in out
+    assert "<b>the</b>" in out and "<code>code</code>" in out
+    assert out.count("<li>") == 2 and "<ul>" in out
+
+
+def test_markdown_never_lets_a_card_inject_html():
+    """Escaping happens once, before any tag is introduced."""
+    out = panel.markdown("<script>alert(1)</script>\n\n<img src=x onerror=y>")
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
+
+
+def test_a_wrapped_list_item_does_not_restart_the_numbering():
+    """An indented continuation line closed the list, so the next item opened a
+    fresh `<ol>` — every step in a card's `## Steps` rendered as "1."."""
+    out = panel.markdown("1. first step\n   continued here\n2. second step\n")
+    assert out.count("<ol>") == 1, out
+    assert "continued here" in out
+    assert out.count("<li>") == 2
+
+
+def test_a_fenced_block_keeps_its_markup_literal():
+    out = panel.markdown("```\n**not bold**\n```\n")
+    assert "<pre>**not bold**</pre>" in out
+
+
+def test_frontmatter_is_split_off_rather_than_rendered_as_prose():
+    """Rendered as markdown the block is neither: the fences become rules and the
+    fields collapse into one run-on paragraph at the top of every card."""
+    fields, body = panel.split_frontmatter(
+        "---\nid: a-card\nstate: tasks\n---\n\n## Intent\n\nOne thing.\n")
+    assert fields["id"] == "a-card"
+    assert body.lstrip().startswith("## Intent")
+    assert "id: a-card" not in panel.markdown(body)
+
+
+def test_a_card_page_shows_its_fields_and_its_prose(server):
+    base, root = server
+    _card(root, "tasks", "a-card")
+    _, text = _get(base, "card/a-card")
+    assert '<div class="fields">' in text
+    assert "<h3>Intent</h3>" in text
+    assert "Command Center" in text, "a card opens inside the panel, not as a bare dump"
+
+
+# ------------------------------------------------------------------ the tag shows
+
+
+def test_a_nightshift_card_says_so_on_its_row(server):
+    """The tag is the difference between a card the night can take and one it
+    never will, so it belongs where the queue is read."""
+    base, root = server
+    path = root / "Board" / "tasks" / "framework.md"
+    path.write_text(CARD.format(id="framework", state="tasks", unattended="false").replace(
+        "verify: play", "verify: play\ntags:\n  - nightshift"), encoding="utf-8", newline="")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "framework card")
+
+    _, text = _get(base, "now")
+
+    assert "nightshift" in text
+    assert '<span class="chip warn">nightshift</span>' in text
+
+
+# ------------------------------------------------------------------- the meters
+
+
+def _bucket(name, util):
+    return panel.usage.Bucket(name=name, utilization=util, resets_at=None)
+
+
+def test_only_session_and_weekly_get_a_permanent_meter():
+    """The endpoint returns a dozen-odd windows, most of them null and several
+    with internal codenames that mean nothing here."""
+    snapshot = panel.usage.Snapshot(buckets=(
+        _bucket("five_hour", 30.0), _bucket("nimbus_quill", 0.0),
+        _bucket("seven_day", 49.0), _bucket("tangelo", 12.0)), fetched=True)
+    assert [b.name for b in panel.shown_buckets(snapshot)] == ["five_hour", "seven_day"]
+
+
+def test_a_bucket_that_is_actually_spent_is_shown_whatever_it_is_called():
+    """`usage.check` refuses on the worst bucket, so an exhausted one that the
+    rail hid would leave a refusal with nothing on screen explaining it."""
+    snapshot = panel.usage.Snapshot(buckets=(
+        _bucket("five_hour", 30.0), _bucket("iguana_necktie", 100.0)), fetched=True)
+    assert [b.name for b in panel.shown_buckets(snapshot)] == ["five_hour", "iguana_necktie"]
+
+
+def test_the_meters_are_labelled_in_the_words_the_plan_uses(server):
+    base, _ = server
+    _, text = _get(base, "now")
+    assert "nimbus" not in text.lower()
+
+
+# --------------------------------------------------------- the run page is honest
+
+
+def test_an_old_record_is_not_presented_as_this_run(server):
+    """The newest record can be weeks old. Shown under "This run" with a start
+    time and no date, it reads as this morning — which is what it did."""
+    base, root = server
+    records = root / ".ai" / "runs" / "records"
+    records.mkdir(parents=True, exist_ok=True)
+    (records / "20260801-101700.json").write_text(json.dumps({
+        "started": "2026-08-01T10:17:00", "finished": "2026-08-01T11:00:00",
+        "complete": True, "kind": "night", "host": "somebox", "cost_usd": 3.0,
+        "dispatched": [{"card": "old-card", "outcome": "reviewed", "landed": "old-card: → done/"}],
+        "skipped": [{"card": "already-finished", "reason": "attempts: 3 — at the limit"}],
+    }), encoding="utf-8")
+
+    _, text = _get(base, "run")
+
+    assert "Last run" in text
+    assert "This run" not in text
+    assert "2026-08-01" in text, "the date is what stops it reading as today"
+
+
+def test_not_taken_reads_the_board_not_a_stale_skip_list(server):
+    """The record's `skipped` belongs to whichever run wrote it — two weeks ago
+    here — so it confidently listed cards that had since been finished."""
+    base, root = server
+    records = root / ".ai" / "runs" / "records"
+    records.mkdir(parents=True, exist_ok=True)
+    (records / "20260801-101700.json").write_text(json.dumps({
+        "started": "2026-08-01T10:17:00", "complete": True, "kind": "night",
+        "dispatched": [],
+        "skipped": [{"card": "already-finished", "reason": "was skipped a fortnight ago"}],
+    }), encoding="utf-8")
+    _card(root, "tasks", "needs-a-human", unattended="false")
+
+    _, text = _get(base, "run")
+
+    assert "already-finished" not in text, "a card from a stale run's skip list"
+    assert "needs-a-human" in text, "the board's own undispatchable card"
+
+
+# ------------------------------------------------- the waiver the rule requires
+
+
+def _spend_on(monkeypatch):
+    monkeypatch.setattr(panel.usage, "read_identity",
+                        lambda path: panel.usage.Identity(
+                            fetched=True, email="k@example.com", has_extra_usage_enabled=True))
+
+
+def test_the_veto_is_waived_by_an_explicit_human_override(monkeypatch):
+    """`feedback_account_dispatch`: the exclusion is "a default, enforced against
+    tooling, waived only by a human". A veto with no override would be the tool
+    deciding, which is the thing the rule forbids."""
+    _spend_on(monkeypatch)
+    with pytest.raises(panel.PanelError):
+        panel._guard_dispatch_account()
+    panel._guard_dispatch_account(waived=True)   # must not raise
+
+
+def test_a_dispatch_never_account_is_also_waivable(tmp_path, monkeypatch):
+    root = _repo(tmp_path)
+    panel.select_account(root, "spendy")
+    with pytest.raises(panel.PanelError):
+        panel._guard_dispatch_account()
+    monkeypatch.setattr(panel.usage, "read_identity",
+                        lambda path: panel.usage.Identity(fetched=True))
+    panel._guard_dispatch_account(waived=True)   # must not raise
+
+
+def test_the_override_travels_with_the_request_and_is_never_stored(server, monkeypatch):
+    """Per invocation, never persisted — so the next request without the tick is
+    refused again."""
+    base, root = server
+    _spend_on(monkeypatch)
+    monkeypatch.setattr(panel, "spawn_background", lambda *a, **k: 11)
+
+    allowed, _ = _post(base, "api/dispatch", {"card_id": "x", "allow_paid": True})
+    refused, _ = _post(base, "api/dispatch", {"card_id": "x"})
+
+    assert allowed == 200
+    assert refused == 400, "the waiver outlived the click that granted it"
+
+
+def test_the_override_reaches_the_commands_that_check_the_money_rule(server, monkeypatch):
+    base, root = server
+    _spend_on(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(panel, "spawn_background",
+                        lambda module, args, r: seen.setdefault("args", list(args)) or 5)
+
+    status, data = _post(base, "api/chores/run", {"allow_paid": True})
+
+    assert status == 200, data
+    assert seen["args"] == ["--allow-paid"]
