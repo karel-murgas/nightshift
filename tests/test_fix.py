@@ -263,9 +263,16 @@ def test_the_loop_files_what_the_agent_escalated(repo, monkeypatch):
 # --- bootstrap: the one file that breaks the chicken-and-egg --------------------
 
 
-def test_bootstrap_writes_only_the_install_skill(repo):
+def test_bootstrap_writes_the_install_skill_and_the_launchers_and_nothing_else(repo):
+    """Two things break the chicken-and-egg, not one. The skill is how the install is
+    driven; the launchers are how you reach the panel that offers to drive it — and the
+    panel renders before there is an install, which is what makes that offer possible.
+
+    Still an exact list. `bootstrap` is the one command that runs in a repo which has
+    consented to nothing yet, and anything extra it drops is something nobody asked for.
+    """
     plan = init.bootstrap_plan(repo)
-    assert list(plan.staged) == [init.INSTALL_SKILL]
+    assert sorted(plan.staged) == sorted([init.INSTALL_SKILL, *init.LAUNCHERS])
 
 
 def test_bootstrap_is_recorded_so_uninstall_takes_it_back(tmp_path):
@@ -275,7 +282,21 @@ def test_bootstrap_is_recorded_so_uninstall_takes_it_back(tmp_path):
 
     assert (root / init.INSTALL_SKILL).is_file()
     receipt = json.loads((root / init.RECEIPT).read_text(encoding="utf-8"))
-    assert receipt["created"] == [init.INSTALL_SKILL]
+    assert sorted(receipt["created"]) == sorted([init.INSTALL_SKILL, *init.LAUNCHERS])
+
+
+def test_bootstrap_does_not_claim_the_repo_is_installed(tmp_path):
+    """`bootstrap` writes a receipt, so the receipt cannot be the test for `is this
+    repo installed` — the panel keyed on it and reported a finished install in a repo
+    with no manifest, then failed rendering on the manifest that was never written."""
+    from nightshift import panel
+
+    root = tmp_path / "bare"
+    (root / ".git").mkdir(parents=True)
+    init.apply(init.bootstrap_plan(root))
+
+    assert (root / init.RECEIPT).is_file()
+    assert not panel.installed(root)
 
 
 def test_the_install_skill_drives_the_whole_install(repo):

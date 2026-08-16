@@ -11,6 +11,12 @@ was the previous version of this process and it is the thing this skill replaces
 
 Work in order. Report each step's real result, not that you attempted it.
 
+**You may have been started from the Command Center.** `nightshift bootstrap` writes this
+skill *and* `command-center.bat` / `command-center.sh`, and the panel renders in a repo
+with no `.ai/` — so its System page has a *Set up nightshift* button that opens a session
+running this skill. Nothing about the install changes if that is how you got here; it is
+worth knowing only because step 8 should send them back to that page.
+
 ## 1. Establish four facts before writing anything
 
 | Fact | How | If you cannot |
@@ -246,6 +252,14 @@ just wrote — and commit the cards.
 4. That gates now run after every edit, that `python -m nightshift.preflight` is
    required before any push, and that the board is optional — the inline half works
    without it.
+
+**Point them back at the Command Center** (`command-center.bat`, or `./command-center.sh`
+— `bootstrap` wrote both). It is the front door from here on: the board as a set of
+pages, and a *System* page carrying the maintenance they would otherwise have to
+remember — `doctor`, the gates, preflight, the `fix` pass, and `nightshift update`, which
+is what keeps the files just written current as the framework changes. Say that last one
+explicitly: `init` never overwrites, so without `update` this repo keeps today's charters
+and skills for as long as it exists.
 
 **The one thing to tell them to do by hand**, because it is a download in another
 application and no command you can run will do it: install the **Base Board** community

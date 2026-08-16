@@ -27,8 +27,9 @@ import sys
 _USAGE = """\
 usage: nightshift <command> [options]
 
-  bootstrap  write just the install skill, then run /install-nightshift in Claude
+  bootstrap  write the install skill and the Command Center launchers, then open it
   init       stand nightshift up in this repo — asks four questions, then writes
+  update     bring the files init wrote up to today's templates
   fix        run every check and dispatch an agent to fix what failed
   doctor     per-machine preconditions, plus drift between the manifest and the tree
   uninstall  remove what init wrote, so a first install can be retried
@@ -75,6 +76,10 @@ def main(argv: list[str] | None = None) -> int:
         from nightshift import fix
 
         return fix.main(rest)
+    if command == "update":
+        from nightshift import update
+
+        return update.main(rest)
     if command == "uninstall":
         from nightshift import uninstall
 

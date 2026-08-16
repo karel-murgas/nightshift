@@ -23,15 +23,26 @@ cd your-project && pip install -e ../nightshift
 nightshift bootstrap
 ```
 
-`bootstrap` writes exactly one file — `.claude/skills/install-nightshift/SKILL.md` —
-and nothing else. Then, inside Claude Code in your project:
+`bootstrap` writes three files and nothing else: the install skill
+(`.claude/skills/install-nightshift/SKILL.md`) and the two Command Center launchers.
+Then open the Command Center:
+
+```
+command-center.bat          # Windows
+./command-center.sh         # macOS / Linux
+```
+
+**It runs before nightshift is installed — that is the point.** The panel needs no
+manifest to render, so its **System** page is where the install happens: press *Set up
+nightshift* and it opens an interactive Claude session running the install skill. If you
+would rather start that yourself, it is the same thing:
 
 ```
 /install-nightshift
 ```
 
-It establishes the four facts that have to hold, asks you **two questions** (the
-integration branch, and what a worker may do on this machine), runs the installer,
+Either way it establishes the four facts that have to hold, asks you **two questions**
+(the integration branch, and what a worker may do on this machine), runs the installer,
 commits, then **runs the checks and fixes what they report** — and files a card in
 `Board/needs-decision/` for anything that needs your judgment instead of guessing. You
 read a diff at the end.
@@ -137,6 +148,9 @@ python -m nightshift.gates.run     # the gate suite
 python -m nightshift.preflight     # gates + your tests + a receipt
 ```
 
+All four are buttons on the Command Center's System page, if you would rather click
+them than remember them.
+
 </details>
 
 <!-- stale-ok: `.claude/settings.json` is the consuming project's own settings file,
@@ -156,6 +170,62 @@ It removes only what `init` wrote, leaves your own files alone, keeps a
 corrections log that has real entries in it, and un-merges its hook entries from
 `.claude/settings.json` without touching your other settings. The package stays
 installed — you do not need to `pip uninstall` to try again.
+
+## The Command Center
+
+```
+command-center.bat          # Windows
+./command-center.sh         # macOS / Linux
+python -m nightshift.panel  # the same thing, if you prefer the module path
+```
+
+A local web panel: **a launcher, a registry and a tail, never a chat client.** It finds
+the repo root itself, so the launchers carry no project-specific path and are the same
+file in every project. Six pages — *Now*, *Verify*, *Inbox*, *Ideas*, *Run* and
+*System* — and the server owns no logic: every button shells out to the CLI verb a
+person would otherwise have typed.
+
+**System** is the framework maintaining itself: the install (before there is one),
+project-file updates, the framework's own freshness, `doctor`, the gates, `preflight`,
+the `fix` pass, and uninstall behind a typed confirmation.
+
+<!-- stale-ok: `.ai/manifest.toml`, `.ai/hosts.json` and `.ai/corrections.log` below are
+     files `nightshift init` writes into a CONSUMING project, and the three `update`
+     holds frozen. This package is not its own consumer — its manifest is hand-written
+     and it has no hosts file — so none of them resolve here. -->
+## Keeping a project's files current
+
+`init` never overwrites, which is what makes it safe to re-run — and it means a project
+installed months ago still has that month's agent charters, skills and board README,
+with nothing anywhere saying so. `update` is the other half:
+
+```
+nightshift update             # what moved, what you changed — writes nothing
+nightshift update --apply     # take every safe update
+```
+
+It compares three things: the file on disk, the content hash `init` recorded when it
+wrote it, and today's template. That is what separates *the template moved* (safe to
+overwrite — you never touched it) from *you edited this* (never touched) from a genuine
+**conflict**, where both changed. A conflict is never resolved by guessing:
+
+```
+nightshift update --diff  <path>    # yours against ours
+nightshift update --take  <path>    # take the template, keeping yours as .nightshift-old
+nightshift update --keep  <path>    # record that you chose yours; silent until it moves again
+nightshift update --merge <path>    # dispatch an agent to merge the two
+```
+
+Three files are never candidates — `.ai/manifest.toml`, `.ai/hosts.json` and
+`.ai/corrections.log`. They are *records*, of an interview, of a machine, and of what
+went wrong here; the corrections log is the one artefact in the tree that cannot be
+regenerated. The same four verbs are the buttons on the panel's System page.
+
+The framework's own code needs no update step: the install is editable, so a commit in
+this repo is live in every consumer at once. What tells you whether to pull it is
+`python -m nightshift.freshness`, and the pull stays a human's decision — including a
+refusal while a run is live, because moving the framework under a night already using
+it is how a run dies half-finished.
 
 <!-- stale-ok: `Board/README.md` is written into the CONSUMING project by `init`
      (from `templates/board/README.md`). This package has no board. -->

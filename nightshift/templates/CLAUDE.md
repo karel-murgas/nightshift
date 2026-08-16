@@ -7,13 +7,21 @@
 ## How to run
 
 ```bash
+command-center.bat                    # the Command Center (./command-center.sh on unix)
 python -m nightshift.gates.run        # the gate suite (also runs on save, via a hook)
 python -m nightshift.preflight        # MANDATORY before push/merge — writes a receipt
 python -m nightshift.runner           # dispatch cards from Board/tasks/; run backgrounded
 python -m nightshift.reconcile        # inbox notes -> cards; digest: nightshift.digest
 python -m nightshift.doctor           # the per-machine preconditions git cannot carry
+python -m nightshift.update           # bring this repo's nightshift files up to date
 pytest                                # the test suite
 ```
+
+**The Command Center is the front door.** A local web panel — a launcher, a registry and
+a tail, never a chat client. Its *System* page carries the framework's own maintenance:
+what this repo's nightshift files are missing or behind on, `doctor`, the gates,
+preflight, the `fix` pass. Every button shells out to the command above that it names,
+so nothing there is a second implementation of anything.
 
 **The AI-team tooling is an installed dependency, not part of this repo.** A fresh clone
 needs it before any gate, preflight or runner command works:
@@ -21,6 +29,13 @@ needs it before any gate, preflight or runner command works:
 ```bash
 pip install -e path/to/nightshift
 ```
+
+**`python -m nightshift.update` after pulling a newer nightshift.** The framework's code
+is live immediately (the install is editable), but the files it wrote *into this repo* —
+the agent charters, the skills, the board README, the launchers — are copies, and `init`
+never overwrites them. `update` reports what moved and what you edited, and writes only
+what you never touched; a file that changed on both sides is a conflict it refuses to
+resolve on its own (`--diff`, `--take`, `--keep`, `--merge`).
 
 **`python -m nightshift.preflight` before every push, merge or PR.** It runs the doctor
 checks, the gates, the audit matrix, the corrections check and the test slice your branch
