@@ -48,6 +48,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -105,13 +106,30 @@ def _has_real_entries(path: Path) -> bool:
                for line in text.splitlines())
 
 
-def strip_hooks(existing: dict) -> tuple[dict, int]:
-    """`settings.json` without our hook entries. Returns (settings, removed count).
+def is_ours(hook: object) -> bool:
+    """Whether a hook entry is one `init` merged in — a `nightshift.` command.
 
-    Matched on the command containing `nightshift.` — every entry `init` merges in
-    is a `python -m nightshift.<module>` command, and that is the only property that
-    identifies them without keeping a second copy of the fragment here. A group left
-    with no hooks is dropped; a project's own hooks under the same matcher survive.
+    The default predicate for `strip_hooks`, and correct for an uninstall: the package
+    is going away, so every entry that invokes it goes with it, `project_script`
+    included — a hook that runs a project's script *through this package* stops working
+    the moment the package is gone, so leaving it behind leaves a broken hook.
+    """
+    return isinstance(hook, dict) and "nightshift." in str(hook.get("command", ""))
+
+
+def strip_hooks(existing: dict, predicate: Callable[[object], bool] = is_ours
+                ) -> tuple[dict, int]:
+    """`settings.json` without the hook entries `predicate` selects. Returns (settings, n).
+
+    A group left with no hooks is dropped; a project's own hooks under the same matcher
+    survive.
+
+    **`predicate` exists because `update` asks a narrower question than `uninstall`.**
+    Uninstall removes everything that invokes this package. Update must not: it removes
+    only what is *dead*, and a live hook the project added deliberately — the documented
+    `project_script` escape hatch above all — is not the framework's to withdraw. The
+    traversal is identical either way, so it stays in one place rather than being copied
+    into the updater with one line changed.
     """
     out = json.loads(json.dumps(existing))
     hooks = out.get("hooks")
@@ -132,8 +150,7 @@ def strip_hooks(existing: dict) -> tuple[dict, int]:
             if not isinstance(entries, list):
                 surviving_groups.append(group)
                 continue
-            keep = [h for h in entries
-                    if not (isinstance(h, dict) and "nightshift." in str(h.get("command", "")))]
+            keep = [h for h in entries if not predicate(h)]
             removed += len(entries) - len(keep)
             if keep:
                 surviving_groups.append({**group, "hooks": keep})

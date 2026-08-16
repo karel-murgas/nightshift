@@ -343,3 +343,40 @@ def test_a_merge_refuses_before_it_spends_anything(repo, monkeypatch):
     assert "cannot edit files" in str(caught.value)
     assert not (repo / (TRACKED + ".nightshift-new")).exists(), "scratch file left behind"
     assert (repo / TRACKED).read_text(encoding="utf-8") == mine
+
+
+def test_a_projects_own_hook_through_project_script_is_not_stripped(repo):
+    """Found by running the updater against the first real repo it ever saw.
+
+    `nightshift.hooks.project_script` exists precisely so a project can reach its OWN
+    script from any working directory. It is in no template, so "strip every nightshift
+    hook, then merge today's template back" — which converges, and which was the first
+    implementation — deletes it. The live repo had exactly that hook, pointing at a
+    script that exists, and the updater offered to remove it.
+    """
+    path = repo / init.SETTINGS
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    settings["hooks"].setdefault("PostToolUse", []).append(
+        {"matcher": "Write|Edit", "hooks": [
+            {"type": "command",
+             "command": "python -m nightshift.hooks.project_script .ai/recipes/hint.py; exit 0"}]})
+    path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+    found = update.survey(repo)
+    if found.settings:
+        update.apply(found)
+
+    assert "project_script" in path.read_text(encoding="utf-8"), (
+        "a live hook the project added was removed as though it were dead")
+
+
+def test_deadness_is_checked_not_inferred_from_absence_in_the_template():
+    """The distinction the fix turns on: a module that no longer resolves is dead; one
+    that resolves is live, whoever put the hook there and whether or not we ship it."""
+    live = {"command": "python -m nightshift.hooks.project_script .ai/recipes/hint.py"}
+    gone = {"command": "python -m nightshift.hooks.no_such_module_here"}
+    unrelated = {"command": "make lint"}
+
+    assert not update.dead_hook(live)
+    assert update.dead_hook(gone)
+    assert not update.dead_hook(unrelated), "a non-nightshift command is not ours to judge"

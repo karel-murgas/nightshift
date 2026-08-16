@@ -51,7 +51,9 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import importlib.util
 import json
+import re
 import sys
 import tomllib
 from dataclasses import dataclass, field
@@ -248,15 +250,49 @@ def survey(root: Path) -> Survey:
     return out
 
 
+#: `python -m nightshift.some.module` inside a hook command.
+_HOOK_MODULE = re.compile(r"-m\s+(nightshift(?:\.[A-Za-z0-9_]+)+)")
+
+
+def dead_hook(hook: object) -> bool:
+    """Whether a hook names a nightshift module that no longer exists.
+
+    **The predicate `update` strips on, and it is deliberately much narrower than
+    `uninstall.is_ours`.** The first version of this reused that one — remove every
+    `nightshift.` hook, then merge today's template back — which converges, and which
+    quietly deletes any hook the *project* added that runs through this package. That is
+    not hypothetical: the first real repo it ran against had
+
+        python -m nightshift.hooks.project_script .ai/recipes/hint.py
+
+    where `project_script` exists precisely so a project can reach its own script from
+    any working directory. It is in no template, it is entirely the project's, and
+    "not in today's template" would have called it dead and removed it.
+
+    So deadness is *checked* rather than inferred from absence: the module is looked up
+    with `find_spec`, which resolves it without importing it. A renamed or deleted module
+    fails that lookup and is genuinely firing nothing; a live one is left alone, whoever
+    put it there. A command with no `-m nightshift...` in it is not ours to judge at all.
+    """
+    if not isinstance(hook, dict):
+        return False
+    match = _HOOK_MODULE.search(str(hook.get("command", "")))
+    if not match:
+        return False
+    try:
+        return importlib.util.find_spec(match.group(1)) is None
+    except (ImportError, ValueError):
+        return True
+
+
 def _survey_settings(out: Survey, root: Path) -> None:
     """What the hook merge would change in `.claude/settings.json`.
 
     **Strip then merge, rather than merge alone.** `init` only ever adds the entries a
     project lacks, which cannot remove one whose command changed — a hook pointing at a
-    module that was renamed sits in the file forever, firing nothing. Taking ours out
-    first and putting today's back is the only pass that converges. `strip_hooks` matches
-    on the command containing `nightshift.`, so a project's own hooks are not ours to
-    touch and survive both halves.
+    module that was renamed sits in the file forever, firing nothing. Taking the dead
+    ones out first and putting today's back is the only pass that converges. What counts
+    as dead is `dead_hook`, and the narrowness of it is the whole safety of this.
     """
     path = root / init.SETTINGS
     if not path.is_file():
@@ -271,7 +307,7 @@ def _survey_settings(out: Survey, root: Path) -> None:
         (init.TEMPLATES / "settings.hooks.json").read_text(encoding="utf-8"))
     fragment.pop("_comment", None)
 
-    stripped, _ = uninstall.strip_hooks(existing)
+    stripped, _ = uninstall.strip_hooks(existing, dead_hook)
     merged, _ = init.merge_hooks(stripped, fragment)
     # Compared as parsed structures, not as text. The file is the project's and they
     # may have reindented it; a textual comparison would report a change on every run
