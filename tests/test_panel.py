@@ -1466,7 +1466,9 @@ def test_open_terminal_resolves_claude_instead_of_trusting_the_new_window_s_path
 
     panel.open_terminal(tmp_path, "claude", "--resume", "abc123")
 
-    argv = spawned[0]
+    # `list(...)` because the Windows branch now hands `command` to `Popen` as it
+    # received it — a tuple — rather than splicing it into a `cmd` wrapper list.
+    argv = list(spawned[0])
     assert "claude" not in argv, "the bare name was passed through to the new window"
     assert r"C:\Users\k\.local\bin\claude.exe" in argv
     assert argv[-2:] == ["--resume", "abc123"] or argv[-1].endswith("--resume abc123")
