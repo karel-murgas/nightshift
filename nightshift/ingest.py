@@ -345,7 +345,13 @@ def scribe(decisions: list[Decision], root: Path, *, allow_paid: bool = False,
             continue
         payload, _ = _extract_json(text)
         if payload and payload.get("bounce"):
-            print(f"    bounced to triage - {payload.get('reason', 'no reason given')}")
+            reason = str(payload.get("reason", "no reason given"))
+            print(f"    bounced to triage - {reason}")
+            # The re-route the charter promises, performed rather than described.
+            # Without it the note keeps the route that just failed, and the button
+            # offering to card it buys the same bounce again.
+            if reroute_to_triage(root, decision.note, reason):
+                print("      -> re-routed to triage in the view")
             bounced += 1
             continue
         did = Wrote(note=decision.note,
@@ -504,6 +510,38 @@ def parse_report(text: str) -> RoutingView:
             note=entry.group("note"), route=route, why=why,
             dispatchable=dispatchable, confidence=confidence)
     return RoutingView(written=written, decisions=decisions)
+
+
+def reroute_to_triage(root: Path, note: str, reason: str,
+                      snapshot: usage.Snapshot | None = None) -> bool:
+    """Record that the scribe bounced this note, by moving it to `triage` in the view.
+
+    **The charter already promised this and nothing did it.** The scribe's own
+    bounce section says a bounce *"costs one cheap dispatch and re-routes the note
+    to `triage`, which is the correct outcome and counts as success"* — and the
+    bounce was reported to stdout and then dropped. The note kept its old route, so
+    the panel went on offering *Write the card* for it, and pressing that button
+    bought the same bounce again. Measured on the first real fan-out, 2026-08-17:
+    three of five notes bounced, all three still routed `chore` afterwards.
+
+    The view is rewritten rather than patched line by line, because it is a *view*
+    — `report()` is the one thing that knows its shape, and a second writer editing
+    its markdown in place is how the reader and the writer drift apart. The
+    classification timestamp is preserved on purpose: the routing pass really did
+    happen when it says, and moving the stamp to now would make a bounce look like
+    a fresh classify pass nobody paid for. The bounce says so in the `why` instead.
+    """
+    view = read_view(root)
+    if note not in view.decisions:
+        return False
+    view.decisions[note] = Decision(
+        note=note, route="triage", why=f"scribe bounced it: {reason}",
+        dispatchable=view.decisions[note].dispatchable, confidence="high")
+    routing = Routing(decisions=list(view.decisions.values()))
+    stamp = view.written or dt.datetime.now()
+    textio.write_text_lf(root / OUT, report(
+        routing, notes(root), snapshot if snapshot is not None else usage.read(), stamp))
+    return True
 
 
 def read_view(root: Path) -> RoutingView:
