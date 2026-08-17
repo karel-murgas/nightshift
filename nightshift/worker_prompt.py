@@ -22,7 +22,8 @@ of good practice, so guidance that has to be found first is the weaker of the tw
 """
 from __future__ import annotations
 
-__all__ = ["TOOL_ECONOMY", "INTERACTIVE_CARD", "INTERACTIVE_NOTE"]
+__all__ = ["TOOL_ECONOMY", "INTERACTIVE_CARD", "INTERACTIVE_NOTE", "HOW_TO_TEST_STEP",
+           "INTERACTIVE_TRIAGE"]
 
 TOOL_ECONOMY = """\
 **Tool calls cost wall time, not just tokens.** Each one is a round-trip, and any \
@@ -64,28 +65,53 @@ fewer round-trips. If you genuinely need a file again, read it again.\
 INTERACTIVE_CARD = """\
 Work this card, with the maintainer at the keyboard.
 
+**Your goal is to finish this card and land it in `{finished_lane}/`.** The card is done \
+when its acceptance criteria are met, the work is committed and merged into `{base}`, and \
+the card has been moved. Anything short of that is not finished, however much code exists.
+
 **This is an interactive session, and that changes what is expected of you.** A person is \
 present for the whole run: when the card is ambiguous, ask them rather than picking an \
-answer and noting the risk. There is no verdict file to write and no `outcome` to declare \
-— you report to them, in the conversation, and they decide what happens next.
+answer and noting the risk. There is no verdict file to write — you report to them, in the \
+conversation.
 
 Working rules for this repo:
 
-- **Branch before you edit.** Cut `{branch}` from `{base}` and commit your work there. Do \
-not merge, do not push, and never commit directly to `{base}`.
-- **Do not move the card between lanes.** Lane transitions belong to the runner and to the \
-maintainer; a card that changes lane under them is a card they can no longer find. You may \
-append to the card's `## Thread`.
+- **Branch before you edit.** Cut `{branch}` from `{base}` and commit your work there. \
+Never commit directly to `{base}`.
 - The card is at `{card_path}` — read it there rather than trusting the copy below to be \
 current if the session runs long.
-- Run the project's gates and the tests your change touches before you call it done, and \
-say plainly what passed and what did not.
+- Run the project's gates and the tests your change touches, and say plainly what passed \
+and what did not. Do not weaken a gate or a test to make it pass.
+
+**Closing the card out**, once the maintainer agrees the work is done:
+
+1. Run the project's preflight and get it green.
+2. Merge `{branch}` into `{base}` and delete the branch — local and remote. Use `git \
+branch -d`, never `-D`: the safe form refuses a branch that is not really merged, which is \
+the check you want.
+3. Write `## Summary` onto the card — what changed, what you tested, gate and test status. \
+Concrete, 2-4 lines, not "implemented the card".{how_to_test}
+4. Move the card to `{finished_lane}/` (`state:` and the directory both — the project's \
+board tooling does the two together).
+
+**If you cannot finish**, do not move the card to `{finished_lane}/`. Write a `## Question` \
+section carrying what you attempted, what is ambiguous, and what each candidate answer \
+would imply, and move the card to `needs-decision/`. Parking is a success state; guessing \
+at an ambiguity is not.
 
 {tool_economy}
 
 --- the card ---
 {card_body}
 """
+
+#: Step 3's tail, present only on a card the maintainer has to exercise by hand. On a
+#: `verify: review` card there is no scenario to write and inventing one is worse than
+#: leaving it out — the same judgment `runner._PROMPT` makes about `how_to_test`.
+HOW_TO_TEST_STEP = """ Then write `## How to test` — the scenario in the \
+maintainer's terms: open the game, go here, do this, expect that. Name the door: which \
+menu, which key, which enemy, what the screen should show. It is the only thing telling \
+them what to do with what you built."""
 
 INTERACTIVE_NOTE = """\
 Work this note from the board's inbox, with the maintainer at the keyboard.
@@ -101,11 +127,27 @@ Working rules for this repo:
 - **Branch before you edit.** Cut a branch from `{base}` and commit your work there. Do not \
 merge, do not push, and never commit directly to `{base}`.
 - The note is at `{note_path}`. It is not a card and has no acceptance criteria — do not \
-invent any, and do not file it as a card yourself; the maintainer closes it from the panel \
-when the work is done.
+invent any, and do not turn it into one; a note that should have been carded is a note that \
+should have gone to triage instead, so say so rather than carding it yourself.
+- **Leave the note where it is when you finish.** The maintainer closes it from the panel, \
+which files it in `done/` as a record of what was asked and that they closed it by hand. \
+Tell them the work is done and let them press it.
 
 {tool_economy}
 
 --- the note ---
 {note_body}
+"""
+
+INTERACTIVE_TRIAGE = """\
+Triage `{note_path}`. Follow your charter.
+
+**Your goal is one well-formed card in `{lane}/tasks/`, or one well-formed question.** \
+Triage is finished when the note has become a card that a worker could execute without \
+asking anything — frontmatter, acceptance criteria, scope — and the note itself is gone \
+from `inbox/`. If the note cannot be scoped that far without an answer only the maintainer \
+can give, ask them: they are at the keyboard for this whole session, which is the reason \
+triage is interactive and never dispatched.
+
+Do not start building what the card describes. The deliverable is the card.
 """

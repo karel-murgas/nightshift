@@ -1311,6 +1311,97 @@ def test_a_session_with_no_prompt_carries_no_fence(server, monkeypatch):
     assert "--" not in opened[0]
 
 
+def test_a_card_session_is_told_its_goal_and_where_to_land_the_card(server, monkeypatch):
+    """Karel, 2026-08-17: *"the session should know what the goal it has and that it
+    should move the card when reached"*. `verify: play` means a surface he has to
+    exercise, so the card lands in `testing/` carrying a scenario."""
+    base, root = server
+    _card(root, "tasks", "stun-grenade")           # the CARD template is `verify: play`
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    status, data = _post(base, "api/work", {"card": "stun-grenade"})
+
+    prompt = opened[0][-1]
+    assert "land it in `testing/`" in prompt
+    assert "## How to test" in prompt, "a play card must be told to write the scenario"
+    assert "Move the card to `testing/`" in prompt
+    assert "testing/" in data["message"], "the page does not say where this is headed"
+
+
+def test_a_review_card_lands_in_done_and_is_not_asked_for_a_scenario(server, monkeypatch):
+    """`verify: review` has no surface to exercise — inventing a scenario for a gate or
+    a refactor is worse than leaving it out."""
+    base, root = server
+    path = _card(root, "tasks", "gate-fix")
+    path.write_text(path.read_text(encoding="utf-8").replace("verify: play", "verify: review"),
+                    encoding="utf-8", newline="")
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    _post(base, "api/work", {"card": "gate-fix"})
+
+    prompt = opened[0][-1]
+    assert "land it in `done/`" in prompt
+    assert "## How to test" not in prompt
+    assert "testing/" not in prompt
+
+
+def test_the_lane_rule_has_one_home(server):
+    """It was `"testing" if card.verify == "play" else "done"`, spelled in the runner,
+    for as long as the runner was the only thing that finished a card."""
+    _, root = server
+    path = _card(root, "tasks", "stun-grenade")
+    card = board.Card.load(path, "tasks")
+    assert board.finished_lane(card) == "testing"
+    path.write_text(path.read_text(encoding="utf-8").replace("verify: play", "verify: review"),
+                    encoding="utf-8", newline="")
+    assert board.finished_lane(board.Card.load(path, "tasks")) == "done"
+
+
+def test_a_card_that_cannot_be_finished_is_parked_not_landed(server, monkeypatch):
+    base, root = server
+    _card(root, "tasks", "stun-grenade")
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    _post(base, "api/work", {"card": "stun-grenade"})
+
+    prompt = opened[0][-1]
+    assert "needs-decision/" in prompt
+    assert "do not move the card to `testing/`" in prompt.lower()
+
+
+def test_triage_is_told_the_deliverable_is_the_card_not_the_work(server, monkeypatch):
+    """Karel's other half: *"triage for task"*. The failure this guards against is a
+    triage session that reads the note and starts building what it describes."""
+    base, root = server
+    (root / "Board" / "inbox" / "taser.md").write_text("x\n", encoding="utf-8", newline="")
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    _post(base, "api/triage", {"note": "taser.md"})
+
+    prompt = opened[0][-1]
+    assert "Board/tasks/" in prompt
+    assert "Do not start building" in prompt
+
+
+def test_a_note_session_leaves_the_note_for_the_done_button(server, monkeypatch):
+    """`_done_act` exists because nothing else moves an inline note, and the record it
+    files is *that Karel closed it by hand* — a session filing it itself erases that."""
+    base, root = server
+    (root / "Board" / "inbox" / "taser.md").write_text("x\n", encoding="utf-8", newline="")
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    _post(base, "api/work", {"note": "taser.md"})
+
+    prompt = opened[0][-1]
+    assert "Leave the note where it is" in prompt
+    assert "do not turn it into one" in prompt
+
+
 def test_work_on_a_card_tells_it_the_branch_to_cut_and_the_base_to_leave_alone(
         server, monkeypatch):
     base, root = server
@@ -1322,8 +1413,14 @@ def test_work_on_a_card_tells_it_the_branch_to_cut_and_the_base_to_leave_alone(
 
     prompt = opened[0][-1]
     assert "ai/stun-grenade" in prompt, "no branch named — the session would work on the base"
-    assert "Do not move the card between lanes" in prompt
+    # The fixture's integration branch comes from its manifest, so name the rule, not
+    # the branch — the branch is `[branches].integration` and differs per project.
+    assert "Never commit directly to" in prompt
     assert "verdict" in prompt.lower(), "the interactive prompt must cancel the verdict file"
+    # The card session moves its own card now (Karel, 2026-08-17). That is the one rule
+    # this prompt reverses against the headless one, where lane moves are the runner's
+    # alone — so it is asserted rather than left to the goal sentence above.
+    assert "git branch -d" in prompt, "no branch cleanup — the branch outlives the work"
 
 
 def test_work_on_a_note_gets_the_note_and_no_charter(server, monkeypatch):
