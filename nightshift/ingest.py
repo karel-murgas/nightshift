@@ -274,6 +274,26 @@ def scribe(decisions: list[Decision], root: Path, *, allow_paid: bool = False,
     return written, bounced, blocked
 
 
+#: Heading and blurb per route, in the order the report lists them.
+#:
+#: A module constant rather than a local because `report` is no longer the only
+#: thing that needs it: `read_view` parses the file back, and a reader keyed on
+#: headings a writer can silently reword is a reader that goes quietly blank. The
+#: two live together, and `test_ingest` round-trips a report through the parser so
+#: rewording one without the other fails a test rather than a panel.
+#:
+#: Second person, not a name: this package ships to other repos, and a report that
+#: addresses someone else's owner is the `project_agnostic` test's whole subject.
+#: Docstrings may name the origin project; runtime strings may not.
+ROUTE_HEADINGS: dict[str, tuple[str, str]] = {
+    "inline": ("Do now - inline", "You, at the keyboard. No card is written for these."),
+    "chore": ("Chores - batch overnight", "Thin cards, verified as one batch."),
+    "scribe": ("Scribe - needs the envelope only", "Already elaborated; no investigation."),
+    "triage": ("Waiting on triage", "The expensive route. Launch it deliberately, "
+                                    "on the account you meant."),
+}
+
+
 def report(routing: Routing, found: list[Note], snapshot: usage.Snapshot,
            now: dt.datetime) -> str:
     """The routing view. Regenerated, never edited — the lane is the state."""
@@ -287,19 +307,9 @@ def report(routing: Routing, found: list[Note], snapshot: usage.Snapshot,
     if routing.error:
         lines += [f"**Classification failed** - {routing.error}", ""]
 
-    headings = {
-        # Second person, not a name: this package ships to other repos, and a report
-        # that addresses someone else's owner is the `project_agnostic` test's whole
-        # subject. Docstrings may name the origin project; runtime strings may not.
-        "inline": ("Do now - inline", "You, at the keyboard. No card is written for these."),
-        "chore": ("Chores - batch overnight", "Thin cards, verified as one batch."),
-        "scribe": ("Scribe - needs the envelope only", "Already elaborated; no investigation."),
-        "triage": ("Waiting on triage", "The expensive route. Launch it deliberately, "
-                                        "on the account you meant."),
-    }
     for route in ("inline", "chore", "scribe", "triage"):
         bucket = routing.by_route(route)
-        title, blurb = headings[route]
+        title, blurb = ROUTE_HEADINGS[route]
         lines += [f"## {title} ({len(bucket)})", "", blurb, ""]
         if not bucket:
             lines += ["_none_", ""]
@@ -322,6 +332,105 @@ def report(routing: Routing, found: list[Note], snapshot: usage.Snapshot,
         lines += [f"- **{d.note}** ({d.route})" for d in sorted(suspect, key=lambda d: d.note)]
         lines.append("")
     return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------------------
+# Reading the view back. The lane is the state and the report is the view over
+# it — but a *reader* of that view is what lets the inbox stop lying about it.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RoutingView:
+    """A routing pass as it can be read back off disk.
+
+    **Why this exists at all.** A note does not leave `inbox/` when it is routed —
+    routing is a *view*, deliberately, so re-running is idempotent and there is no
+    checklist state to lose. The cost of that design was paid by the panel, which
+    listed every note under "Not yet classified" whatever had happened to it: on
+    2026-08-17 all thirteen notes were classified and all thirteen still read as
+    unclassified, with the answer sitting in a file the page linked but did not
+    read. So the page reads it.
+
+    Parsing our own generated markdown rather than writing a JSON sidecar is the
+    deliberate choice: a second artefact is a second thing to keep in sync, to
+    commit or ignore, and to explain to `GENERATED_VIEWS`. The writer and the
+    reader are twenty lines apart in one module and a round-trip test binds them.
+    """
+
+    written: dt.datetime | None = None
+    decisions: dict[str, Decision] = field(default_factory=dict)
+
+    def of(self, note: str) -> Decision | None:
+        return self.decisions.get(note)
+
+    @property
+    def known(self) -> bool:
+        return bool(self.decisions) or self.written is not None
+
+
+_VIEW_STAMP = re.compile(r"^#\s+Routing\s+-\s+(?P<when>\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s*$")
+_VIEW_HEADING = re.compile(r"^##\s+(?P<title>.+?)\s+\((?P<count>\d+)\)\s*$")
+_VIEW_ENTRY = re.compile(r"^-\s+\*\*(?P<note>.+?)\*\*\s+-\s+(?P<why>.*)$")
+#: The trailing `_(confidence low; not unattended-dispatchable)_` the writer appends.
+_VIEW_FLAGS = re.compile(r"\s*_\((?P<flags>[^)]*)\)_\s*$")
+
+
+def parse_report(text: str) -> RoutingView:
+    """A routing report, read back into the decisions that produced it.
+
+    Keyed on the headings in `ROUTE_HEADINGS` and nothing else: a section this
+    does not recognise — "Check these first", or anything a later version adds —
+    contributes no decisions rather than guessing a route for its entries. The
+    first mention of a note wins, so the repeat listing under "Check these first"
+    cannot overwrite the real one even if its shape ever changes to match.
+    """
+    by_title = {title: route for route, (title, _) in ROUTE_HEADINGS.items()}
+    written: dt.datetime | None = None
+    decisions: dict[str, Decision] = {}
+    route = ""
+    for line in text.splitlines():
+        if stamp := _VIEW_STAMP.match(line):
+            try:
+                written = dt.datetime.strptime(stamp.group("when"), "%Y-%m-%d %H:%M")
+            except ValueError:
+                written = None
+            continue
+        if heading := _VIEW_HEADING.match(line):
+            route = by_title.get(heading.group("title").strip(), "")
+            continue
+        if not route:
+            continue
+        entry = _VIEW_ENTRY.match(line)
+        if not entry or entry.group("note") in decisions:
+            continue
+        why = entry.group("why").strip()
+        confidence, dispatchable = "high", True
+        if flags := _VIEW_FLAGS.search(why):
+            why = why[:flags.start()].strip()
+            for flag in flags.group("flags").split(";"):
+                flag = flag.strip()
+                if flag.startswith("confidence "):
+                    confidence = flag[len("confidence "):].strip()
+                elif flag == "not unattended-dispatchable":
+                    dispatchable = False
+        decisions[entry.group("note")] = Decision(
+            note=entry.group("note"), route=route, why=why,
+            dispatchable=dispatchable, confidence=confidence)
+    return RoutingView(written=written, decisions=decisions)
+
+
+def read_view(root: Path) -> RoutingView:
+    """The last routing pass, or an empty view if there has never been one.
+
+    Never raises: a missing, half-written or hand-mangled report means "nothing is
+    known about these notes", which is the state the page rendered unconditionally
+    before it read this at all.
+    """
+    try:
+        return parse_report((root / OUT).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return RoutingView()
 
 
 def main(argv: list[str] | None = None) -> int:

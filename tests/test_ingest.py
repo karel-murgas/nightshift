@@ -343,3 +343,80 @@ def test_the_report_is_written_lf_because_it_is_committed(tmp_path: Path, calls)
     root = _repo(tmp_path, alpha="a", beta="b")
     ingest.main(["--root", str(root)])
     assert b"\r\n" not in (root / ingest.OUT).read_bytes()
+
+
+# --------------------------------------------------------------------------
+# Reading the view back. `report` and `parse_report` are two halves of one
+# format, twenty lines apart in one module, and the round-trip is what keeps
+# them that way: rewording a heading without teaching the reader about it fails
+# here rather than silently emptying the panel's inbox page.
+# --------------------------------------------------------------------------
+
+
+def _decision(note: str, route: str, **kw) -> ingest.Decision:
+    return ingest.Decision(note=note, route=route, why=f"because of {note}", **kw)
+
+
+def test_a_report_round_trips_through_its_own_parser():
+    routing = ingest.Routing([
+        _decision("plain.md", "chore"),
+        _decision("shaky.md", "triage", confidence="low"),
+        _decision("human.md", "inline", dispatchable=False),
+        _decision("both.md", "scribe", confidence="medium", dispatchable=False),
+    ])
+    text = ingest.report(routing, [], _healthy(), dt.datetime(2026, 8, 17, 9, 51))
+    view = ingest.parse_report(text)
+
+    assert view.written == dt.datetime(2026, 8, 17, 9, 51)
+    assert set(view.decisions) == {"plain.md", "shaky.md", "human.md", "both.md"}
+    for original in routing.decisions:
+        back = view.of(original.note)
+        assert back.route == original.route
+        assert back.why == original.why
+        assert back.confidence == original.confidence
+        assert back.dispatchable == original.dispatchable
+
+
+def test_a_why_containing_a_dash_survives_the_round_trip():
+    """The entry line is `- **note** - why`, and a `why` that itself contains
+    ` - ` is the ordinary case, not the exotic one."""
+    routing = ingest.Routing([ingest.Decision(
+        note="n.md", route="triage",
+        why="the fork - aimed tile vs heat-map - is left for triage")])
+    view = ingest.parse_report(
+        ingest.report(routing, [], _healthy(), dt.datetime(2026, 8, 17, 9, 51)))
+    assert view.of("n.md").why == "the fork - aimed tile vs heat-map - is left for triage"
+
+
+def test_the_check_these_first_repeat_does_not_overwrite_the_real_routing():
+    """A suspect note is listed twice in the report. The second listing carries
+    no `why` and sits under a heading that is not a route, so it must contribute
+    nothing rather than blanking the entry."""
+    routing = ingest.Routing([_decision("shaky.md", "triage", confidence="low")])
+    view = ingest.parse_report(
+        ingest.report(routing, [], _healthy(), dt.datetime(2026, 8, 17, 9, 51)))
+    assert view.of("shaky.md").route == "triage"
+    assert view.of("shaky.md").why == "because of shaky.md"
+
+
+def test_reading_a_view_that_was_never_written_is_empty_not_an_error(tmp_path: Path):
+    view = ingest.read_view(_repo(tmp_path))
+    assert not view.known
+    assert view.of("anything.md") is None
+
+
+def test_a_mangled_view_is_read_as_nothing_known_rather_than_raising(tmp_path: Path):
+    root = _repo(tmp_path)
+    (root / ingest.OUT).write_text("someone edited this by hand\n\n## Nonsense (2)\n",
+                                   encoding="utf-8")
+    view = ingest.read_view(root)
+    assert view.decisions == {}
+
+
+def test_the_view_written_by_a_real_run_reads_back(tmp_path: Path, calls):
+    """End to end through `main`: the file the command writes is the file the
+    reader reads, with no test-authored markdown in between."""
+    root = _repo(tmp_path, alpha="a", beta="b")
+    ingest.main(["--root", str(root)])
+    view = ingest.read_view(root)
+    assert set(view.decisions) == {"alpha.md", "beta.md"}

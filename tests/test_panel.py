@@ -45,7 +45,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import board, panel
+from nightshift import board, jobs, panel
 
 CARD = """\
 ---
@@ -298,21 +298,63 @@ def test_run_command_invokes_the_module_as_a_subprocess(tmp_path, monkeypatch):
 def test_spawn_background_passes_the_selected_accounts_env(tmp_path, monkeypatch):
     root = _repo(tmp_path)
     panel.select_account(root, "main")
-    captured = {}
+    captured = _capture_popen(monkeypatch)
+
+    pid = panel.spawn_background("runner", ["--card", "x"], root)
+    assert pid == 4242
+    assert captured["env"]["CLAUDE_CONFIG_DIR"] == "/does/not/exist/main"
+    # The wrapper is what gets spawned; the command it will run is on the record.
+    recorded = jobs.read_all(root)[0]
+    assert recorded.argv == [sys.executable, "-m", "nightshift.runner", "--card", "x"]
+    assert captured["argv"][:3] == [sys.executable, "-m", "nightshift.jobs"]
+    assert captured["argv"][-1] == recorded.ident
+
+
+def test_every_background_verb_leaves_a_record_and_a_log_to_read(tmp_path, monkeypatch):
+    """The property is about *all* of them, not the one that was noticed.
+
+    `ingest` is the verb whose silence was measured, but it was silent for a
+    structural reason — the spawn threw the output away — and every other
+    background verb shared the code that did it. So the test is over the call
+    sites, not over `ingest`.
+    """
+    root = _repo(tmp_path)
+    captured = _capture_popen(monkeypatch)
+    for module, args in (("ingest", []), ("chores", []), ("drain", ["--card", "c"]),
+                         ("preflight", []), ("fix", []), ("runner", [])):
+        panel.spawn_background(module, args, root)
+        recorded = jobs.read_all(root)[0]
+        assert recorded.label == module
+        assert recorded.argv[:3] == [sys.executable, "-m", f"nightshift.{module}"]
+        # The log file is opened by the panel and handed over as the wrapper's
+        # own stdout — which is what puts the command's output in it.
+        assert jobs.log_path(root, recorded.ident).exists()
+        assert captured["stdout"] is not None
+
+
+def test_the_card_sequencer_is_recorded_the_same_way(tmp_path, monkeypatch):
+    root = _repo(tmp_path)
+    _capture_popen(monkeypatch)
+    panel.spawn_sequence(["a", "b"], root)
+    recorded = jobs.read_all(root)[0]
+    assert recorded.argv[-3:] == ["--dispatch-cards", "a", "b"]
+
+
+def _capture_popen(monkeypatch) -> dict:
+    """Stand in for `Popen` and report what it was asked to start."""
+    captured: dict = {}
 
     class FakeProc:
         pid = 4242
 
     def fake_popen(argv, **kwargs):
         captured["argv"] = argv
-        captured["env"] = kwargs["env"]
+        captured["env"] = kwargs.get("env")
+        captured["stdout"] = kwargs.get("stdout")
         return FakeProc()
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
-    pid = panel.spawn_background("runner", ["--card", "x"], root)
-    assert pid == 4242
-    assert captured["argv"] == [sys.executable, "-m", "nightshift.runner", "--card", "x"]
-    assert captured["env"]["CLAUDE_CONFIG_DIR"] == "/does/not/exist/main"
+    return captured
 
 
 # --------------------------------------------------------------- the server
@@ -1201,3 +1243,206 @@ def test_the_repair_pass_answers_to_the_account_veto(server, monkeypatch):
     status, data = _post(base, "api/system/fix", {})
 
     assert status == 400, data
+
+
+# --------------------------------------------------------------------------
+# Saying what happened. On 2026-08-17 "Classify all" ran `ingest` to completion
+# — thirteen notes routed, `Routing.md` rewritten — and the panel reported none
+# of it: the spawn discarded the output, the rail only knew about the runner's
+# own heartbeat, and the inbox page listed every routed note as unclassified.
+# Three surfaces, one complaint, and each is pinned here.
+# --------------------------------------------------------------------------
+
+
+def _finished_job(root: Path, label: str, *, code: int = 0,
+                  ago: dt.timedelta = dt.timedelta(minutes=3)) -> jobs.Job:
+    started = dt.datetime.now() - ago
+    job = jobs.record(root, label, ["python", "-m", f"nightshift.{label}"], now=started)
+    job.finished = (started + dt.timedelta(seconds=90)).isoformat(timespec="seconds")
+    job.exit_code = code
+    jobs.save(root, job)
+    return job
+
+
+def test_a_running_job_is_on_every_page_because_the_rail_is(server):
+    base, root = server
+    job = jobs.record(root, "ingest", ["python", "-m", "nightshift.ingest"])
+    for page in panel.PAGES:
+        _, text = _get(base, page)
+        assert "ingest" in text, f"{page} does not say what is running"
+        assert f"/log/{job.ident}" in text, f"{page} does not link the output"
+
+
+def test_a_job_that_failed_says_so_rather_than_saying_nothing(server):
+    base, root = server
+    _finished_job(root, "ingest", code=3)
+    _, text = _get(base, "now")
+    assert "failed" in text
+    assert "exit 3" in text
+
+
+def test_a_finished_job_leaves_the_rail_once_it_stops_being_news():
+    """The rail is a status line, not a history page — and a red line that
+    outlives the moment it described is the one people learn to scroll past."""
+    now = dt.datetime.now()
+    fresh = jobs.Job(ident="a", label="ingest",
+                     started=(now - dt.timedelta(minutes=5)).isoformat(),
+                     finished=(now - dt.timedelta(minutes=4)).isoformat(), exit_code=0)
+    old = jobs.Job(ident="b", label="chores",
+                   started=(now - dt.timedelta(hours=9)).isoformat(),
+                   finished=(now - dt.timedelta(hours=8)).isoformat(), exit_code=1)
+    assert [j.ident for j, _ in panel.shown_jobs([fresh, old], now=now)] == ["a"]
+
+
+def test_a_jobs_output_is_readable_from_the_browser(server):
+    base, root = server
+    job = _finished_job(root, "ingest")
+    jobs.log_path(root, job.ident).write_text(
+        "  classifying with sonnet ...\n  wrote Routing.md\n", encoding="utf-8")
+
+    status, text = _get(base, f"log/{job.ident}")
+    assert status == 200
+    assert "classifying with sonnet" in text
+    assert "wrote Routing.md" in text
+
+
+def test_a_job_id_that_is_not_one_is_a_page_saying_so_not_a_crash(server):
+    base, _ = server
+    status, text = _get(base, "log/20260817-000000-nothing")
+    assert status == 200
+    assert "no such job" in text
+
+
+# ------------------------------------------------------------- the inbox page
+
+
+_ROUTED = """\
+# Routing - 2026-08-17 09:51
+
+2 note(s) in `inbox/`.
+
+## Do now - inline (1)
+
+You, at the keyboard.
+
+- **needs-you.md** - the note itself says to wait for a direction
+
+## Chores - batch overnight (0)
+
+_none_
+
+## Scribe - needs the envelope only (1)
+
+Already elaborated.
+
+- **ready.md** - already worked out, only the envelope is missing
+
+## Waiting on triage (0)
+
+_none_
+"""
+
+
+def _notes(root: Path, **bodies: str) -> None:
+    lane = root / "Board" / "inbox"
+    for name, body in bodies.items():
+        (lane / name).write_text(body, encoding="utf-8")
+
+
+def test_a_classified_note_stops_being_listed_as_unclassified(server):
+    """The complaint, exactly: the routing had run, said so in a file the page
+    linked, and the page went on calling every note unclassified."""
+    base, root = server
+    _notes(root, **{"ready.md": "a", "needs-you.md": "b"})
+    (root / board.ROUTING_VIEW).write_text(_ROUTED, encoding="utf-8")
+
+    _, text = _get(base, "inbox")
+
+    assert "Not yet classified" not in text
+    assert "Scribe" in text and "Do now" in text
+    assert "already worked out, only the envelope is missing" in text
+    assert "Routed 17 Aug 09:51" in text
+
+
+def test_a_note_added_after_the_pass_is_the_only_unclassified_one(server):
+    base, root = server
+    _notes(root, **{"ready.md": "a", "needs-you.md": "b", "brand-new.md": "c"})
+    (root / board.ROUTING_VIEW).write_text(_ROUTED, encoding="utf-8")
+
+    _, text = _get(base, "inbox")
+
+    assert "Not yet classified — 1" in text
+    assert "1 note(s) added since" in text
+
+
+def test_a_note_edited_after_it_was_routed_says_so(server):
+    """The routing describes text that has since changed, and the whole value of
+    the view is that it says what is true of the note as it stands."""
+    base, root = server
+    _notes(root, **{"ready.md": "a", "needs-you.md": "b"})
+    (root / board.ROUTING_VIEW).write_text(_ROUTED, encoding="utf-8")
+    edited = root / "Board" / "inbox" / "ready.md"
+    stamp = dt.datetime(2026, 8, 17, 18, 0).timestamp()
+    os.utime(edited, (stamp, stamp))
+
+    _, text = _get(base, "inbox")
+    assert "edited since routing" in text
+
+
+def test_with_no_routing_pass_the_page_says_which_button_fills_it_in(server):
+    base, root = server
+    _notes(root, **{"lonely.md": "a"})
+    _, text = _get(base, "inbox")
+    assert "No routing pass yet" in text
+    assert "Not yet classified" in text
+
+
+# ----------------------------------------------------------------- the chores
+
+
+def _chore(root: Path, card_id: str) -> Path:
+    path = root / "Board" / "tasks" / f"{card_id}.md"
+    text = CARD.format(id=card_id, state="tasks", unattended="true")
+    path.write_text(text.replace("tier: worker", "tier: worker\nkind: chore"),
+                    encoding="utf-8", newline="")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", f"chore {card_id}")
+    return path
+
+
+def test_a_chore_is_not_filed_under_work_that_needs_you_at_the_keyboard(server):
+    """`runner.select` calls this "not a refusal — a routing fact": the chore
+    batch runs it, unattended. Filing it beside `unattended: false` said the
+    opposite, under a chip that cut the explanation off mid-sentence."""
+    base, root = server
+    _chore(root, "a-chore")
+
+    ctx = panel.read_context(root)
+    assert [c.card.id for c in ctx.chores] == ["a-chore"]
+    assert "a-chore" not in [c.card.id for c in ctx.do_now]
+
+    _, text = _get(base, "now")
+    head, _, rest = text.partition("Chores")
+    assert "a-chore" in rest, "the chore belongs in its own section"
+    assert "a-chore" not in head, "and not in the sections above it"
+
+
+def test_a_chore_still_counts_towards_the_rails_now_total(server):
+    base, root = server
+    _chore(root, "a-chore")
+    assert panel.read_context(root).counts()["now"] == 1
+
+
+def test_a_chore_that_needs_another_machine_is_filed_as_that_instead(tmp_path):
+    """Two true facts, and the more useful one wins: the batch here cannot take
+    it either."""
+    root = _repo(tmp_path)
+    path = _chore(root, "gpu-chore")
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        "kind: chore", "kind: chore\nrequires: gpu-box"), encoding="utf-8", newline="")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "requires")
+
+    ctx = panel.read_context(root)
+    assert [c.card.id for c in ctx.elsewhere] == ["gpu-chore"]
+    assert ctx.chores == []
