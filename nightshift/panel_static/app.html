@@ -214,6 +214,21 @@
   }
   .tallyline b { color: var(--phosphor-d); font-weight: 500; font-variant-numeric: tabular-nums; }
 
+  /* What the panel itself started in the background. A line per command, under
+     the run it may or may not be part of — `ingest` and `preflight` are nobody's
+     night, and before this block existed they had nowhere on the page to be. */
+  .jobs { margin-top: 0.8rem; display: flex; flex-direction: column; gap: 0.3rem; }
+  .jobline {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-family: var(--mono);
+    font-size: var(--step--1);
+  }
+  .jobline .dim { color: var(--ink-faint); }
+  .jobline .act { padding: 0.05rem 0.4rem; }
+
   .roster { padding: 0.4rem 1.5rem 1.2rem; overflow-x: auto; }
   .roster table {
     width: 100%;
@@ -618,14 +633,55 @@
 /* Every action is a POST to a verb that already works from a command line; this
    file only decides which one and shows what it said. */
 
+/* A verb's reply, shown until it has plausibly been read.
+
+   It is dismissible because it is now allowed to be long-lived, and a message
+   that cannot be got rid of is a message that covers the button underneath it. */
 function toast(message, bad) {
   var el = document.getElementById("toast");
   el.textContent = message;
   el.className = bad ? "bad" : "";
   el.style.display = "block";
+  el.onclick = function () { el.style.display = "none"; };
   clearTimeout(window._toastTimer);
-  window._toastTimer = setTimeout(function () { el.style.display = "none"; }, bad ? 12000 : 5000);
+  window._toastTimer = setTimeout(function () { el.style.display = "none"; }, bad ? 20000 : 9000);
 }
+
+/* ---- a message has to survive the reload that follows it ----
+
+   Every successful action reloads the page 900 ms later, so that the board it
+   just changed is the board you are looking at. That reload used to destroy the
+   only thing the panel ever said about the action: the toast was given five
+   seconds and got nine hundred milliseconds, and "classifying the inbox (pid
+   31904)" flashed and was gone. What made it worse than a cosmetic bug is which
+   messages survived — a *refused* verb does not reload, so failures stayed on
+   screen and successes did not, and the panel appeared to answer only when it
+   had bad news.
+
+   So the message is parked in sessionStorage and re-shown by the page that
+   replaces this one. sessionStorage rather than a query parameter: it is not
+   part of the address, so it does not survive a bookmark, a share or a manual
+   refresh — the message belongs to this tab and this moment. */
+var TOAST_KEY = "ns_toast";
+
+function toastAfterReload(message, bad) {
+  try {
+    sessionStorage.setItem(TOAST_KEY, JSON.stringify({ message: message, bad: !!bad }));
+  } catch (err) { /* private mode, or a storage quota: the toast is not worth failing over */ }
+}
+
+(function showCarriedToast() {
+  var raw = null;
+  try {
+    raw = sessionStorage.getItem(TOAST_KEY);
+    sessionStorage.removeItem(TOAST_KEY);
+  } catch (err) { return; }
+  if (!raw) { return; }
+  try {
+    var carried = JSON.parse(raw);
+    toast(carried.message, carried.bad);
+  } catch (err) { /* nothing legible was parked; say nothing rather than something wrong */ }
+})();
 
 /* The override rides on every request rather than being remembered per button.
    It is a property of the moment, not of the action, and attaching it in the one
@@ -644,8 +700,10 @@ function post(path, body, opts) {
   }).then(function (r) {
     return r.json().then(function (data) { return { ok: r.ok, data: data }; });
   }).then(function (result) {
-    toast(result.data.message || (result.ok ? "done" : "refused"), !result.ok);
+    var message = result.data.message || (result.ok ? "done" : "refused");
+    toast(message, !result.ok);
     if (result.ok && opts.reload !== false) {
+      toastAfterReload(message, false);
       setTimeout(function () { location.reload(); }, 900);
     }
     return result;

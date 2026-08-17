@@ -73,8 +73,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from nightshift import (board, drain, freshness, ingest, init, manifest, run_record,
-                        textio, update, usage)
+from nightshift import (board, drain, freshness, ingest, init, jobs, manifest,
+                        run_record, textio, update, usage)
 from nightshift.manifest import ManifestError, find_root
 from nightshift.runner import (
     RUNS,
@@ -255,17 +255,19 @@ def spawn_background(module: str, args: list[str], root: Path) -> int:
     """Start `python -m nightshift.<module> <args>` detached and return its pid.
 
     For a verb that may dispatch an actual LLM session and run for minutes. The
-    HTTP request returns immediately; progress is read from the files the command
-    itself already writes (`.ai/runs/status.json`, the run records), never from
-    this function holding the connection open. Detached on purpose: closing the
-    panel must not kill a night.
+    HTTP request returns immediately; progress is read back from `jobs`, never
+    from this function holding the connection open. Detached on purpose: closing
+    the panel must not kill a night.
+
+    **It used to send the command's output to `DEVNULL`, and that was the whole
+    bug.** A verb that succeeded and a verb that died on its first line were
+    indistinguishable from the browser, because the only thing either produced was
+    a toast; `jobs.py`'s docstring carries the measured case. Every background verb
+    goes through here or through `spawn_sequence`, so keeping the record in these
+    two functions is what makes the property true of *all* of them rather than of
+    whichever ones someone remembered.
     """
-    proc = subprocess.Popen(
-        _module_argv(module, *args), cwd=root, env=_dispatch_env(),
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        **_detached(),
-    )
-    return proc.pid
+    return spawn_job(root, module, _module_argv(module, *args))
 
 
 def spawn_sequence(card_ids: list[str], root: Path) -> int:
@@ -282,11 +284,36 @@ def spawn_sequence(card_ids: list[str], root: Path) -> int:
     the thing the button does can be typed into a terminal and watched.
     """
     argv = [sys.executable, "-m", "nightshift.panel", "--dispatch-cards", *card_ids]
-    proc = subprocess.Popen(
-        argv, cwd=root, env=_dispatch_env(),
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        **_detached(),
-    )
+    return spawn_job(root, "run", argv)
+
+
+def spawn_job(root: Path, label: str, argv: list[str]) -> int:
+    """Record `argv`, start it detached through the job wrapper, return the pid.
+
+    Three things happen in this order and the order is the point:
+
+    1. **The record is written first**, so a spawn that fails outright still
+       leaves a row saying what was meant to run.
+    2. **The log file is opened here** and handed to the wrapper as its stdout and
+       stderr. The wrapper's child inherits them, so the command's own output —
+       and the wrapper's own line about how it exited — land in one file, in
+       order, with nothing in between that could drop them.
+    3. **The wrapper, not the command, is what gets spawned.** It waits, and
+       writes the exit code back. This process cannot: the panel is closable by
+       design, and a status inferred from a pid is the recycled-pid trap
+       `run_is_live` documents.
+    """
+    job = jobs.record(root, label, argv)
+    path = jobs.log_path(root, job.ident)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wrapper = [sys.executable, "-m", "nightshift.jobs", "--root", str(root),
+               "--run", job.ident]
+    with path.open("a", encoding="utf-8", newline="") as sink:
+        proc = subprocess.Popen(
+            wrapper, cwd=root, env=_dispatch_env(),
+            stdin=subprocess.DEVNULL, stdout=sink, stderr=subprocess.STDOUT,
+            **_detached(),
+        )
     return proc.pid
 
 
@@ -436,6 +463,11 @@ class Context:
     review: list[board.Card] = field(default_factory=list)
     notes: list[ingest.Note] = field(default_factory=list)
     ideas: list[str] = field(default_factory=list)
+    routing: ingest.RoutingView = field(default_factory=ingest.RoutingView)
+    #: What this panel started in the background, newest first. Read for every
+    #: page because the rail carrying it is on every page — the same reason the
+    #: five lane counts are gathered here rather than per-page.
+    jobs: list[jobs.Job] = field(default_factory=list)
 
     @property
     def tonight(self) -> list[Candidate]:
@@ -457,17 +489,37 @@ class Context:
                 and c.card.requires not in capabilities and c.card.unattended]
 
     @property
+    def chores(self) -> list[Candidate]:
+        """The chore batch's work — which the night skips by *routing*, not refusal.
+
+        `runner.select` is explicit that this is "not a refusal — a routing fact":
+        a chore is dispatched by `python -m nightshift.chores` as a batch, because
+        the per-card treatment is exactly what the batch exists to avoid. Filing it
+        under "Do now" therefore said something false — it told you a person was
+        needed at the keyboard for work that has its own button two sections down,
+        under a chip that truncated the explanation mid-sentence at seventy
+        characters.
+
+        A chore that *also* wants another machine is left to `elsewhere`, which is
+        the more useful of the two facts: the batch here cannot take it either.
+        """
+        elsewhere = {id(c) for c in self.elsewhere}
+        return [c for c in self.candidates
+                if not c.dispatchable and c.card.kind == board.KIND_CHORE
+                and id(c) not in elsewhere]
+
+    @property
     def do_now(self) -> list[Candidate]:
         """Everything else the night will not take — `unattended: false`,
         `worker: none`, a broken schema. Which is the same list as the inline
         notes: it needs a person present."""
-        elsewhere = {id(c) for c in self.elsewhere}
-        return [c for c in self.candidates if not c.dispatchable and id(c) not in elsewhere]
+        parked = {id(c) for c in self.elsewhere} | {id(c) for c in self.chores}
+        return [c for c in self.candidates if not c.dispatchable and id(c) not in parked]
 
     def counts(self) -> dict[str, int]:
         return {
             "now": len(self.decisions) + len(self.do_now) + len(self.tonight)
-                   + len(self.elsewhere),
+                   + len(self.elsewhere) + len(self.chores),
             "verify": len(self.testing) + len(self.review),
             "inbox": len(self.notes),
             "ideas": len(self.ideas),
@@ -498,8 +550,10 @@ def read_context(root: Path, *, fetch_freshness: bool = False) -> Context:
     is not the place to do it on its behalf.
     """
     if not installed(root):
+        # Jobs are read even here: `/api/setup` is a button an uninstalled repo
+        # has, and a setup that failed silently is the same bug in the same place.
         return Context(root=root, rail=read_rail(root, fetch_freshness=fetch_freshness),
-                       base="")
+                       base="", jobs=jobs.read_all(root, limit=JOBS_READ))
     return Context(
         root=root,
         rail=read_rail(root, fetch_freshness=fetch_freshness),
@@ -510,7 +564,16 @@ def read_context(root: Path, *, fetch_freshness: bool = False) -> Context:
         review=board.cards(root, "review"),
         notes=ingest.notes(root),
         ideas=read_ideas(root),
+        routing=ingest.read_view(root),
+        jobs=jobs.read_all(root, limit=JOBS_READ),
     )
+
+
+#: How many job records a page load reads. `jobs.KEEP` is what the directory
+#: retains; this is what a *render* needs, and the two are different numbers on
+#: purpose — the rail shows the newest handful, and reading eighty JSON files to
+#: draw four lines is a cost paid on every click.
+JOBS_READ = 12
 
 
 def read_ideas(root: Path) -> list[str]:
@@ -852,7 +915,77 @@ def _runbox_html(ctx: Context) -> str:
     tally = (f'<p class="tallyline"><b>{landed}</b> landed &middot; '
              f'<b>{failed}</b> back in tasks &middot; <b>{queued}</b> queued'
              f'{_act("Run detail", href="/run")}</p>')
-    return f'<div class="runbox">{head}{tally}</div>'
+    return f'<div class="runbox">{head}{_jobs_html(ctx)}{tally}</div>'
+
+
+#: How long a finished job stays in the rail. Long enough that a classify pass
+#: started, watched, and left alone for a coffee still says how it went when you
+#: come back; short enough that the rail is not a history page. `/run` is where
+#: history lives.
+JOB_SHOWN_FOR = dt.timedelta(hours=2)
+
+#: Most rows the rail will carry. A night is one job, but a click-happy minute
+#: can be five, and the rail is a status line rather than a list.
+JOB_ROWS = 4
+
+_JOB_MARK = {jobs.RUNNING: ("", "running"), jobs.DONE: ("ok", "finished"),
+             jobs.FAILED: ("bad", "failed"), jobs.LOST: ("warn", "ended without saying how")}
+
+
+def shown_jobs(all_jobs: list[jobs.Job], *,
+               now: dt.datetime | None = None) -> list[tuple[jobs.Job, str]]:
+    """The background commands worth a line right now, each with its state:
+    everything still running, plus everything that ended recently enough to still
+    be news.
+
+    The state is returned rather than left for the caller to ask again, because
+    asking is not free: on Windows `jobs.state` answers "is that pid alive" by
+    running `tasklist`, and this is a rail on every page. One question per job per
+    render is the budget.
+
+    A *failed* job is kept on the same clock as a successful one, deliberately.
+    The temptation is to hold failures longer so they cannot be missed — but the
+    rail is on every page, and a red line that outlives the moment it described
+    becomes the thing you learn to scroll past. The log is kept either way, and
+    the job's own page is where an old failure is read on purpose.
+    """
+    now = now or dt.datetime.now()
+    keep = []
+    for job in all_jobs:
+        if len(keep) == JOB_ROWS:
+            break
+        status = jobs.state(job, now=now)
+        finished = job.finished_at
+        if status == jobs.RUNNING or (finished and now - finished < JOB_SHOWN_FOR):
+            keep.append((job, status))
+    return keep
+
+
+def _jobs_html(ctx: Context) -> str:
+    """The rail's line per background command the panel started.
+
+    This is the panel saying what *it* set in motion, which is a different
+    question from `status.json`'s "where is the runner up to" — and it is the one
+    that was unanswerable. A dispatch shows both: the phase pills above say how
+    far the night has got, this line says the process is alive and where its
+    output is.
+    """
+    shown = shown_jobs(ctx.jobs)
+    if not shown:
+        return ""
+    rows = []
+    for job, status in shown:
+        kind, word = _JOB_MARK.get(status, ("", status))
+        took = jobs.elapsed(job)
+        when = f"{word} &middot; {_e(took)}" if took else word
+        if status == jobs.FAILED and job.exit_code is not None:
+            when += f" &middot; exit {job.exit_code}"
+        dot = '<span class="live-dot"></span>' if status == jobs.RUNNING else ""
+        rows.append(
+            f'<p class="jobline">{dot}{_chip(job.label, kind)}'
+            f'<span class="dim">{when}</span>'
+            f'{_act("Output", href=f"/log/{job.ident}")}</p>')
+    return f'<div class="jobs">{"".join(rows)}</div>'
 
 
 #: The two windows worth a permanent meter, and what to call them. The endpoint
@@ -976,6 +1109,35 @@ def _statusrail_html(ctx: Context) -> str:
 # ------------------------------------------------------------------ the pages
 
 
+def _chores_section(ctx: Context) -> str:
+    """The chore batch, as its own section with its own button.
+
+    Its own section because a chore is neither of the two things the sections
+    around it are: not work waiting on a person, and not a card the night takes
+    one at a time. It has a third answer — one batch, one verified suite run —
+    and a heading is the cheapest way to say so.
+    """
+    rows = []
+    for candidate in ctx.chores:
+        card = candidate.card
+        meta = [_chip("chore", "ok"), _e(card.worker)]
+        if card.surface:
+            meta.append(_e(card.surface))
+        if card.attempts:
+            meta.append(_e(f"{card.attempts} attempt(s)"))
+        rows.append(_row(marker="&middot;", body=_card_body(card, meta=meta),
+                         acts=_act("Read card", href=f"/card/{card.id}")))
+    bar = ('<div class="barbox">'
+           '<p>One batch: a cheap pass per item, then one full suite run over the '
+           'merged result.</p><div class="acts">'
+           + _act("Run chores", onclick="runChores()", primary=True)
+           + '</div></div>')
+    return _section("Chores", len(ctx.chores), "".join(rows),
+                    note="Batched, not dispatched one at a time.",
+                    bar=bar if rows else "",
+                    empty="No chores are waiting.")
+
+
 def _render_now(ctx: Context) -> str:
     out = []
 
@@ -1005,6 +1167,8 @@ def _render_now(ctx: Context) -> str:
                         (_group("Cards the night cannot take") + inline_rows) if inline_rows else "",
                         note="Work that needs you at the keyboard.",
                         empty="Nothing needs you at the keyboard."))
+
+    out.append(_chores_section(ctx))
 
     tonight = ctx.tonight
     # The same liveness question the rail asks, asked once here: a stale heartbeat
@@ -1162,22 +1326,73 @@ def _render_verify(ctx: Context) -> str:
     return "".join(out)
 
 
+#: Route → (group heading, chip kind). The headings are the report's own, minus
+#: its second-person blurbs; the order is the order `ingest.report` lists them, so
+#: the page and the file read the same way round. `""` is the note no pass has
+#: reached yet, which is the only bucket the page used to have.
+_ROUTE_GROUPS: tuple[tuple[str, str, str], ...] = (
+    ("", "Not yet classified", "warn"),
+    ("inline", "Do now — inline, at the keyboard", "mute"),
+    ("chore", "Chores — batched overnight", "ok"),
+    ("scribe", "Scribe — needs the envelope only", "ok"),
+    ("triage", "Waiting on triage — the expensive route", "warn"),
+)
+
+
 def _render_inbox(ctx: Context) -> str:
+    """The inbox, grouped by what the last routing pass decided about each note.
+
+    **The page used to state the opposite of the truth.** Every note was listed
+    under "Not yet classified", because a note does not leave `inbox/` when it is
+    routed — `ingest.RoutingView` has the full account. The routing was written to
+    `Routing.md`, which this page linked by name and timestamp without reading, so
+    a classification that had worked perfectly was indistinguishable from one that
+    had never run.
+
+    A note edited *after* the pass that routed it is marked rather than trusted:
+    the routing describes text that has since changed, and the whole value of the
+    view is that it says what is true of the note as it stands.
+    """
+    view = ctx.routing
+    ordered: dict[str, list[tuple[ingest.Note, ingest.Decision | None]]] = {
+        route: [] for route, _, _ in _ROUTE_GROUPS}
+    for note in ctx.notes:
+        decision = view.of(note.name)
+        ordered.setdefault(decision.route if decision else "", []).append((note, decision))
+
     rows = []
-    for position, note in enumerate(ctx.notes, start=1):
-        # Positional, not the filename — real note names carry spaces and capitals
-        # ("Regenerate soundtrack.md"), and whitespace is not allowed in an HTML id.
-        # Same reason the Ideas page numbers its editors.
-        slug = f"note-{position}"
-        rel = _rel(ctx.root, note.path)
-        rows.append(_row(
-            marker="&rsaquo;",
-            body=(f'<span class="id">{_e(note.name)}</span>'
-                  + _meta([f"{note.size} B", _e(_stamp_of(note.path))])),
-            acts=_act("Edit", onclick=f"editBody('{slug}','{_attr(rel)}')")
-                 + _act("Open note", href=f"/body/{rel}")))
-        rows.append(_editor(slug, save=f"saveBody('{slug}','{_attr(rel)}')"))
+    position = 0
+    for route, heading, kind in _ROUTE_GROUPS:
+        bucket = ordered.get(route) or []
+        if not bucket:
+            continue
+        rows.append(_group(f"{heading} — {len(bucket)}"))
+        for note, decision in bucket:
+            position += 1
+            # Positional, not the filename — real note names carry spaces and capitals
+            # ("Regenerate soundtrack.md"), and whitespace is not allowed in an HTML id.
+            # Same reason the Ideas page numbers its editors.
+            slug = f"note-{position}"
+            rel = _rel(ctx.root, note.path)
+            meta = [f"{note.size} B", _e(_stamp_of(note.path))]
+            if decision:
+                meta.insert(0, _chip(route, kind))
+                if decision.confidence != "high":
+                    meta.append(_chip(f"confidence {decision.confidence}", "warn"))
+                if not decision.dispatchable:
+                    meta.append(_chip("needs a human", "warn"))
+                if _changed_since(note.path, view.written):
+                    meta.append(_chip("edited since routing", "warn"))
+            body = f'<span class="id">{_e(note.name)}</span>'
+            if decision and decision.why:
+                body += f'<p class="why">{_e(decision.why)}</p>'
+            rows.append(_row(
+                marker="&rsaquo;", body=body + _meta(meta),
+                acts=_act("Edit", onclick=f"editBody('{slug}','{_attr(rel)}')")
+                     + _act("Open note", href=f"/body/{rel}")))
+            rows.append(_editor(slug, save=f"saveBody('{slug}','{_attr(rel)}')"))
     rows = "".join(rows)
+
     bar = ('<div class="barbox">'
            '<p>One cheap dispatch reads every note and sorts it. It reports before '
            'spending anything else.</p><div class="acts">'
@@ -1188,11 +1403,33 @@ def _render_inbox(ctx: Context) -> str:
            + '</div></div>'
            + _editor("new-note", save="saveNew('new-note','inbox')", named=True,
                      placeholder="One or two sentences is enough."))
-    routing = ctx.root / board.ROUTING_VIEW
-    note = _stamp_of(routing) if routing.is_file() else "no routing pass yet"
-    return _section("Not yet classified", len(ctx.notes), rows, note=f"Routing.md {note}",
+    unrouted = len(ordered.get("") or [])
+    if not view.known:
+        note = "No routing pass yet — Classify all is what fills this in."
+    else:
+        when = f"{view.written:%d %b %H:%M}" if view.written else "at an unrecorded time"
+        note = (f"Routed {when}"
+                + (f" · {unrouted} note(s) added since" if unrouted else "")
+                + f" · {board.ROUTING_VIEW} has the full report")
+    return _section("Inbox", len(ctx.notes), rows, note=note,
                     bar=bar, empty="The inbox is empty.") + (
         f'<footer>{len(ctx.notes)} note(s) in inbox</footer>')
+
+
+def _changed_since(path: Path, when: dt.datetime | None) -> bool:
+    """Whether the note was written after the routing pass that judged it.
+
+    A minute of slack: the report's own timestamp is minute-resolution, so a note
+    saved in the same minute as the pass that read it would otherwise read as
+    having changed underneath it.
+    """
+    if when is None:
+        return False
+    try:
+        touched = dt.datetime.fromtimestamp(path.stat().st_mtime)
+    except OSError:
+        return False
+    return touched - when > dt.timedelta(minutes=1)
 
 
 def _rel(root: Path, path: Path) -> str:
@@ -1784,6 +2021,39 @@ def render_page(page: str, root: Path) -> str:
                         content=_RENDER[page](ctx))
 
 
+def render_job(root: Path, ident: str) -> str:
+    """One background command's output, framed like any other document.
+
+    The command's stdout, unedited, and the three facts around it: what was run,
+    how long it took, and how it ended. Nothing here summarises the log — a
+    summary of a failure is the thing that hid the failure in the first place.
+
+    A running job's page carries a reload, because the file it is showing is
+    still being written and a static snapshot of a live log is a page that lies
+    quietly as you read it.
+    """
+    job = jobs.load(root, ident)
+    if job is None:
+        return render_document(root, title="no such job",
+                               subtitle=f"nothing recorded under {ident}",
+                               body="<p>The record has been pruned, or was never "
+                                    "written.</p>")
+    status = jobs.state(job)
+    facts = [f"<b>{_e(status)}</b>", _e(job.command)]
+    if took := jobs.elapsed(job):
+        facts.append(_e(f"{'running for' if status == jobs.RUNNING else 'took'} {took}"))
+    if job.exit_code is not None:
+        facts.append(_e(f"exit {job.exit_code}"))
+    text = jobs.read_log(root, job.ident) or "(nothing written yet)"
+    live = ('<p class="note">This job is still running; the page reloads every '
+            'five seconds.</p><script>setTimeout(function(){location.reload();},5000);'
+            '</script>' if status == jobs.RUNNING else "")
+    return render_document(
+        root, title=f"{job.label} · output", subtitle=job.started.replace("T", " "),
+        body=f'{_meta(facts)}{live}<pre>{_e(text)}</pre>',
+        acts=_act("Reload", href=f"/log/{job.ident}"))
+
+
 def render_document(root: Path, *, title: str, subtitle: str, body: str,
                     acts: str = "") -> str:
     """A card or a diff, framed. `body` is already-safe HTML."""
@@ -1875,6 +2145,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, render_document(
                 self.root, title=Path(target).name, subtitle=target,
                 body=markdown(text)).encode("utf-8"))
+            return
+        if path.startswith("log/"):
+            self._send(200, render_job(self.root, path[len("log/"):]).encode("utf-8"))
             return
         if path.startswith("diff/"):
             card = board.find(self.root, path[len("diff/"):])
