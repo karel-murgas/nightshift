@@ -25,8 +25,6 @@ if str(_GATES) not in sys.path:
 from nightshift.gates import doc_scan  # noqa: E402
 from nightshift.gates import source_reference_liveness as gate  # noqa: E402
 
-import _fixtures  # noqa: E402
-
 
 def _tree(tmp_path: Path, source: str, *, name: str = "newthing.py",
           real: tuple[str, ...] = ()) -> Path:
