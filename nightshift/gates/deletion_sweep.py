@@ -135,7 +135,16 @@ def removed_names(repo_root: Path) -> dict[str, str]:
         if status.startswith("D"):
             bury_file(path, _git(repo_root, ["show", f"{base}:{path}"]),
                       f"deleted in this branch ({path})")
-        elif status.startswith("M"):
+        elif status.startswith("M") and (repo_root / path).is_file():
+            # `is_file()` because a path modified in the committed range can be
+            # *gone from disk* — a branch that edited a file and has since deleted
+            # it, which is the normal mid-change state of any removal. Step 1 has
+            # already buried it as a working-tree deletion, so there is nothing to
+            # add here; without the guard the `read_text` raised FileNotFoundError
+            # and took the whole gate run down with a traceback rather than
+            # reporting anything. Observed 2026-08-17, splitting `test_runner.py`
+            # into three modules: 23 gates stopped running because one file was
+            # `git rm`-ed while its edits were still in the branch.
             before = _top_level_names(_git(repo_root, ["show", f"{base}:{path}"]))
             after = _top_level_names((repo_root / path).read_text(encoding="utf-8", errors="replace"))
             for name in before - after:

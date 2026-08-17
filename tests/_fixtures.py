@@ -44,8 +44,8 @@ Not everything can be copied, and the exceptions are deliberate:
   - `test_freshness.py` clones a real bare origin. The clone's `.git/config`
     holds an absolute `url`, so every copy would point back at the *template's*
     origin and two tests would be pushing into one remote.
-  - the worktree paths in `test_runner.py` record absolute `gitdir` paths under
-    `.git/worktrees/`.
+  - the worktree paths in `test_runner_review.py` record absolute `gitdir` paths
+    under `.git/worktrees/`.
 
 Both build genuinely, and should stay that way.
 """

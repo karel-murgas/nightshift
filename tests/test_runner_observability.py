@@ -53,7 +53,7 @@ from nightshift import runner  # noqa: E402
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_runner import _card, _repo  # noqa: E402
+from _runner_helpers import _card, _repo  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,14 @@ from nightshift.gates import doc_reference_liveness
 from nightshift.gates import doc_scan
 from nightshift.gates import doc_signature_drift
 
+import _fixtures
+
+
+def _git(repo, *args):
+    import subprocess
+    subprocess.run(["git", "-C", str(repo), *args], check=True,
+                   capture_output=True, encoding="utf-8", errors="replace")
+
 
 # --- scope declarations ---------------------------------------------------
 
@@ -274,6 +282,49 @@ def test_deletion_sweep_reports_a_dead_name_still_named_by_a_live_doc(tmp_path, 
     files = {v.file for v in violations}
     assert ".claude/memory/live.md" in files
     assert ".claude/memory/old.md" not in files
+    doc_scan.clear_caches()
+
+
+def test_a_file_edited_then_deleted_does_not_crash_the_sweep(tmp_path):
+    """`removed_names` reads a modified file from disk, and a path modified in the
+    committed range can be *gone* — the normal mid-change state of any removal.
+
+    Observed 2026-08-17: splitting `test_runner.py` into three modules meant the
+    branch carried edits to it and then `git rm`-ed it, and the unguarded
+    `read_text` raised FileNotFoundError out of `check()`. That does not fail the
+    gate, it takes the whole run down with a traceback — all 23 gates stopped
+    reporting because of one file in a state git considers ordinary.
+
+    A real repo rather than a stub, because the bug is in what git says about the
+    tree versus what is on disk, which is the one thing a stub cannot disagree
+    about. The other `deletion_sweep` test patches `removed_names` out and so
+    could never have seen this.
+    """
+    root = _fixtures.git_init(tmp_path / "proj", branch="main")
+    pkg = root / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8", newline="")
+    (pkg / "thing.py").write_text("def alpha():\n    pass\n",
+                                  encoding="utf-8", newline="")
+    (root / ".ai").mkdir()
+    (root / ".ai" / "manifest.toml").write_text(
+        '[project]\nname = "proj"\nsource_dirs = ["pkg"]\n',
+        encoding="utf-8", newline="")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "base")
+    _git(root, "checkout", "-q", "-b", "work")
+
+    # Edit it, commit that, then delete it — the shape the split produced.
+    (pkg / "thing.py").write_text("def alpha():\n    return 1\n",
+                                  encoding="utf-8", newline="")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "edit the file")
+    _git(root, "rm", "-q", "pkg/thing.py")
+
+    doc_scan.clear_caches()
+    dead = deletion_sweep.removed_names(root)   # must not raise
+    assert "alpha" in dead, "the deleted file's definitions are still buried"
+    assert "thing.py" in dead
     doc_scan.clear_caches()
 
 

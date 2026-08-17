@@ -34,7 +34,7 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 from nightshift import runner  # noqa: E402
 
 import _fixtures  # noqa: E402
-from test_runner import _card, _repo  # noqa: E402
+from _runner_helpers import _card, _repo  # noqa: E402
 import nightshift.merge_check as merge_check  # noqa: E402
 from nightshift.merge_check import check_branch, report, _conflicted_paths  # noqa: E402
 

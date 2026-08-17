@@ -29,7 +29,7 @@ def _no_xdist_in_child_runs(monkeypatch):
     it is six outer workers each spawning six inner ones, and this file's
     contribution measured 54.7 s of that contention against 16.0 s run on its own.
 
-    The same fixture exists in `test_runner.py`, `test_merge_check.py`,
+    The same fixture exists in `_runner_helpers.py`, `test_merge_check.py`,
     `test_drain.py` and `test_chores_execution.py` — they patch
     `runner._PYTEST_PARALLEL`, which is the seam their code path reads; this one
     goes through `suite.parallel_args` because preflight's does.
