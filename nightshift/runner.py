@@ -1366,7 +1366,7 @@ def prepare_worktree(root: Path, card: board.Card,
     (`_normalize_worktree`) — a freshly cut worktree is a fresh checkout, which
     is precisely the state that needs it.
     """
-    branch = f"ai/{card.id}"
+    branch = branches.work_branch(card.id, card.fields.get("branch", ""))
     path = worktree_root(root) / card.id
     handover = read_handover(root, card.id)
     warm = bool(handover.session_id or handover.diff_hash)
@@ -3884,7 +3884,7 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
     The returned outcome's `cost_usd` carries the dispatch cost forward plus the
     reviewer's own, so the run loop accounts for it with one `spent +=`.
     """
-    branch = card.fields.get("branch") or f"ai/{card.id}"
+    branch = branches.work_branch(card.id, card.fields.get("branch", ""))
 
     # The window is already known to be closed: an earlier stage walled and had
     # its verdict honoured (`wall-on-review-wrapup-discards-a-verdict`), so the
@@ -4274,7 +4274,7 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
         # overflow-guard attempt 5 — found by hand again because the symptom
         # is invisible from the card alone: `attempts`/`finished` update, but
         # `## Question` just doesn't move).
-        branch = card.fields.get("branch") or f"ai/{card_id}"
+        branch = branches.work_branch(card_id, card.fields.get("branch", ""))
         relpath = str(card.path.relative_to(root)).replace("\\", "/")
         branch_text = _card_text_on_branch(root, branch, relpath)
         branch_question = board.section(branch_text, "Question") if branch_text else ""
@@ -4309,7 +4309,7 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
         return f"{card_id}: → needs-decision/ (reviewer flagged a decision)"
 
     if result.outcome == "reviewed":
-        branch = card.fields.get("branch") or f"ai/{card_id}"
+        branch = branches.work_branch(card_id, card.fields.get("branch", ""))
         integration = default_base(root)
         # The host's `publish_remote`, resolved here rather than inside
         # `rebase_and_merge`, for the same reason `integration` is: the merge

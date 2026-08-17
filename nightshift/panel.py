@@ -75,8 +75,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen
 
-from nightshift import (board, drain, freshness, ingest, init, jobs, manifest,
-                        run_record, textio, update, usage)
+from nightshift import (board, branches, drain, freshness, ingest, init, jobs,
+                        manifest, preflight, run_record, textio, tiers, update,
+                        usage, worker_prompt)
 from nightshift.manifest import ManifestError, find_root
 from nightshift.runner import (
     RUNS,
@@ -88,6 +89,7 @@ from nightshift.runner import (
     current_branch,
     default_base,
     host_capabilities,
+    host_setting,
     read_telemetry,
     schema_violations,
 )
@@ -362,11 +364,18 @@ def open_terminal(root: Path, *command: str) -> None:
     knows the CLI may live in `%USERPROFILE%\\.local\\bin` without being on PATH —
     and on the box this was found on (2026-08-17) that is exactly where it lives.
     This function was the one place that passed the bare name and trusted `cmd` to
-    find it, so every launcher button on the page — Start session, Talk, Triage,
+    find it, so every launcher button on the page — Work on this, Talk, Triage,
     Setup, Switch account — opened a console window reading `'claude' is not
     recognized`, while the runner dispatched the same CLI fine. Failing here with a
     sentence the page can render beats spawning a window whose only content is that
     error.
+
+    **`env=_dispatch_env()`, for the same reason `spawn_background` passes it.** The
+    account selector sets one variable — `CLAUDE_CONFIG_DIR` — and a launcher that
+    spawns with the server's own inherited environment ignores the selection
+    silently: the window opens on the ambient account, logged in as whoever, and
+    nothing on the page says so. Every other spending path here answers to the
+    selector; this one did not, which made the dropdown a lie for five buttons.
     """
     if command and command[0] == "claude":
         binary = claude_binary()
@@ -376,17 +385,97 @@ def open_terminal(root: Path, *command: str) -> None:
         command = (binary, *command[1:])
     if os.name == "nt":
         subprocess.Popen(["cmd", "/c", "start", "Command Center", "cmd", "/k", *command],
-                         cwd=root)  # gate-ok(subprocess_result_checked): a detached, visible
-                                    # console window the user drives from here on — there is
-                                    # nothing this function could do with an exit code from a
-                                    # window that has not been interacted with yet
+                         cwd=root, env=_dispatch_env())
+        # gate-ok(subprocess_result_checked): a detached, visible console window the user
+        # drives from here on — there is nothing this function could do with an exit code
+        # from a window that has not been interacted with yet
     else:
         # `shlex.join`, not `" ".join`: the emulator hands this string to a shell, and
-        # both a resolved binary path and the triage prompt can contain spaces — joined
+        # both a resolved binary path and the card prompt can contain spaces — joined
         # raw, the prompt arrives as a dozen arguments instead of one.
         subprocess.Popen(["x-terminal-emulator", "-e", shlex.join(command)], cwd=root,
-                         shell=False)  # gate-ok(subprocess_result_checked): same reason as the
-                                       # Windows branch just above
+                         env=_dispatch_env(), shell=False)
+        # gate-ok(subprocess_result_checked): same reason as the Windows branch just above
+
+
+def session_argv(root: Path, *, name: str = "", prompt: str = "", tier: str = "",
+                 agent: str = "") -> list[str]:
+    """The `claude` invocation for an interactive session this panel launches.
+
+    **The button used to open a bare `claude` and stop there**, which is a launcher
+    that has done almost none of the launching: Karel reported it 2026-08-17 as
+    *"it opens Claude CLI. I need to login and insert a prompt. It is not related to
+    the card, nor my actually used account and I guess the model is default too.
+    This helps very little."* Every one of those four is something the caller
+    already knows and the CLI takes on the command line, so the fix is to say them:
+
+    * `prompt` as the trailing positional — `claude "<prompt>"` starts an
+      *interactive* session already primed with that first message. Not `-p`: the
+      whole point is that the person can answer it.
+    * `--model`, resolved from the card's own `tier:` through `tiers.resolve` — the
+      same call the runner makes, so the tier table stays the one place a model is
+      named. A card that declares no tier gets no `--model` and the CLI's default,
+      which is correct: inventing a tier here would be a second tier policy.
+    * `--agent`, from the card's `worker:` field, so `Work on this` on a code card
+      opens the same charter the night would have dispatched.
+    * `--permission-mode`, from `interactive_permission_mode` — **deliberately not
+      the `permission_mode` the runner uses.** That setting answers "what may a
+      worker do when there is nobody to ask", and on this machine its answer is
+      `bypassPermissions`, which is a reasonable thing to say about an unattended
+      3 AM dispatch and the wrong thing to say about a session with a person in
+      front of it: it would silently hand every session the panel opens fewer
+      guardrails than the same person gets in their editor. Two capabilities, two
+      postures — the inverse of `shared-dispatch-missing-the-writers-permissions`,
+      where one dispatch helper wrongly gave every caller the *least* privileged
+      answer. Defaults to `acceptEdits`, so edits flow and everything else still
+      asks.
+
+    **`--remote-control` is on by default, and that is the answer to "should we
+    build a chat UI".** It keeps the session running locally — this repo, this
+    filesystem, the project's MCP servers — while mirroring it to claude.ai/code
+    and the phone app, so the interface for the session's questions is one
+    Anthropic maintains and the panel stays a launcher (§3.4: *"never a chat
+    client"*). Turned off with `remote_control = false` in the host config. An
+    account without the entitlement is not a broken button: the CLI documents that
+    `--remote-control` still starts the interactive session and shows a
+    Remote Control failure notification, so the degradation is a notice rather than
+    a dead window. Team and Enterprise plans have the feature off until an Owner
+    enables it, which no amount of argv gets around.
+
+    Flag order is load-bearing in one place: `--remote-control` takes an *optional*
+    positional name, so the token after it must start with `-` or it eats it.
+    `--name` follows it for that reason, and `prompt` goes strictly last. The long
+    form rather than `-n`, because `pytest_invocation` reads a bare `-n` in an argv
+    as the xdist worker count and is right to — that gate has no way to know whose
+    argv this is, and one character of brevity is not worth an appeal.
+    """
+    binary = claude_binary()
+    if binary is None:
+        raise PanelError("the `claude` CLI was not found (checked $CLAUDE_BIN, PATH "
+                         "and ~/.local/bin). Install it, or set CLAUDE_BIN.")
+    argv = [binary]
+    if host_setting(root, "remote_control", True):
+        argv.append("--remote-control")
+    if name:
+        argv += ["--name", name]
+    if tier:
+        try:
+            argv += ["--model", tiers.resolve(root, tier)]
+        except tiers.TierError as exc:
+            # Not fatal, and deliberately not silent either. An unbound tier is a
+            # board/config mismatch the maintainer needs to hear about, but refusing
+            # to open the session would make a typo in one card's frontmatter into a
+            # dead button — so the session opens on the CLI's default model and the
+            # page says which model it did not get.
+            raise PanelError(f"cannot resolve the model for `tier: {tier}` — {exc}") from exc
+    if agent and agent != "none":
+        argv += ["--agent", agent]
+    argv += ["--permission-mode",
+             str(host_setting(root, "interactive_permission_mode", "acceptEdits"))]
+    argv += ["--add-dir", str(board.board_dir(root).resolve())]
+    if prompt:
+        argv.append(prompt)
+    return argv
 
 
 # --------------------------------------------------------------------------
@@ -1216,7 +1305,7 @@ def _render_now(ctx: Context) -> str:
         inline_rows.append(_row(
             marker="&rsaquo;", body=_card_body(card, meta=meta),
             acts=_act("Read card", href=f"/card/{card.id}")
-                 + _act("Start session", onclick="post('/api/session',{})", primary=True)))
+                 + _work_act(card=card.id, tier=card.tier, worker=card.worker)))
     inline_rows = "".join(inline_rows)
     # The other half of the same question. A note routed `inline` is, by the route's
     # definition, work for Karel at the keyboard that will never become a card — so
@@ -1228,14 +1317,28 @@ def _render_now(ctx: Context) -> str:
                    + (f'<p class="why">{_e(decision.why)}</p>' if decision.why else "")
                    + _meta([_chip("note", "mute"), f"{note.size} B"])),
              acts=_act("Open note", href=f"/body/{_rel(ctx.root, note.path)}")
-                  + _act("Start session", onclick="post('/api/session',{})")
+                  + _work_act(note=note.name)
                   + _done_act(note.name))
         for note, decision in ctx.inline_notes)
     body = ((_group("Cards the night cannot take") + inline_rows) if inline_rows else "")
     if note_rows:
         body += _group(f"Notes routed to you — {len(ctx.inline_notes)}") + note_rows
+    # The one session on the page that carries nothing, and it belongs here rather
+    # than on a row: every row's button is *about* that row, so a general session has
+    # no row to sit on — but this is the section for keyboard work, so it is where
+    # you would look for it. Kept because the alternative is opening an editor for
+    # everything the board does not know about yet (Karel, 2026-08-17: *"so I don't
+    # have to use VSC for general stuff like I'm doing just now"*).
+    general = ('<div class="barbox"><p>For work the board does not know about yet.</p>'
+               '<div class="acts">'
+               + _act("New session here", onclick="post('/api/session',{})",
+                      extra='title="Opens an interactive session in this repo with no '
+                            'card, no prompt and no charter — on the selected account, '
+                            'like every other session this panel starts."')
+               + '</div></div>')
     out.append(_section("Do now", len(do_now) + len(ctx.inline_notes), body,
                         note="Work that needs you at the keyboard.",
+                        bar=general,
                         empty="Nothing needs you at the keyboard."))
 
     out.append(_chores_section(ctx))
@@ -1257,6 +1360,14 @@ def _render_now(ctx: Context) -> str:
         control = (f'<input type="checkbox" class="pick" data-id="{_e(card.id)}" checked '
                    f'aria-label="include {_e(card.id)}">')
         acts = _act("Read card", href=f"/card/{card.id}")
+        # `Work on this` next to `Dispatch`, on the same row, because they are the two
+        # answers to the same question and the row is where the choice is made: hand
+        # the card to the night, or sit down with it now. Not offered while the card is
+        # the one running — two sessions on one card's branch is a merge conflict with
+        # extra steps.
+        if not running:
+            acts += _work_act(card=card.id, tier=card.tier, worker=card.worker,
+                              primary=False)
         acts += (_act("Running", disabled=True) if running else
                  _act("Dispatch", onclick=f"post('/api/dispatch',{{card_id:'{_attr(card.id)}'}})",
                       primary=True))
@@ -1556,10 +1667,7 @@ def _route_act(note: str, route: str) -> str:
                                'last pass gave it. The note becomes the card and leaves the '
                                'lane; a bounce sends it to triage instead."'))
     if route == "inline":
-        acts.append(_act("Start session", onclick="post('/api/session',{})",
-                         extra='title="Opens a terminal in this repo. An inline note is '
-                               'your own work at the keyboard — no card is dispatched '
-                               'for it."'))
+        acts.append(_work_act(note=note))
         acts.append(_done_act(note))
     acts.append(_act("Triage this", onclick=f"post('/api/triage',{{note:'{target}'}})",
                      primary=route == "triage",
@@ -1568,6 +1676,39 @@ def _route_act(note: str, route: str) -> str:
                            'triage is investigative work you drive, and it is the '
                            'expensive route, so it is never dispatched for you."'))
     return "".join(acts)
+
+
+def _work_act(*, card: str = "", note: str = "", tier: str = "", worker: str = "",
+              primary: bool | None = None) -> str:
+    """`Work on this` — the button that used to say `Start session` and mean nothing.
+
+    Three rows offered `Start session`, all three posted the same empty
+    `/api/session`, and all three opened a bare CLI in the repo: no prompt, no
+    model, no charter, no account. The label was accurate and that was the problem —
+    it described what the panel did rather than what the row is for. Named for the
+    work now, because the button carries it (Karel, 2026-08-17: *"cards should start
+    working on themselves"*).
+
+    The tooltip names the model tier and the charter, so what the click is about to
+    spend is legible *before* the click rather than in the session's own header —
+    the same principle §3.4 applies to the account chip.
+    """
+    if card:
+        target = f"{{card:'{_attr(card)}'}}"
+        detail = " · ".join(x for x in (f"{tier} tier" if tier else "",
+                                        worker if worker and worker != "none" else "") if x)
+        title = (f"Opens an interactive session on this card"
+                 + (f" ({detail})" if detail else "")
+                 + ". It reads the card, cuts the card's own branch and works with you "
+                   "at the keyboard — nothing is dispatched and no verdict is written.")
+    else:
+        target = f"{{note:'{_attr(note)}'}}"
+        title = ("Opens an interactive session on this note. A note routed to you is "
+                 "your own work at the keyboard — the session gets the note's text, not "
+                 "a card, and files nothing when it is done.")
+    return _act("Work on this", onclick=f"post('/api/work',{target})",
+                primary=bool(card) if primary is None else primary,
+                extra=f'title="{title}"')
 
 
 def _done_act(note: str) -> str:
@@ -2694,8 +2835,16 @@ class Handler(BaseHTTPRequestHandler):
             return _system_verb(path.rsplit("/", 1)[1], root, waived=waived, body=body)
 
         if path == "api/session":
-            open_terminal(root, "claude")
-            return "opened a terminal in this repo"
+            # The one deliberately empty session on the page. Everything else that
+            # opens a terminal now knows what it is for; this is the exception Karel
+            # asked to keep (2026-08-17: *"there can be a one button for that (so I
+            # don't have to use VSC for general stuff)"*) — a session in this repo,
+            # on the selected account, for work that has no card and no note yet.
+            open_terminal(root, *session_argv(root, name="general"))
+            return "opened a session in this repo — no card, no prompt"
+
+        if path == "api/work":
+            return _work_verb(root, body)
 
         if path == "api/talk":
             session = str(body.get("session_id", ""))
@@ -2713,7 +2862,7 @@ class Handler(BaseHTTPRequestHandler):
             # which. Interactive on purpose (§3.4): triage is investigative work a
             # person drives, never a `-p` dispatch.
             note = str(body.get("note", ""))
-            command = ["claude", "--agent", "triage"]
+            command = session_argv(root, name=f"triage {note}".strip(), agent="triage")
             if note:
                 lane = board.board_rel(root)
                 command.append(f"Triage `{lane}/inbox/{note}`. Follow your charter.")
@@ -2722,6 +2871,55 @@ class Handler(BaseHTTPRequestHandler):
                     "opened a terminal running the triage charter")
 
         return None
+
+
+def _work_verb(root: Path, body: dict) -> str:
+    """`Work on this`: an interactive session that already carries the work.
+
+    One endpoint for both kinds of thing the page can hand a person, because the
+    difference between them is two lines of prompt and one `--agent`, not two
+    verbs. A card brings its own tier and worker; a note brings neither by
+    definition — it is the route that exists *because* no agent was dispatched —
+    so it runs at the lead tier with no charter and a prompt that says so.
+
+    Not guarded by `_guard_dispatch_account`. That veto is for spend this panel
+    starts and walks away from; an interactive session is a person choosing to
+    spend, in front of the account chip that says whose money it is, and refusing
+    it would leave no way to work at all on the account the veto names.
+    """
+    base = preflight.integration_base(root)
+    card_id = str(body.get("card", ""))
+    note = str(body.get("note", ""))
+    if card_id and note:
+        raise PanelError("give a card or a note, not both")
+
+    if card_id:
+        card = board.find(root, card_id)
+        if card is None:
+            raise PanelError(f"no card named {card_id!r} on the board")
+        prompt = worker_prompt.INTERACTIVE_CARD.format(
+            branch=branches.work_branch(card.id, card.fields.get("branch", "")), base=base,
+            card_path=card.path.resolve().as_posix(),
+            tool_economy=worker_prompt.TOOL_ECONOMY, card_body=card.text,
+        )
+        open_terminal(root, *session_argv(root, name=card.id, prompt=prompt,
+                                         tier=card.tier, agent=card.worker))
+        return (f"working {card.id} — {card.tier or 'default'} tier"
+                + (f", {card.worker}" if card.worker and card.worker != "none" else ""))
+
+    if note:
+        path = board.board_dir(root) / "inbox" / note
+        if not path.is_file():
+            raise PanelError(f"no note named {note!r} in the inbox")
+        prompt = worker_prompt.INTERACTIVE_NOTE.format(
+            base=base, note_path=path.resolve().as_posix(),
+            tool_economy=worker_prompt.TOOL_ECONOMY,
+            note_body=path.read_text(encoding="utf-8"),
+        )
+        open_terminal(root, *session_argv(root, name=note, prompt=prompt, tier="lead"))
+        return f"working {note}"
+
+    raise PanelError("no card or note given")
 
 
 def read_body(root: Path, target: str) -> str:

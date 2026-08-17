@@ -81,8 +81,28 @@ from nightshift.manifest import Manifest, ManifestError
 
 __all__ = [
     "integration", "stable", "forbidden_bases", "merge_base_candidates",
-    "is_forbidden_base",
+    "is_forbidden_base", "WORK_PREFIX", "work_branch",
 ]
+
+#: What a card's own branch is called. Not configurable, and named here because it
+#: was spelled `f"ai/{card.id}"` inline at three places in `runner.py` and was about
+#: to be spelled a fourth time by the panel's `Work on this` button — the
+#: `category-of-one-read-as-a-literal` shape from the corrections log, one member
+#: and therefore indistinguishable from a string until a second caller arrives.
+WORK_PREFIX = "ai/"
+
+
+def work_branch(card_id: str, recorded: str = "") -> str:
+    """The branch a card's work belongs on: the one recorded on it, else `ai/<id>`.
+
+    `branch:` is a **runner-written** field (`board.RUNNER_FIELDS`), stamped onto the
+    card once the worktree is cut, so the two halves cannot disagree: the site that
+    cuts the branch has nothing to read yet and computes the name, and every site
+    afterwards reads back what was stamped. Pass what the card carries and let the
+    fallback handle a card no attempt has reached — which is also the panel's case,
+    since `Work on this` may be the first thing to touch a card.
+    """
+    return recorded or f"{WORK_PREFIX}{card_id}"
 
 _WHY_INTEGRATION = (
     "it is the branch work is cut from and merged back into. Nothing can guess "

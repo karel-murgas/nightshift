@@ -1175,6 +1175,175 @@ def test_setup_launches_the_install_skill_and_does_not_perform_it(server, monkey
     assert opened["cmd"] == ["claude", "/install-nightshift"]
 
 
+def test_work_on_a_card_carries_the_card_the_model_and_the_charter(server, monkeypatch):
+    """The whole point of the rename. `Start session` opened a bare CLI, so the
+    person had to tell it which card, which model and which agent — three things the
+    caller already knew (Karel, 2026-08-17: *"It is not related to the card, nor my
+    actually used account and I guess the model is default too"*)."""
+    base, root = server
+    _card(root, "tasks", "stun-grenade")
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal",
+                        lambda r, *cmd: opened.append(list(cmd)))
+
+    status, data = _post(base, "api/work", {"card": "stun-grenade"})
+
+    assert status == 200, data
+    argv = opened[0]
+    assert argv[-1].startswith("Work this card"), "the prompt is not the trailing arg"
+    assert "stun-grenade" in argv[-1], "the card body never reached the prompt"
+    # sonnet, from the tier-binding doc — not a literal in this module and not the
+    # CLI's default.
+    assert argv[argv.index("--model") + 1] == "sonnet"
+    assert argv[argv.index("--agent") + 1] == "code-thread"
+    assert argv[argv.index("--name") + 1] == "stun-grenade"
+    assert "-p" not in argv, "an interactive session must not be a print dispatch"
+    assert "stun-grenade" in data["message"] and "worker tier" in data["message"]
+
+
+def test_work_on_a_card_tells_it_the_branch_to_cut_and_the_base_to_leave_alone(
+        server, monkeypatch):
+    base, root = server
+    _card(root, "tasks", "stun-grenade")
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    _post(base, "api/work", {"card": "stun-grenade"})
+
+    prompt = opened[0][-1]
+    assert "ai/stun-grenade" in prompt, "no branch named — the session would work on the base"
+    assert "Do not move the card between lanes" in prompt
+    assert "verdict" in prompt.lower(), "the interactive prompt must cancel the verdict file"
+
+
+def test_work_on_a_note_gets_the_note_and_no_charter(server, monkeypatch):
+    """A note routed to a human is the route that exists *because* no agent was
+    dispatched — so it must not arrive wearing one."""
+    base, root = server
+    (root / "Board" / "inbox" / "taser.md").write_text("Taser should stun.\n",
+                                                       encoding="utf-8", newline="")
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    status, data = _post(base, "api/work", {"note": "taser.md"})
+
+    assert status == 200, data
+    argv = opened[0]
+    assert "--agent" not in argv, "a note is not a card and has no worker"
+    assert "Taser should stun." in argv[-1]
+    assert argv[argv.index("--model") + 1] == "opus", "notes run at the lead tier"
+
+
+def test_work_refuses_a_card_or_note_that_is_not_there(server, monkeypatch):
+    base, _ = server
+    monkeypatch.setattr(panel, "open_terminal",
+                        lambda *a, **k: pytest.fail("a session was opened anyway"))
+
+    for body, wanted in (({"card": "ghost"}, "no card"),
+                         ({"note": "ghost.md"}, "no note"),
+                         ({}, "no card or note")):
+        status, data = _post(base, "api/work", body)
+        assert status == 400, (body, data)
+        assert wanted in data["message"], (body, data)
+
+
+def test_the_interactive_permission_mode_is_not_the_headless_one(server, monkeypatch):
+    """`permission_mode` answers "what may a worker do with nobody to ask", and on
+    Karel's box that is `bypassPermissions`. Reusing it here would hand every session
+    the panel opens fewer guardrails than the same person gets in their own editor."""
+    base, root = server
+    # `.ai/host.json`, the untracked per-machine override — read unconditionally.
+    # `hosts.json` is keyed by `socket.gethostname()`, so a `{"default": ...}` entry
+    # there is read by nothing and this test would pass without the code under test.
+    (root / ".ai" / "host.json").write_text(
+        json.dumps({"permission_mode": "bypassPermissions"}), encoding="utf-8", newline="")
+    _card(root, "tasks", "stun-grenade")
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    _post(base, "api/work", {"card": "stun-grenade"})
+
+    argv = opened[0]
+    assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+
+
+def test_remote_control_is_on_by_default_and_never_eats_the_session_name(
+        server, monkeypatch):
+    """`--remote-control` takes an *optional* positional name, so the token after it
+    must start with `-` or the name is swallowed and the prompt shifts."""
+    base, root = server
+    _card(root, "tasks", "stun-grenade")
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    _post(base, "api/work", {"card": "stun-grenade"})
+
+    argv = opened[0]
+    assert "--remote-control" in argv
+    assert argv[argv.index("--remote-control") + 1].startswith("-")
+
+
+def test_remote_control_can_be_turned_off_in_the_host_config(server, monkeypatch):
+    base, root = server
+    (root / ".ai" / "host.json").write_text(
+        json.dumps({"remote_control": False}), encoding="utf-8", newline="")
+    _card(root, "tasks", "stun-grenade")
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    _post(base, "api/work", {"card": "stun-grenade"})
+
+    assert "--remote-control" not in opened[0]
+
+
+def test_the_general_session_button_survives_and_carries_no_work(server, monkeypatch):
+    """Karel asked to keep exactly one: *"there can be a one button for that (so I
+    don't have to use VSC for general stuff)"*."""
+    base, _ = server
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    status, data = _post(base, "api/session", {})
+
+    assert status == 200, data
+    argv = opened[0]
+    assert "--agent" not in argv and "--model" not in argv
+    assert argv[argv.index("--name") + 1] == "general"
+    assert "no card" in data["message"]
+
+
+def test_no_row_still_offers_a_session_that_does_nothing(server):
+    """The label described what the panel did, not what the row was for — and all
+    three rows posted the same empty endpoint."""
+    base, root = server
+    _card(root, "tasks", "stun-grenade")
+    (root / "Board" / "inbox" / "taser.md").write_text("x\n", encoding="utf-8", newline="")
+
+    status, html = _get(base, "")
+
+    assert status == 200
+    assert "Start session" not in html
+    assert "Work on this" in html
+    # The one exception, and it says so.
+    assert html.count("post('/api/session',{})") == 1
+
+
+def test_every_launcher_passes_the_selected_account(monkeypatch, tmp_path):
+    """`spawn_background` passed `_dispatch_env()` and this did not, so the account
+    dropdown was a lie for every button that opens a terminal."""
+    spawned = []
+    monkeypatch.setattr(panel, "claude_binary", lambda: "claude.exe")
+    monkeypatch.setattr(panel.subprocess, "Popen",
+                        lambda argv, **kw: spawned.append(kw.get("env")) or _FakeProc())
+    panel._ACCOUNT = panel.AccountState(label="alt", config_dir=str(tmp_path / "alt"),
+                                        dispatch="always")
+
+    panel.open_terminal(tmp_path, "claude")
+
+    assert spawned[0] is not None, "the terminal inherited the server's own environment"
+    assert spawned[0]["CLAUDE_CONFIG_DIR"] == str(tmp_path / "alt")
+
+
 def test_open_terminal_resolves_claude_instead_of_trusting_the_new_window_s_path(
         monkeypatch, tmp_path):
     """The CLI is not always on PATH — on Karel's box it lives in
@@ -1575,9 +1744,27 @@ def test_triage_is_launched_on_the_note_you_picked(server, monkeypatch):
     status, data = _post(base, "api/triage", {"note": "stun-grenade.md"})
 
     assert status == 200, data
-    assert opened[0][:3] == ("claude", "--agent", "triage")
-    assert "Board/inbox/stun-grenade.md" in opened[0][3]
+    argv = list(opened[0])
+    assert argv[argv.index("--agent") + 1] == "triage"
+    assert "Board/inbox/stun-grenade.md" in argv[-1]
     assert "stun-grenade.md" in data["message"]
+
+
+def test_triage_goes_through_the_same_launcher_as_every_other_session(server, monkeypatch):
+    """It used to hand-roll `["claude", "--agent", "triage"]`, which is how it came to
+    be the one launch with no account, no permission mode and no session name — the
+    same shape as `Start session`, one row further down the page."""
+    base, _ = server
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal",
+                        lambda r, *command: opened.append(command))
+
+    _post(base, "api/triage", {"note": "stun-grenade.md"})
+
+    argv = list(opened[0])
+    assert argv[0] != "claude", "the bare name is back — resolution was skipped"
+    assert "--permission-mode" in argv
+    assert argv[argv.index("--name") + 1] == "triage stun-grenade.md"
 
 
 def test_triage_with_no_note_still_opens_the_charter(server, monkeypatch):
@@ -1588,7 +1775,13 @@ def test_triage_with_no_note_still_opens_the_charter(server, monkeypatch):
                         lambda r, *command: opened.append(command))
 
     _post(base, "api/triage", {})
-    assert opened == [("claude", "--agent", "triage")]
+
+    argv = list(opened[0])
+    assert argv[argv.index("--agent") + 1] == "triage"
+    assert argv[argv.index("--name") + 1] == "triage"
+    # No note means no prompt, so the argv ends on the last flag's value rather than
+    # on a trailing positional. The charter still arrives — via `--agent`.
+    assert argv[-2] == "--add-dir"
 
 
 def test_the_triage_section_lists_the_notes_not_the_report_file(server):
