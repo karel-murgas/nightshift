@@ -1,0 +1,14 @@
+$ python -m nightshift.ingest --allow-paid
+# started 2026-08-17T16:02:43 in C:\Users\karel\Documents\Programming\Dungeoneer\dungeoneer
+ingest: 13 note(s) in Board/inbox
+  five_hour               43.0%  resets 2026-08-17 18:19
+  nimbus_quill             0.0%
+  seven_day               78.0%  resets 2026-08-21 01:59
+  paid overage ENABLED - 74.48 EUR used
+  classifying with sonnet ...
+  wrote Routing.md
+    chore    3
+    inline   6
+    scribe   2
+    triage   2
+# exit 0 after 2 min

@@ -180,21 +180,34 @@ def _cli_result(completed) -> tuple[str, str]:
     return completed.stdout, ""
 
 
-def denials(completed) -> int:
-    """How many tool calls the CLI refused, out of its own envelope.
+def denials(completed) -> list[str]:
+    """Which tool calls the CLI refused, out of its own envelope.
 
     `runner.read_telemetry` has read this field for months and reports it as *"the
     worker was refused a tool it asked for"*; this module ignored it, so an agent
     that could not write the file it was told to write reported nothing at all and
     the run said only that nothing happened. It is the difference between "the
     scribe declined" and "the scribe was not allowed".
+
+    **The tool names, not just a count.** A refusal is not on its own a failure:
+    `acceptEdits` approves file edits and nothing else, so an agent that reaches
+    for a shell command gets refused, works around it, and produces a perfectly
+    good card — which is exactly what happened to the first note of the 16:10 run.
+    A bare count cannot tell that story from the one where the refusal *was* the
+    reason nothing happened. The name can.
     """
     try:
         envelope = json.loads(completed.stdout)
     except (ValueError, AttributeError):
-        return 0
+        return []
     found = envelope.get("permission_denials") if isinstance(envelope, dict) else None
-    return len(found) if isinstance(found, list) else 0
+    if not isinstance(found, list):
+        return []
+    names = []
+    for entry in found:
+        name = entry.get("tool_name") if isinstance(entry, dict) else None
+        names.append(str(name) if name else "an unnamed tool")
+    return names
 
 
 def _guard(allow_paid: bool, what: str) -> usage.Verdict:
@@ -241,10 +254,17 @@ def _dispatch(agent: str, prompt: str, root: Path, model: str,
         argv += ["--model", model]
     completed = run_cli(argv, cwd=root, timeout=timeout, prompt=prompt)
     if refused := denials(completed):
+        # Parenthesised, not prefixed with `!`, and that is not cosmetic. `!` is
+        # this module's failure prefix — `parse_progress` reads `    ! <text>` as
+        # the reason a note stranded — so announcing a *survivable* refusal that
+        # way both alarms the reader and mis-parses. Karel, 2026-08-17, on seeing
+        # it above a card that had been written perfectly well: quoting the two
+        # lines back, which is what a reader does when a page contradicts itself.
+        #
         # Said here rather than returned, so the seam `_dispatch` presents to its
         # callers — and to every test that fakes it — stays two values wide.
-        print(f"    ! {refused} tool call(s) refused — the agent asked for something "
-              f"the permission mode does not allow")
+        print(f"    ({len(refused)} tool call(s) refused: {', '.join(sorted(set(refused)))}"
+              f" — the permission mode allows edits, not everything)")
     return _cli_result(completed)
 
 
@@ -609,6 +629,107 @@ def parse_report(text: str) -> RoutingView:
             note=entry.group("note"), route=route, why=why,
             dispatchable=dispatchable, confidence=confidence)
     return RoutingView(written=written, decisions=decisions)
+
+
+# --------------------------------------------------------------------------
+# Reading a run's own output back as a roster. The panel renders this; the
+# format belongs here, next to the prints that produce it, for the same reason
+# `parse_report` sits next to `report`.
+# --------------------------------------------------------------------------
+
+#: What one note's card-writing attempt came to, and how to draw it.
+ITEM_STATES = {
+    "done": ("m-ok", "&check;"),
+    "bounced": ("m-now", "?"),
+    "stranded": ("m-bad", "&times;"),
+    "running": ("m-wait", "&middot;"),
+}
+
+
+@dataclass
+class Item:
+    """One note in a card-writing fan-out, as its own line of the run."""
+
+    name: str
+    state: str = "running"
+    detail: str = ""
+
+
+@dataclass
+class Progress:
+    """A run's own output, read back as the roster the panel draws.
+
+    **Why parsed rather than streamed into a status file.** A second artefact
+    written for the panel's benefit is a second thing to keep in step with what
+    the command prints, and the command has to print it anyway — the log is the
+    record a person reads in a terminal. So the prints are the interface, and this
+    is its reader, sitting in the same module for the same reason `parse_report`
+    does. The tests drive real logs from real runs through it.
+
+    **What a classify pass cannot offer.** It is *one* dispatch over the whole
+    lane — that is the entire economy of the thing (`classify`: "One dispatch over
+    the whole lane. Cheap by construction"). So there is no per-note progress to
+    report while it runs, and pretending otherwise would mean inventing it. What
+    it has is a phase while running and the per-route counts once it lands, and
+    the routing itself is on the Inbox page. Only the card-writing phase has items.
+    """
+
+    phase: str = ""
+    total: int = 0
+    items: list[Item] = field(default_factory=list)
+    routes: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def finished(self) -> int:
+        return sum(1 for i in self.items if i.state != "running")
+
+
+_P_TOTAL = re.compile(r"^ingest: (?P<n>\d+) note\(s\)")
+_P_ITEM = re.compile(r"^  (?:\[(?P<at>\d+)/(?P<of>\d+)\] )?scribe: (?P<note>.+?)\s*$")
+_P_DONE = re.compile(r"^    -> (?P<cards>.+?)\s*$")
+_P_BOUNCED = re.compile(r"^    bounced to triage - (?P<why>.+?)\s*$")
+_P_STRANDED = re.compile(r"^    ! (?P<why>.+?)\s*$")
+_P_ROUTE = re.compile(r"^    (?P<route>\w[\w-]*)\s+(?P<n>\d+)\s*$")
+_P_SUMMARY = re.compile(r"^  scribe: \d+ card")
+
+
+def parse_progress(text: str) -> Progress:
+    """A run's log, read back as a roster. Never raises; unknown lines are skipped.
+
+    A line this does not recognise contributes nothing rather than guessing — the
+    log carries meter readings, git warnings and an agent's own quoted words, and
+    a parser that tried to interpret those would report fiction about a run.
+    """
+    out = Progress()
+    for line in (text or "").splitlines():
+        if found := _P_TOTAL.match(line):
+            out.total = int(found.group("n"))
+            out.phase = "carding" if "to card" in line else "reading the lane"
+        elif line.startswith("  classifying with"):
+            out.phase = "classifying"
+        elif line.startswith("  wrote "):
+            out.phase = "routed"
+        elif _P_SUMMARY.match(line):
+            # The fan-out's own tally — `scribe: 1 card(s), 3 bounced, ...` — which
+            # shares its prefix with a per-note line and would otherwise be read as
+            # a note called "1 card(s), 3 bounced, 1 stranded, 0 not reached".
+            # Checked before the item pattern rather than inside it: the two are
+            # distinguished by which is more specific, not by argument order.
+            out.phase = "done"
+        elif found := _P_ITEM.match(line):
+            out.phase = "carding"
+            if found.group("of"):
+                out.total = int(found.group("of"))
+            out.items.append(Item(name=found.group("note")))
+        elif out.items and (found := _P_DONE.match(line)):
+            out.items[-1].state, out.items[-1].detail = "done", found.group("cards")
+        elif out.items and (found := _P_BOUNCED.match(line)):
+            out.items[-1].state, out.items[-1].detail = "bounced", found.group("why")
+        elif out.items and not _P_SUMMARY.match(line) and (found := _P_STRANDED.match(line)):
+            out.items[-1].state, out.items[-1].detail = "stranded", found.group("why")
+        elif out.phase == "routed" and (found := _P_ROUTE.match(line)):
+            out.routes[found.group("route")] = int(found.group("n"))
+    return out
 
 
 def set_route(root: Path, note: str, route: str, why: str,

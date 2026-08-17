@@ -1669,83 +1669,133 @@ JOB_TAIL_LINES = 14
 JOB_TAIL_BYTES = 8_000
 
 
-def _jobs_section(ctx: Context) -> str:
-    """Every background command this panel started, newest first.
+def _running_section(ctx: Context) -> str:
+    """What this panel has started and has not finished — and nothing else.
 
-    **The Run page used to be about the runner and nothing else**, which made it
-    the wrong answer to the question it is named after. Karel, 2026-08-17, with an
-    `ingest` three minutes into a live run and a header reading *Last run — 2026-08-02*:
-    *"I'm running the ingest, but run page doesn't show details about it, it shows
-    last runner or something like that."*
+    **Only the live one.** Karel, 2026-08-17: *"started from here — I don't think
+    we need a full history at the top of the page ... only current run."* Right:
+    the top of a page called Run is where "what is happening" belongs, and a
+    fortnight of finished jobs above the night's own roster pushes the thing you
+    came for below the fold. The history moved to `_job_history_section`, beside
+    the earlier nights it belongs with.
+    """
+    live = [job for job in ctx.jobs if jobs.state(job) == jobs.RUNNING]
+    rows = []
+    for job in live:
+        rows.append(
+            f'<tr><td class="mark m-now">&middot;</td>'
+            f'<td class="card">{_e(job.label)}</td>'
+            f'<td class="lane">{_e(jobs.elapsed(job))}</td>'
+            f'<td class="said"><code>{_e(job.command)}</code></td>'
+            f'<td class="num">{_act("Output", href=f"/log/{job.ident}")}</td></tr>')
+        rows.append(_job_detail(ctx, job))
+    return _section("Running now", len(live),
+                    f'<div class="roster"><table><tbody>{"".join(rows)}</tbody></table></div>'
+                    if rows else "",
+                    note="Started from this panel, still going.",
+                    empty="Nothing this panel started is still running.")
 
-    That was a fair reading of "Run detail". A night is one kind of run and the
-    page knew only that kind, so a live `ingest`, `chores`, `drain`, `preflight`
-    or `fix` had one line in the rail and no detail anywhere — while the page
-    presented a fortnight-old night under a heading that implied the present.
 
-    It sits **first**, above the night, because a job that is running now is the
-    reason the page was opened. The night's own roster keeps everything it had:
-    per-card outcomes, cost, and the session to resume.
+def _job_detail(ctx: Context, job: jobs.Job) -> str:
+    """A job's own progress, as a roster where the format is ours and a tail where
+    it is not.
+
+    Karel again, on seeing the raw tail: *"I would expect for the ingest (and other
+    bulk actions) similar overview as for runs. Card xxx classified as XYZ, Card
+    yyy in progress."* A log tail is what a command happens to print; a roster is
+    the question answered. So a verb whose output this package owns gets parsed —
+    `ingest` first, since it is the bulk action that exists — and everything else
+    still gets the tail, which is honest about being raw rather than pretending to
+    a structure nobody has written yet.
+    """
+    text = jobs.read_log(ctx.root, job.ident, tail=JOB_TAIL_BYTES)
+    if not text.strip():
+        return ""
+    if job.label == "ingest":
+        return _ingest_roster(ingest.parse_progress(text))
+    lines = text.strip().splitlines()[-JOB_TAIL_LINES:]
+    return (f'<tr class="joblog"><td></td><td colspan="3">'
+            f'<pre>{_e(chr(10).join(lines))}</pre></td><td></td></tr>')
+
+
+def _ingest_roster(progress: ingest.Progress) -> str:
+    """One line per note, with what became of it.
+
+    A classify pass has no per-note lines to show and that is not a gap: it is one
+    dispatch over the whole lane, which is the entire economy of the step. So it
+    reports its phase while it runs and its per-route counts when it lands, and the
+    routing itself is on the Inbox page — inventing per-note progress for it would
+    be reporting something nobody measured.
     """
     rows = []
-    running = 0
-    inlined = 0
-    #: Counted separately from `rows`, because a row is not a job: an inlined log
-    #: is a row too, and using `len(rows)` made the section header claim four jobs
-    #: over three of them.
+    for item in progress.items:
+        css, glyph = ingest.ITEM_STATES.get(item.state, ("m-wait", "&middot;"))
+        said = {"done": "carded as", "bounced": "bounced to triage —",
+                "stranded": "stranded —"}.get(item.state, "")
+        rows.append(f'<tr><td class="mark {css}">{glyph}</td>'
+                    f'<td class="card">{_e(item.name)}</td>'
+                    f'<td class="lane">{_e(item.state)}</td>'
+                    f'<td class="said">{_e(said)} {_e(item.detail)}</td>'
+                    f'<td class="num"></td></tr>')
+    if progress.routes:
+        counts = " · ".join(f"{n} {route}" for route, n in progress.routes.items())
+        rows.append(f'<tr><td class="mark m-ok">&check;</td>'
+                    f'<td class="card">routed</td>'
+                    f'<td class="lane">{progress.total} note(s)</td>'
+                    f'<td class="said">{_e(counts)} — the Inbox page has each one</td>'
+                    f'<td class="num"></td></tr>')
+    if not rows:
+        # Mid-classify: one dispatch over the lane, with nothing per-note yet.
+        rows.append(f'<tr><td class="mark m-wait">&middot;</td>'
+                    f'<td class="card">{_e(progress.phase or "starting")}</td>'
+                    f'<td class="lane">{progress.total} note(s)</td>'
+                    f'<td class="said">one dispatch over the whole lane; there is no '
+                    f'per-note progress until it lands</td>'
+                    f'<td class="num"></td></tr>')
+    elif progress.total:
+        rows.append(f'<tr class="pend"><td></td><td class="card"></td>'
+                    f'<td class="lane">{progress.finished}/{progress.total}</td>'
+                    f'<td class="said">{_e(progress.phase)}</td>'
+                    f'<td class="num"></td></tr>')
+    return "".join(rows)
+
+
+def _job_history_section(ctx: Context) -> str:
+    """Everything this panel started that has stopped, newest first.
+
+    At the foot of the page with the earlier nights, because that is what it is:
+    history. One line each, no inlined output — the link is enough for something
+    you are looking up rather than watching.
+    """
+    rows = []
     shown = 0
-    # One `jobs.state` per job, not two: on Windows it answers "is that pid alive"
-    # by running `tasklist`, and this page can be carrying eighty records.
-    for index, job in enumerate(ctx.jobs[:JOBS_ON_RUN_PAGE]):
+    for job in ctx.jobs[:JOBS_ON_RUN_PAGE]:
         status = jobs.state(job)
-        running += status == jobs.RUNNING
+        if status == jobs.RUNNING:
+            continue
         shown += 1
         _, word = _JOB_MARK.get(status, ("", status))
         mark = {jobs.DONE: '<td class="mark m-ok">&check;</td>',
-                jobs.FAILED: '<td class="mark m-bad">&times;</td>',
-                jobs.RUNNING: '<td class="mark m-now">&middot;</td>'}.get(
+                jobs.FAILED: '<td class="mark m-bad">&times;</td>'}.get(
                     status, '<td class="mark m-wait">?</td>')
         started = job.started_at
-        when = f"{started:%d %b %H:%M}" if started else ""
         said = word if status != jobs.FAILED else f"{word} — exit {job.exit_code}"
         rows.append(
             f'<tr>{mark}<td class="card">{_e(job.label)}</td>'
-            f'<td class="lane">{_e(when)}</td>'
+            f'<td class="lane">{_e(f"{started:%d %b %H:%M}" if started else "")}</td>'
             f'<td class="num">{_e(jobs.elapsed(job))}</td>'
             f'<td class="said">{_e(said)} &mdash; <code>{_e(job.command)}</code></td>'
             f'<td class="num">{_act("Output", href=f"/log/{job.ident}")}</td></tr>')
-        # **The progress view, inline.** Karel, 2026-08-17: *"there was no overview
-        # of the cards in the run ... the whole point of run was to see how far are
-        # we with the current automated job."* A link to the output is not that: it
-        # is a page you have to decide to open, and the answer to "how far" has to
-        # be on the page you are already looking at.
-        #
-        # The tail rather than a parse of it, deliberately. A per-verb progress
-        # format would be a second thing to keep in step with each command's own
-        # printing, and the commands already print progress — `ingest` numbers its
-        # notes `[2/5]`, `chores` names each item, `preflight` prints a line per
-        # check. Rendering what they write serves every verb, including the ones
-        # nobody has written yet.
-        if inlined < JOB_TAILS_INLINE and (status == jobs.RUNNING or index == 0):
-            tail = jobs.read_log(ctx.root, job.ident, tail=JOB_TAIL_BYTES).strip()
-            if tail:
-                inlined += 1
-                lines = tail.splitlines()[-JOB_TAIL_LINES:]
-                rows.append(f'<tr class="joblog"><td></td><td colspan="4">'
-                            f'<pre>{_e(chr(10).join(lines))}</pre></td><td></td></tr>')
-    note = (f"{running} running now" if running else
-            "Nothing running — these are what this panel has started.")
-    return _section("Started from here", shown,
+    return _section("Earlier from here", shown,
                     f'<div class="roster"><table><tbody>{"".join(rows)}</tbody></table></div>'
-                    if rows else "", note=note,
-                    sub="Every verb the buttons spawn, with the command's own output. "
-                        "A night is one of these; the roster below is that night's cards.",
+                    if rows else "",
+                    note="Every verb the buttons have spawned on this machine.",
                     empty="No button on this panel has started anything yet.")
 
 
 def _render_run(ctx: Context) -> str:
     record = _latest_record(ctx.root)
-    out = [_jobs_section(ctx)]
+    out = [_running_section(ctx)]
     dispatched = record.get("dispatched", [])
 
     body = []
@@ -1842,6 +1892,8 @@ def _render_run(ctx: Context) -> str:
     out.append(_section("Earlier runs", len(earlier),
                         f'<div class="roster"><table><tbody>{"".join(rows)}</tbody></table></div>'
                         if rows else "", empty="No earlier runs on this machine."))
+
+    out.append(_job_history_section(ctx))
 
     out.append(f'<footer>Records in {run_record.DIR.as_posix()} &middot; transcripts stay '
                f'on the machine that produced them</footer>')
@@ -2286,9 +2338,20 @@ def render_job(root: Path, ident: str) -> str:
     live = ('<p class="note">This job is still running; the page reloads every '
             'five seconds.</p><script>setTimeout(function(){location.reload();},5000);'
             '</script>' if status == jobs.RUNNING else "")
+    # **The roster belongs here too, not only on a live run.** The Run page leads
+    # with what is running, by request — which would otherwise mean that the moment
+    # a fan-out finishes, the structured account of it is replaced by a raw log. So
+    # the job's own page carries both: what became of each item, and the output it
+    # was read from.
+    roster = ""
+    if job.label == "ingest":
+        rows = _ingest_roster(ingest.parse_progress(text))
+        if rows:
+            roster = (f'<div class="roster"><table><tbody>{rows}'
+                      f'</tbody></table></div>')
     return render_document(
         root, title=f"{job.label} · output", subtitle=job.started.replace("T", " "),
-        body=f'{_meta(facts)}{live}<pre>{_e(text)}</pre>',
+        body=f'{_meta(facts)}{live}{roster}<pre>{_e(text)}</pre>',
         acts=_act("Reload", href=f"/log/{job.ident}"))
 
 
@@ -2690,9 +2753,40 @@ def _verb(result: subprocess.CompletedProcess) -> str:
     return text
 
 
+class _Server(ThreadingHTTPServer):
+    """`ThreadingHTTPServer`, minus the address reuse it turns on by default.
+
+    **`allow_reuse_address = 1` is a lie about safety on Windows.** It sets
+    `SO_REUSEADDR`, which on Linux only shortens the TIME_WAIT wait, but on Windows
+    lets a *second live socket* bind a port another process is already listening
+    on. Both then "serve" and connections land on either, so a second Command
+    Center starts without complaint and the page you are reading may come from
+    whichever process the OS felt like — including one holding code from before
+    your last change.
+
+    Measured on 2026-08-17: three restarts in a row appeared not to take. Each time
+    the old panel had survived, the new one bound alongside it, and the fix under
+    test was reported as live while the page came from the previous build. It cost
+    two false "verified" claims, which is the specific harm — the panel exists to
+    say what is true, and a duplicate of it says what *was* true.
+
+    So the port is exclusive: the second panel fails to start and says why, which
+    is the behaviour a person wants from "the port is already in use".
+    """
+
+    allow_reuse_address = False
+
+
 def serve(root: Path, port: int = DEFAULT_PORT, *, open_browser: bool = True) -> None:
     Handler.root = root
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    try:
+        server = _Server(("127.0.0.1", port), Handler)
+    except OSError as exc:
+        print(f"Command Center: port {port} is already in use ({exc}).\n"
+              f"  Another panel is probably still running — the page it serves may be "
+              f"older than your checkout.\n"
+              f"  Stop it, or start this one on another port with --port.")
+        raise SystemExit(2) from exc
     url = f"http://127.0.0.1:{port}/now"
     print(f"Command Center serving {root} at {url}")
     if open_browser:
