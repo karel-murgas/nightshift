@@ -12,9 +12,29 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from nightshift import preflight, suite
 
 import _fixtures
+
+
+@pytest.fixture(autouse=True)
+def _no_xdist_in_child_runs(monkeypatch):
+    """These tests run a real one-test suite in a temp repo, through preflight.
+
+    `preflight._run_pytest` asks `suite.parallel_args()` for `-n auto --dist
+    loadfile`, so without this each child spins up a full set of xdist workers to
+    run a single test. Serially that is merely wasteful; inside the parallel suite
+    it is six outer workers each spawning six inner ones, and this file's
+    contribution measured 54.7 s of that contention against 16.0 s run on its own.
+
+    The same fixture exists in `test_runner.py`, `test_merge_check.py`,
+    `test_drain.py` and `test_chores_execution.py` — they patch
+    `runner._PYTEST_PARALLEL`, which is the seam their code path reads; this one
+    goes through `suite.parallel_args` because preflight's does.
+    """
+    monkeypatch.setattr(suite, "parallel_args", lambda *a, **k: ())
 
 
 def _git(repo: Path, *args: str) -> str:
