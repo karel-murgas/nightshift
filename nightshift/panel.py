@@ -63,6 +63,7 @@ import html
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -83,6 +84,7 @@ from nightshift.runner import (
     STOP_FILE,
     Candidate,
     branch_has_commits,
+    claude_binary,
     current_branch,
     default_base,
     host_capabilities,
@@ -354,7 +356,24 @@ def open_terminal(root: Path, *command: str) -> None:
     is captured per attempt); triage is `claude --agent triage` — deliberately
     interactive, because triage is investigative work a person drives, not a
     one-shot `-p` dispatch this module could run for them.
+
+    **`claude` is resolved here, not left to the new window's PATH.** Every other
+    dispatch path in the framework goes through `runner.claude_binary()`, which
+    knows the CLI may live in `%USERPROFILE%\\.local\\bin` without being on PATH —
+    and on the box this was found on (2026-08-17) that is exactly where it lives.
+    This function was the one place that passed the bare name and trusted `cmd` to
+    find it, so every launcher button on the page — Start session, Talk, Triage,
+    Setup, Switch account — opened a console window reading `'claude' is not
+    recognized`, while the runner dispatched the same CLI fine. Failing here with a
+    sentence the page can render beats spawning a window whose only content is that
+    error.
     """
+    if command and command[0] == "claude":
+        binary = claude_binary()
+        if binary is None:
+            raise PanelError("the `claude` CLI was not found (checked $CLAUDE_BIN, "
+                             "PATH and ~/.local/bin). Install it, or set CLAUDE_BIN.")
+        command = (binary, *command[1:])
     if os.name == "nt":
         subprocess.Popen(["cmd", "/c", "start", "Command Center", "cmd", "/k", *command],
                          cwd=root)  # gate-ok(subprocess_result_checked): a detached, visible
@@ -362,7 +381,10 @@ def open_terminal(root: Path, *command: str) -> None:
                                     # nothing this function could do with an exit code from a
                                     # window that has not been interacted with yet
     else:
-        subprocess.Popen(["x-terminal-emulator", "-e", " ".join(command)], cwd=root,
+        # `shlex.join`, not `" ".join`: the emulator hands this string to a shell, and
+        # both a resolved binary path and the triage prompt can contain spaces — joined
+        # raw, the prompt arrives as a dozen arguments instead of one.
+        subprocess.Popen(["x-terminal-emulator", "-e", shlex.join(command)], cwd=root,
                          shell=False)  # gate-ok(subprocess_result_checked): same reason as the
                                        # Windows branch just above
 
