@@ -176,3 +176,69 @@ def test_tags_are_read_in_either_form(tmp_path):
     assert tags["block"] == ["nightshift"]
     assert tags["inline"] == ["nightshift"]
     assert tags["none"] == []
+
+
+# --------------------------------------------------------------------------
+# Line endings, fixed at the funnel rather than at the writer.
+#
+# It had been fixed three times at three different writers — `Path.write_text`
+# (2026-08-14), `prepare_worktree` (2026-08-13), and on 2026-08-17 an agent's own
+# file tools and a human's editor, neither of which this package can reach.
+# Chasing writers cannot converge: any tool that opens a file in text mode on
+# Windows is a new one. Every board write in the framework ends at
+# `commit_board`, so whatever wrote CRLF, it is on disk by the time we get here.
+# --------------------------------------------------------------------------
+
+
+def _pin_lf(root: Path) -> None:
+    """What `init` writes into every installed repo, and what the whole mechanism
+    rests on: with `eol=lf` pinned, `git add` stores an LF blob while the worktree
+    copy stays CRLF — the phantom-dirty state the gate names and normalising
+    resolves. Without it git keeps the CRLF verbatim and there is nothing to fix."""
+    (root / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
+    subprocess.run(["git", "add", ".gitattributes"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "attrs"], cwd=root, check=True)
+
+
+def test_a_board_commit_leaves_no_crlf_in_the_working_tree(tmp_path):
+    root = _repo(tmp_path)
+    _pin_lf(root)
+    card = root / "Board" / "tasks" / "crlf-card.md"
+    card.write_bytes(b"---\r\nid: crlf-card\r\nstate: tasks\r\n---\r\n\r\nbody\r\n")
+
+    board.commit_board(root, "board: a card written by something in text mode")
+
+    assert b"\r\n" not in card.read_bytes(), "CRLF survived the commit"
+
+
+def test_a_commit_with_nothing_to_normalise_does_not_shell_out_to_do_it(tmp_path,
+                                                                        monkeypatch):
+    """The answer is almost always "nothing to do", and it costs one
+    `git ls-files --eol` to know that. Normalising anyway would put several git
+    invocations behind every card move the runner makes."""
+    root = _repo(tmp_path)
+    (root / "Board" / "tasks" / "clean.md").write_bytes(b"---\nid: clean\n---\n\nbody\n")
+
+    from nightshift import normalize_worktree
+    monkeypatch.setattr(normalize_worktree, "normalize",
+                        lambda *a, **k: pytest.fail("nothing needed normalising"))
+    board.commit_board(root, "board: a clean card")
+
+
+def test_a_normalise_failure_does_not_take_the_board_write_down(tmp_path, monkeypatch,
+                                                               capsys):
+    """A board move failing at 3 AM over line endings would be far worse than the
+    line endings — the same trade `_warn_if_failed` makes."""
+    root = _repo(tmp_path)
+    _pin_lf(root)
+    (root / "Board" / "tasks" / "c.md").write_bytes(b"---\r\nid: c\r\n---\r\n\r\nx\r\n")
+
+    from nightshift import normalize_worktree
+    monkeypatch.setattr(normalize_worktree, "worktree_crlf_files",
+                        lambda root: (_ for _ in ()).throw(OSError("git is missing")))
+
+    board.commit_board(root, "board: still commits")
+    assert "could not normalise" in capsys.readouterr().out
+    said = subprocess.run(["git", "log", "--format=%s", "-1"], cwd=root,
+                          capture_output=True, text=True, check=True).stdout
+    assert said.strip() == "board: still commits"

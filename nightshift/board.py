@@ -535,3 +535,39 @@ def commit_board(root: Path, message: str, extra_paths: tuple[str, ...] = ()) ->
                             encoding="utf-8", errors="replace")
     _warn_if_failed(staged, f"staging {', '.join(paths)}")
     _git_commit(root, message, ", ".join(paths))
+    _normalize_after_write(root)
+
+
+def _normalize_after_write(root: Path) -> None:
+    """Re-materialise any CRLF the write left in the working tree.
+
+    **The line-ending problem has been fixed three times, at three different
+    writers, and a fourth writer keeps arriving.** `python-write-text-crlfs-the-
+    file-on-windows` (2026-08-14) fixed `Path.write_text`; `fresh-worktree-never-
+    gets-normalized` (2026-08-13) fixed `prepare_worktree`; on 2026-08-17 it was
+    an agent's own file tools and a human's editor, neither of which this package
+    can reach. Karel, that day: *"It's like we fixed this 7 times or so already."*
+
+    Chasing writers cannot converge, because any tool that opens a file in text
+    mode on Windows is a new one. So this is fixed at the **funnel** instead: every
+    board write in the framework ends here — each `boardcmd` verb, `board.move`,
+    `chores`, the runner's card moves, `ingest`'s cards and views — and whatever
+    put CRLF on disk, it is on disk by now.
+
+    The condition is worth removing rather than tolerating, but not because it
+    breaks anything: a CRLF card costs a `git status` that reads dirty with an
+    empty diff, and an on-disk size that disagrees with the size the runner
+    measures by a few bytes. What it actually costs is a **blocked preflight** and
+    a manual remedy, which is a real toll for a harmless state.
+
+    Asked before acted on, because the answer is almost always "nothing to do" and
+    that answer costs one `git ls-files --eol`. Best-effort and never fatal: a
+    board move failing at 3 AM over line endings would be far worse than the line
+    endings, which is the same trade `_warn_if_failed` makes one line up.
+    """
+    try:
+        from nightshift import normalize_worktree
+        if normalize_worktree.worktree_crlf_files(root):
+            normalize_worktree.normalize(root)
+    except Exception as exc:                      # noqa: BLE001 — see the docstring
+        print(f"warning: could not normalise line endings after the board write ({exc})")

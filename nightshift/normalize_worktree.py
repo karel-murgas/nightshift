@@ -48,11 +48,14 @@ def _find_repo_root() -> Path:
     return find_root()
 
 
-def _worktree_crlf_files(repo: Path) -> list[str]:
+def worktree_crlf_files(repo: Path) -> list[str]:
     """The working-tree CRLF files the gate reports, by relative path.
 
     Delegates entirely to `nightshift.gates.line_endings.check` so the binary-
     sniffing and `_CRLF_ALLOWED` allowlist rules have one owner.
+
+    Public because `board.commit_board` asks it first: normalising is cheap only
+    when it is a no-op, and this is the one question that decides that.
     """
     import nightshift.gates.line_endings as _le
     return [v.file for v in _le.check(repo) if "working tree" in v.rule]
@@ -105,7 +108,7 @@ def normalize(repo: Path, *, dry_run: bool = False) -> int:
     Returns 1 when git commands fail or when CRLF violations remain (e.g.
     because some files had real content changes and were skipped).
     """
-    targets_rel = _worktree_crlf_files(repo)
+    targets_rel = worktree_crlf_files(repo)
 
     if not targets_rel:
         print("normalize_worktree: working tree is already clean -- nothing to do.")
@@ -187,7 +190,7 @@ def normalize(repo: Path, *, dry_run: bool = False) -> int:
 
     # Re-verify after the rewrite: exit non-zero if any violations remain so
     # the caller sees that not everything was fixed.
-    remaining = _worktree_crlf_files(repo)
+    remaining = worktree_crlf_files(repo)
     if remaining:
         print(
             f"normalize_worktree: ERROR: {len(remaining)} working-tree violation(s) "
