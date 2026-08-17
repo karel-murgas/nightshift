@@ -478,6 +478,18 @@ def _git_commit(root: Path, message: str, what: str) -> bool:
     return False
 
 
+def finished_lane(card: Card) -> str:
+    """Where a card goes once its work is done and landed: `testing/` or `done/`.
+
+    The rule is `Card.verify`'s, stated once here rather than at each site that has
+    to act on it. It was a literal in `runner.py` — `"testing" if card.verify ==
+    "play" else "done"` — for as long as the runner was the only thing that finished
+    a card; the panel's interactive sessions are the second, and two copies of a
+    routing rule is how the two come to disagree about where a card belongs.
+    """
+    return "testing" if card.verify == "play" else "done"
+
+
 def move(root: Path, card: Card, to_lane: str, commit: bool = True) -> Card:
     """`git mv` + rewrite `state:` + commit, as one commit (`03_board.md` §4).
 

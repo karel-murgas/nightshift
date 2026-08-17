@@ -1377,7 +1377,8 @@ def _render_now(ctx: Context) -> str:
         inline_rows.append(_row(
             marker="&rsaquo;", body=_card_body(card, meta=meta),
             acts=_act("Read card", href=f"/card/{card.id}")
-                 + _work_act(card=card.id, tier=card.tier, worker=card.worker)))
+                 + _work_act(card=card.id, tier=card.tier, worker=card.worker,
+                            lane=board.finished_lane(card))))
     inline_rows = "".join(inline_rows)
     # The other half of the same question. A note routed `inline` is, by the route's
     # definition, work for Karel at the keyboard that will never become a card — so
@@ -1439,7 +1440,7 @@ def _render_now(ctx: Context) -> str:
         # extra steps.
         if not running:
             acts += _work_act(card=card.id, tier=card.tier, worker=card.worker,
-                              primary=False)
+                              lane=board.finished_lane(card), primary=False)
         acts += (_act("Running", disabled=True) if running else
                  _act("Dispatch", onclick=f"post('/api/dispatch',{{card_id:'{_attr(card.id)}'}})",
                       primary=True))
@@ -1751,7 +1752,7 @@ def _route_act(note: str, route: str) -> str:
 
 
 def _work_act(*, card: str = "", note: str = "", tier: str = "", worker: str = "",
-              primary: bool | None = None) -> str:
+              lane: str = "", primary: bool | None = None) -> str:
     """`Work on this` — the button that used to say `Start session` and mean nothing.
 
     Three rows offered `Start session`, all three posted the same empty
@@ -1772,7 +1773,8 @@ def _work_act(*, card: str = "", note: str = "", tier: str = "", worker: str = "
         title = (f"Opens an interactive session on this card"
                  + (f" ({detail})" if detail else "")
                  + ". It reads the card, cuts the card's own branch and works with you "
-                   "at the keyboard — nothing is dispatched and no verdict is written.")
+                   "at the keyboard — nothing is dispatched and no verdict is written."
+                 + (f" Its goal is to land the card in {lane}/." if lane else ""))
     else:
         target = f"{{note:'{_attr(note)}'}}"
         title = ("Opens an interactive session on this note. A note routed to you is "
@@ -2941,8 +2943,9 @@ class Handler(BaseHTTPRequestHandler):
             lane = board.board_rel(root)
             open_terminal(root, *session_argv(
                 root, name=f"triage {note}".strip(), agent="triage",
-                prompt=(f"Triage `{lane}/inbox/{note}`. Follow your charter."
-                        if note else "")))
+                prompt=(worker_prompt.INTERACTIVE_TRIAGE.format(
+                    note_path=f"{lane.as_posix()}/inbox/{note}", lane=lane.as_posix())
+                    if note else "")))
             return (f"opened a terminal running triage on {note}" if note else
                     "opened a terminal running the triage charter")
 
@@ -2973,14 +2976,16 @@ def _work_verb(root: Path, body: dict) -> str:
         card = board.find(root, card_id)
         if card is None:
             raise PanelError(f"no card named {card_id!r} on the board")
+        lane = board.finished_lane(card)
         prompt = worker_prompt.INTERACTIVE_CARD.format(
             branch=branches.work_branch(card.id, card.fields.get("branch", "")), base=base,
-            card_path=card.path.resolve().as_posix(),
+            card_path=card.path.resolve().as_posix(), finished_lane=lane,
+            how_to_test=(worker_prompt.HOW_TO_TEST_STEP if card.verify == "play" else ""),
             tool_economy=worker_prompt.TOOL_ECONOMY, card_body=card.text,
         )
         open_terminal(root, *session_argv(root, name=card.id, prompt=prompt,
                                          tier=card.tier, agent=card.worker))
-        return (f"working {card.id} — {card.tier or 'default'} tier"
+        return (f"working {card.id} → {lane}/ — {card.tier or 'default'} tier"
                 + (f", {card.worker}" if card.worker and card.worker != "none" else ""))
 
     if note:

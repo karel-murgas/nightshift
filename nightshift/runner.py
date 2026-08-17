@@ -4326,7 +4326,7 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
                                    "The worker recorded no scenario — that is itself a "
                                    "defect on a `verify: play` card; the diff is on "
                                    f"`{branch}`.")
-            lane = "testing" if card.verify == "play" else "done"
+            lane = board.finished_lane(card)
             board.move(root, card, lane)
             return (f"{card_id}: → {lane}/ (reviewed ok, rebased {branch} onto "
                     f"{integration} and merged)")
