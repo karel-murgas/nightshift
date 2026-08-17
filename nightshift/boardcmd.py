@@ -56,6 +56,7 @@ here. It is a dispatch rather than a board write, and it belongs to
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import subprocess
 import sys
 from pathlib import Path
@@ -192,6 +193,110 @@ def promote(root: Path, name: str) -> str:
     return f"{filename}: {board.PRIVATE_LANE}/ → {INBOX}/"
 
 
+#: What a closed inline note becomes. Every stamped value is one this verb can
+#: actually know, which is the whole reason the template is this short:
+#:
+#: * `worker: none` / `recipe: none` — nothing dispatched it, and saying otherwise
+#:   would put an agent's name on a human's work.
+#: * `unattended: false` — the field governs one decision, "may the runner start
+#:   this", and the answer for work routed to a person is no. It is history by the
+#:   time the card is in `done/`, but it must be true history.
+#: * `tier: worker` — `_TIERS` is `{worker, lead}` and neither describes a human.
+#:   The lower of the two is the honest choice: a tier is what the dispatcher would
+#:   have resolved to a model, and nothing here will ever resolve it.
+#:
+#: `## Acceptance` says what actually happened rather than inventing criteria after
+#: the fact. An inline note is one the classifier sent to a person *because* a card
+#: would have been overhead — writing machine-checkable criteria for it now would
+#: be fabricating the brief that deliberately never existed.
+_CLOSED_INLINE = """\
+---
+id: {ident}
+title: "{title}"
+state: done
+tier: worker
+worker: none
+recipe: none
+unattended: false
+created: {today}
+---
+
+## Intent
+
+{body}
+
+## Steps
+
+Done at the keyboard, not dispatched.
+
+## Acceptance
+
+- human: closed by hand on {today}, from `{lane}/{filename}`. This item was routed
+  `inline`, which means a person was the process and their judgment that it is
+  finished is the acceptance — there were never machine criteria to meet.
+
+## Open questions
+
+none
+"""
+
+
+def close_note(root: Path, name: str) -> str:
+    """Verb 5 — an inline note is finished: stamp the minimum and file it in `done/`.
+
+    **The one route whose process had no hands.** A note routed `chore` or `scribe`
+    leaves `inbox/` because the scribe moves it; a `triage` note leaves because
+    triage does; the runner moves cards between lanes as it works. `inline` means
+    *Karel is the process*, so nothing was left to move the note and it sat in the
+    lane after the work was done — where the next classify pass would route it
+    again, and the panel would go on listing finished work as waiting.
+
+    Karel, 2026-08-17: *"Inline process should move the card when we are done."*
+
+    It becomes a card rather than a deletion because `done/` is the board's record
+    of what happened, and inline work happened. `card_schema` schemas that lane
+    fully, so the note is stamped into something that genuinely satisfies it —
+    every field a fact this verb knows (see `_CLOSED_INLINE`), never a plausible
+    filler. The note's own text stays as `## Intent`: it is the best statement of
+    what the work was, and it was written before anyone knew the answer.
+    """
+    filename = _bare_name(name)
+    source = board.board_dir(root) / INBOX / filename
+    if not source.is_file():
+        raise BoardCommandError(f"no note called {filename!r} in {INBOX}/")
+    text = source.read_text(encoding="utf-8")
+    if board.FRONTMATTER.match(text):
+        raise BoardCommandError(
+            f"{INBOX}/{filename} already carries frontmatter — it is a card being "
+            f"triaged, not a bare note, and a card advances through its own lanes")
+    ident = _slug(Path(filename).stem)
+    target = board.board_dir(root) / "done" / f"{ident}.md"
+    if target.exists():
+        raise BoardCommandError(f"done/{ident}.md already exists — rename the note")
+    today = dt.date.today().isoformat()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    textio.write_text_lf(target, _CLOSED_INLINE.format(
+        ident=ident, title=Path(filename).stem.replace('"', "'"), today=today,
+        body=text.strip() or "(the note was empty)", lane=INBOX, filename=filename))
+    source.unlink()
+    board.commit_board(root, f"board: closed inline note {filename} into done/")
+    return f"{filename}: {INBOX}/ → done/{ident}.md"
+
+
+def _slug(stem: str) -> str:
+    """A note's filename as a card id: kebab-case, which is what `id` must be.
+
+    Real notes are called `Regenerate soundtrack.md`, and `card_schema` requires
+    `id` to equal the filename stem — so the rename is part of becoming a card,
+    exactly as it is for the scribe and for triage.
+    """
+    kept = [c.lower() if (c.isalnum() or c in "-_") else "-" for c in stem]
+    slug = "".join(kept)
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return slug.strip("-") or "note"
+
+
 #: Where `create_note` may write. `inbox/` is the ordinary case; `ideas/` is
 #: Karel's own private lane, and writing a *new* file into it reads nothing and
 #: prints nothing back — the same boundary `promote` already keeps, just in the
@@ -314,6 +419,10 @@ def _parser() -> argparse.ArgumentParser:
     moved = subs.add_parser("promote", help=f"move one note into {INBOX}/ without reading it")
     moved.add_argument("name", help="the note's filename, no path")
 
+    closed = subs.add_parser("close", help=f"an inline note is finished: stamp the "
+                                           f"minimum and file it in done/")
+    closed.add_argument("name", help="the note's filename, no path")
+
     note = subs.add_parser("note", help=f"write a new bare note into {INBOX}/ (or {board.PRIVATE_LANE}/)")
     note.add_argument("name", help="the note's filename, no path")
     note.add_argument("--lane", choices=_NOTE_LANES, default=INBOX,
@@ -346,6 +455,8 @@ def main(argv: list[str] | None = None) -> int:
             print(mark_verified(root, args.card_id))
         elif args.verb == "promote":
             print(promote(root, args.name))
+        elif args.verb == "close":
+            print(close_note(root, args.name))
         elif args.verb == "note":
             print(create_note(root, args.name, _body(args), lane=args.lane))
         elif args.verb == "edit":

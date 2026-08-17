@@ -489,6 +489,24 @@ class Context:
                 and c.card.requires not in capabilities and c.card.unattended]
 
     @property
+    def inline_notes(self) -> list[tuple[ingest.Note, ingest.Decision]]:
+        """Notes the classifier sent back to Karel, for the page about Karel's work.
+
+        Not a lane and not a card — which is exactly why they were invisible from
+        `/now`: every section there reads a board lane, and an inline note stays a
+        note on purpose (`ingest`'s four routes: *"inline — Karel, at the keyboard.
+        No card is written for these"*).
+        """
+        return [(note, decision) for note in self.notes
+                if (decision := self.routing.of(note.name)) and decision.route == "inline"]
+
+    @property
+    def triage_notes(self) -> list[tuple[ingest.Note, ingest.Decision]]:
+        """Notes the classifier said need the expensive route, newest routing first."""
+        return [(note, decision) for note in self.notes
+                if (decision := self.routing.of(note.name)) and decision.route == "triage"]
+
+    @property
     def chores(self) -> list[Candidate]:
         """The chore batch's work — which the night skips by *routing*, not refusal.
 
@@ -519,7 +537,7 @@ class Context:
     def counts(self) -> dict[str, int]:
         return {
             "now": len(self.decisions) + len(self.do_now) + len(self.tonight)
-                   + len(self.elsewhere) + len(self.chores),
+                   + len(self.elsewhere) + len(self.chores) + len(self.inline_notes),
             "verify": len(self.testing) + len(self.review),
             "inbox": len(self.notes),
             "ideas": len(self.ideas),
@@ -1163,8 +1181,23 @@ def _render_now(ctx: Context) -> str:
             acts=_act("Read card", href=f"/card/{card.id}")
                  + _act("Start session", onclick="post('/api/session',{})", primary=True)))
     inline_rows = "".join(inline_rows)
-    out.append(_section("Do now", len(do_now),
-                        (_group("Cards the night cannot take") + inline_rows) if inline_rows else "",
+    # The other half of the same question. A note routed `inline` is, by the route's
+    # definition, work for Karel at the keyboard that will never become a card — so
+    # the page that answers "what needs me" was answering half of it and pointing at
+    # another page for the rest, with nothing on either saying so.
+    note_rows = "".join(
+        _row(marker="&rsaquo;",
+             body=(f'<span class="id">{_e(note.name)}</span>'
+                   + (f'<p class="why">{_e(decision.why)}</p>' if decision.why else "")
+                   + _meta([_chip("note", "mute"), f"{note.size} B"])),
+             acts=_act("Open note", href=f"/body/{_rel(ctx.root, note.path)}")
+                  + _act("Start session", onclick="post('/api/session',{})")
+                  + _done_act(note.name))
+        for note, decision in ctx.inline_notes)
+    body = ((_group("Cards the night cannot take") + inline_rows) if inline_rows else "")
+    if note_rows:
+        body += _group(f"Notes routed to you — {len(ctx.inline_notes)}") + note_rows
+    out.append(_section("Do now", len(do_now) + len(ctx.inline_notes), body,
                         note="Work that needs you at the keyboard.",
                         empty="Nothing needs you at the keyboard."))
 
@@ -1221,18 +1254,26 @@ def _render_now(ctx: Context) -> str:
                         bar=bar if tonight else "",
                         empty="Nothing is dispatchable here right now."))
 
-    triage_note = ("Routing.md names what triage would take. Launched one at a time, "
-                   "deliberately — it is the expensive route.")
-    routing = ctx.root / board.ROUTING_VIEW
-    triage_rows = _row(
-        marker="&rsaquo;",
-        body=('<span class="id">Routing.md</span>'
-              f'<div class="meta"><span>{_e(_stamp_of(routing))}</span></div>'),
-        acts=_act("Launch triage", onclick="post('/api/triage',{})", primary=True),
-    ) if routing.is_file() else ""
-    out.append(_section("Waiting on triage", 1 if triage_rows else 0, triage_rows,
-                        note=triage_note,
-                        empty="No routing view yet — classify the inbox first."))
+    # The notes themselves, one row each, each with its own button — not a single
+    # row for `Routing.md` and one "Launch triage" that named no note. Triage takes
+    # exactly one note per call and is the route whose cost is the reason the
+    # classifier exists, so "which one, and on purpose" is the entire gesture.
+    waiting = ctx.triage_notes
+    triage_rows = "".join(
+        _row(marker="&rsaquo;",
+             body=(f'<span class="id">{_e(note.name)}</span>'
+                   + (f'<p class="why">{_e(decision.why)}</p>' if decision.why else "")
+                   + _meta([_chip("triage", "warn"), f"{note.size} B"]
+                           + ([_chip(f"confidence {decision.confidence}", "warn")]
+                              if decision.confidence != "high" else []))),
+             acts=_act("Open note", href=f"/body/{_rel(ctx.root, note.path)}")
+                  + _act("Triage this",
+                         onclick=f"post('/api/triage',{{note:'{_attr(note.name)}'}})",
+                         primary=True))
+        for note, decision in waiting)
+    out.append(_section("Waiting on triage", len(waiting), triage_rows,
+                        note="One at a time, deliberately — it is the expensive route.",
+                        empty="Nothing is waiting on triage."))
 
     out.append(f'<footer>Board on {_e(current_branch(ctx.root))} &middot; '
                f'{_e(ctx.rail.freshness_line)}</footer>')
@@ -1358,7 +1399,14 @@ def _render_inbox(ctx: Context) -> str:
         route: [] for route, _, _ in _ROUTE_GROUPS}
     for note in ctx.notes:
         decision = view.of(note.name)
-        ordered.setdefault(decision.route if decision else "", []).append((note, decision))
+        # A route this page has no group for lands with the unrouted, never in a
+        # bucket nothing renders. Neither producer can currently emit one —
+        # `classify` folds an unknown route to `inline` and `parse_report` only
+        # assigns routes it has headings for — but a note silently missing from
+        # the page is the exact class of failure this whole pass was about, and
+        # "no producer can do that today" is a claim about today.
+        route = decision.route if decision and decision.route in ordered else ""
+        ordered[route].append((note, decision if route else None))
 
     rows = []
     position = 0
@@ -1389,17 +1437,35 @@ def _render_inbox(ctx: Context) -> str:
             rows.append(_row(
                 marker="&rsaquo;", body=body + _meta(meta),
                 acts=_act("Edit", onclick=f"editBody('{slug}','{_attr(rel)}')")
-                     + _act("Open note", href=f"/body/{rel}")))
+                     + _act("Open note", href=f"/body/{rel}")
+                     + _route_act(note.name, route)))
             rows.append(_editor(slug, save=f"saveBody('{slug}','{_attr(rel)}')"))
     rows = "".join(rows)
 
+    # **Two steps, and they are two buttons because the ordering is the rule.**
+    # `ingest`: *"It reports before it spends. Classification is one cheap
+    # dispatch over the whole lane; everything after it is opt-in."* The old pair was
+    # "Classify all" and "Classify + write cards" — the same first half twice, with
+    # the second one unable to be opt-in about the second half and paying for a
+    # fresh classify pass to re-learn what the report on disk already said. So the
+    # second button now acts on the routing that exists: look, then write.
+    writable = sum(1 for note in ctx.notes
+                   if (d := ctx.routing.of(note.name)) and d.route in ingest.WRITABLE_ROUTES)
+    write_label = f"Write the {writable} card(s)" if writable else "Write the cards"
     bar = ('<div class="barbox">'
-           '<p>One cheap dispatch reads every note and sorts it. It reports before '
-           'spending anything else.</p><div class="acts">'
+           '<p>One cheap dispatch reads every note and sorts it, and spends nothing '
+           'else. Writing the cards is the second step, on what it found.</p>'
+           '<div class="acts">'
            + _act("New note", onclick="openEditor('new-note')")
-           + _act("Classify all", onclick="post('/api/ingest',{scribe:false})")
-           + _act("Classify + write cards", onclick="post('/api/ingest',{scribe:true})",
-                  primary=True)
+           + _act(write_label, onclick="post('/api/ingest',{write:true})",
+                  disabled=not writable,
+                  extra='title="One scribe dispatch per chore- or scribe-routed note. '
+                        'Each note becomes its card and leaves the lane; nothing is '
+                        'reclassified."')
+           + _act("Classify all", onclick="post('/api/ingest',{})", primary=True,
+                  extra='title="One classifier dispatch over the whole lane. Writes '
+                        'Routing.md and no cards — this is the look-before-you-spend '
+                        'step."')
            + '</div></div>'
            + _editor("new-note", save="saveNew('new-note','inbox')", named=True,
                      placeholder="One or two sentences is enough."))
@@ -1414,6 +1480,72 @@ def _render_inbox(ctx: Context) -> str:
     return _section("Inbox", len(ctx.notes), rows, note=note,
                     bar=bar, empty="The inbox is empty.") + (
         f'<footer>{len(ctx.notes)} note(s) in inbox</footer>')
+
+
+def _route_act(note: str, route: str) -> str:
+    """The actions a note's route implies, on the note's own row.
+
+    Four routes, four different next steps, and before this the page offered the
+    same two — Edit and Open — to all of them. The bar's bulk buttons could not
+    stand in for it: the write button takes the whole writable set, and triage is
+    explicitly the route you spend on **one** note at a time, chosen deliberately.
+    So the choice belongs on the row, where the note you are looking at is the note
+    the button acts on.
+
+    **`Triage this` is on every row, whatever the route says**, including a note no
+    pass has reached. The route is a recommendation from an agent that deliberately
+    never opened the codebase — the classifier's own charter says *"route from the
+    shape of the request, not the shape of the work"* and *"a wrong answer from you
+    is affordable"* — so the human overruling it is the design working, not a
+    bypass of it. It is also the one action that cannot be spent wrongly by
+    accident: it opens an interactive session you are sitting in front of.
+
+    Karel, 2026-08-17, asking for exactly this: *"change the classification if
+    needed (like run triage on non triaged card for example)"*.
+
+    The reverse override — forcing the scribe onto a triage-routed note — is
+    deliberately **not** here. `ingest --only` refuses it and says why, because
+    that direction is the one that spends on an agent forbidden to read the code
+    and produces a confidently wrong `## Acceptance` if it guesses. Re-run the
+    classify pass, or triage it.
+    """
+    target = _attr(note)
+    acts = []
+    if route in ingest.WRITABLE_ROUTES:
+        acts.append(_act("Write the card",
+                         onclick=f"post('/api/ingest/one',{{note:'{target}'}})",
+                         primary=True,
+                         extra='title="One scribe dispatch on this note, on the route the '
+                               'last pass gave it. The note becomes the card and leaves the '
+                               'lane; a bounce sends it to triage instead."'))
+    if route == "inline":
+        acts.append(_act("Start session", onclick="post('/api/session',{})",
+                         extra='title="Opens a terminal in this repo. An inline note is '
+                               'your own work at the keyboard — no card is dispatched '
+                               'for it."'))
+        acts.append(_done_act(note))
+    acts.append(_act("Triage this", onclick=f"post('/api/triage',{{note:'{target}'}})",
+                     primary=route == "triage",
+                     extra='title="Opens a terminal running the triage charter on this '
+                           'note, whatever the routing said. Interactive on purpose — '
+                           'triage is investigative work you drive, and it is the '
+                           'expensive route, so it is never dispatched for you."'))
+    return "".join(acts)
+
+
+def _done_act(note: str) -> str:
+    """The gesture that closes an inline note, because nothing else can.
+
+    Every other route's note is moved by the process that works it — the scribe
+    and triage move theirs into a lane as they card it, the runner moves cards as
+    it goes. `inline` means *you* are the process, so the move needs a hand, and
+    without one the note sat in `inbox/` after the work was done: re-routed by the
+    next classify pass, and listed by this page as still waiting.
+    """
+    return _act("Done", onclick=f"post('/api/close',{{note:'{_attr(note)}'}})",
+                extra='title="Files this note in done/ as a minimal card — what it '
+                      'asked for, and that you closed it by hand. It leaves the inbox, '
+                      'so the next classify pass will not route it again."')
 
 
 def _changed_since(path: Path, when: dt.datetime | None) -> bool:
@@ -2237,9 +2369,29 @@ class Handler(BaseHTTPRequestHandler):
             return f"chore batch started (pid {spawn_background('chores', paid, root)})"
 
         if path == "api/ingest":
+            # `write` is the second step over the recorded routing; `scribe` is the
+            # combined one-shot, kept because the CLI has it and an unattended
+            # caller wants both halves in one command. The bar only offers the two
+            # separate steps — see `_render_inbox` on why the ordering is the rule.
             _guard_dispatch_account(waived)
+            if body.get("write"):
+                args = ["--write-cards"] + paid
+                return (f"writing the cards for the routed notes "
+                        f"(pid {spawn_background('ingest', args, root)})")
             args = (["--scribe"] if body.get("scribe") else []) + paid
             return f"classifying the inbox (pid {spawn_background('ingest', args, root)})"
+
+        if path == "api/ingest/one":
+            # One note's card, on the route the last pass gave it. The same verb
+            # the bar runs, narrowed by a flag — not a second code path, and not
+            # this server deciding what a route means.
+            _guard_dispatch_account(waived)
+            note = str(body.get("note", ""))
+            if not note:
+                raise PanelError("no note given")
+            args = ["--only", note] + paid
+            return (f"writing the card for {note} "
+                    f"(pid {spawn_background('ingest', args, root)})")
 
         if path == "api/review":
             _guard_dispatch_account(waived)
@@ -2264,6 +2416,14 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "api/promote":
             return _verb(run_command("boardcmd", ["promote", str(body.get("name", ""))], root))
+
+        if path == "api/close":
+            # Spends nothing and dispatches nothing: it is a board write, so it
+            # runs to completion like every other one and answers in its own words.
+            note = str(body.get("note", ""))
+            if not note:
+                raise PanelError("no note given")
+            return _verb(run_command("boardcmd", ["close", note], root))
 
         if path == "api/note":
             lane = str(body.get("lane") or "inbox")
@@ -2353,8 +2513,21 @@ class Handler(BaseHTTPRequestHandler):
             return f"opened a terminal resuming {session}"
 
         if path == "api/triage":
-            open_terminal(root, "claude", "--agent", "triage")
-            return "opened a terminal running the triage charter"
+            # **With the note named, when one is given.** The button used to open
+            # `claude --agent triage` and stop there, leaving you to remember which
+            # of five notes you had meant and type it — for the one route whose
+            # whole discipline is "one note at a time, deliberately". The charter
+            # takes exactly one note per call, so the launcher may as well say
+            # which. Interactive on purpose (§3.4): triage is investigative work a
+            # person drives, never a `-p` dispatch.
+            note = str(body.get("note", ""))
+            command = ["claude", "--agent", "triage"]
+            if note:
+                lane = board.board_rel(root)
+                command.append(f"Triage `{lane}/inbox/{note}`. Follow your charter.")
+            open_terminal(root, *command)
+            return (f"opened a terminal running triage on {note}" if note else
+                    "opened a terminal running the triage charter")
 
         return None
 

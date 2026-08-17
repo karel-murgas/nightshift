@@ -32,6 +32,7 @@ from pathlib import Path
 import pytest
 
 from nightshift import board, boardcmd
+from nightshift.gates import card_schema
 
 # Deliberately awkward: fields out of schema order, a quoted value, a single-quoted
 # one, and `kanban_order` sitting in the middle rather than at the end. A writer
@@ -440,3 +441,96 @@ def test_the_module_grows_no_frontmatter_parser_of_its_own():
         "a regex in here is how the fifth frontmatter parser starts — every write "
         "goes through board.set_fields / board.move")
     assert "re.compile" not in source
+
+
+# --------------------------------------------------------------------------
+# Closing an inline note. Every other route's note is moved by the process that
+# works it — the scribe and triage move theirs as they card it, the runner moves
+# cards as it goes. `inline` means Karel is the process, so the move needed a
+# hand, and without one the note sat in `inbox/` after the work was done: routed
+# again by the next classify pass, and listed by the panel as still waiting.
+# --------------------------------------------------------------------------
+
+
+def test_closing_an_inline_note_files_it_in_done(tmp_path):
+    root = _repo(tmp_path)
+    (root / "Board" / "inbox" / "tidy the hotbar.md").write_text(
+        "The hotbar spacing is off by a pixel.\n", encoding="utf-8")
+
+    said = boardcmd.close_note(root, "tidy the hotbar.md")
+
+    assert not (root / "Board" / "inbox" / "tidy the hotbar.md").exists()
+    card = root / "Board" / "done" / "tidy-the-hotbar.md"
+    assert card.is_file(), said
+    text = card.read_text(encoding="utf-8")
+    assert "id: tidy-the-hotbar" in text
+    assert "state: done" in text
+    assert "The hotbar spacing is off by a pixel." in text, "the note is the intent"
+
+
+def test_a_closed_inline_note_satisfies_the_schema_it_is_now_subject_to(tmp_path):
+    """`done/` is fully schema'd, so the stamp has to produce a real card — not a
+    note in a lane that will redden the board on the next gate run."""
+    root = _repo(tmp_path)
+    (root / "Board" / "inbox" / "some note.md").write_text("do the thing\n",
+                                                           encoding="utf-8")
+    boardcmd.close_note(root, "some note.md")
+
+    violations = card_schema.check(root)
+    assert [v for v in violations if "some" in str(v.path) or "note" in str(v.path)] == []
+    assert violations == [], violations
+
+
+def test_every_stamped_field_is_one_the_verb_actually_knows(tmp_path):
+    """No agent's name on a human's work, and no invented acceptance criteria.
+
+    An inline note is one the classifier sent to a person *because* a card would
+    have been overhead; writing machine-checkable criteria for it afterwards would
+    fabricate the brief that deliberately never existed.
+    """
+    root = _repo(tmp_path)
+    (root / "Board" / "inbox" / "n.md").write_text("x\n", encoding="utf-8")
+    boardcmd.close_note(root, "n.md")
+
+    text = (root / "Board" / "done" / "n.md").read_text(encoding="utf-8")
+    assert "worker: none" in text and "recipe: none" in text
+    assert "unattended: false" in text
+    assert "closed by hand" in text
+
+
+def test_closing_a_note_that_is_already_a_card_is_refused(tmp_path):
+    """A file with frontmatter is a card mid-triage, and a card advances through
+    its own lanes rather than being stamped into a new one."""
+    root = _repo(tmp_path)
+    (root / "Board" / "inbox" / "half.md").write_text(
+        "---\nid: half\nstate: inbox\n---\n\nbody\n", encoding="utf-8")
+
+    with pytest.raises(boardcmd.BoardCommandError, match="already carries frontmatter"):
+        boardcmd.close_note(root, "half.md")
+    assert (root / "Board" / "inbox" / "half.md").exists()
+
+
+def test_closing_a_note_that_is_not_there_is_refused(tmp_path):
+    root = _repo(tmp_path)
+    with pytest.raises(boardcmd.BoardCommandError, match="no note called"):
+        boardcmd.close_note(root, "ghost.md")
+
+
+def test_closing_will_not_overwrite_a_card_that_already_has_the_name(tmp_path):
+    root = _repo(tmp_path)
+    (root / "Board" / "done" / "taken.md").write_text("the real one\n", encoding="utf-8")
+    (root / "Board" / "inbox" / "taken.md").write_text("a note\n", encoding="utf-8")
+
+    with pytest.raises(boardcmd.BoardCommandError, match="already exists"):
+        boardcmd.close_note(root, "taken.md")
+    assert (root / "Board" / "done" / "taken.md").read_text(encoding="utf-8") \
+        == "the real one\n"
+
+
+def test_the_close_is_committed_like_every_other_board_write(tmp_path):
+    root = _repo(tmp_path)
+    (root / "Board" / "inbox" / "n.md").write_text("x\n", encoding="utf-8")
+    boardcmd.close_note(root, "n.md")
+
+    assert _git(root, "status", "--porcelain").stdout.strip() == ""
+    assert "closed inline note" in _git(root, "log", "-1", "--format=%s").stdout

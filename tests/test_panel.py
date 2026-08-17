@@ -1446,3 +1446,226 @@ def test_a_chore_that_needs_another_machine_is_filed_as_that_instead(tmp_path):
     ctx = panel.read_context(root)
     assert [c.card.id for c in ctx.elsewhere] == ["gpu-chore"]
     assert ctx.chores == []
+
+
+# --------------------------------------------------------------------------
+# The lifecycle, from the page. Every route's next step is a button on the row
+# it belongs to: before this the inbox offered Edit and Open to all four, the
+# bar's two buttons ran the same classify pass twice, and "Launch triage" named
+# no note for the one route whose whole discipline is choosing one deliberately.
+# --------------------------------------------------------------------------
+
+
+def test_a_writable_note_offers_the_verb_that_cards_it(server):
+    base, root = server
+    _notes(root, **{"ready.md": "a", "needs-you.md": "b"})
+    (root / board.ROUTING_VIEW).write_text(_ROUTED, encoding="utf-8")
+
+    _, text = _get(base, "inbox")
+    assert "Write the card" in text
+    assert "/api/ingest/one" in text
+
+
+def _no_veto(monkeypatch) -> None:
+    """Take the account veto out of the picture for a test that is not about it.
+
+    Without this the guard reads whatever `~/.claude.json` says on the machine
+    running the suite — the same non-hermetic read
+    `test_guard_refuses_when_the_live_identity_shows_spend_enabled` exists to keep
+    out of tests that are about something else.
+    """
+    monkeypatch.setattr(panel.usage, "read_identity",
+                        lambda path: panel.usage.Identity(
+                            fetched=True, has_extra_usage_enabled=False))
+
+
+def test_writing_one_card_runs_the_per_note_verb(server, monkeypatch):
+    base, root = server
+    seen = []
+    monkeypatch.setattr(panel, "spawn_background",
+                        lambda module, args, r: seen.append((module, args)) or 7)
+    _no_veto(monkeypatch)
+
+    status, data = _post(base, "api/ingest/one", {"note": "ready.md"})
+
+    assert status == 200, data
+    assert seen == [("ingest", ["--only", "ready.md"])]
+    assert "ready.md" in data["message"]
+
+
+def test_writing_one_card_needs_a_note(server, monkeypatch):
+    base, _ = server
+    _no_veto(monkeypatch)
+    status, data = _post(base, "api/ingest/one", {})
+    assert status == 400
+    assert "no note given" in data["message"]
+
+
+def test_the_write_button_runs_the_second_step_not_a_second_classify(server, monkeypatch):
+    """The bar used to offer "Classify all" and "Classify + write cards" — the same
+    first half twice, the second unable to be opt-in about spending on the second
+    half, and paying for a fresh pass to re-learn what Routing.md already said."""
+    base, root = server
+    seen = []
+    monkeypatch.setattr(panel, "spawn_background",
+                        lambda module, args, r: seen.append(args) or 7)
+    _no_veto(monkeypatch)
+
+    _post(base, "api/ingest", {"write": True})
+    assert seen == [["--write-cards"]]
+
+    _post(base, "api/ingest", {})
+    assert seen[-1] == [], "classify spends on the classifier and nothing else"
+
+
+def test_triage_is_launched_on_the_note_you_picked(server, monkeypatch):
+    base, root = server
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal",
+                        lambda r, *command: opened.append(command))
+
+    status, data = _post(base, "api/triage", {"note": "stun-grenade.md"})
+
+    assert status == 200, data
+    assert opened[0][:3] == ("claude", "--agent", "triage")
+    assert "Board/inbox/stun-grenade.md" in opened[0][3]
+    assert "stun-grenade.md" in data["message"]
+
+
+def test_triage_with_no_note_still_opens_the_charter(server, monkeypatch):
+    """The old behaviour, kept: a session you drive yourself is legitimate."""
+    base, _ = server
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal",
+                        lambda r, *command: opened.append(command))
+
+    _post(base, "api/triage", {})
+    assert opened == [("claude", "--agent", "triage")]
+
+
+def test_the_triage_section_lists_the_notes_not_the_report_file(server):
+    """It used to be one row for `Routing.md` and one button that named no note."""
+    base, root = server
+    _notes(root, **{"forky.md": "a"})
+    (root / board.ROUTING_VIEW).write_text(_ROUTED.replace(
+        "## Waiting on triage (0)\n\n_none_",
+        "## Waiting on triage (1)\n\nThe expensive route.\n\n"
+        "- **forky.md** - the fork cannot be posed without the code"), encoding="utf-8")
+
+    _, text = _get(base, "now")
+    assert "forky.md" in text
+    assert "the fork cannot be posed without the code" in text
+    assert "Routing.md" not in text.split("Waiting on triage")[1]
+
+
+def test_an_inline_note_is_on_the_page_about_your_own_work(server):
+    """`/now` answered "what needs me" from board lanes only, and an inline-routed
+    note is by definition work for Karel that will never become a card."""
+    base, root = server
+    _notes(root, **{"needs-you.md": "b"})
+    (root / board.ROUTING_VIEW).write_text(_ROUTED, encoding="utf-8")
+
+    _, text = _get(base, "now")
+    head, _, rest = text.partition("Notes routed to you")
+    assert "needs-you.md" in rest
+    assert "the note itself says to wait for a direction" in rest
+    assert panel.read_context(root).counts()["now"] == 1
+
+
+def test_a_carded_note_stops_being_counted_as_needing_you(server):
+    """The count follows the lane, so carding a note removes it from both."""
+    base, root = server
+    _notes(root, **{"needs-you.md": "b"})
+    (root / board.ROUTING_VIEW).write_text(_ROUTED, encoding="utf-8")
+    assert panel.read_context(root).counts()["now"] == 1
+
+    (root / "Board" / "inbox" / "needs-you.md").unlink()
+    assert panel.read_context(root).counts()["now"] == 0
+
+
+def test_an_inline_note_can_be_closed_from_the_page(server):
+    """The gesture the inline route had no process for. Karel, 2026-08-17: "Inline
+    process should move the card when we are done."
+
+    Runs the real `boardcmd close` — the panel's founding rule is that a button is
+    a CLI verb, and a board write that only the panel can perform is a board write
+    nobody can audit from a terminal.
+    """
+    base, root = server
+    (root / "Board" / "inbox" / "tidy the hotbar.md").write_text(
+        "spacing is off\n", encoding="utf-8")
+
+    status, data = _post(base, "api/close", {"note": "tidy the hotbar.md"})
+
+    assert status == 200, data
+    assert "done/tidy-the-hotbar.md" in data["message"]
+    assert not (root / "Board" / "inbox" / "tidy the hotbar.md").exists()
+    assert (root / "Board" / "done" / "tidy-the-hotbar.md").is_file()
+
+
+def test_closing_needs_a_note(server):
+    base, _ = server
+    status, data = _post(base, "api/close", {})
+    assert status == 400
+    assert "no note given" in data["message"]
+
+
+def test_an_inline_note_carries_the_button_on_both_pages_it_appears_on(server):
+    base, root = server
+    _notes(root, **{"needs-you.md": "b"})
+    (root / board.ROUTING_VIEW).write_text(_ROUTED, encoding="utf-8")
+
+    for page in ("inbox", "now"):
+        _, text = _get(base, page)
+        assert "/api/close" in text, f"{page} offers no way to close it"
+
+
+def test_every_note_can_be_sent_to_triage_whatever_the_routing_said(server):
+    """The route is a recommendation from an agent that never opened the codebase.
+
+    Karel, 2026-08-17: "change the classification if needed (like run triage on non
+    triaged card for example)". Overruling a cheap classifier is the design working
+    — and triage is the one action that cannot be spent wrongly by accident, since
+    it opens a session you are sitting in front of.
+    """
+    base, root = server
+    _notes(root, **{"ready.md": "a", "needs-you.md": "b", "unrouted.md": "c"})
+    (root / board.ROUTING_VIEW).write_text(_ROUTED, encoding="utf-8")
+
+    _, text = _get(base, "inbox")
+    for note in ("ready.md", "needs-you.md", "unrouted.md"):
+        row = text.split(note, 1)[1].split('class="row"', 1)[0]
+        assert "/api/triage" in row, f"{note} cannot be sent to triage"
+
+
+def test_the_scribe_is_not_offered_for_a_note_routed_to_triage(server):
+    """The override that *does* stay closed. `ingest --only` refuses it and says
+    why: it spends on an agent forbidden to read the code, and a confidently wrong
+    `## Acceptance` is dispatchable and worse than no card."""
+    base, root = server
+    _notes(root, **{"forky.md": "a"})
+    (root / board.ROUTING_VIEW).write_text(_ROUTED.replace(
+        "## Waiting on triage (0)\n\n_none_",
+        "## Waiting on triage (1)\n\nThe expensive route.\n\n"
+        "- **forky.md** - a real fork"), encoding="utf-8")
+
+    _, text = _get(base, "inbox")
+    row = text.split("forky.md", 1)[1].split('class="row"', 1)[0]
+    assert "/api/ingest/one" not in row
+
+
+def test_a_note_with_a_route_the_page_has_no_group_for_still_renders(server):
+    """Neither producer can emit one today — `classify` folds an unknown route to
+    `inline`, `parse_report` only assigns routes it has headings for. The guard is
+    there because a note silently missing from the page is the exact class of
+    failure this pass was about, and "no producer can do that" is about today."""
+    base, root = server
+    _notes(root, **{"odd.md": "a"})
+    (root / board.ROUTING_VIEW).write_text(
+        "# Routing - 2026-08-17 09:51\n\n## Bespoke lane (1)\n\nWho knows.\n\n"
+        "- **odd.md** - routed somewhere this page has never heard of\n",
+        encoding="utf-8")
+
+    _, text = _get(base, "inbox")
+    assert "odd.md" in text
+    assert "Not yet classified" in text

@@ -63,6 +63,24 @@ SCRIBE_TIMEOUT_S = 900
 
 ROUTES = ("chore", "inline", "scribe", "triage")
 
+#: The routes `--scribe` can turn into cards, and the reason the set is not just
+#: `("scribe",)`.
+#:
+#: **`chore` was a dead end until 2026-08-17.** The classifier's charter says a
+#: chore "becomes a thin card and runs in a batch overnight", the scribe's charter
+#: has a whole section on writing one (*"A short note with nothing to decide is a
+#: chore card, and writing it is exactly your job"*), and `chores.select` reads
+#: `kind: chore` cards out of `tasks/` — every piece was built. Nothing ever asked
+#: the scribe for them: this fan-out took `by_route("scribe")` alone, so a
+#: chore-routed note sat in the lane forever and the panel's Chores section was
+#: permanently, accurately empty.
+#:
+#: The two that stay out are out for their own reasons, not by omission. `inline`
+#: is Karel's own work and gets no card *by definition* — that is what the route
+#: means. `triage` is never dispatched from here at all (see the module docstring):
+#: it is the expensive route and choosing when to spend it is a human's call.
+WRITABLE_ROUTES = ("chore", "scribe")
+
 #: A fenced block the model wrapped its JSON in. Tolerated rather than forbidden: the
 #: charter asks for bare JSON, and rejecting a fence would fail a run over formatting.
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
@@ -246,20 +264,80 @@ def classify(found: list[Note], root: Path, *, model: str = CLASSIFIER_MODEL,
     return routing
 
 
+def card_ids(root: Path) -> set[str]:
+    """Every card id on the board, whatever lane holds it.
+
+    `inbox` is excluded deliberately: a bare note is not a card, and the whole
+    question this set is used to answer is whether one *became* one.
+    """
+    return {card.id for lane in board.LANES if lane != "inbox"
+            for card in board.cards(root, lane)}
+
+
+@dataclass
+class Wrote:
+    """What one scribe dispatch actually did to the board.
+
+    A dispatch that returns cleanly is not evidence that a card exists. **The
+    scribe's contract is the one `triage` already states** — *"the note **is** the
+    card. You edit the file in place and move it; you never copy it into a new
+    card and leave the original behind"* — and until 2026-08-17 nothing checked
+    it, on either path. The failure that hides in the gap is not a missing card;
+    it is a **duplicate**: a card written while the note stays in `inbox/` gets
+    re-routed by the next classify pass and carded again, and the second card
+    looks exactly as legitimate as the first.
+
+    So the effect is measured rather than assumed, by the only two facts a
+    deterministic caller can check: did a card appear, and did the note leave.
+    The note's *name* cannot be part of that check — a card id is a kebab-case
+    stem and real notes are called `Regenerate soundtrack.md`, so the scribe has
+    to rename as it moves.
+    """
+
+    note: str
+    carded: list[str] = field(default_factory=list)
+    consumed: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.carded) and self.consumed
+
+    @property
+    def complaint(self) -> str:
+        """What to say when it is not `ok`. Empty when it is."""
+        if self.ok:
+            return ""
+        if self.carded and not self.consumed:
+            return (f"wrote {', '.join(self.carded)} but left the note in inbox/ - the "
+                    f"next classify pass will route it again and card it twice")
+        if self.consumed and not self.carded:
+            return "the note left inbox/ and no card appeared anywhere on the board"
+        return "no card appeared and the note is untouched - nothing happened"
+
+
 def scribe(decisions: list[Decision], root: Path, *, allow_paid: bool = False,
            model: str = SCRIBE_MODEL,
-           timeout: int = SCRIBE_TIMEOUT_S) -> tuple[int, int, int]:
-    """Fan the scribe over its bucket. Returns (written, bounced, blocked)."""
-    written = bounced = blocked = 0
+           timeout: int = SCRIBE_TIMEOUT_S) -> tuple[int, int, int, int]:
+    """Fan the scribe over the writable routes.
+
+    Returns (written, bounced, blocked, stranded) — where `written` means a card
+    is on the board *and* the note has left the lane, and `stranded` counts the
+    dispatches that returned cleanly without achieving both. See `Wrote`.
+    """
+    lane = board.board_dir(root) / "inbox"
+    written = bounced = blocked = stranded = 0
     for decision in decisions:
         if not _guard(allow_paid, f"scribe on {decision.note}").allow:
-            blocked = len(decisions) - written - bounced
+            blocked = len(decisions) - written - bounced - stranded
             break
         print(f"  scribe: {decision.note}")
+        before = card_ids(root)
         text, why = _dispatch("scribe", (
             f"Write the card for `Board/inbox/{decision.note}`. Follow your charter: "
-            f"read the note and the schema, not the codebase. If you cannot ground the "
-            f"acceptance criteria, emit the bounce object instead of a card."
+            f"read the note and the schema, not the codebase. The note **is** the card - "
+            f"edit that file in place and move it to its lane; never leave the original "
+            f"behind. If you cannot ground the acceptance criteria, emit the bounce "
+            f"object instead of a card."
         ), root, model, timeout)
         if why:
             print(f"    ! failed - {why}")
@@ -269,9 +347,17 @@ def scribe(decisions: list[Decision], root: Path, *, allow_paid: bool = False,
         if payload and payload.get("bounce"):
             print(f"    bounced to triage - {payload.get('reason', 'no reason given')}")
             bounced += 1
-        else:
+            continue
+        did = Wrote(note=decision.note,
+                    carded=sorted(card_ids(root) - before),
+                    consumed=not (lane / decision.note).exists())
+        if did.ok:
+            print(f"    -> {', '.join(did.carded)}")
             written += 1
-    return written, bounced, blocked
+        else:
+            print(f"    ! {did.complaint}")
+            stranded += 1
+    return written, bounced, blocked, stranded
 
 
 #: Heading and blurb per route, in the order the report lists them.
@@ -439,7 +525,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=None,
                         help="repo root (default: found from the cwd)")
     parser.add_argument("--scribe", action="store_true",
-                        help="after reporting, write cards for the scribe bucket")
+                        help=f"after reporting, write cards for the "
+                             f"{' and '.join(WRITABLE_ROUTES)} buckets")
+    parser.add_argument("--only", metavar="NOTE", default="",
+                        help="write the card for exactly this note, using the route the "
+                             "last pass gave it, and classify nothing. The per-note verb "
+                             "the panel's own rows need")
+    parser.add_argument("--write-cards", action="store_true",
+                        help=f"write the cards for every {' or '.join(WRITABLE_ROUTES)} "
+                             f"note in the last pass, and classify nothing")
     parser.add_argument("--allow-paid", action="store_true",
                         help="proceed even if a dispatch would draw on paid credits")
     parser.add_argument("--model", default=CLASSIFIER_MODEL,
@@ -453,6 +547,12 @@ def main(argv: list[str] | None = None) -> int:
         manifest.find_root(root)
     except Exception:
         pass                                  # a repo without a manifest still has a lane
+
+    if args.only:
+        return _write_one(root, args.only, allow_paid=args.allow_paid)
+
+    if args.write_cards:
+        return _write_recorded(root, allow_paid=args.allow_paid)
 
     found = notes(root)
     print(f"ingest: {len(found)} note(s) in {board.board_rel(root)}/inbox")
@@ -493,14 +593,101 @@ def main(argv: list[str] | None = None) -> int:
         print(f"    {route:8} {len(routing.by_route(route))}")
 
     if args.scribe:
-        bucket = routing.by_route("scribe")
+        # Both writable buckets, in the order the report lists them, so the cheap
+        # batch work is carded before the elaborated notes that take longer.
+        bucket = [d for route in WRITABLE_ROUTES for d in routing.by_route(route)]
         if not bucket:
-            print("  no notes routed to scribe")
+            print(f"  no notes routed to {' or '.join(WRITABLE_ROUTES)}")
         else:
-            written, bounced, blocked = scribe(bucket, root, allow_paid=args.allow_paid)
-            print(f"  scribe: {written} card(s), {bounced} bounced, {blocked} not reached")
+            written, bounced, blocked, stranded = scribe(bucket, root,
+                                                         allow_paid=args.allow_paid)
+            print(f"  scribe: {written} card(s), {bounced} bounced, "
+                  f"{stranded} stranded, {blocked} not reached")
             if blocked:
                 return 3
+            if stranded:
+                return 1
+    return 0
+
+
+def _write_recorded(root: Path, *, allow_paid: bool = False) -> int:
+    """`--write-cards`: card every writable note the last pass routed, no reclassify.
+
+    **The second step of the two the module's own ordering asks for**, separated so
+    that it *is* a second step. `--scribe` does both halves in one command, and it
+    has to for the unattended case — but as the shape of a button it quietly
+    inverts the rule this module was built on: *"It reports before it spends.
+    Classification is one cheap dispatch over the whole lane; everything after it
+    is opt-in."* A combined button cannot be opt-in about the second half, and it
+    pays for a fresh classify pass every time it is pressed to re-learn what the
+    report on disk already says.
+
+    So: classify to look, then write when the look was fine. `--only` is the same
+    act on one note; this is the same act on all of them.
+    """
+    view = read_view(root)
+    if not view.known:
+        print("ingest: no routing pass on record - classify the inbox first "
+              "(`python -m nightshift.ingest`)")
+        return 2
+    present = {note.name for note in notes(root)}
+    bucket = [d for route in WRITABLE_ROUTES for d in view.decisions.values()
+              if d.route == route and d.note in present]
+    when = f", from the pass of {view.written:%Y-%m-%d %H:%M}" if view.written else ""
+    print(f"ingest: {len(bucket)} note(s) to card{when}")
+    if not bucket:
+        print(f"  nothing routed to {' or '.join(WRITABLE_ROUTES)} is still in the lane")
+        return 0
+    ensure_workspace_trusted(root)
+    written, bounced, blocked, stranded = scribe(bucket, root, allow_paid=allow_paid)
+    print(f"  scribe: {written} card(s), {bounced} bounced, "
+          f"{stranded} stranded, {blocked} not reached")
+    if blocked:
+        return 3
+    return 1 if stranded else 0
+
+
+def _write_one(root: Path, note: str, *, allow_paid: bool = False) -> int:
+    """`--only <note>`: card exactly this note, on the route it was already given.
+
+    It reads the route back off `Routing.md` rather than classifying again. That is
+    the point of the flag: one note's card costs one scribe dispatch, not a fresh
+    pass over the whole lane — and re-classifying to answer a question already
+    answered is the expense this module exists to avoid.
+
+    A note routed `inline` or `triage` is refused rather than quietly scribed. Both
+    refusals are the route's own meaning: `inline` has no card by definition, and
+    `triage` is never dispatched from here.
+    """
+    lane = board.board_dir(root) / "inbox"
+    if not (lane / note).is_file():
+        print(f"ingest: no note named {note!r} in {board.board_rel(root)}/inbox")
+        return 2
+    view = read_view(root)
+    decision = view.of(note)
+    if decision is None:
+        print(f"ingest: {note} has no routing yet - classify the inbox first "
+              f"(`python -m nightshift.ingest`)")
+        return 2
+    if decision.route not in WRITABLE_ROUTES:
+        print(f"ingest: {note} is routed `{decision.route}`, and only "
+              f"{' and '.join(WRITABLE_ROUTES)} can be written from here")
+        if decision.route == "triage":
+            print("  triage is the expensive route and is launched deliberately, "
+                  "one note at a time, by a human")
+        elif decision.route == "inline":
+            print("  an inline note is your own work at the keyboard - it gets no card")
+        return 2
+
+    print(f"ingest: {note} ({decision.route})")
+    if not _guard(allow_paid, f"scribe on {note}").allow:
+        return 3
+    ensure_workspace_trusted(root)
+    written, bounced, blocked, stranded = scribe([decision], root, allow_paid=allow_paid)
+    if blocked:
+        return 3
+    if stranded or not written:
+        return 1
     return 0
 
 
