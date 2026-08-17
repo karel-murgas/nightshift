@@ -906,12 +906,23 @@ def _runbox_html(ctx: Context) -> str:
     failed = len(run_record.failures(record))
     queued = len(ctx.tonight)
 
+    shown = shown_jobs(ctx.jobs)
+    live_jobs = [job for job, state in shown if state == jobs.RUNNING]
+
     if not card_id:
         last = str(status.get("card") or "")
         when = str(status.get("updated") or "")
         tail = (f"Last was {last} at {when[11:16]}." if last and when else
                 "Nothing has dispatched on this machine yet.")
-        head = ('<p class="eyebrow">No run in progress</p>'
+        # **"No run in progress" over a pulsing `ingest` is a contradiction**, and
+        # it is one a reader resolves against us: Karel read the rail with a live
+        # classify pass on it and reported the panel as showing nothing about it.
+        # The eyebrow is a claim about the *queue* — no card is being dispatched —
+        # so when a background command is running it says that instead of implying
+        # the machine is idle. Both statements were always true; only one of them
+        # was on screen.
+        eyebrow = ("No card dispatching" if live_jobs else "No run in progress")
+        head = (f'<p class="eyebrow">{_e(eyebrow)}</p>'
                 f'<div class="runline"><span class="dim">{_e(tail)}</span></div>')
     else:
         attempt = status.get("attempt")
@@ -933,7 +944,7 @@ def _runbox_html(ctx: Context) -> str:
     tally = (f'<p class="tallyline"><b>{landed}</b> landed &middot; '
              f'<b>{failed}</b> back in tasks &middot; <b>{queued}</b> queued'
              f'{_act("Run detail", href="/run")}</p>')
-    return f'<div class="runbox">{head}{_jobs_html(ctx)}{tally}</div>'
+    return f'<div class="runbox">{head}{_jobs_html(shown)}{tally}</div>'
 
 
 #: How long a finished job stays in the rail. Long enough that a classify pass
@@ -979,7 +990,7 @@ def shown_jobs(all_jobs: list[jobs.Job], *,
     return keep
 
 
-def _jobs_html(ctx: Context) -> str:
+def _jobs_html(shown: list[tuple[jobs.Job, str]]) -> str:
     """The rail's line per background command the panel started.
 
     This is the panel saying what *it* set in motion, which is a different
@@ -987,8 +998,11 @@ def _jobs_html(ctx: Context) -> str:
     that was unanswerable. A dispatch shows both: the phase pills above say how
     far the night has got, this line says the process is alive and where its
     output is.
+
+    Takes the already-computed list rather than the context, because the caller
+    needs the same answer for its own eyebrow and `jobs.state` is not free — it
+    shells out to `tasklist` on Windows for every job with no finish on file.
     """
-    shown = shown_jobs(ctx.jobs)
     if not shown:
         return ""
     rows = []
@@ -1637,9 +1651,65 @@ def _said(entry: dict, limit: int = 90) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+#: How far back the Run page's job history reaches. The rail shows what is news
+#: (`JOB_SHOWN_FOR`, two hours); this is the page you open to ask what happened,
+#: so it shows everything still on file — `jobs.KEEP` records — and lets the
+#: reader decide what is old.
+JOBS_ON_RUN_PAGE = jobs.KEEP
+
+
+def _jobs_section(ctx: Context) -> str:
+    """Every background command this panel started, newest first.
+
+    **The Run page used to be about the runner and nothing else**, which made it
+    the wrong answer to the question it is named after. Karel, 2026-08-17, with an
+    `ingest` three minutes into a live run and a header reading *Last run — 2026-08-02*:
+    *"I'm running the ingest, but run page doesn't show details about it, it shows
+    last runner or something like that."*
+
+    That was a fair reading of "Run detail". A night is one kind of run and the
+    page knew only that kind, so a live `ingest`, `chores`, `drain`, `preflight`
+    or `fix` had one line in the rail and no detail anywhere — while the page
+    presented a fortnight-old night under a heading that implied the present.
+
+    It sits **first**, above the night, because a job that is running now is the
+    reason the page was opened. The night's own roster keeps everything it had:
+    per-card outcomes, cost, and the session to resume.
+    """
+    rows = []
+    running = 0
+    # One `jobs.state` per job, not two: on Windows it answers "is that pid alive"
+    # by running `tasklist`, and this page can be carrying eighty records.
+    for job in ctx.jobs[:JOBS_ON_RUN_PAGE]:
+        status = jobs.state(job)
+        running += status == jobs.RUNNING
+        _, word = _JOB_MARK.get(status, ("", status))
+        mark = {jobs.DONE: '<td class="mark m-ok">&check;</td>',
+                jobs.FAILED: '<td class="mark m-bad">&times;</td>',
+                jobs.RUNNING: '<td class="mark m-now">&middot;</td>'}.get(
+                    status, '<td class="mark m-wait">?</td>')
+        started = job.started_at
+        when = f"{started:%d %b %H:%M}" if started else ""
+        said = word if status != jobs.FAILED else f"{word} — exit {job.exit_code}"
+        rows.append(
+            f'<tr>{mark}<td class="card">{_e(job.label)}</td>'
+            f'<td class="lane">{_e(when)}</td>'
+            f'<td class="num">{_e(jobs.elapsed(job))}</td>'
+            f'<td class="said">{_e(said)} &mdash; <code>{_e(job.command)}</code></td>'
+            f'<td class="num">{_act("Output", href=f"/log/{job.ident}")}</td></tr>')
+    note = (f"{running} running now" if running else
+            "Nothing running — these are what this panel has started.")
+    return _section("Started from here", len(rows),
+                    f'<div class="roster"><table><tbody>{"".join(rows)}</tbody></table></div>'
+                    if rows else "", note=note,
+                    sub="Every verb the buttons spawn, with the command's own output. "
+                        "A night is one of these; the roster below is that night's cards.",
+                    empty="No button on this panel has started anything yet.")
+
+
 def _render_run(ctx: Context) -> str:
     record = _latest_record(ctx.root)
-    out = []
+    out = [_jobs_section(ctx)]
     dispatched = record.get("dispatched", [])
 
     body = []

@@ -658,3 +658,76 @@ def test_write_cards_ignores_a_recorded_note_that_has_since_left_the_lane(
 
     assert ingest.main(["--root", str(root), "--write-cards"]) == 0
     assert "still in the lane" in capsys.readouterr().out
+
+
+# ---------------------------------------------- a bounce re-routes, as promised
+
+
+def test_a_bounce_moves_the_note_to_triage_in_the_view(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The charter says a bounce "re-routes the note to `triage`, which is the
+    correct outcome and counts as success". Nothing performed it, so the note kept
+    the route that had just failed and the panel's button bought the same bounce
+    again. Measured on the first real fan-out: three of five notes bounced, all
+    three still routed `chore` afterwards.
+    """
+    root = _repo(tmp_path, alpha="a", beta="b")
+
+    def fake(agent: str, prompt: str, root: Path, *_a, **_k):
+        if agent == "classifier":
+            return json.dumps({"notes": [
+                {"file": "alpha.md", "route": "chore", "why": "looks thin"},
+                {"file": "beta.md", "route": "chore", "why": "also thin"}]}), ""
+        if _note_of(prompt) == "alpha.md":
+            return json.dumps({"bounce": True, "note": "alpha.md",
+                               "reason": "no anchor number to ground acceptance"}), ""
+        _card_the_note(root, _note_of(prompt))
+        return "{}", ""
+
+    monkeypatch.setattr(ingest, "_dispatch", fake)
+    monkeypatch.setattr(usage, "read", _healthy)
+    ingest.main(["--root", str(root), "--scribe"])
+
+    view = ingest.read_view(root)
+    assert view.of("alpha.md").route == "triage"
+    assert "no anchor number" in view.of("alpha.md").why
+    assert "scribe bounced it" in view.of("alpha.md").why
+
+
+def test_a_bounce_does_not_move_the_classification_timestamp(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The pass really did happen when it says. Restamping would make a bounce look
+    like a fresh classify pass nobody paid for."""
+    root = _repo(tmp_path, alpha="a")
+    _routes(monkeypatch, {"alpha.md": "chore"})
+    ingest.main(["--root", str(root)])
+    before = ingest.read_view(root).written
+
+    ingest.reroute_to_triage(root, "alpha.md", "needs the code", _healthy())
+
+    view = ingest.read_view(root)
+    assert view.written == before
+    assert view.of("alpha.md").route == "triage"
+
+
+def test_a_bounced_note_can_no_longer_be_carded_from_the_per_note_verb(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+    """The point of the re-route, end to end: the second press is refused rather
+    than buying the same bounce again."""
+    root = _repo(tmp_path, alpha="a")
+    scribed = _routes(monkeypatch, {"alpha.md": "chore"},
+                      effect=lambda root, note: None)
+    ingest.main(["--root", str(root)])
+    monkeypatch.setattr(ingest, "_dispatch", lambda agent, prompt, *a, **k: (
+        json.dumps({"bounce": True, "note": "alpha.md", "reason": "needs the code"}), ""))
+
+    assert ingest.main(["--root", str(root), "--only", "alpha.md"]) == 1
+    assert ingest.read_view(root).of("alpha.md").route == "triage"
+
+    assert ingest.main(["--root", str(root), "--only", "alpha.md"]) == 2
+    assert "expensive route" in capsys.readouterr().out
+
+
+def test_rerouting_a_note_the_view_never_had_changes_nothing(tmp_path: Path):
+    root = _repo(tmp_path, alpha="a")
+    assert ingest.reroute_to_triage(root, "ghost.md", "why", _healthy()) is False

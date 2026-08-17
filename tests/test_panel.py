@@ -1669,3 +1669,45 @@ def test_a_note_with_a_route_the_page_has_no_group_for_still_renders(server):
     _, text = _get(base, "inbox")
     assert "odd.md" in text
     assert "Not yet classified" in text
+
+
+def test_the_run_page_shows_what_this_panel_started_not_only_the_night(server):
+    """Karel, 2026-08-17, with a live `ingest` and the page headed "Last run —
+    2026-08-02": "I'm running the ingest, but run page doesn't show details about
+    it, it shows last runner or something like that."
+
+    A night is one kind of run and the page knew only that kind.
+    """
+    base, root = server
+    job = jobs.record(root, "ingest", ["python", "-m", "nightshift.ingest"])
+
+    _, text = _get(base, "run")
+    head, _, rest = text.partition("Last run")
+    assert "Started from here" in head, "the live thing belongs above the old night"
+    assert "ingest" in head
+    assert f"/log/{job.ident}" in head, "with a way into its output"
+    assert "1 running now" in head
+
+
+def test_a_finished_job_stays_on_the_run_page_after_it_leaves_the_rail():
+    """The rail shows what is news; the Run page is where you go to ask what
+    happened, so its window is `jobs.KEEP` rather than two hours."""
+    now = dt.datetime.now()
+    old = jobs.Job(ident="b", label="chores",
+                   started=(now - dt.timedelta(hours=9)).isoformat(),
+                   finished=(now - dt.timedelta(hours=8)).isoformat(), exit_code=1)
+    assert panel.shown_jobs([old], now=now) == []
+    assert panel.JOBS_ON_RUN_PAGE >= jobs.KEEP
+
+
+def test_the_rail_does_not_claim_nothing_is_happening_while_a_job_runs(server):
+    """"No run in progress" over a pulsing `ingest` is a contradiction, and it is
+    one the reader resolves against us. The eyebrow is a claim about the queue."""
+    base, root = server
+    _, idle = _get(base, "now")
+    assert "No run in progress" in idle
+
+    jobs.record(root, "ingest", ["python", "-m", "nightshift.ingest"])
+    _, busy = _get(base, "now")
+    assert "No card dispatching" in busy
+    assert "No run in progress" not in busy
