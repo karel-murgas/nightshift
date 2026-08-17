@@ -376,6 +376,24 @@ def open_terminal(root: Path, *command: str) -> None:
     silently: the window opens on the ambient account, logged in as whoever, and
     nothing on the page says so. Every other spending path here answers to the
     selector; this one did not, which made the dropdown a lie for five buttons.
+
+    **No `cmd.exe` in the Windows path, because a prompt has newlines in it.** This
+    used to spawn `cmd /c start "Command Center" cmd /k <argv>`, which put the whole
+    invocation through two rounds of `cmd` parsing — and `cmd` treats a newline
+    inside an argument as a command separator. Measured 2026-08-17, from the session
+    transcript: a card prompt arrived as its **first line only**, so the session was
+    told "Work this note from the board's inbox" with no note named, went and picked
+    one off the board itself, and worked the wrong thing under the right session
+    name. A direct `CreateProcess` with `CREATE_NEW_CONSOLE` gets the same detached,
+    visible window with no shell in between; a probe writing a six-line argument
+    through both paths returns one line through `cmd` and six through this one.
+
+    The trade-off, stated because it is a real loss: `cmd /k` kept the window open
+    after the CLI exited, and this does not. What that window was worth was a
+    readable error when the launch failed — and the launch failures now surface
+    better than they did, as a `PanelError` sentence on the page (no binary; an argv
+    the OS refuses), because without a shell swallowing them they reach this process
+    as an exception instead of a window that closes before you can read it.
     """
     if command and command[0] == "claude":
         binary = claude_binary()
@@ -384,11 +402,18 @@ def open_terminal(root: Path, *command: str) -> None:
                              "PATH and ~/.local/bin). Install it, or set CLAUDE_BIN.")
         command = (binary, *command[1:])
     if os.name == "nt":
-        subprocess.Popen(["cmd", "/c", "start", "Command Center", "cmd", "/k", *command],
-                         cwd=root, env=_dispatch_env())
-        # gate-ok(subprocess_result_checked): a detached, visible console window the user
-        # drives from here on — there is nothing this function could do with an exit code
-        # from a window that has not been interacted with yet
+        try:
+            subprocess.Popen(command, cwd=root, env=_dispatch_env(),
+                             creationflags=subprocess.CREATE_NEW_CONSOLE)
+            # gate-ok(subprocess_result_checked): a detached, visible console window the
+            # user drives from here on — there is nothing this function could do with an
+            # exit code from a window that has not been interacted with yet
+        except OSError as exc:
+            # Reaches the page now instead of flashing a console. The one that bites is
+            # a command line over the 32767-char `CreateProcess` limit; `session_argv`
+            # spills a long prompt to a file to stay under it, so arriving here means
+            # something else — a bad path, a refused executable.
+            raise PanelError(f"the session could not be started: {exc}") from exc
     else:
         # `shlex.join`, not `" ".join`: the emulator hands this string to a shell, and
         # both a resolved binary path and the card prompt can contain spaces — joined
@@ -487,8 +512,42 @@ def session_argv(root: Path, *, name: str = "", prompt: str = "", tier: str = ""
              str(host_setting(root, "interactive_permission_mode", "acceptEdits"))]
     argv += ["--add-dir", str(board.board_dir(root).resolve())]
     if prompt:
-        argv += ["--", prompt]
+        argv += ["--", _prompt_arg(root, name, prompt, argv)]
     return argv
+
+
+#: How long the whole command line may get before the prompt is handed over as a file
+#: instead. `CreateProcess` refuses a command line over 32767 characters, and this
+#: board is already past that: `grid-distance-metric` builds a 32610-character prompt
+#: (measured 2026-08-17 across 109 cards), which with the flags around it cannot be
+#: launched at all. The margin below that ceiling covers quoting expansion and leaves
+#: the great majority of cards on the direct path, where the session starts working
+#: without reading anything first.
+ARGV_BUDGET = 24000
+
+
+def _prompt_arg(root: Path, name: str, prompt: str, argv: list[str]) -> str:
+    """The prompt itself, or a one-line instruction pointing at it on disk.
+
+    Spilling is not the preferred path and is not used unless the direct one would
+    fail: a prompt on the command line is in front of the session immediately, while
+    a spilled one costs it a `Read` before it can start. But a card long enough to
+    blow the command-line limit is a card the button simply could not open, and
+    "this one card does nothing when you click it" is a worse answer than one extra
+    tool call.
+
+    The file is written where the panel's other per-run artefacts live and named for
+    the session, so a spilled prompt is inspectable after the fact — the same reason
+    `run_producer` writes `prompt-N.md` beside its stream.
+    """
+    if len(subprocess.list2cmdline([*argv, prompt])) <= ARGV_BUDGET:
+        return prompt
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name or "session").strip("-") or "session"
+    path = root / RUNS / "_panel" / f"prompt-{slug}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    textio.write_text_lf(path, prompt)
+    return (f"Your instructions are in `{path.resolve().as_posix()}` — it was too long "
+            f"to pass on the command line. Read that file and follow it.")
 
 
 # --------------------------------------------------------------------------
