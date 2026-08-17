@@ -1657,6 +1657,17 @@ def _said(entry: dict, limit: int = 90) -> str:
 #: reader decide what is old.
 JOBS_ON_RUN_PAGE = jobs.KEEP
 
+#: How many jobs get their output inlined under their row, and how much of it.
+#: Two is the running one plus the last one, which is "what is happening" and
+#: "what just happened" — the two questions the page is opened with. More than
+#: that and the history below is pushed off the screen by logs nobody asked for.
+JOB_TAILS_INLINE = 2
+JOB_TAIL_LINES = 14
+#: Read a little more than `JOB_TAIL_LINES` could need, so the last lines are
+#: whole ones. Reading the whole file to show fourteen lines of it would make
+#: every page load carry a night's worth of `runner` output.
+JOB_TAIL_BYTES = 8_000
+
 
 def _jobs_section(ctx: Context) -> str:
     """Every background command this panel started, newest first.
@@ -1678,11 +1689,17 @@ def _jobs_section(ctx: Context) -> str:
     """
     rows = []
     running = 0
+    inlined = 0
+    #: Counted separately from `rows`, because a row is not a job: an inlined log
+    #: is a row too, and using `len(rows)` made the section header claim four jobs
+    #: over three of them.
+    shown = 0
     # One `jobs.state` per job, not two: on Windows it answers "is that pid alive"
     # by running `tasklist`, and this page can be carrying eighty records.
-    for job in ctx.jobs[:JOBS_ON_RUN_PAGE]:
+    for index, job in enumerate(ctx.jobs[:JOBS_ON_RUN_PAGE]):
         status = jobs.state(job)
         running += status == jobs.RUNNING
+        shown += 1
         _, word = _JOB_MARK.get(status, ("", status))
         mark = {jobs.DONE: '<td class="mark m-ok">&check;</td>',
                 jobs.FAILED: '<td class="mark m-bad">&times;</td>',
@@ -1697,9 +1714,28 @@ def _jobs_section(ctx: Context) -> str:
             f'<td class="num">{_e(jobs.elapsed(job))}</td>'
             f'<td class="said">{_e(said)} &mdash; <code>{_e(job.command)}</code></td>'
             f'<td class="num">{_act("Output", href=f"/log/{job.ident}")}</td></tr>')
+        # **The progress view, inline.** Karel, 2026-08-17: *"there was no overview
+        # of the cards in the run ... the whole point of run was to see how far are
+        # we with the current automated job."* A link to the output is not that: it
+        # is a page you have to decide to open, and the answer to "how far" has to
+        # be on the page you are already looking at.
+        #
+        # The tail rather than a parse of it, deliberately. A per-verb progress
+        # format would be a second thing to keep in step with each command's own
+        # printing, and the commands already print progress — `ingest` numbers its
+        # notes `[2/5]`, `chores` names each item, `preflight` prints a line per
+        # check. Rendering what they write serves every verb, including the ones
+        # nobody has written yet.
+        if inlined < JOB_TAILS_INLINE and (status == jobs.RUNNING or index == 0):
+            tail = jobs.read_log(ctx.root, job.ident, tail=JOB_TAIL_BYTES).strip()
+            if tail:
+                inlined += 1
+                lines = tail.splitlines()[-JOB_TAIL_LINES:]
+                rows.append(f'<tr class="joblog"><td></td><td colspan="4">'
+                            f'<pre>{_e(chr(10).join(lines))}</pre></td><td></td></tr>')
     note = (f"{running} running now" if running else
             "Nothing running — these are what this panel has started.")
-    return _section("Started from here", len(rows),
+    return _section("Started from here", shown,
                     f'<div class="roster"><table><tbody>{"".join(rows)}</tbody></table></div>'
                     if rows else "", note=note,
                     sub="Every verb the buttons spawn, with the command's own output. "
