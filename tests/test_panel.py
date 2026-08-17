@@ -1711,3 +1711,60 @@ def test_the_rail_does_not_claim_nothing_is_happening_while_a_job_runs(server):
     _, busy = _get(base, "now")
     assert "No card dispatching" in busy
     assert "No run in progress" not in busy
+
+
+def test_a_running_jobs_own_output_is_on_the_page_not_behind_a_link(server):
+    """Karel, 2026-08-17: "there was no overview of the cards in the run ... the
+    whole point of run was to see how far are we with the current automated job."
+
+    A link to the output is not that — it is a page you have to decide to open.
+    """
+    base, root = server
+    job = jobs.record(root, "ingest", ["python", "-m", "nightshift.ingest"])
+    jobs.log_path(root, job.ident).write_text(
+        "ingest: 5 note(s) to card\n"
+        "  [1/5] scribe: alpha.md\n    -> alpha\n"
+        "  [2/5] scribe: beta.md\n", encoding="utf-8")
+
+    _, text = _get(base, "run")
+    assert "[2/5] scribe: beta.md" in text, "progress is not on the page"
+    assert 'class="joblog"' in text
+
+
+def test_only_the_live_and_the_latest_job_get_their_output_inlined(server):
+    """More than that and the history below is pushed off the screen by logs
+    nobody asked for."""
+    base, root = server
+    for name in ("oldest", "middle", "newest"):
+        job = jobs.record(root, name, ["python", "-c", "pass"])
+        job.finished = job.started
+        job.exit_code = 0
+        jobs.save(root, job)
+        jobs.log_path(root, job.ident).write_text(f"output of {name}\n", encoding="utf-8")
+
+    _, text = _get(base, "run")
+    assert "output of newest" in text
+    assert "output of oldest" not in text
+    assert text.count('class="joblog"') <= panel.JOB_TAILS_INLINE
+
+
+def test_a_job_with_no_output_yet_gets_no_empty_box(server):
+    """Asserted on the row's class, not on the word: `.roster tr.joblog` is in the
+    stylesheet on every page, so the bare substring is always present."""
+    base, root = server
+    jobs.record(root, "ingest", ["python", "-m", "nightshift.ingest"])
+    _, text = _get(base, "run")
+    assert 'class="joblog"' not in text
+
+
+def test_the_job_count_counts_jobs_not_table_rows(server):
+    """An inlined log is a row too, and `len(rows)` made the header claim four
+    jobs over three of them."""
+    base, root = server
+    for name in ("one", "two"):
+        job = jobs.record(root, name, ["python", "-c", "pass"])
+        jobs.log_path(root, job.ident).write_text("some output\n", encoding="utf-8")
+
+    _, text = _get(base, "run")
+    head = text.split("Started from here", 1)[1][:200]
+    assert re.search(r'class="count">2<', head), head

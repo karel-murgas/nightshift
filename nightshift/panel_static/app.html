@@ -246,6 +246,20 @@
   .roster td.num { font-variant-numeric: tabular-nums; color: var(--ink-dim); text-align: right; }
   .roster td.said { color: var(--ink-faint); white-space: normal; max-width: 34rem; }
   .roster tr.pend td { color: var(--ink-faint); }
+  /* A job's own output, under its row — the answer to "how far are we", on the
+     page you are already looking at rather than behind a link. */
+  .roster tr.joblog td { white-space: normal; padding: 0 0 0.7rem; }
+  .roster tr.joblog pre {
+    margin: 0;
+    padding: 0.5rem 0.7rem;
+    background: var(--panel-2);
+    border-left: 2px solid var(--line);
+    color: var(--ink-dim);
+    font-size: var(--step--1);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-x: auto;
+  }
   .roster tr.now td.card { color: var(--phosphor); }
   .m-ok   { color: var(--phosphor); }
   .m-bad  { color: var(--ember); }

@@ -42,8 +42,8 @@ from pathlib import Path
 from nightshift import board, manifest, textio, usage
 # The one place the CLI is executed lives in `runner`; see the alias's comment there
 # on why this imports it rather than growing a second copy of the deadlock fix.
-from nightshift.runner import (claude_binary, ensure_workspace_trusted, repo_root,
-                               run_cli)
+from nightshift.runner import (claude_binary, ensure_workspace_trusted, host_setting,
+                               repo_root, run_cli)
 
 #: Written at the repo root, next to the digest, because that is the Obsidian vault
 #: root — a report the maintainer has to go looking for is a report they do not read.
@@ -180,6 +180,23 @@ def _cli_result(completed) -> tuple[str, str]:
     return completed.stdout, ""
 
 
+def denials(completed) -> int:
+    """How many tool calls the CLI refused, out of its own envelope.
+
+    `runner.read_telemetry` has read this field for months and reports it as *"the
+    worker was refused a tool it asked for"*; this module ignored it, so an agent
+    that could not write the file it was told to write reported nothing at all and
+    the run said only that nothing happened. It is the difference between "the
+    scribe declined" and "the scribe was not allowed".
+    """
+    try:
+        envelope = json.loads(completed.stdout)
+    except (ValueError, AttributeError):
+        return 0
+    found = envelope.get("permission_denials") if isinstance(envelope, dict) else None
+    return len(found) if isinstance(found, list) else 0
+
+
 def _guard(allow_paid: bool, what: str) -> usage.Verdict:
     """The money rule, checked immediately before spending on `what`."""
     verdict = usage.check(usage.read(), allow_paid=allow_paid)
@@ -205,10 +222,29 @@ def _dispatch(agent: str, prompt: str, root: Path, model: str,
     binary = claude_binary()
     if not binary:
         return "", "the `claude` CLI was not found (set CLAUDE_BIN, or put it on PATH)"
-    argv = [binary, "-p", "--agent", agent, "--output-format", "json"]
+    argv = [binary, "-p", "--agent", agent, "--output-format", "json",
+            # **The flag this module was missing, and it silently broke the scribe.**
+            # Every dispatch site in `runner` passes it — `run_producer`, the
+            # checker, the reviewer, the drain — and this one did not. A headless
+            # `-p` session in the default permission mode has nobody to approve an
+            # edit, so the scribe could not write the card it was asked for: it
+            # explained itself in prose, returned exit 0, and the run reported
+            # "nothing happened" with no idea why. Measured 2026-08-17: two notes
+            # stranded on two consecutive runs.
+            #
+            # Read through `host_setting` rather than hardcoded, for the reason
+            # `runner` reads it that way: the posture is a property of the machine
+            # (`.ai/hosts.json`), not of the verb, and a box that wants a stricter
+            # mode must be able to say so once.
+            "--permission-mode", str(host_setting(root, "permission_mode", "acceptEdits"))]
     if model:
         argv += ["--model", model]
     completed = run_cli(argv, cwd=root, timeout=timeout, prompt=prompt)
+    if refused := denials(completed):
+        # Said here rather than returned, so the seam `_dispatch` presents to its
+        # callers — and to every test that fakes it — stays two values wide.
+        print(f"    ! {refused} tool call(s) refused — the agent asked for something "
+              f"the permission mode does not allow")
     return _cli_result(completed)
 
 
@@ -326,11 +362,14 @@ def scribe(decisions: list[Decision], root: Path, *, allow_paid: bool = False,
     """
     lane = board.board_dir(root) / "inbox"
     written = bounced = blocked = stranded = 0
-    for decision in decisions:
+    for position, decision in enumerate(decisions, start=1):
         if not _guard(allow_paid, f"scribe on {decision.note}").allow:
             blocked = len(decisions) - written - bounced - stranded
             break
-        print(f"  scribe: {decision.note}")
+        # The counter is what makes the log answer "how far are we". A fan-out of
+        # five notes at up to a few minutes each is a long silence otherwise, and
+        # the panel renders this log as its progress view.
+        print(f"  [{position}/{len(decisions)}] scribe: {decision.note}")
         before = card_ids(root)
         text, why = _dispatch("scribe", (
             f"Write the card for `Board/inbox/{decision.note}`. Follow your charter: "
@@ -365,6 +404,14 @@ def scribe(decisions: list[Decision], root: Path, *, allow_paid: bool = False,
             _commit(root, f"{decision.note} carded as {', '.join(did.carded)}")
         else:
             print(f"    ! {did.complaint}")
+            # **The reply is the only evidence, so it is not thrown away.** A
+            # stranded dispatch is by definition the case nobody understands: the
+            # agent returned cleanly, emitted no bounce, and changed nothing. On
+            # 2026-08-17 that happened twice in a row and the log said only
+            # "nothing happened" — the sentence in which the scribe explained
+            # itself had been discarded by the code that printed the complaint.
+            for line in _quote(text):
+                print(line)
             stranded += 1
             # Committed even so, because the half-transition is already on disk
             # and leaving it dirty does not undo it — it only means the next
@@ -373,6 +420,24 @@ def scribe(decisions: list[Decision], root: Path, *, allow_paid: bool = False,
             if did.carded or did.consumed:
                 _commit(root, f"{decision.note} stranded — {did.complaint}")
     return written, bounced, blocked, stranded
+
+
+#: How much of an unexplained reply to quote into the log. Enough to carry a
+#: refusal or a question, short of pasting a whole card draft into a run log.
+QUOTED_LINES = 8
+QUOTED_WIDTH = 160
+
+
+def _quote(text: str) -> list[str]:
+    """The agent's own words, indented, for the log to carry verbatim."""
+    lines = [line.rstrip() for line in (text or "").strip().splitlines() if line.strip()]
+    if not lines:
+        return ["      (it said nothing at all)"]
+    out = [f"      said: {lines[0][:QUOTED_WIDTH]}"]
+    out += [f"            {line[:QUOTED_WIDTH]}" for line in lines[1:QUOTED_LINES]]
+    if len(lines) > QUOTED_LINES:
+        out.append(f"            ... {len(lines) - QUOTED_LINES} more line(s)")
+    return out
 
 
 def _commit(root: Path, what: str) -> None:
