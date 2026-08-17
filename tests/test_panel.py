@@ -37,6 +37,7 @@ import os
 import re
 import subprocess
 import sys
+import socket
 import threading
 import urllib.error
 import urllib.request
@@ -1671,22 +1672,41 @@ def test_a_note_with_a_route_the_page_has_no_group_for_still_renders(server):
     assert "Not yet classified" in text
 
 
-def test_the_run_page_shows_what_this_panel_started_not_only_the_night(server):
+def test_the_run_page_leads_with_what_is_running_not_with_the_night(server):
     """Karel, 2026-08-17, with a live `ingest` and the page headed "Last run —
     2026-08-02": "I'm running the ingest, but run page doesn't show details about
-    it, it shows last runner or something like that."
-
-    A night is one kind of run and the page knew only that kind.
+    it, it shows last runner or something like that." A night is one kind of run
+    and the page knew only that kind.
     """
     base, root = server
     job = jobs.record(root, "ingest", ["python", "-m", "nightshift.ingest"])
 
     _, text = _get(base, "run")
     head, _, rest = text.partition("Last run")
-    assert "Started from here" in head, "the live thing belongs above the old night"
+    assert "Running now" in head
     assert "ingest" in head
     assert f"/log/{job.ident}" in head, "with a way into its output"
-    assert "1 running now" in head
+
+
+def test_only_the_running_job_is_at_the_top_and_the_rest_is_history(server):
+    """Karel: "started from here — I don't think we need a full history at the top
+    of the page ... only current run." The top of a page called Run is where "what
+    is happening" belongs; a fortnight of finished jobs above the night's own
+    roster pushes the thing you came for below the fold."""
+    base, root = server
+    done = jobs.record(root, "chores", ["python", "-c", "pass"])
+    done.finished, done.exit_code = done.started, 0
+    jobs.save(root, done)
+    live = jobs.record(root, "ingest", ["python", "-m", "nightshift.ingest"])
+
+    _, text = _get(base, "run")
+    # Scoped to the section, not to "everything above the night": the status rail
+    # sits above it on every page and legitimately shows a job that finished in the
+    # last couple of hours. The claim here is about which section owns which job.
+    section = text.split("Running now", 1)[1].split("</section>", 1)[0]
+    assert live.ident in section
+    assert done.ident not in section, "a finished job is history, not the current run"
+    assert done.ident in text.split("Earlier from here")[1], "and history is at the foot"
 
 
 def test_a_finished_job_stays_on_the_run_page_after_it_leaves_the_rail():
@@ -1713,39 +1733,78 @@ def test_the_rail_does_not_claim_nothing_is_happening_while_a_job_runs(server):
     assert "No run in progress" not in busy
 
 
-def test_a_running_jobs_own_output_is_on_the_page_not_behind_a_link(server):
-    """Karel, 2026-08-17: "there was no overview of the cards in the run ... the
-    whole point of run was to see how far are we with the current automated job."
+def test_a_running_ingest_is_a_roster_of_notes_not_a_log_tail(server):
+    """Karel, 2026-08-17: "I would expect for the ingest (and other bulk actions)
+    similar overview as for runs. Card xxx classified as XYZ, Card yyy in progress."
 
-    A link to the output is not that — it is a page you have to decide to open.
+    A log tail is what a command happens to print; a roster is the question
+    answered.
     """
     base, root = server
     job = jobs.record(root, "ingest", ["python", "-m", "nightshift.ingest"])
-    jobs.log_path(root, job.ident).write_text(
-        "ingest: 5 note(s) to card\n"
-        "  [1/5] scribe: alpha.md\n    -> alpha\n"
-        "  [2/5] scribe: beta.md\n", encoding="utf-8")
+    jobs.log_path(root, job.ident).write_text("""\
+ingest: 3 note(s) to card
+  [1/3] scribe: alpha.md
+    -> alpha
+  [2/3] scribe: beta.md
+    bounced to triage - needs the code
+  [3/3] scribe: gamma.md
+""", encoding="utf-8")
 
     _, text = _get(base, "run")
-    assert "[2/5] scribe: beta.md" in text, "progress is not on the page"
-    assert 'class="joblog"' in text
+    top = text.split("Last run")[0]
+    assert "carded as" in top and "alpha" in top
+    assert "bounced to triage" in top and "needs the code" in top
+    assert "gamma.md" in top, "the one in flight is on the roster too"
+    assert "2/3" in top, "and so is how far it has got"
+    assert 'class="joblog"' not in top, "a verb we can parse is not shown as a tail"
 
 
-def test_only_the_live_and_the_latest_job_get_their_output_inlined(server):
-    """More than that and the history below is pushed off the screen by logs
-    nobody asked for."""
+def test_a_verb_whose_output_we_do_not_parse_still_shows_its_tail(server):
+    """Honest about being raw rather than pretending to a structure nobody has
+    written yet."""
     base, root = server
-    for name in ("oldest", "middle", "newest"):
-        job = jobs.record(root, name, ["python", "-c", "pass"])
-        job.finished = job.started
-        job.exit_code = 0
-        jobs.save(root, job)
-        jobs.log_path(root, job.ident).write_text(f"output of {name}\n", encoding="utf-8")
+    job = jobs.record(root, "preflight", ["python", "-m", "nightshift.preflight"])
+    jobs.log_path(root, job.ident).write_text("""\
+  [OK  ] lf-worktree
+  [OK  ] gates
+""", encoding="utf-8")
 
     _, text = _get(base, "run")
-    assert "output of newest" in text
-    assert "output of oldest" not in text
-    assert text.count('class="joblog"') <= panel.JOB_TAILS_INLINE
+    assert 'class="joblog"' in text
+    assert "[OK  ] gates" in text
+
+
+def test_a_classify_pass_says_why_it_has_no_per_note_progress(server):
+    """One dispatch over the whole lane is the entire economy of the step, so
+    inventing per-note progress for it would report something nobody measured."""
+    base, root = server
+    job = jobs.record(root, "ingest", ["python", "-m", "nightshift.ingest"])
+    jobs.log_path(root, job.ident).write_text("""\
+ingest: 13 note(s) in Board/inbox
+  classifying with sonnet ...
+""", encoding="utf-8")
+
+    _, text = _get(base, "run")
+    assert "classifying" in text
+    assert "no per-note progress until it lands" in text
+
+
+def test_a_finished_classify_shows_the_routes_it_produced(server):
+    base, root = server
+    job = jobs.record(root, "ingest", ["python", "-m", "nightshift.ingest"])
+    jobs.log_path(root, job.ident).write_text("""\
+ingest: 13 note(s) in Board/inbox
+  classifying with sonnet ...
+  wrote Routing.md
+    chore    3
+    inline   6
+    triage   4
+""", encoding="utf-8")
+
+    _, text = _get(base, "run")
+    assert "3 chore" in text and "6 inline" in text
+    assert "the Inbox page has each one" in text
 
 
 def test_a_job_with_no_output_yet_gets_no_empty_box(server):
@@ -1757,14 +1816,84 @@ def test_a_job_with_no_output_yet_gets_no_empty_box(server):
     assert 'class="joblog"' not in text
 
 
-def test_the_job_count_counts_jobs_not_table_rows(server):
-    """An inlined log is a row too, and `len(rows)` made the header claim four
-    jobs over three of them."""
+def test_the_history_count_counts_jobs_not_table_rows(server):
+    """A row is not a job — the inlined roster is rows too, and `len(rows)` had the
+    header claiming four jobs over three of them."""
     base, root = server
     for name in ("one", "two"):
         job = jobs.record(root, name, ["python", "-c", "pass"])
+        job.finished, job.exit_code = job.started, 0
+        jobs.save(root, job)
         jobs.log_path(root, job.ident).write_text("some output\n", encoding="utf-8")
 
     _, text = _get(base, "run")
-    head = text.split("Started from here", 1)[1][:200]
+    head = text.split("Earlier from here", 1)[1][:200]
     assert re.search(r'class="count">2<', head), head
+
+
+def test_the_port_is_exclusive_so_two_panels_cannot_both_serve_it():
+    """`ThreadingHTTPServer` sets `allow_reuse_address`, which on Windows lets a
+    second live socket bind a port another process is already listening on. Both
+    then serve, connections land on either, and the page you read may come from a
+    process holding code from before your last change.
+
+    Measured 2026-08-17: three restarts appeared not to take, and the fix under
+    test was reported as live while the page came from the previous build. The
+    panel exists to say what is true, and a duplicate of it says what *was* true.
+    """
+    assert panel._Server.allow_reuse_address is False
+
+
+def test_a_panel_already_serving_is_opened_rather_than_refused(tmp_path, capsys,
+                                                              monkeypatch):
+    """The ordinary case, and refusing it broke the launcher.
+
+    Karel, 2026-08-17: "Running the bat opens and immediately closes the window and
+    no browser page opens." Someone double-clicking the launcher while a panel is
+    up wants that panel — an instant exit in a window with no pause is the worst
+    possible answer.
+    """
+    root = _repo(tmp_path)
+    opened = []
+    monkeypatch.setattr(panel.webbrowser, "open", opened.append)
+    held = ThreadingHTTPServer(("127.0.0.1", 0), panel.Handler)
+    panel.Handler.root = root
+    thread = threading.Thread(target=held.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = held.server_address[1]
+        panel.serve(root, port, open_browser=True)          # returns; does not raise
+        said = capsys.readouterr().out
+        assert "already serving" in said
+        assert "holds the code it started with" in said, "and says why to restart it"
+        assert opened == [f"http://127.0.0.1:{port}/now"]
+    finally:
+        held.shutdown()
+        thread.join(timeout=5)
+        held.server_close()
+
+
+def test_a_port_held_by_something_else_is_still_an_error(tmp_path, capsys):
+    """The other reason, kept distinct: a socket that is not a Command Center has
+    nothing to open, so there is nothing to do but say so."""
+    root = _repo(tmp_path)
+    squatter = socket.socket()
+    squatter.bind(("127.0.0.1", 0))
+    squatter.listen(1)
+    try:
+        with pytest.raises(SystemExit) as exit_code:
+            panel.serve(root, squatter.getsockname()[1], open_browser=False)
+        assert exit_code.value.code == 2
+        said = capsys.readouterr().out
+        assert "not a panel" in said
+        assert "--port" in said, "and the way out"
+    finally:
+        squatter.close()
+
+
+def test_already_serving_says_no_when_nothing_is_there():
+    free = socket.socket()
+    free.bind(("127.0.0.1", 0))
+    port = free.getsockname()[1]
+    free.close()
+    assert panel.already_serving(port) is False

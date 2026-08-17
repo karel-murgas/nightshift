@@ -1,0 +1,15 @@
+$ python -m nightshift.ingest --write-cards --allow-paid
+# started 2026-08-17T13:21:04 in C:\Users\karel\Documents\Programming\Dungeoneer\dungeoneer
+ingest: 5 note(s) to card, from the pass of 2026-08-17 09:51
+  scribe: Regenerate soundtrack.md
+    bounced to triage - "wire it in the game" needs the actual music/audio trigger system (unknown symbol/file), and "create new tracks" has no count or target scenes — both are forks only triage's codebase access can resolve
+  scribe: ad-sound-for-recharge.md
+    bounced to triage - note doesn't say which recharge mechanic (weapon/cyberware/hacking/other) or what event it hooks into — acceptance would need a symbol/trigger I'd have to look up
+  scribe: perks-tinkering.md
+    bounced to triage - two of three balance asks ('a bit cheaper', 'a bit more expensive') give no anchor number or current price, so acceptance criteria can't be grounded without reading the perk/skill code to find current costs and lock concrete target numbers — needs triage, not scribe.
+  scribe: combat-end-on-lost-sight.md
+    ! no card appeared and the note is untouched - nothing happened
+  scribe: skills-tinkering.md
+    -> skills-tinkering
+  scribe: 1 card(s), 3 bounced, 1 stranded, 0 not reached
+# exit 1 after 16 min

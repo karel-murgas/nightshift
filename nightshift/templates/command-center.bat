@@ -10,4 +10,15 @@ rem install. So this is the file that turns "read the install docs" into "double
 rem this". `nightshift uninstall` removes it.
 rem
 rem Arguments are passed through, so `command-center.bat --port 9000` works.
+rem
+rem The `pause` on failure is not decoration. A double-clicked .bat closes its window
+rem the instant the command exits, so every way this can fail -- no python on PATH,
+rem the package not installed, a port held by something else -- looked identical from
+rem the outside: a window that flashes and is gone. Observed 2026-08-17. On success
+rem there is no pause, because the panel holds the window open by serving.
 python -m nightshift.panel %*
+if errorlevel 1 (
+    echo.
+    echo The Command Center could not start. The reason is above.
+    pause
+)

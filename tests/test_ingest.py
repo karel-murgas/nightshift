@@ -876,3 +876,125 @@ def test_a_route_that_is_not_a_route_is_refused(tmp_path: Path):
     root = _repo(tmp_path, alpha="a")
     with pytest.raises(ValueError, match="not one of"):
         ingest.set_route(root, "alpha.md", "somewhere-else", "why", _healthy())
+
+
+# --------------------------------------------------------------------------
+# Reading a run's own output back as a roster. Driven by logs from real runs,
+# committed under tests/data/, because the format's only definition is what the
+# prints in this module produce -- a hand-written fixture would let the two
+# drift together and still agree.
+# --------------------------------------------------------------------------
+
+_LOGS = Path(__file__).parent / "data"
+
+
+def test_a_real_carding_run_reads_back_as_its_roster():
+    """The 2026-08-17 13:21 run: five notes, three bounced, one stranded, one
+    carded. Every one of those outcomes is a different branch of the parser."""
+    progress = ingest.parse_progress(
+        (_LOGS / "ingest-carding.log").read_text(encoding="utf-8"))
+
+    assert progress.total == 5
+    assert [i.state for i in progress.items] == [
+        "bounced", "bounced", "bounced", "stranded", "done"]
+    assert progress.finished == 5
+    by_name = {i.name: i for i in progress.items}
+    assert by_name["skills-tinkering.md"].detail == "skills-tinkering"
+    assert "one recharge mechanic" not in by_name["ad-sound-for-recharge.md"].detail
+    assert "which recharge mechanic" in by_name["ad-sound-for-recharge.md"].detail
+
+
+def test_the_fan_outs_own_tally_is_not_read_as_a_note():
+    """`  scribe: 1 card(s), 3 bounced, ...` shares its prefix with a per-note
+    line, and was read as a note called "1 card(s), 3 bounced, 1 stranded, 0 not
+    reached" until the summary was checked first."""
+    progress = ingest.parse_progress(
+        (_LOGS / "ingest-carding.log").read_text(encoding="utf-8"))
+    assert not [i for i in progress.items if "card(s)" in i.name]
+
+
+def test_a_real_classify_run_reads_back_as_its_route_counts():
+    """A classify pass is one dispatch over the whole lane, so it has no per-note
+    progress to report and none is invented for it."""
+    progress = ingest.parse_progress(
+        (_LOGS / "ingest-classifying.log").read_text(encoding="utf-8"))
+
+    assert progress.items == []
+    assert progress.total == 13
+    assert progress.phase == "routed"
+    assert progress.routes == {"chore": 3, "inline": 6, "scribe": 2, "triage": 2}
+
+
+def test_a_note_in_flight_is_on_the_roster_as_running():
+    progress = ingest.parse_progress(
+        "ingest: 3 note(s) to card\n"
+        "  [1/3] scribe: done.md\n    -> done-card\n"
+        "  [2/3] scribe: inflight.md\n")
+    assert [(i.name, i.state) for i in progress.items] == [
+        ("done.md", "done"), ("inflight.md", "running")]
+    assert progress.finished == 1 and progress.total == 3
+
+
+def test_the_meter_lines_and_quoted_replies_contribute_nothing():
+    """The log carries meter readings, git warnings and an agent's own quoted
+    words. A parser that interpreted those would report fiction about a run."""
+    progress = ingest.parse_progress(
+        "ingest: 1 note(s) to card\n"
+        "  five_hour               43.0%  resets 2026-08-17 18:19\n"
+        "  paid overage ENABLED - 74.48 EUR used\n"
+        "  [1/1] scribe: n.md\n"
+        "    ! no card appeared and the note is untouched - nothing happened\n"
+        "      said: I could not write the file.\n"
+        "            Permission was refused.\n")
+    assert [(i.name, i.state) for i in progress.items] == [("n.md", "stranded")]
+    assert progress.items[0].detail.startswith("no card appeared")
+
+
+def test_an_empty_or_garbled_log_is_an_empty_roster_not_an_error():
+    assert ingest.parse_progress("").items == []
+    assert ingest.parse_progress("").total == 0
+    assert ingest.parse_progress("total nonsense\nand more of it\n").items == []
+
+
+class _Envelope:
+    """A CLI result carrying `permission_denials`, as the real envelope does."""
+
+    returncode = 0
+
+    def __init__(self, denied: list) -> None:
+        self.stdout = json.dumps({"result": "ok", "permission_denials": denied})
+        self.stderr = ""
+
+
+def test_a_refusal_names_the_tool_because_a_count_cannot_tell_the_story():
+    """`acceptEdits` approves file edits and nothing else, so an agent that reaches
+    for a shell command is refused, works around it, and produces a perfectly good
+    card — which is what happened to the first note of the 16:10 run. A bare count
+    cannot tell that from the case where the refusal *was* the reason."""
+    assert ingest.denials(_Envelope([{"tool_name": "Bash"}])) == ["Bash"]
+    assert ingest.denials(_Envelope([{"no_name_field": 1}])) == ["an unnamed tool"]
+    assert ingest.denials(_Envelope([])) == []
+
+
+def test_an_envelope_without_the_field_is_no_denials_not_a_crash():
+    class _Bare:
+        returncode = 0
+        stdout = '{"result": "ok"}'
+        stderr = ""
+
+    assert ingest.denials(_Bare()) == []
+
+
+def test_a_survivable_refusal_is_not_printed_as_a_failure():
+    """`!` is this module's failure prefix, and `parse_progress` reads
+    `    ! <text>` as the reason a note stranded. Announcing a refusal that way
+    both alarmed the reader and mis-parsed the run."""
+    log = """\
+ingest: 1 note(s) to card
+  [1/1] scribe: n.md
+    (1 tool call(s) refused: Bash - the permission mode allows edits)
+    -> n
+"""
+    progress = ingest.parse_progress(log)
+    assert [(i.name, i.state) for i in progress.items] == [("n.md", "done")]
+    assert progress.items[0].detail == "n"
