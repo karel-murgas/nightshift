@@ -37,6 +37,7 @@ import os
 import re
 import subprocess
 import sys
+import socket
 import threading
 import urllib.error
 import urllib.request
@@ -1830,8 +1831,7 @@ def test_the_history_count_counts_jobs_not_table_rows(server):
     assert re.search(r'class="count">2<', head), head
 
 
-def test_a_second_panel_on_the_same_port_refuses_instead_of_double_binding(tmp_path,
-                                                                          capsys):
+def test_the_port_is_exclusive_so_two_panels_cannot_both_serve_it():
     """`ThreadingHTTPServer` sets `allow_reuse_address`, which on Windows lets a
     second live socket bind a port another process is already listening on. Both
     then serve, connections land on either, and the page you read may come from a
@@ -1843,15 +1843,57 @@ def test_a_second_panel_on_the_same_port_refuses_instead_of_double_binding(tmp_p
     """
     assert panel._Server.allow_reuse_address is False
 
+
+def test_a_panel_already_serving_is_opened_rather_than_refused(tmp_path, capsys,
+                                                              monkeypatch):
+    """The ordinary case, and refusing it broke the launcher.
+
+    Karel, 2026-08-17: "Running the bat opens and immediately closes the window and
+    no browser page opens." Someone double-clicking the launcher while a panel is
+    up wants that panel — an instant exit in a window with no pause is the worst
+    possible answer.
+    """
     root = _repo(tmp_path)
+    opened = []
+    monkeypatch.setattr(panel.webbrowser, "open", opened.append)
     held = ThreadingHTTPServer(("127.0.0.1", 0), panel.Handler)
+    panel.Handler.root = root
+    thread = threading.Thread(target=held.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = held.server_address[1]
+        panel.serve(root, port, open_browser=True)          # returns; does not raise
+        said = capsys.readouterr().out
+        assert "already serving" in said
+        assert "holds the code it started with" in said, "and says why to restart it"
+        assert opened == [f"http://127.0.0.1:{port}/now"]
+    finally:
+        held.shutdown()
+        thread.join(timeout=5)
+        held.server_close()
+
+
+def test_a_port_held_by_something_else_is_still_an_error(tmp_path, capsys):
+    """The other reason, kept distinct: a socket that is not a Command Center has
+    nothing to open, so there is nothing to do but say so."""
+    root = _repo(tmp_path)
+    squatter = socket.socket()
+    squatter.bind(("127.0.0.1", 0))
+    squatter.listen(1)
     try:
         with pytest.raises(SystemExit) as exit_code:
-            panel.serve(root, held.server_address[1], open_browser=False)
+            panel.serve(root, squatter.getsockname()[1], open_browser=False)
         assert exit_code.value.code == 2
         said = capsys.readouterr().out
-        assert "already in use" in said
-        assert "older than your checkout" in said, "the message names the real hazard"
+        assert "not a panel" in said
         assert "--port" in said, "and the way out"
     finally:
-        held.server_close()
+        squatter.close()
+
+
+def test_already_serving_says_no_when_nothing_is_there():
+    free = socket.socket()
+    free.bind(("127.0.0.1", 0))
+    port = free.getsockname()[1]
+    free.close()
+    assert panel.already_serving(port) is False

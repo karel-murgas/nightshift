@@ -72,6 +72,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from urllib.request import urlopen
 
 from nightshift import (board, drain, freshness, ingest, init, jobs, manifest,
                         run_record, textio, update, usage)
@@ -2777,15 +2778,48 @@ class _Server(ThreadingHTTPServer):
     allow_reuse_address = False
 
 
+def already_serving(port: int) -> bool:
+    """Whether a Command Center is answering on this port already.
+
+    Asked when the bind fails, to tell the two reasons apart. A panel already
+    running is **not an error** — it is the thing the person double-clicking the
+    launcher wanted, and they should get it rather than a refusal. Something else
+    holding the port is an error and needs saying.
+
+    Identified by asking it: a page of ours carries its own wordmark. A bare port
+    probe cannot distinguish a panel from anything else that happens to listen.
+    """
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/now", timeout=2) as answer:
+            return b"Command Center" in answer.read(4096)
+    except Exception:                             # noqa: BLE001 — any failure is "not ours"
+        return False
+
+
 def serve(root: Path, port: int = DEFAULT_PORT, *, open_browser: bool = True) -> None:
     Handler.root = root
     try:
         server = _Server(("127.0.0.1", port), Handler)
     except OSError as exc:
-        print(f"Command Center: port {port} is already in use ({exc}).\n"
-              f"  Another panel is probably still running — the page it serves may be "
-              f"older than your checkout.\n"
-              f"  Stop it, or start this one on another port with --port.")
+        # **Two reasons, two answers, and conflating them broke the launcher.**
+        # Making the port exclusive was right — a second panel used to bind
+        # alongside the first on Windows and serve stale code. But refusing
+        # outright turned the ordinary case, "I clicked the launcher and a panel is
+        # already up", into an instant exit; the `.bat` has no pause, so the window
+        # vanished before the reason could be read. Karel, 2026-08-17: *"Running
+        # the bat opens and immediately closes the window and no browser page
+        # opens."*
+        url = f"http://127.0.0.1:{port}/now"
+        if already_serving(port):
+            print(f"Command Center is already serving at {url} — opening that one.\n"
+                  f"  Stop it and run this again if you want it restarted "
+                  f"(a running panel holds the code it started with).")
+            if open_browser:
+                webbrowser.open(url)
+            return
+        print(f"Command Center: port {port} is in use by something that is not a "
+              f"panel ({exc}).\n"
+              f"  Free the port, or start on another one with --port.")
         raise SystemExit(2) from exc
     url = f"http://127.0.0.1:{port}/now"
     print(f"Command Center serving {root} at {url}")
