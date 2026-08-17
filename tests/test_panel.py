@@ -1201,6 +1201,64 @@ def test_work_on_a_card_carries_the_card_the_model_and_the_charter(server, monke
     assert "stun-grenade" in data["message"] and "worker tier" in data["message"]
 
 
+def test_the_windows_launch_puts_no_shell_between_us_and_the_prompt(monkeypatch, tmp_path):
+    """`cmd` treats a newline inside an argument as a command separator, so routing a
+    multi-line prompt through `cmd /c start … cmd /k` delivered its first line and
+    dropped the rest. Measured from a real session transcript 2026-08-17: the session
+    received `"Work this note from the board's inbox, with the maintainer at the
+    keyboard."` and nothing else, so it picked a note off the board itself."""
+    if os.name != "nt":
+        pytest.skip("the cmd-parsing hazard is Windows-only")
+    spawned = []
+    monkeypatch.setattr(panel, "claude_binary", lambda: "claude.exe")
+    monkeypatch.setattr(panel.subprocess, "Popen",
+                        lambda argv, **kw: spawned.append((argv, kw)) or _FakeProc())
+
+    panel.open_terminal(tmp_path, "claude", "--", "line one\n\nline two\n\nline three")
+
+    argv, kw = spawned[0]
+    assert argv[0] != "cmd", "a shell is back between the panel and the CLI"
+    assert "start" not in argv
+    assert argv[-1].count("\n") == 4, "the prompt lost its lines on the way out"
+    assert kw["creationflags"] & subprocess.CREATE_NEW_CONSOLE
+
+
+def test_a_prompt_too_long_for_a_command_line_is_handed_over_as_a_file(
+        server, monkeypatch):
+    """`CreateProcess` refuses a command line over 32767 chars and this board is
+    already past it — `grid-distance-metric` builds a 32610-char prompt, so the button
+    could not open that card at all."""
+    base, root = server
+    huge = "x" * 60000
+    path = root / "Board" / "inbox" / "huge.md"
+    path.write_text(huge, encoding="utf-8", newline="")
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    status, data = _post(base, "api/work", {"note": "huge.md"})
+
+    assert status == 200, data
+    argv = opened[0]
+    assert len(subprocess.list2cmdline(argv)) < 32767, "the launch would be refused"
+    spilled = root / panel.RUNS / "_panel" / "prompt-huge.md.md"
+    assert spilled.is_file(), "the prompt went nowhere"
+    assert huge in spilled.read_text(encoding="utf-8"), "the note body was lost in the spill"
+    assert spilled.resolve().as_posix() in argv[-1], "the session is not told where to look"
+
+
+def test_an_ordinary_card_is_not_spilled(server, monkeypatch):
+    """Spilling costs the session a `Read` before it can start, so it is the fallback
+    and not the path."""
+    base, root = server
+    _card(root, "tasks", "stun-grenade")
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    _post(base, "api/work", {"card": "stun-grenade"})
+
+    assert opened[0][-1].startswith("Work this card"), "a small card should go direct"
+
+
 def test_the_prompt_is_fenced_off_from_the_variadic_flags(server, monkeypatch):
     """The bug the first version shipped: `--add-dir <directories...>` is variadic and
     ate the trailing prompt, so the session opened with an empty input box and the card
