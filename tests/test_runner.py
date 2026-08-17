@@ -42,6 +42,7 @@ import datetime as dt
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -5809,3 +5810,54 @@ def test_interruptions_count_toward_the_consecutive_failure_breaker(tmp_path, mo
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
     assert calls == ["a", "b", "c"]
     assert "failed in a row" in _only_record(root)["stop_reason"]
+
+
+# --------------------------------------------------------------------------
+# The permission modes that cannot write a file. Named as a category on
+# 2026-08-17, after `plan` turned out to be a second member of what had read as
+# a single literal everywhere it was consulted.
+# --------------------------------------------------------------------------
+
+
+def _host_mode(root: Path, mode: str) -> None:
+    (root / ".ai").mkdir(parents=True, exist_ok=True)
+    (root / ".ai" / "hosts.json").write_text(
+        json.dumps({socket.gethostname(): {"permission_mode": mode}}), encoding="utf-8")
+
+
+def test_the_modes_that_cannot_edit_are_a_named_category_not_a_literal():
+    """`category-of-one-read-as-a-literal`, caught while adding a second member.
+
+    While `default` was the only answer, "cannot edit" and `"default"` were the
+    same string, so each consumer spelled the string out — `update.merge` did, from
+    the day it was written until 2026-08-17. The arrival of `plan` meant every
+    consumer had to be recalled from memory rather than found by following a
+    reference, which is what the class describes.
+    """
+    assert set(runner.MODES_WITHOUT_EDIT) == {"default", "plan"}
+
+    package = Path(runner.__file__).parent
+    for module in ("ingest.py", "update.py"):
+        text = (package / module).read_text(encoding="utf-8")
+        assert 'permission_mode == "default"' not in text, (
+            f"{module} asks about one member instead of the category")
+
+
+@pytest.mark.parametrize("mode", ["default", "plan"])
+def test_cannot_edit_names_the_mode_so_the_message_can_quote_it(tmp_path, mode):
+    _host_mode(tmp_path, mode)
+    assert runner.cannot_edit(tmp_path) == mode
+
+
+@pytest.mark.parametrize("mode", ["acceptEdits", "bypassPermissions", "aModeFromNextYear"])
+def test_cannot_edit_is_silent_for_a_mode_that_writes_or_is_unknown(tmp_path, mode):
+    """Enumerated rather than "outside the allowed set": a verb that refuses to
+    start on an unrecognised string is worse than one that tries and reports what
+    happened."""
+    _host_mode(tmp_path, mode)
+    assert runner.cannot_edit(tmp_path) == ""
+
+
+def test_a_machine_with_no_host_entry_can_write():
+    """A fresh clone must be able to card, so the fallback is `acceptEdits`."""
+    assert runner.cannot_edit(Path(__file__).parent) == ""

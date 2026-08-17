@@ -492,11 +492,16 @@ def merge(found: Survey, finding: Finding, *, permission_mode: str,
         raise UpdateError(
             "the `claude` CLI was not found (checked $CLAUDE_BIN, PATH and "
             "~/.local/bin). Install it, or set CLAUDE_BIN — a merge is an agent.")
-    if permission_mode == "default":
+    # Asked of the category, not of the one string that used to be its only member.
+    # `plan` cannot edit either, and this check said `== "default"` from the day it
+    # was written until 2026-08-17 — not because `plan` was judged acceptable but
+    # because "cannot edit" and `"default"` were the same string while the category
+    # had one member (`runner.MODES_WITHOUT_EDIT`).
+    if permission_mode in runner.MODES_WITHOUT_EDIT:
         raise UpdateError(
-            "permission_mode is `default`, which cannot edit files — the agent could "
-            "read both versions and write neither. Pass `--permission-mode acceptEdits` "
-            f"for this merge, or set it in {AI_DIR}/hosts.json.")
+            f"permission_mode is `{permission_mode}`, which cannot edit files — the agent "
+            f"could read both versions and write neither. Pass `--permission-mode "
+            f"acceptEdits` for this merge, or set it in {AI_DIR}/hosts.json.")
 
     out_dir = found.root / runner.RUNS / "merge"
     out_dir.mkdir(parents=True, exist_ok=True)

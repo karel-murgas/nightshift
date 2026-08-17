@@ -40,10 +40,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from nightshift import board, manifest, textio, usage
+from nightshift.manifest import AI_DIR
 # The one place the CLI is executed lives in `runner`; see the alias's comment there
 # on why this imports it rather than growing a second copy of the deadlock fix.
-from nightshift.runner import (claude_binary, ensure_workspace_trusted, host_setting,
-                               repo_root, run_cli)
+from nightshift.runner import (cannot_edit, claude_binary, ensure_workspace_trusted,
+                               host_setting, repo_root, run_cli)
 
 #: Written at the repo root, next to the digest, because that is the Obsidian vault
 #: root — a report the maintainer has to go looking for is a report they do not read.
@@ -205,8 +206,16 @@ def denials(completed) -> list[str]:
         return []
     names = []
     for entry in found:
-        name = entry.get("tool_name") if isinstance(entry, dict) else None
-        names.append(str(name) if name else "an unnamed tool")
+        if not isinstance(entry, dict):
+            names.append("an unnamed tool")
+            continue
+        name = str(entry.get("tool_name") or "an unnamed tool")
+        # A reason when the refuser gave one. `PreToolUse` hooks do — that is how
+        # `ideas_fence` explains that the private lane is not readable — and it is
+        # the difference between a line you can act on and a line you can only
+        # worry about.
+        why = entry.get("message") or entry.get("reason") or ""
+        names.append(f"{name}: {str(why)[:120]}" if why else name)
     return names
 
 
@@ -263,8 +272,16 @@ def _dispatch(agent: str, prompt: str, root: Path, model: str,
         #
         # Said here rather than returned, so the seam `_dispatch` presents to its
         # callers — and to every test that fakes it — stays two values wide.
-        print(f"    ({len(refused)} tool call(s) refused: {', '.join(sorted(set(refused)))}"
-              f" — the permission mode allows edits, not everything)")
+        # **It does not say why, because it cannot know why.** The first version of
+        # this line blamed the permission mode. On the machine it was written for,
+        # `hosts.json` sets `bypassPermissions`, under which the mode refuses
+        # nothing at all — so the refusal came from one of the six `PreToolUse`
+        # hooks (`ideas_fence` fencing the private lane, `commit_pathspec`,
+        # `preflight_guard`, `worktree_fence`, `tier_guard`), each of which is doing
+        # its job. Asserting a cause the data does not carry is the same mistake
+        # this module spent the day fixing, one layer up.
+        print(f"    ({len(refused)} tool call(s) refused — by the permission mode or a "
+              f"PreToolUse hook: {'; '.join(sorted(set(refused)))})")
     return _cli_result(completed)
 
 
@@ -318,6 +335,32 @@ def classify(found: list[Note], root: Path, *, model: str = CLASSIFIER_MODEL,
                 note=note.name, route="inline", why="classifier returned no entry",
                 confidence="low"))
     return routing
+
+
+def cannot_card(root: Path) -> str:
+    """Why the scribe could not write a card here, or "" if it can.
+
+    **Checked before spending, because the siblings already learned to.**
+    `fix.can_dispatch` refuses a pass whose mode cannot run Bash — *"it would spend
+    a round and a budget discovering that"* — and `update.merge` refuses `default`
+    with the sentence that describes exactly what happened here on 2026-08-17:
+    *"which cannot edit files — the agent could read both versions and write
+    neither."* Two modules had the knowledge and the guard. This one had neither,
+    so it spent two runs and twenty-two minutes discovering it, and reported the
+    result as the scribe declining.
+
+    Only on the card-writing path: `classify` reads notes and writes no file, which
+    is why it kept working throughout and hid the fault.
+    """
+    if mode := cannot_edit(root):
+        # `AI_DIR` rather than the literal, which is how `fix` and `update` write
+        # the same sentence: the path exists only in a consuming project, so
+        # spelling it out here makes `source_reference_liveness` report a dangling
+        # reference in this repo, correctly.
+        return (f"permission_mode is `{mode}`, under which a headless agent cannot write "
+                f"a file — the scribe would read the note and card nothing. Set it to "
+                f"`acceptEdits` for this machine in {AI_DIR}/hosts.json.")
+    return ""
 
 
 def card_ids(root: Path) -> set[str]:
@@ -380,6 +423,9 @@ def scribe(decisions: list[Decision], root: Path, *, allow_paid: bool = False,
     is on the board *and* the note has left the lane, and `stranded` counts the
     dispatches that returned cleanly without achieving both. See `Wrote`.
     """
+    if why := cannot_card(root):
+        print(f"  REFUSED before the scribe - {why}")
+        return 0, 0, len(decisions), 0
     lane = board.board_dir(root) / "inbox"
     written = bounced = blocked = stranded = 0
     for position, decision in enumerate(decisions, start=1):

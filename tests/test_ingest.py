@@ -998,3 +998,90 @@ ingest: 1 note(s) to card
     progress = ingest.parse_progress(log)
     assert [(i.name, i.state) for i in progress.items] == [("n.md", "done")]
     assert progress.items[0].detail == "n"
+
+
+# ------------------------------------- the guard the siblings already had
+
+
+def _hosts(root: Path, mode: str) -> None:
+    import socket
+    (root / ".ai").mkdir(exist_ok=True)
+    (root / ".ai" / "hosts.json").write_text(
+        json.dumps({socket.gethostname(): {"permission_mode": mode}}), encoding="utf-8")
+
+
+def test_a_mode_that_cannot_write_is_refused_before_a_single_dispatch(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+    """`fix.can_dispatch` refuses a pass whose mode cannot run Bash, because "it
+    would spend a round and a budget discovering that". `update.merge` refuses
+    `default` with the sentence that describes what happened here: "which cannot
+    edit files — the agent could read both versions and write neither." Two modules
+    had the guard; this one had neither it nor the flag, and spent two runs and
+    twenty-two minutes discovering it.
+    """
+    root = _repo(tmp_path, alpha="a")
+    _hosts(root, "default")
+    scribed = _routes(monkeypatch, {"alpha.md": "chore"})
+    ingest.main(["--root", str(root)])
+
+    code = ingest.main(["--root", str(root), "--write-cards"])
+
+    assert scribed == [], "not one dispatch may be spent"
+    assert code == 3
+    said = capsys.readouterr().out
+    assert "REFUSED before the scribe" in said
+    assert "cannot write a file" in said
+    assert "hosts.json" in said, "and it says where to change it"
+
+
+@pytest.mark.parametrize("mode", ["default", "plan"])
+def test_every_mode_that_cannot_write_is_named(tmp_path: Path, mode: str):
+    """`plan` forbids edits outright, and leaving it out was the same omission one
+    level down: `update.merge` checks `== "default"` alone and would dispatch a
+    merge under `plan` that cannot write either."""
+    root = _repo(tmp_path, alpha="a")
+    _hosts(root, mode)
+    assert mode in ingest.cannot_card(root)
+
+
+@pytest.mark.parametrize("mode", ["acceptEdits", "bypassPermissions"])
+def test_a_mode_that_can_write_is_not_refused(tmp_path: Path, mode: str):
+    root = _repo(tmp_path, alpha="a")
+    _hosts(root, mode)
+    assert ingest.cannot_card(root) == ""
+
+
+def test_a_mode_nobody_has_heard_of_fails_open(tmp_path: Path):
+    """Enumerated rather than "not in the allowed set", so a new CLI mode does not
+    silently block the verb — the scribe's own report says what happened instead."""
+    root = _repo(tmp_path, alpha="a")
+    _hosts(root, "someModeFromNextYear")
+    assert ingest.cannot_card(root) == ""
+
+
+def test_the_default_when_no_host_entry_exists_can_write(tmp_path: Path):
+    """An unlisted machine must be able to card, or a fresh clone silently cannot —
+    which is why the fallback here is `acceptEdits` and not `default`."""
+    root = _repo(tmp_path, alpha="a")
+    assert ingest.cannot_card(root) == ""
+
+
+def test_classifying_is_not_gated_on_being_able_to_write(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """`classify` reads notes and writes no card, which is why it kept working
+    throughout and hid the fault."""
+    root = _repo(tmp_path, alpha="a")
+    _hosts(root, "default")
+    _routes(monkeypatch, {"alpha.md": "chore"})
+    assert ingest.main(["--root", str(root)]) == 0
+    assert ingest.read_view(root).of("alpha.md").route == "chore"
+
+
+def test_a_refusal_does_not_assert_a_cause_it_cannot_know(capsys):
+    """The first version of the line blamed the permission mode. On the machine it
+    was written for, `hosts.json` sets `bypassPermissions`, under which the mode
+    refuses nothing — so the refusal came from one of the six `PreToolUse` hooks,
+    each doing its job."""
+    named = ingest.denials(_Envelope([{"tool_name": "Read",
+                                       "message": "Board/ideas/ is private"}]))
+    assert named == ["Read: Board/ideas/ is private"]
