@@ -431,6 +431,34 @@ def host_setting(root: Path, key: str, default: object) -> object:
     return host_config(root).get(key, default)
 
 
+#: Permission modes under which a headless agent cannot write a file: `default`
+#: prompts for the edit and a `-p` session has nobody to answer, `plan` forbids
+#: edits outright by design.
+#:
+#: **Named here because it was a category with one member.** While `default` was
+#: the only answer, "cannot edit" and `"default"` were the same string, so each
+#: consumer spelled the string out — `update.merge` still did on 2026-08-17 — and
+#: the arrival of a second member meant every consumer had to be recalled from
+#: memory rather than found by following a reference. That is
+#: `category-of-one-read-as-a-literal`, and this is the reference.
+#:
+#: Enumerated rather than "anything outside the allowed set", so a mode the CLI
+#: adds later fails open: a verb that refuses to start on an unrecognised string
+#: is worse than one that tries and reports what happened.
+MODES_WITHOUT_EDIT: tuple[str, ...] = ("default", "plan")
+
+
+def cannot_edit(root: Path) -> str:
+    """The configured permission mode's name if it cannot write a file, else "".
+
+    The question two verbs ask before they spend — `ingest` before the scribe,
+    `update` before a merge — because both dispatch an agent whose entire job is
+    to write one.
+    """
+    mode = str(host_setting(root, "permission_mode", "acceptEdits"))
+    return mode if mode in MODES_WITHOUT_EDIT else ""
+
+
 # --------------------------------------------------------------------------
 # Single instance
 # --------------------------------------------------------------------------
