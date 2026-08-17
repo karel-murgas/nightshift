@@ -4996,6 +4996,10 @@ def _bare_origin(root: Path, tmp_path: Path, name: str = "origin.git") -> Path:
     """A bare repo wired as `origin`, so `publish()`'s pushes are real and their
     result can be inspected independently of the working checkout."""
     bare = tmp_path / name
+    # gate-ok(fixture_rebuild): a *bare* repo, which the shared template does not
+    # offer — `_fixtures.git_init` builds a working tree, and a bare origin has no
+    # tree to build. Nor would copying one help: each caller wires it as its own
+    # remote, which is the absolute path a copy could not carry.
     subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
     subprocess.run(["git", "remote", "add", "origin", str(bare)], cwd=root, check=True)
     return bare

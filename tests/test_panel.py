@@ -1126,7 +1126,7 @@ def test_the_panel_renders_in_a_repo_with_no_install(tmp_path, monkeypatch):
     """
     root = tmp_path / "fresh"
     root.mkdir()
-    _git(root, "init", "-q")
+    _fixtures.git_init(root)
     from nightshift import init as _init
     _init.apply(_init.bootstrap_plan(root))
 
@@ -1143,7 +1143,7 @@ def test_root_goes_to_system_when_there_is_no_install(tmp_path):
     install never happened — which is exactly the state a first visitor is in."""
     root = tmp_path / "fresh"
     root.mkdir()
-    _git(root, "init", "-q")
+    _fixtures.git_init(root)
 
     panel.Handler.root = root
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), panel.Handler)

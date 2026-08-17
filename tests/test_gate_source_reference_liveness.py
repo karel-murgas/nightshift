@@ -25,6 +25,8 @@ if str(_GATES) not in sys.path:
 from nightshift.gates import doc_scan  # noqa: E402
 from nightshift.gates import source_reference_liveness as gate  # noqa: E402
 
+import _fixtures  # noqa: E402
+
 
 def _tree(tmp_path: Path, source: str, *, name: str = "newthing.py",
           real: tuple[str, ...] = ()) -> Path:
@@ -245,7 +247,7 @@ def _ignoring_repo(tmp_path: Path, source: str, pattern: str) -> Path:
     """
     repo = tmp_path / "repo"
     (repo / ".ai").mkdir(parents=True)
-    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    _fixtures.git_init(repo)
     (repo / ".gitignore").write_text(pattern + "\n", encoding="utf-8")
     (repo / ".ai" / "newthing.py").write_text(source, encoding="utf-8")
     doc_scan.clear_caches()

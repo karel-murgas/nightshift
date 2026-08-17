@@ -28,6 +28,8 @@ import pytest
 
 from nightshift import freshness, runner
 
+import _fixtures
+
 _MANIFEST = """
 [project]
 name = "myapp"
@@ -50,9 +52,7 @@ def checkout(tmp_path: Path) -> Path:
     origin = tmp_path / "origin.git"
     seed = tmp_path / "seed"
     seed.mkdir()
-    _git(seed, "init", "-q")
-    _git(seed, "config", "user.email", "t@t")
-    _git(seed, "config", "user.name", "t")
+    _fixtures.git_init(seed, email="t@t")
     (seed / ".ai").mkdir()
     (seed / ".ai" / "manifest.toml").write_text(_MANIFEST, encoding="utf-8")
     (seed / "file.txt").write_text("one\n", encoding="utf-8")
@@ -222,9 +222,7 @@ def test_the_paired_check_is_the_one_that_refuses(tmp_path, checkout):
 
     project = tmp_path / "project"
     project.mkdir()
-    _git(project, "init", "-q")
-    _git(project, "config", "user.email", "t@t")
-    _git(project, "config", "user.name", "t")
+    _fixtures.git_init(project, email="t@t")
     (project / "x.txt").write_text("x\n", encoding="utf-8")
     _git(project, "add", "-A")
     _git(project, "commit", "-qm", "seed")

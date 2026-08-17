@@ -511,6 +511,7 @@ project's one.
 | `deletion_sweep` | a removed file or top-level class/def must not still be named by any live doc |
 | `doc_reference_liveness` | docs must not name files or symbols that no longer exist |
 | `doc_signature_drift` | a signature written into a doc must match the real parameter names, in order |
+| `fixture_rebuild` | tests copy the shared fixture template instead of running `git init` themselves |
 | `gate_appeals` | every `# gate-ok(...)` appeal names a real gate and carries a written reason |
 | `import_layering` | a declared one-way dependency between packages stays one-way |
 | `line_endings` | Line endings stay LF, in the index and in the working tree. |

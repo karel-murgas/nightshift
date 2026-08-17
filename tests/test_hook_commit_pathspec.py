@@ -187,9 +187,7 @@ def test_git_dash_C_points_the_index_check_at_the_other_repo(repo, tmp_path):
     there. Checking the cwd's index instead would read a clean tree and allow it."""
     other = tmp_path / "other"
     other.mkdir()
-    _git(other, "init", "-q", "-b", "main")
-    _git(other, "config", "user.email", "t@example.com")
-    _git(other, "config", "user.name", "T")
+    _fixtures.git_init(other, branch="main", name="T")
     (other / "a.txt").write_text("a\n", encoding="utf-8")
     _git(other, "add", "--", "a.txt")
     reason = commit_pathspec.evaluate(

@@ -214,9 +214,7 @@ def test_the_stale_prompt_asks_for_a_final_message_not_a_file():
 
 def _board_repo(tmp_path: Path) -> Path:
     """A git repo shaped enough for `board.commit_board` to really commit."""
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
-    _git(tmp_path, "config", "user.email", "t@t")
-    _git(tmp_path, "config", "user.name", "t")
+    _fixtures.git_init(tmp_path, email="t@t")
     (tmp_path / "Board" / "tasks").mkdir(parents=True)
     (tmp_path / "seed.txt").write_text("seed\n", encoding="utf-8")
     _git(tmp_path, "add", "-A")
