@@ -31,6 +31,8 @@ import pytest
 
 from nightshift import ingest, usage
 
+import _fixtures
+
 
 # --------------------------------------------------------------------------- fixtures
 
@@ -53,9 +55,7 @@ def _repo(tmp_path: Path, **notes: str) -> Path:
     (lane / ".gitkeep").write_text("", encoding="utf-8")
     for name, body in notes.items():
         (lane / f"{name}.md").write_text(body, encoding="utf-8")
-    _git(tmp_path, "init", "-q")
-    _git(tmp_path, "config", "user.email", "t@t")
-    _git(tmp_path, "config", "user.name", "t")
+    _fixtures.git_init(tmp_path, email="t@t")
     (tmp_path / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-qm", "seed")

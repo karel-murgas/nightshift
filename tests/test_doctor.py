@@ -23,6 +23,8 @@ import pytest
 
 from nightshift import doctor, freshness, preflight, runner
 
+import _fixtures
+
 
 @pytest.fixture(autouse=True)
 def _pin_the_framework_reading(monkeypatch):
@@ -70,12 +72,9 @@ def _project(tmp_path: Path, *, hosts: dict | None = None, name: str = "repo") -
 
 
 def _git_init(repo: Path) -> None:
-    _git(repo, "init", "-q")
     # As in `test_gate_line_endings._repo`: the fixture's own bytes must be what
     # gets stored, not whatever this machine's autocrlf would make of them.
-    _git(repo, "config", "core.autocrlf", "false")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "t")
+    _fixtures.git_init(repo, autocrlf="false")
 
 
 def _named(results: list, name: str):

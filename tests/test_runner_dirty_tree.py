@@ -26,15 +26,15 @@ import pytest
 
 from nightshift import runner
 
+import _fixtures
+
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True,
                    capture_output=True, encoding="utf-8", errors="replace")
 
 
-@pytest.fixture
-def repo(tmp_path: Path) -> Path:
-    r = tmp_path / "proj"
+def _build(r: Path) -> None:
     (r / "Board" / "tasks").mkdir(parents=True)
     (r / ".obsidian").mkdir()
     (r / "pkg").mkdir()
@@ -42,13 +42,14 @@ def repo(tmp_path: Path) -> Path:
     (r / "Board" / "tasks" / "a.md").write_text("---\nid: a\n---\n", encoding="utf-8")
     (r / "Digest.md").write_text("# Digest\n", encoding="utf-8")
     (r / ".obsidian" / "workspace.json").write_text('{"active": "a"}\n', encoding="utf-8")
-    _git(r, "init", "-q", "-b", "main")
-    _git(r, "config", "core.autocrlf", "false")
-    _git(r, "config", "user.email", "t@example.com")
-    _git(r, "config", "user.name", "t")
+    _fixtures.git_init(r, branch="main", autocrlf="false")
     _git(r, "add", "-A")
     _git(r, "commit", "-q", "-m", "fixture")
-    return r
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    return _fixtures.repo_copy("board-and-obsidian", tmp_path / "proj", _build)
 
 
 def test_a_clean_tree_is_clean(repo):

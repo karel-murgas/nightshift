@@ -22,29 +22,31 @@ import pytest
 
 from nightshift import discover, init
 
+import _fixtures
+
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True,
                    capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
-@pytest.fixture
-def repo(tmp_path: Path) -> Path:
-    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)],
-                   check=True, capture_output=True)
-    _git(tmp_path, "config", "user.email", "t@example.com")
-    _git(tmp_path, "config", "user.name", "Alex Rivera")
-    (tmp_path / "myapp").mkdir()
+def _build(root: Path) -> None:
+    _fixtures.git_init(root, branch="main", name="Alex Rivera")
+    (root / "myapp").mkdir()
     # `newline=""` deliberately: on Windows `write_text` emits CRLF, and a fixture
     # committing a CRLF file before `.gitattributes` exists reproduces the exact
     # per-machine problem `init` reports and cannot fix — which would make
     # `test_an_initialised_empty_repo_passes_the_gates` fail for a reason that has
     # nothing to do with init.
-    (tmp_path / "myapp" / "__init__.py").write_text("X = 1\n", encoding="utf-8", newline="")
-    (tmp_path / "tests").mkdir()
-    _git(tmp_path, "add", "-A")
-    _git(tmp_path, "commit", "-qm", "init")
-    return tmp_path
+    (root / "myapp" / "__init__.py").write_text("X = 1\n", encoding="utf-8", newline="")
+    (root / "tests").mkdir()
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "init")
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    return _fixtures.repo_copy("discovered-myapp", tmp_path, _build)
 
 
 def _init(repo: Path, integration: str | None = "main") -> init.Plan:

@@ -34,6 +34,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 from nightshift import normalize_worktree  # noqa: E402
 
+import _fixtures  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -55,10 +57,7 @@ def _repo(tmp_path: Path, files: dict[str, bytes]) -> Path:
     """
     repo = tmp_path / "repo"
     repo.mkdir()
-    _git(repo, "init", "-q")
-    _git(repo, "config", "core.autocrlf", "false")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "t")
+    _fixtures.git_init(repo, autocrlf="false")
     # Matching the real tree: LF-pinned attributes.
     (repo / ".gitattributes").write_bytes(
         (line_endings.REQUIRED_ATTRIBUTE + "\n").encode("utf-8")

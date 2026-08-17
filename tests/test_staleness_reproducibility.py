@@ -41,6 +41,8 @@ from nightshift import runner
 from nightshift.gates import doc_reference_liveness
 from nightshift.gates import doc_scan
 
+import _fixtures
+
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True,
@@ -52,9 +54,14 @@ def _git(repo: Path, *args: str) -> None:
 def repo(tmp_path: Path) -> Path:
     """A real git repo — `_project_files` shells out to git, so a fake tree
     would exercise only the no-git fallback and prove nothing."""
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
-    _git(tmp_path, "config", "user.email", "t@example.com")
-    _git(tmp_path, "config", "user.name", "t")
+    _fixtures.repo_copy("staleness-myapp", tmp_path, _build)
+    doc_scan.clear_caches()
+    yield tmp_path
+    doc_scan.clear_caches()
+
+
+def _build(tmp_path: Path) -> None:
+    _fixtures.git_init(tmp_path)
     (tmp_path / "myapp").mkdir()
     (tmp_path / "myapp" / "real_module.py").write_text(
         "class RealClass:\n    pass\n", encoding="utf-8")
@@ -68,9 +75,6 @@ def repo(tmp_path: Path) -> Path:
     (tmp_path / ".gitignore").write_text("ignored_stuff/\n", encoding="utf-8")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-qm", "init")
-    doc_scan.clear_caches()
-    yield tmp_path
-    doc_scan.clear_caches()
 
 
 # --- 1. the disk is not the project --------------------------------------

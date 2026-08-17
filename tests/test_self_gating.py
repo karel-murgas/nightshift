@@ -45,6 +45,8 @@ if str(_GATES) not in sys.path:
 from nightshift.gates import (card_schema, deletion_sweep,  # noqa: E402
                               doc_signature_drift, run_stop_recorded, scope)
 
+import _fixtures  # noqa: E402
+
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args],
@@ -59,10 +61,7 @@ def _repo(tmp_path: Path, manifest: str, name: str = "proj") -> Path:
     (repo / "pkg" / "__init__.py").write_text("", encoding="utf-8")
     (repo / ".ai" / "manifest.toml").write_text(manifest, encoding="utf-8", newline="\n")
     (repo / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
-    _git(repo, "init", "-q")
-    _git(repo, "config", "core.autocrlf", "false")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "t")
+    _fixtures.git_init(repo, autocrlf="false")
     return repo
 
 

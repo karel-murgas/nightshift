@@ -25,6 +25,8 @@ import pytest
 
 from nightshift.hooks import commit_pathspec
 
+import _fixtures
+
 
 def _git(repo: Path, *args: str) -> None:
     result = subprocess.run(["git", *args], cwd=str(repo), capture_output=True,
@@ -32,15 +34,16 @@ def _git(repo: Path, *args: str) -> None:
     assert result.returncode == 0, f"git {' '.join(args)}: {result.stderr}"
 
 
+def _build(root: Path) -> None:
+    _fixtures.git_init(root, branch="main", name="T")
+    (root / "seed.txt").write_text("seed\n", encoding="utf-8")
+    _git(root, "add", "--", "seed.txt")
+    _git(root, "commit", "-qm", "seed")
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
-    _git(tmp_path, "init", "-q", "-b", "main")
-    _git(tmp_path, "config", "user.email", "t@example.com")
-    _git(tmp_path, "config", "user.name", "T")
-    (tmp_path / "seed.txt").write_text("seed\n", encoding="utf-8")
-    _git(tmp_path, "add", "--", "seed.txt")
-    _git(tmp_path, "commit", "-qm", "seed")
-    return tmp_path
+    return _fixtures.repo_copy("pathspec-seed", tmp_path, _build)
 
 
 def _bash(command: str) -> dict:

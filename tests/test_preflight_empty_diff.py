@@ -14,6 +14,8 @@ from pathlib import Path
 
 from nightshift import preflight, suite
 
+import _fixtures
+
 
 def _git(repo: Path, *args: str) -> str:
     out = subprocess.run(["git", "-C", str(repo), *args], check=True,
@@ -35,19 +37,18 @@ def _repo(tmp_path: Path) -> Path:
     own `.gitignore` template does), so a fixture that does not is testing an
     artifact of the fixture, not the mechanism.
     """
-    repo = tmp_path / "proj"
-    repo.mkdir()
-    _git(repo, "init", "-q", "-b", "base")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "t")
-    _git(repo, "config", "commit.gpgsign", "false")
+    return _fixtures.repo_copy("preflight-base-feature", tmp_path / "proj", _build)
+
+
+def _build(repo: Path) -> None:
+    _fixtures.git_init(repo, branch="base",
+                       extra_config=(("commit.gpgsign", "false"),))
     (repo / "file.txt").write_text("one\n", encoding="utf-8", newline="\n")
     (repo / ".gitignore").write_text(".ai/runs/\n__pycache__/\n*.pyc\n",
                                      encoding="utf-8", newline="\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "one")
     _git(repo, "checkout", "-q", "-b", "feature")
-    return repo
 
 
 def _commit(repo: Path, name: str, text: str) -> None:

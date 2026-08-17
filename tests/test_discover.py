@@ -21,6 +21,8 @@ import pytest
 
 from nightshift import discover
 
+import _fixtures
+
 _NIGHTSHIFT = Path(__file__).resolve().parent.parent
 
 
@@ -29,20 +31,20 @@ def _git(repo: Path, *args: str) -> None:
                    capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
+def _build(root: Path) -> None:
+    _fixtures.git_init(root, branch="main", name="Alex Rivera")
+    (root / "myapp").mkdir()
+    (root / "myapp" / "__init__.py").write_text("X = 1\n", encoding="utf-8")
+    (root / "tests").mkdir()
+    (root / "CLAUDE.md").write_text("# rules\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "init")
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     """A minimal but real Python project: one package, one test dir, one commit."""
-    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)],
-                   check=True, capture_output=True)
-    _git(tmp_path, "config", "user.email", "t@example.com")
-    _git(tmp_path, "config", "user.name", "Alex Rivera")
-    (tmp_path / "myapp").mkdir()
-    (tmp_path / "myapp" / "__init__.py").write_text("X = 1\n", encoding="utf-8")
-    (tmp_path / "tests").mkdir()
-    (tmp_path / "CLAUDE.md").write_text("# rules\n", encoding="utf-8")
-    _git(tmp_path, "add", "-A")
-    _git(tmp_path, "commit", "-qm", "init")
-    return tmp_path
+    return _fixtures.repo_copy("minimal-python-project", tmp_path, _build)
 
 
 # --- the two that are never inferred -----------------------------------------

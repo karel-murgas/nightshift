@@ -32,6 +32,8 @@ if str(_GATES) not in sys.path:
 from nightshift import board, digest, runner  # noqa: E402
 from nightshift.gates import card_schema  # noqa: E402
 
+import _fixtures  # noqa: E402
+
 _FRONT = """\
 ---
 id: a-card
@@ -70,8 +72,7 @@ def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
 
 
-def _repo(tmp_path: Path) -> Path:
-    repo = tmp_path / "proj"
+def _build(repo: Path) -> None:
     (repo / ".ai").mkdir(parents=True)
     (repo / ".claude" / "agents").mkdir(parents=True)
     (repo / ".claude" / "agents" / "code-thread.md").write_text("x", encoding="utf-8")
@@ -80,11 +81,11 @@ def _repo(tmp_path: Path) -> Path:
     (repo / "pkg").mkdir()
     (repo / "pkg" / "__init__.py").write_text("", encoding="utf-8")
     (repo / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
-    _git(repo, "init", "-q")
-    _git(repo, "config", "core.autocrlf", "false")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "t")
-    return repo
+    _fixtures.git_init(repo, autocrlf="false")
+
+
+def _repo(tmp_path: Path) -> Path:
+    return _fixtures.repo_copy("verify-route-proj", tmp_path / "proj", _build)
 
 
 def _card(repo: Path, lane: str, extra: str = "", body: str = "") -> Path:

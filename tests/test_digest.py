@@ -27,6 +27,8 @@ from nightshift import digest
 from nightshift import run_record
 from nightshift import stale_sweep
 
+import _fixtures
+
 
 def _card(root: Path, lane: str, name: str, body: str) -> None:
     lane_dir = root / "Board" / lane
@@ -941,9 +943,7 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
 
 
 def _init_repo(root: Path) -> None:
-    _git(root, "init", "-q")
-    _git(root, "config", "user.email", "t@example.com")
-    _git(root, "config", "user.name", "Test")
+    _fixtures.git_init(root, name="Test")
 
 
 def _commit_all(root: Path, message: str) -> None:

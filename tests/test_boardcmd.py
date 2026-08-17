@@ -34,6 +34,8 @@ import pytest
 from nightshift import board, boardcmd
 from nightshift.gates import card_schema
 
+import _fixtures
+
 # Deliberately awkward: fields out of schema order, a quoted value, a single-quoted
 # one, and `kanban_order` sitting in the middle rather than at the end. A writer
 # that rebuilt this block instead of splicing it would tidy every one of those.
@@ -71,20 +73,19 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
                           encoding="utf-8", errors="replace", check=False)
 
 
-def _repo(tmp_path: Path) -> Path:
-    """A committed repo with every lane, and nothing in them."""
-    root = tmp_path / "repo"
-    root.mkdir()
-    _git(root, "init", "-q")
-    _git(root, "config", "user.email", "t@t")
-    _git(root, "config", "user.name", "t")
+def _build(root: Path) -> None:
+    _fixtures.git_init(root, email="t@t")
     (root / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
     for lane in board.LANES + (board.PRIVATE_LANE,):
         (root / "Board" / lane).mkdir(parents=True)
         (root / "Board" / lane / ".gitkeep").write_bytes(b"")
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "seed")
-    return root
+
+
+def _repo(tmp_path: Path) -> Path:
+    """A committed repo with every lane, and nothing in them."""
+    return _fixtures.repo_copy("board-every-lane", tmp_path / "repo", _build)
 
 
 def _card(root: Path, lane: str, card_id: str, *, state: str | None = None,

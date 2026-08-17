@@ -26,28 +26,35 @@ import pytest
 
 from nightshift import init, update
 
+import _fixtures
+
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args],
                    check=True, capture_output=True, encoding="utf-8", errors="replace")
 
 
-@pytest.fixture
-def repo(tmp_path: Path) -> Path:
-    """A fresh project with nightshift installed and nothing drifted yet."""
-    root = tmp_path / "proj"
+def _build(root: Path) -> None:
+    """The 467 ms this file used to pay 23 times. `init.apply` is 247 ms of it."""
     (root / "pkg").mkdir(parents=True)
     (root / "tests").mkdir()
     (root / "pkg" / "__init__.py").write_text("", encoding="utf-8")
     (root / "tests" / "test_x.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
-    _git(root, "init", "-q", "-b", "main")
-    _git(root, "config", "core.autocrlf", "false")
-    _git(root, "config", "user.email", "t@example.com")
-    _git(root, "config", "user.name", "t")
+    _fixtures.git_init(root, branch="main", autocrlf="false")
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", "fixture")
     init.apply(init.build_plan(root, integration="main"))
-    return root
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    """A fresh project with nightshift installed and nothing drifted yet.
+
+    Built once per process and copied — the installed tree names no absolute
+    path (checked: none of its 68 files mentions the directory it was built in),
+    so a copy is indistinguishable from a rebuild.
+    """
+    return _fixtures.repo_copy("installed-main", tmp_path / "proj", _build)
 
 
 #: A file `init` writes verbatim from a template, so a test can move "the template"

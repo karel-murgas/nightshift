@@ -22,6 +22,8 @@ if str(_GATES) not in sys.path:
 
 import line_endings  # noqa: E402
 
+import _fixtures  # noqa: E402
+
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(
@@ -39,10 +41,7 @@ def _repo(tmp_path: Path, files: dict[str, bytes], *, attributes: str | None = l
     """
     repo = tmp_path / "repo"
     repo.mkdir()
-    _git(repo, "init", "-q")
-    _git(repo, "config", "core.autocrlf", "false")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "t")
+    _fixtures.git_init(repo, autocrlf="false")
     if attributes is not None:
         (repo / ".gitattributes").write_bytes(attributes.encode("utf-8") + b"\n")
     for name, data in files.items():

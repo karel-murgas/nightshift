@@ -23,6 +23,8 @@ import pytest
 from nightshift import preflight
 from nightshift.hooks import preflight_guard
 
+import _fixtures
+
 
 def _git(repo: Path, *args: str) -> str:
     out = subprocess.run(["git", "-C", str(repo), *args], check=True,
@@ -46,10 +48,8 @@ def _repo(tmp_path: Path, name: str, *, manifest: bool = True) -> Path:
         (repo / ".ai" / "manifest.toml").write_text(
             f'[project]\nname = "{name}"\n', encoding="utf-8", newline="\n")
     (repo / "file.txt").write_text("one\n", encoding="utf-8", newline="\n")
-    _git(repo, "init", "-q", "-b", "main")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "t")
-    _git(repo, "config", "commit.gpgsign", "false")
+    _fixtures.git_init(repo, branch="main",
+                       extra_config=(("commit.gpgsign", "false"),))
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "one")
     return repo

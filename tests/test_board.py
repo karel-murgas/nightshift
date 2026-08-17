@@ -16,6 +16,8 @@ import pytest
 
 from nightshift import board
 
+import _fixtures
+
 _CARD = """---
 id: probe
 title: A probe card
@@ -31,9 +33,7 @@ Do the thing.
 
 def _repo(tmp_path: Path, manifest: str | None = None, lane: str = "tasks",
           board_root: str = "Board") -> Path:
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
+    _fixtures.git_init(tmp_path, email="t@t")
     if manifest is not None:
         (tmp_path / ".ai").mkdir(exist_ok=True)
         (tmp_path / ".ai" / "manifest.toml").write_text(manifest, encoding="utf-8")

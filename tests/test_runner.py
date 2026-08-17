@@ -61,6 +61,8 @@ from nightshift import stale_sweep
 from nightshift import tiers
 from nightshift.hooks import worktree_fence
 
+import _fixtures
+
 
 # The runner's own source, for the AST guards below. Read off the installed
 # module rather than `.ai/runner.py`: 07_portability.md §8 step 4 moved it into
@@ -120,11 +122,8 @@ def _charter(root: Path, name: str) -> None:
     (agents / f"{name}.md").write_text(f"---\nname: {name}\n---\n", encoding="utf-8")
 
 
-def _repo(tmp_path: Path) -> Path:
-    """A git repo with a board, so `git mv` and the commits are real."""
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
+def _build_repo(tmp_path: Path) -> None:
+    _fixtures.git_init(tmp_path, email="t@t")
     (tmp_path / "Board").mkdir(exist_ok=True)
     # A manifest, because the fixture is a *consumer* of one. `[branches]` moved
     # out of `.ai/branches.py` in 07_portability.md §8 step 4, and the step's own
@@ -136,7 +135,16 @@ def _repo(tmp_path: Path) -> Path:
     (tmp_path / "seed.txt").write_text("seed\n", encoding="utf-8")
     subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-qm", "seed"], cwd=tmp_path, check=True)
-    return tmp_path
+
+
+def _repo(tmp_path: Path) -> Path:
+    """A git repo with a board, so `git mv` and the commits are real.
+
+    Built once per process and copied. The worktree fixtures below build on top
+    of this copy and cut their worktrees per test — a *cut* worktree records an
+    absolute gitdir and could never be copied, but the repo it is cut from can.
+    """
+    return _fixtures.repo_copy("runner-board-seed", tmp_path, _build_repo)
 
 
 def _write_manifest(root: Path, integration: str = "development_team",
@@ -1350,8 +1358,16 @@ def _gate_stub(monkeypatch, tmp_path: Path, body: str = "import sys; sys.exit(0)
     fixture created the very file the extraction had deleted, so the tests kept
     exercising a path that no longer existed in a real worktree. Substituting the
     argv keeps the seam pointed at whatever `_run_gates` actually invokes.
+
+    Written *beside* the repo rather than inside it, for the same reason. It used
+    to land in `tmp_path`, which is the fixture repo's root, and went unnoticed
+    only because `_repo` ran `git add -A` afterwards and committed the harness's
+    own scratch file along with the fixture. Once the repo became a copy of a
+    template built before the stub existed, it showed up as an untracked file and
+    the four `dirty_outside_board` tests started reporting `['gate_stub.py']` —
+    the stub was never meant to be in the tree they inspect.
     """
-    stub = tmp_path / "gate_stub.py"
+    stub = tmp_path.parent / f"{tmp_path.name}-gate-stub.py"
     stub.write_text(body, encoding="utf-8")
     monkeypatch.setattr(runner, "GATE_ARGV", [sys.executable, str(stub)])
     return stub
@@ -2049,7 +2065,12 @@ def test_red_gates_fail_the_card_even_with_a_done_verdict(tmp_path, monkeypatch)
     _card(root, "tasks", "probe")
     _gate_stub(monkeypatch, tmp_path,
                "print('Board/x.md:1 — nope'); raise SystemExit(1)\n")
-    subprocess.run(["git", "commit", "-aqm", "red gate"], cwd=root, check=True)
+    # `add -A` rather than `commit -a`: the charter and the card are both new
+    # files, and `-a` stages only tracked ones. It used to work by accident —
+    # the gate stub was written into the repo root and swept into the fixture's
+    # commit, so replacing it above left `-a` one tracked modification to find.
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "red gate"], cwd=root, check=True)
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "all good honest"})
 
     result = runner.dispatch(root, board.find(root, "probe"), "development_team",

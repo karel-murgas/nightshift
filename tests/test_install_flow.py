@@ -32,15 +32,15 @@ import pytest
 from nightshift import board, discover, init, tiers, uninstall
 from nightshift.manifest import AI_DIR
 
+import _fixtures
+
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args],
                    check=True, capture_output=True, encoding="utf-8", errors="replace")
 
 
-def _repo(tmp_path: Path, name: str = "proj") -> Path:
-    """A plausible fresh project: one package, one test, two branches."""
-    repo = tmp_path / name
+def _build(repo: Path) -> None:
     (repo / "pkg").mkdir(parents=True)
     (repo / "tests").mkdir()
     (repo / "pkg" / "__init__.py").write_text("", encoding="utf-8")
@@ -48,14 +48,19 @@ def _repo(tmp_path: Path, name: str = "proj") -> Path:
     (repo / "tests" / "test_core.py").write_text(
         "from pkg.core import run\n\n\ndef test_run():\n    assert run(2) == 4\n",
         encoding="utf-8")
-    _git(repo, "init", "-q", "-b", "main")
-    _git(repo, "config", "core.autocrlf", "false")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "t")
+    _fixtures.git_init(repo, branch="main", autocrlf="false")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "fixture")
     _git(repo, "checkout", "-q", "-b", "dev-work")
-    return repo
+
+
+def _repo(tmp_path: Path, name: str = "proj") -> Path:
+    """A plausible fresh project: one package, one test, two branches.
+
+    `name` only picks where the copy lands — the tree it holds is the same
+    either way, which is why one template serves both callers.
+    """
+    return _fixtures.repo_copy("fresh-project-two-branches", tmp_path / name, _build)
 
 
 @pytest.fixture

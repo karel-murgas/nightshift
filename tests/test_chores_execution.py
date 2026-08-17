@@ -36,6 +36,8 @@ import pytest
 
 from nightshift import board, chores, runner, suite, usage
 
+import _fixtures
+
 CARD = """\
 ---
 id: {id}
@@ -113,9 +115,7 @@ def _repo(tmp_path: Path, *cards: tuple[str, str, str]) -> Path:
     """A committed repo on `development_team` with chore cards in `tasks/`."""
     root = tmp_path / "repo"
     root.mkdir()
-    _git(root, "init", "-q")
-    _git(root, "config", "user.email", "t@t")
-    _git(root, "config", "user.name", "t")
+    _fixtures.git_init(root, email="t@t")
 
     (root / ".ai").mkdir()
     (root / ".ai" / "manifest.toml").write_text(_MANIFEST, encoding="utf-8")

@@ -20,6 +20,8 @@ import pytest
 from nightshift import digest, discover, init, manifest as _manifest, reconcile, stale_sweep
 from nightshift.gates import import_layering, memory_freshness, orientation_budget
 
+import _fixtures
+
 REPO = Path(__file__).resolve().parent.parent
 
 
@@ -38,10 +40,7 @@ def _project(tmp_path: Path, manifest: str = "", *, board: bool = True) -> Path:
     (repo / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
     if board:
         (repo / "Board" / "tasks").mkdir(parents=True)
-    _git(repo, "init", "-q")
-    _git(repo, "config", "core.autocrlf", "false")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "t")
+    _fixtures.git_init(repo, autocrlf="false")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "fixture")
     return repo

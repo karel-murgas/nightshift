@@ -22,16 +22,15 @@ import pytest
 from nightshift import board, fix, init, preflight
 from nightshift.gates import card_schema
 
+import _fixtures
+
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args],
                    check=True, capture_output=True, encoding="utf-8", errors="replace")
 
 
-@pytest.fixture
-def repo(tmp_path: Path) -> Path:
-    """An installed repo: a package, a test, a board, a manifest."""
-    root = tmp_path / "proj"
+def _build(root: Path) -> None:
     (root / "pkg").mkdir(parents=True)
     (root / "tests").mkdir()
     (root / "pkg" / "__init__.py").write_text("", encoding="utf-8")
@@ -40,15 +39,17 @@ def repo(tmp_path: Path) -> Path:
     (root / "tests" / "test_core.py").write_text(
         "from pkg.core import run\n\n\ndef test_run():\n    assert run(2) == 4\n",
         encoding="utf-8")
-    _git(root, "init", "-q", "-b", "main")
-    _git(root, "config", "core.autocrlf", "false")
-    _git(root, "config", "user.email", "t@example.com")
-    _git(root, "config", "user.name", "t")
+    _fixtures.git_init(root, branch="main", autocrlf="false")
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", "fixture")
     _git(root, "checkout", "-q", "-b", "dev-work")
     init.apply(init.build_plan(root, integration="dev-work"))
-    return root
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    """An installed repo: a package, a test, a board, a manifest."""
+    return _fixtures.repo_copy("installed-dev-work", tmp_path / "proj", _build)
 
 
 def _failing(*names: str) -> fix.Diagnosis:
