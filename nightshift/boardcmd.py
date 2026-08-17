@@ -209,6 +209,20 @@ def promote(root: Path, name: str) -> str:
 #: the fact. An inline note is one the classifier sent to a person *because* a card
 #: would have been overhead — writing machine-checkable criteria for it now would
 #: be fabricating the brief that deliberately never existed.
+#: Frontmatter a *bare note* may carry without having been triaged. `state:` is the
+#: lane, which `reconcile` reads and every note in an Obsidian-backed board has;
+#: `kanban_order:` is written by the Kanban plugin every time the vault opens.
+#:
+#: The guard below used to refuse on *any* frontmatter, on the reasoning that a bare
+#: note has none. That is true of a note typed straight into the filesystem and false
+#: of every note on a board somebody opens in Obsidian — which is the only kind of
+#: board this verb exists for. Measured 2026-08-18 on the origin project: all 7 inbox
+#: notes carried `state` + `kanban_order`, so `close` refused every one of them and
+#: the panel's `Done` gesture — the sole route out of `inline` — could not close
+#: anything at all. A triaged card is told apart by the fields triage actually adds
+#: (`id`, `title`, `tier`, `worker`, …), never by the presence of a frontmatter block.
+_NOTE_BOOKKEEPING = frozenset({"state", "kanban_order"})
+
 _CLOSED_INLINE = """\
 ---
 id: {ident}
@@ -265,19 +279,24 @@ def close_note(root: Path, name: str) -> str:
     if not source.is_file():
         raise BoardCommandError(f"no note called {filename!r} in {INBOX}/")
     text = source.read_text(encoding="utf-8")
-    if board.FRONTMATTER.match(text):
+    triaged = sorted(set(board.parse_fields(text)) - _NOTE_BOOKKEEPING)
+    if triaged:
         raise BoardCommandError(
-            f"{INBOX}/{filename} already carries frontmatter — it is a card being "
-            f"triaged, not a bare note, and a card advances through its own lanes")
+            f"{INBOX}/{filename} carries triage field(s) {', '.join(triaged)} — it is a "
+            f"card being triaged, not a bare note, and a card advances through its own lanes")
     ident = _slug(Path(filename).stem)
     target = board.board_dir(root) / "done" / f"{ident}.md"
     if target.exists():
         raise BoardCommandError(f"done/{ident}.md already exists — rename the note")
     today = dt.date.today().isoformat()
     target.parent.mkdir(parents=True, exist_ok=True)
+    # The note's *prose*, not its bookkeeping: the old frontmatter is replaced by the
+    # stamped block above, so leaving it in would put a second `---` fence inside
+    # `## Intent` and Obsidian would read the file as having two frontmatter blocks.
+    body = board.FRONTMATTER.sub("", text, count=1).strip()
     textio.write_text_lf(target, _CLOSED_INLINE.format(
         ident=ident, title=Path(filename).stem.replace('"', "'"), today=today,
-        body=text.strip() or "(the note was empty)", lane=INBOX, filename=filename))
+        body=body or "(the note was empty)", lane=INBOX, filename=filename))
     source.unlink()
     board.commit_board(root, f"board: closed inline note {filename} into done/")
     return f"{filename}: {INBOX}/ → done/{ident}.md"

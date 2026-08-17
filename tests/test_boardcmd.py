@@ -500,15 +500,56 @@ def test_every_stamped_field_is_one_the_verb_actually_knows(tmp_path):
 
 
 def test_closing_a_note_that_is_already_a_card_is_refused(tmp_path):
-    """A file with frontmatter is a card mid-triage, and a card advances through
-    its own lanes rather than being stamped into a new one."""
+    """A file carrying triage's own fields is a card mid-triage, and a card advances
+    through its own lanes rather than being stamped into a new one."""
     root = _repo(tmp_path)
     (root / "Board" / "inbox" / "half.md").write_text(
         "---\nid: half\nstate: inbox\n---\n\nbody\n", encoding="utf-8")
 
-    with pytest.raises(boardcmd.BoardCommandError, match="already carries frontmatter"):
+    with pytest.raises(boardcmd.BoardCommandError, match="carries triage field"):
         boardcmd.close_note(root, "half.md")
     assert (root / "Board" / "inbox" / "half.md").exists()
+
+
+def test_a_note_carrying_only_lane_and_kanban_bookkeeping_still_closes(tmp_path):
+    """The bug that made this verb unusable on a real board.
+
+    The guard refused on *any* frontmatter, reasoning that a bare note has none.
+    True of a note typed into the filesystem; false of every note on a board opened
+    in Obsidian, whose Kanban plugin stamps `state:` and `kanban_order:` on all of
+    them. Measured 2026-08-18 on the origin project: 7 of 7 inbox notes carried
+    exactly these two keys, so `close` refused every one and the panel's `Done`
+    gesture — the only route out of `inline` — could close nothing at all.
+    """
+    root = _repo(tmp_path)
+    (root / "Board" / "inbox" / "n.md").write_text(
+        "---\nstate: inbox\nkanban_order: VL\n---\n\nthe real prose\n",
+        encoding="utf-8")
+
+    boardcmd.close_note(root, "n.md")
+
+    assert not (root / "Board" / "inbox" / "n.md").exists()
+    text = (root / "Board" / "done" / "n.md").read_text(encoding="utf-8")
+    assert "the real prose" in text
+    # Exactly one frontmatter block, the stamped one — the note's own must not
+    # survive inside `## Intent`, or Obsidian reads the file as having two.
+    assert text.count("---\n") == 2, text
+    assert "kanban_order" not in text
+    assert "state: done" in text
+
+
+def test_a_closed_note_that_had_bookkeeping_still_satisfies_the_schema(tmp_path):
+    """The stamped card is subject to `card_schema`'s full `done/` requirements, and
+    stripping the old frontmatter must not have broken that."""
+    from nightshift.gates import card_schema
+
+    root = _repo(tmp_path)
+    (root / "Board" / "inbox" / "n.md").write_text(
+        "---\nstate: inbox\nkanban_order: VL\n---\n\nbody\n", encoding="utf-8")
+    boardcmd.close_note(root, "n.md")
+
+    offending = [str(v) for v in card_schema.check(root) if "n.md" in v.file]
+    assert not offending, offending
 
 
 def test_closing_a_note_that_is_not_there_is_refused(tmp_path):
