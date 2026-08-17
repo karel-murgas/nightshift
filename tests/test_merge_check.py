@@ -32,6 +32,8 @@ if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from nightshift import runner  # noqa: E402
+
+import _fixtures  # noqa: E402
 from test_runner import _card, _repo  # noqa: E402
 import nightshift.merge_check as merge_check  # noqa: E402
 from nightshift.merge_check import check_branch, report, _conflicted_paths  # noqa: E402
@@ -66,6 +68,7 @@ def _status_values() -> frozenset[str]:
 def _no_xdist_in_fixtures(monkeypatch):
     """Blank xdist flags so fixture-spawned pytest children don't spin up workers."""
     monkeypatch.setattr(runner, "_PYTEST_PARALLEL", (), raising=False)
+    _fixtures.serial_child_pytest(monkeypatch)
 
 
 # ---------------------------------------------------------------------------

@@ -161,6 +161,30 @@ def git_init(root: Path, *, branch: str | None = None,
     return root
 
 
+def serial_child_pytest(monkeypatch) -> None:
+    """Strip a fixture-spawned pytest down to what a one-test suite needs.
+
+    Several files here run a *real* pytest in a temp repo, through `runner` or
+    `preflight`, and each already blanks the parallel flags so a single test does
+    not pay for a set of xdist workers. This is the other half of the same
+    saving: the child also autoloads every pytest plugin installed on the box.
+    Measured 2026-08-17, one trivial test: **578 ms with autoload, 323 ms
+    without** — and on this machine the plugins being loaded are
+    `pytest-playwright` and `pytest-base-url`, which no suite here has ever used.
+
+    Deliberately *not* done in `preflight.py` or `runner.py`. Those inherit
+    `os.environ`, so setting it here reaches the child either way, and a real
+    preflight spawns pytest once — 255 ms against a run measured in minutes.
+    Buying that in production would mean editing the path that gates `git push`,
+    and it would have to carry `-p xdist` with it: with autoload off and the
+    parallel flags still on, pytest exits 4 with `unrecognized arguments: -n` and
+    writes no JUnit report at all. That is `xdist-assumed-not-probed` exactly,
+    the failure this package already learned once. Here the pairing is safe
+    because the caller has just made the child serial.
+    """
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+
+
 def _run(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True,
                    capture_output=True, encoding="utf-8", errors="replace")

@@ -206,6 +206,7 @@ def _no_xdist_in_fixtures(monkeypatch):
     for fixtures. `test_run_tests_passes_the_parallel_and_junit_flags` restores
     them to prove production still parallelises."""
     monkeypatch.setattr(runner, "_PYTEST_PARALLEL", (), raising=False)
+    _fixtures.serial_child_pytest(monkeypatch)
 
 
 # --- the tier binding is read from §16, never restated ----------------------

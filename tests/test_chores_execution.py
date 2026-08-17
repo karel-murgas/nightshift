@@ -178,6 +178,7 @@ def _gates_pass(monkeypatch):
 def _serial_pytest(monkeypatch):
     """xdist's startup dwarfs a two-test suite, and these run pytest many times."""
     monkeypatch.setattr(runner, "_PYTEST_PARALLEL", ())
+    _fixtures.serial_child_pytest(monkeypatch)
 
 
 @pytest.fixture(autouse=True)

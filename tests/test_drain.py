@@ -170,6 +170,7 @@ def _gates_pass(monkeypatch):
 @pytest.fixture(autouse=True)
 def _serial_pytest(monkeypatch):
     monkeypatch.setattr(runner, "_PYTEST_PARALLEL", ())
+    _fixtures.serial_child_pytest(monkeypatch)
 
 
 @pytest.fixture(autouse=True)

@@ -35,6 +35,7 @@ def _no_xdist_in_child_runs(monkeypatch):
     goes through `suite.parallel_args` because preflight's does.
     """
     monkeypatch.setattr(suite, "parallel_args", lambda *a, **k: ())
+    _fixtures.serial_child_pytest(monkeypatch)
 
 
 def _git(repo: Path, *args: str) -> str:
