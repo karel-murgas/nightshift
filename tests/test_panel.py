@@ -1744,9 +1744,27 @@ def test_triage_is_launched_on_the_note_you_picked(server, monkeypatch):
     status, data = _post(base, "api/triage", {"note": "stun-grenade.md"})
 
     assert status == 200, data
-    assert opened[0][:3] == ("claude", "--agent", "triage")
-    assert "Board/inbox/stun-grenade.md" in opened[0][3]
+    argv = list(opened[0])
+    assert argv[argv.index("--agent") + 1] == "triage"
+    assert "Board/inbox/stun-grenade.md" in argv[-1]
     assert "stun-grenade.md" in data["message"]
+
+
+def test_triage_goes_through_the_same_launcher_as_every_other_session(server, monkeypatch):
+    """It used to hand-roll `["claude", "--agent", "triage"]`, which is how it came to
+    be the one launch with no account, no permission mode and no session name — the
+    same shape as `Start session`, one row further down the page."""
+    base, _ = server
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal",
+                        lambda r, *command: opened.append(command))
+
+    _post(base, "api/triage", {"note": "stun-grenade.md"})
+
+    argv = list(opened[0])
+    assert argv[0] != "claude", "the bare name is back — resolution was skipped"
+    assert "--permission-mode" in argv
+    assert argv[argv.index("--name") + 1] == "triage stun-grenade.md"
 
 
 def test_triage_with_no_note_still_opens_the_charter(server, monkeypatch):
@@ -1757,7 +1775,13 @@ def test_triage_with_no_note_still_opens_the_charter(server, monkeypatch):
                         lambda r, *command: opened.append(command))
 
     _post(base, "api/triage", {})
-    assert opened == [("claude", "--agent", "triage")]
+
+    argv = list(opened[0])
+    assert argv[argv.index("--agent") + 1] == "triage"
+    assert argv[argv.index("--name") + 1] == "triage"
+    # No note means no prompt, so the argv ends on the last flag's value rather than
+    # on a trailing positional. The charter still arrives — via `--agent`.
+    assert argv[-2] == "--add-dir"
 
 
 def test_the_triage_section_lists_the_notes_not_the_report_file(server):
