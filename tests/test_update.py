@@ -134,6 +134,24 @@ def test_a_file_you_edited_whose_template_moved_is_a_conflict_and_is_never_writt
     assert (repo / TRACKED).read_text(encoding="utf-8") == mine
 
 
+def test_an_edit_the_template_later_adopted_is_not_a_conflict(repo, monkeypatch):
+    """Both sides moved off the recorded version and landed on the same bytes — what
+    upstreaming an edit looks like from here. Judged against the receipt alone that is
+    indistinguishable from a real conflict, and the panel duly offered four verbs to
+    resolve a difference whose own diff button reported `identical`."""
+    mine = _edit(repo, TRACKED)
+    _move_template(monkeypatch, TRACKED, "\n## my own note\n")
+
+    found = update.survey(repo)
+
+    assert not found.by(update.CONFLICT)
+    assert TRACKED in [f.rel for f in found.by(update.CURRENT)]
+    assert update.diff(update.find(found, TRACKED), repo) == "", "a verdict with no diff"
+
+    update.apply(found)
+    assert (repo / TRACKED).read_text(encoding="utf-8") == mine
+
+
 def test_a_file_of_ours_deleted_from_disk_is_written_back(repo):
     (repo / TRACKED).unlink()
 

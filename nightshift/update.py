@@ -17,7 +17,10 @@ apart; it has no memory of what it used to hold. `init` records what it wrote
 
     disk == recorded, template moved     ->  stale     overwrite; nothing of yours is there
     disk != recorded, template unchanged ->  yours     leave it; you edited it, we did not
-    disk != recorded, template moved     ->  conflict  never overwritten, ever
+    disk != recorded, template moved,
+        and the two agree                ->  current   converged; only the receipt is stale
+    disk != recorded, template moved,
+        and they disagree                ->  conflict  never overwritten, ever
 
 **The conflict case is the whole design, not an edge.** It is the one an evolving framework
 produces constantly — you customised a charter, and the charter's template also grew a
@@ -28,6 +31,19 @@ this version and chose your own, `--merge` to hand both to an agent. `--keep` wr
 template's hash to the receipt's `declined` map, so the same question stays answered until
 the template moves again — a report that re-asks something you already decided is a report
 you stop reading.
+
+**Convergence is not a conflict, and the first version of this table called it one.** The
+receipt is one *point* in the past, so "both sides moved" says nothing about where they
+moved *to* — and the way a framework like this actually evolves is that an edit made in a
+project gets upstreamed, after which the two sides hold the same bytes and the receipt
+alone is behind. Comparing each side against the receipt and never against the other
+reported that as a conflict with an empty diff: the panel said "nothing is overwritten
+until you say which wins" about two versions that were byte-identical, and the DIFF button
+right beside it said `identical`. Found 2026-08-18 in the Dungeoneer install, on a
+`command-center.bat` whose edit had been taken into the template. Nothing here writes the
+receipt straight — `survey` reads and never writes, which is what lets the panel call it on
+every page load — so the receipt stays behind until a verb touches the file; that costs
+nothing, because a re-derived answer is the same answer.
 
 **Three files are frozen and are never candidates.** `.ai/manifest.toml`, `.ai/hosts.json`
 and `.ai/corrections.log` are *records* — of an interview, of a machine, of what went
@@ -240,6 +256,12 @@ def survey(root: Path) -> Survey:
         if now == was:
             out.findings.append(
                 Finding(rel, CURRENT if ahead == was else STALE, staged))
+        elif now == ahead:
+            # Both sides left the recorded version and arrived at the same one — the
+            # shape an upstreamed edit makes. Judging only against the receipt calls
+            # this a conflict and offers four verbs to resolve a difference that is not
+            # there. Compared against each other it is simply current.
+            out.findings.append(Finding(rel, CURRENT, staged))
         elif ahead == was:
             out.findings.append(Finding(rel, YOURS, staged))
         else:
