@@ -444,10 +444,23 @@ def session_argv(root: Path, *, name: str = "", prompt: str = "", tier: str = ""
 
     Flag order is load-bearing in one place: `--remote-control` takes an *optional*
     positional name, so the token after it must start with `-` or it eats it.
-    `--name` follows it for that reason, and `prompt` goes strictly last. The long
-    form rather than `-n`, because `pytest_invocation` reads a bare `-n` in an argv
-    as the xdist worker count and is right to — that gate has no way to know whose
-    argv this is, and one character of brevity is not worth an appeal.
+    `--name` follows it for that reason. The long form rather than `-n`, because
+    `pytest_invocation` reads a bare `-n` in an argv as the xdist worker count and is
+    right to — that gate has no way to know whose argv this is, and one character of
+    brevity is not worth an appeal.
+
+    **`--` before the prompt, and it is load-bearing.** The first version of this
+    appended the prompt as a bare trailing token and the session opened with an empty
+    input box — the card never reached it, which is the original defect wearing a
+    better label. `--add-dir <directories...>` is *variadic*: it consumes every
+    following non-flag token, so the prompt was read as a second directory to grant
+    access to. Measured 2026-08-17 — `claude -p --add-dir <dir> "Reply with exactly:
+    ALPHA"` fails with *"Input must be provided either through stdin or as a prompt
+    argument when using --print"*, and the same line with `--` inserted answers
+    normally. Ending option parsing is the fix that keeps working when someone adds
+    another variadic flag here (`--tools`, `--allowed-tools` and `--plugin-dir` are
+    all variadic too); reordering the flags so a single-value one happens to come
+    last is the same fix by luck.
     """
     binary = claude_binary()
     if binary is None:
@@ -474,7 +487,7 @@ def session_argv(root: Path, *, name: str = "", prompt: str = "", tier: str = ""
              str(host_setting(root, "interactive_permission_mode", "acceptEdits"))]
     argv += ["--add-dir", str(board.board_dir(root).resolve())]
     if prompt:
-        argv.append(prompt)
+        argv += ["--", prompt]
     return argv
 
 
@@ -2862,11 +2875,15 @@ class Handler(BaseHTTPRequestHandler):
             # which. Interactive on purpose (§3.4): triage is investigative work a
             # person drives, never a `-p` dispatch.
             note = str(body.get("note", ""))
-            command = session_argv(root, name=f"triage {note}".strip(), agent="triage")
-            if note:
-                lane = board.board_rel(root)
-                command.append(f"Triage `{lane}/inbox/{note}`. Follow your charter.")
-            open_terminal(root, *command)
+            # The prompt goes *through* `session_argv`, never appended to what it
+            # returns: it is the function that knows the argv ends with a variadic
+            # `--add-dir` and puts the `--` in. Appending here is how this line
+            # silently dropped the note for one commit.
+            lane = board.board_rel(root)
+            open_terminal(root, *session_argv(
+                root, name=f"triage {note}".strip(), agent="triage",
+                prompt=(f"Triage `{lane}/inbox/{note}`. Follow your charter."
+                        if note else "")))
             return (f"opened a terminal running triage on {note}" if note else
                     "opened a terminal running the triage charter")
 

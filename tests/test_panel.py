@@ -1201,6 +1201,58 @@ def test_work_on_a_card_carries_the_card_the_model_and_the_charter(server, monke
     assert "stun-grenade" in data["message"] and "worker tier" in data["message"]
 
 
+def test_the_prompt_is_fenced_off_from_the_variadic_flags(server, monkeypatch):
+    """The bug the first version shipped: `--add-dir <directories...>` is variadic and
+    ate the trailing prompt, so the session opened with an empty input box and the card
+    never reached it. Every other assertion in this file passed — they all checked that
+    the prompt was *in* the argv, and it was, as a directory.
+
+    Asserting the `--` rather than a flag order, because the property that matters is
+    "option parsing has ended", which survives someone adding another variadic flag.
+    """
+    base, root = server
+    _card(root, "tasks", "stun-grenade")
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    _post(base, "api/work", {"card": "stun-grenade"})
+
+    argv = opened[0]
+    assert argv[-2] == "--", "the prompt is not fenced — a variadic flag can consume it"
+    assert argv[-1].startswith("Work this card")
+    # And the specific adjacency that broke it, named so a reorder cannot reintroduce it.
+    assert "--add-dir" not in argv[-3:-1], "the prompt sits inside --add-dir's values"
+
+
+def test_every_launcher_that_sends_a_prompt_fences_it(server, monkeypatch):
+    """`api/triage` built its argv through `session_argv` and then appended the prompt
+    itself, which put it back inside `--add-dir`. One function owns the fence."""
+    base, root = server
+    (root / "Board" / "inbox" / "taser.md").write_text("x\n", encoding="utf-8", newline="")
+    _card(root, "tasks", "stun-grenade")
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    _post(base, "api/triage", {"note": "taser.md"})
+    _post(base, "api/work", {"note": "taser.md"})
+    _post(base, "api/work", {"card": "stun-grenade"})
+
+    for argv in opened:
+        assert argv.count("--") == 1, argv
+        assert argv.index("--") == len(argv) - 2, argv
+
+
+def test_a_session_with_no_prompt_carries_no_fence(server, monkeypatch):
+    """`--` with nothing after it is not harmless — it is an empty positional."""
+    base, _ = server
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    _post(base, "api/session", {})
+
+    assert "--" not in opened[0]
+
+
 def test_work_on_a_card_tells_it_the_branch_to_cut_and_the_base_to_leave_alone(
         server, monkeypatch):
     base, root = server
