@@ -24,6 +24,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -33,13 +34,36 @@ from nightshift import ingest, usage
 
 # --------------------------------------------------------------------------- fixtures
 
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", check=False)
+
+
 def _repo(tmp_path: Path, **notes: str) -> Path:
+    """A real git repo, because this module commits now.
+
+    It did not use to, and that was the defect: a card the scribe wrote sat in the
+    working tree beside the note's deletion, with nothing closing the transaction.
+    A fixture with no git would let that regress silently — `board.commit_board`
+    warns rather than raising, on purpose, so the tests would go on passing while
+    committing nothing.
+    """
     lane = tmp_path / "Board" / "inbox"
     lane.mkdir(parents=True)
     (lane / ".gitkeep").write_text("", encoding="utf-8")
     for name, body in notes.items():
         (lane / f"{name}.md").write_text(body, encoding="utf-8")
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "t@t")
+    _git(tmp_path, "config", "user.name", "t")
+    (tmp_path / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "seed")
     return tmp_path
+
+
+def _log(root: Path) -> list[str]:
+    return _git(root, "log", "--format=%s").stdout.strip().splitlines()
 
 
 _SCRIBED = """\
@@ -731,3 +755,124 @@ def test_a_bounced_note_can_no_longer_be_carded_from_the_per_note_verb(
 def test_rerouting_a_note_the_view_never_had_changes_nothing(tmp_path: Path):
     root = _repo(tmp_path, alpha="a")
     assert ingest.reroute_to_triage(root, "ghost.md", "why", _healthy()) is False
+
+
+# ------------------------------------------- closing the transaction it opened
+
+
+def test_a_written_card_is_committed_with_the_note_that_became_it(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Every neighbouring path commits — `boardcmd`'s verbs, `board.move`,
+    `chores` — and this one did not, so a card the scribe wrote sat in the working
+    tree beside the note's deletion. Observed 2026-08-17: `skills-tinkering` had
+    been a card for an hour and git still showed the note as deleted-but-unstaged
+    next to an untracked card.
+    """
+    root = _repo(tmp_path, alpha="a")
+    _routes(monkeypatch, {"alpha.md": "chore"})
+
+    assert ingest.main(["--root", str(root), "--scribe"]) == 0
+
+    assert _git(root, "status", "--porcelain").stdout.strip() == ""
+    assert any("alpha.md carded as alpha" in line for line in _log(root)), _log(root)
+
+
+def test_each_card_is_its_own_commit_so_a_lost_window_keeps_the_finished_ones(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Per note, not per run: `_guard` exists to stop a fan-out partway, and
+    committing at the end would make the cheapest failure cost the most work."""
+    root = _repo(tmp_path, alpha="a", beta="b")
+    _routes(monkeypatch, {"alpha.md": "chore", "beta.md": "chore"})
+
+    ingest.main(["--root", str(root), "--scribe"])
+
+    carded = [line for line in _log(root) if "carded as" in line]
+    assert len(carded) == 2, _log(root)
+
+
+def test_the_classify_pass_commits_the_view_it_wrote(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """`Routing.md` is in `GENERATED_VIEWS`, which is what makes it a committed
+    artefact and why the dispatch dirty-check exempts it. Writing it without
+    committing left the report Karel reads sitting modified for hours,
+    indistinguishable from an edit somebody had made by hand."""
+    root = _repo(tmp_path, alpha="a")
+    _routes(monkeypatch, {"alpha.md": "triage"})
+
+    assert ingest.main(["--root", str(root)]) == 0
+
+    assert _git(root, "status", "--porcelain").stdout.strip() == ""
+    assert any("routed 1 note(s)" in line for line in _log(root)), _log(root)
+
+
+def test_a_bounce_commits_the_re_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root = _repo(tmp_path, alpha="a")
+
+    def fake(agent: str, prompt: str, root: Path, *_a, **_k):
+        if agent == "classifier":
+            return json.dumps({"notes": [{"file": "alpha.md", "route": "chore",
+                                          "why": "thin"}]}), ""
+        return json.dumps({"bounce": True, "note": "alpha.md",
+                           "reason": "needs the code"}), ""
+
+    monkeypatch.setattr(ingest, "_dispatch", fake)
+    monkeypatch.setattr(usage, "read", _healthy)
+    ingest.main(["--root", str(root), "--scribe"])
+
+    assert _git(root, "status", "--porcelain").stdout.strip() == ""
+    assert any("re-routed to triage by a scribe bounce" in line for line in _log(root))
+
+
+def test_a_stranded_half_transition_is_committed_and_says_so(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The half-transition is already on disk, and leaving it dirty does not undo
+    it — it only means the next board write sweeps it up under an unrelated
+    message. So it is committed, with the message a reader needs."""
+    root = _repo(tmp_path, alpha="a")
+
+    def writes_but_keeps(root: Path, note: str) -> None:
+        lane = root / "Board" / "tasks"
+        lane.mkdir(parents=True, exist_ok=True)
+        (lane / "alpha.md").write_text(_SCRIBED.format(stem="alpha"), encoding="utf-8")
+
+    _routes(monkeypatch, {"alpha.md": "scribe"}, effect=writes_but_keeps)
+    assert ingest.main(["--root", str(root), "--scribe"]) == 1
+
+    assert _git(root, "status", "--porcelain").stdout.strip() == ""
+    assert any("stranded" in line and "card it twice" in line for line in _log(root))
+
+
+def test_a_dispatch_that_changed_nothing_makes_no_commit(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A commit per attempt rather than per effect would fill the log with
+    entries recording that nothing happened."""
+    root = _repo(tmp_path, alpha="a")
+    _routes(monkeypatch, {"alpha.md": "chore"}, effect=lambda root, note: None)
+    ingest.main(["--root", str(root), "--scribe"])
+
+    assert not [line for line in _log(root) if "stranded" in line], _log(root)
+
+
+def test_a_route_can_be_corrected_without_paying_for_another_pass(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The classifier reads no code, so its answer is a recommendation and being
+    wrong about one note is affordable *provided something can correct it*. Until
+    2026-08-17 nothing could: the only way to change one route was another pass
+    over the whole lane."""
+    root = _repo(tmp_path, alpha="a", beta="b")
+    _routes(monkeypatch, {"alpha.md": "triage", "beta.md": "inline"})
+    ingest.main(["--root", str(root)])
+
+    assert ingest.set_route(root, "alpha.md", "chore",
+                            "one mechanic, one outcome — no fork", _healthy())
+
+    view = ingest.read_view(root)
+    assert view.of("alpha.md").route == "chore"
+    assert "no fork" in view.of("alpha.md").why
+    assert view.of("beta.md").route == "inline", "the rest of the view is untouched"
+
+
+def test_a_route_that_is_not_a_route_is_refused(tmp_path: Path):
+    root = _repo(tmp_path, alpha="a")
+    with pytest.raises(ValueError, match="not one of"):
+        ingest.set_route(root, "alpha.md", "somewhere-else", "why", _healthy())

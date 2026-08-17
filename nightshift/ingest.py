@@ -336,8 +336,9 @@ def scribe(decisions: list[Decision], root: Path, *, allow_paid: bool = False,
             f"Write the card for `Board/inbox/{decision.note}`. Follow your charter: "
             f"read the note and the schema, not the codebase. The note **is** the card - "
             f"edit that file in place and move it to its lane; never leave the original "
-            f"behind. If you cannot ground the acceptance criteria, emit the bounce "
-            f"object instead of a card."
+            f"behind. Bounce only if the note contains a fork you cannot resolve without "
+            f"reading the code - not because you cannot name the file or symbol the work "
+            f"lands in, which is the worker's job to find."
         ), root, model, timeout)
         if why:
             print(f"    ! failed - {why}")
@@ -352,6 +353,7 @@ def scribe(decisions: list[Decision], root: Path, *, allow_paid: bool = False,
             # offering to card it buys the same bounce again.
             if reroute_to_triage(root, decision.note, reason):
                 print("      -> re-routed to triage in the view")
+                _commit(root, f"{decision.note} re-routed to triage by a scribe bounce")
             bounced += 1
             continue
         did = Wrote(note=decision.note,
@@ -360,10 +362,42 @@ def scribe(decisions: list[Decision], root: Path, *, allow_paid: bool = False,
         if did.ok:
             print(f"    -> {', '.join(did.carded)}")
             written += 1
+            _commit(root, f"{decision.note} carded as {', '.join(did.carded)}")
         else:
             print(f"    ! {did.complaint}")
             stranded += 1
+            # Committed even so, because the half-transition is already on disk
+            # and leaving it dirty does not undo it — it only means the next
+            # board write sweeps it up under an unrelated message. The message
+            # is the honest one, so `git log` says a human has to look.
+            if did.carded or did.consumed:
+                _commit(root, f"{decision.note} stranded — {did.complaint}")
     return written, bounced, blocked, stranded
+
+
+def _commit(root: Path, what: str) -> None:
+    """Close the transaction the scribe opened.
+
+    **Nothing on this path committed, and every neighbouring path does.** Every
+    `boardcmd` verb commits, `board.move` commits, `chores` commits — but a card
+    written here sat in the working tree with the note's deletion beside it, so
+    the board's state and git's disagreed until somebody noticed. Observed on the
+    first real fan-out, 2026-08-17: `skills-tinkering` had become a card an hour
+    earlier and git still showed `D Board/inbox/skills-tinkering.md` next to an
+    untracked `Board/tasks/skills-tinkering.md`.
+
+    **Per note, not per run.** A fan-out that loses its window partway — which
+    `_guard` exists to make happen — would otherwise leave every card it did
+    write uncommitted, so the cheapest failure would cost the most work.
+
+    `commit_board` stages `Board/` and the generated views wholesale, so an
+    unrelated board edit sitting in the tree rides along. That is the framework's
+    settled behaviour for every board write (its docstring: "Never `-a`: the
+    runner must not be able to sweep up someone else's work in progress" — the
+    limit is the board, not the file), and being the one path that behaves
+    differently would be worse than the sweep.
+    """
+    board.commit_board(root, f"board: {what}")
 
 
 #: Heading and blurb per route, in the order the report lists them.
@@ -512,6 +546,37 @@ def parse_report(text: str) -> RoutingView:
     return RoutingView(written=written, decisions=decisions)
 
 
+def set_route(root: Path, note: str, route: str, why: str,
+              snapshot: usage.Snapshot | None = None) -> bool:
+    """Change one note's recorded route, keeping the rest of the view as it stands.
+
+    The classifier is cheap and reads no code, so its answer is a recommendation
+    and being wrong about one note is affordable *provided something can correct
+    it*. Until 2026-08-17 nothing could: the route was written once by a pass over
+    the whole lane and the only way to change one was to pay for another pass.
+
+    The view is rewritten rather than patched line by line, because it is a *view*
+    — `report()` is the one thing that knows its shape, and a second writer editing
+    its markdown in place is how a reader and a writer drift apart. The
+    classification timestamp is preserved on purpose: the routing pass really did
+    happen when it says, and moving the stamp to now would make a correction look
+    like a fresh classify pass nobody paid for. The `why` carries who corrected it.
+    """
+    if route not in ROUTES:
+        raise ValueError(f"{route!r} is not one of {ROUTES}")
+    view = read_view(root)
+    if note not in view.decisions:
+        return False
+    view.decisions[note] = Decision(
+        note=note, route=route, why=why, confidence="high",
+        dispatchable=view.decisions[note].dispatchable)
+    routing = Routing(decisions=list(view.decisions.values()))
+    stamp = view.written or dt.datetime.now()
+    textio.write_text_lf(root / OUT, report(
+        routing, notes(root), snapshot if snapshot is not None else usage.read(), stamp))
+    return True
+
+
 def reroute_to_triage(root: Path, note: str, reason: str,
                       snapshot: usage.Snapshot | None = None) -> bool:
     """Record that the scribe bounced this note, by moving it to `triage` in the view.
@@ -524,24 +589,10 @@ def reroute_to_triage(root: Path, note: str, reason: str,
     bought the same bounce again. Measured on the first real fan-out, 2026-08-17:
     three of five notes bounced, all three still routed `chore` afterwards.
 
-    The view is rewritten rather than patched line by line, because it is a *view*
-    — `report()` is the one thing that knows its shape, and a second writer editing
-    its markdown in place is how the reader and the writer drift apart. The
-    classification timestamp is preserved on purpose: the routing pass really did
-    happen when it says, and moving the stamp to now would make a bounce look like
-    a fresh classify pass nobody paid for. The bounce says so in the `why` instead.
+    One caller of `set_route`, named for what it means rather than what it does, so
+    the bounce path reads as the charter states it.
     """
-    view = read_view(root)
-    if note not in view.decisions:
-        return False
-    view.decisions[note] = Decision(
-        note=note, route="triage", why=f"scribe bounced it: {reason}",
-        dispatchable=view.decisions[note].dispatchable, confidence="high")
-    routing = Routing(decisions=list(view.decisions.values()))
-    stamp = view.written or dt.datetime.now()
-    textio.write_text_lf(root / OUT, report(
-        routing, notes(root), snapshot if snapshot is not None else usage.read(), stamp))
-    return True
+    return set_route(root, note, "triage", f"scribe bounced it: {reason}", snapshot)
 
 
 def read_view(root: Path) -> RoutingView:
@@ -622,6 +673,11 @@ def main(argv: list[str] | None = None) -> int:
     now = dt.datetime.now()
     textio.write_text_lf(root / OUT, report(routing, found, snapshot, now))
     print(f"  wrote {OUT}")
+    # The view is a committed artefact — that is what being in `GENERATED_VIEWS`
+    # means, and it is why the dispatch dirty-check exempts it. Writing it and
+    # not committing it left the report Karel reads sitting modified for hours on
+    # 2026-08-17, indistinguishable from an edit somebody had made by hand.
+    _commit(root, f"routed {len(found)} note(s) in {board.board_rel(root)}/inbox")
 
     if routing.error:
         print(f"  classification failed - {routing.error}")
