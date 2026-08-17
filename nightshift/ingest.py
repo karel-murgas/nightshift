@@ -7,9 +7,22 @@ not need it at all — so the routing decision is made here, by an agent that re
 notes and nothing else, and the expensive route is spent only where a note earns it.
 
 **Four routes**, defined in the project's own `classifier` charter: `chore` (a thin card
-that runs in a batch), `inline` (Karel, at the keyboard), `scribe` (the note is already
+that runs in a batch), `inline` (a person at the keyboard), `scribe` (the note is already
 elaborated and needs only the envelope), `triage` (there is a fork that cannot be posed
 without reading the code).
+
+**The decision is written onto the note**, as `route:` in its frontmatter, by the
+deterministic step that follows the dispatch (`apply_routing`). Everything else in this
+module's economy rests on that: `unrouted` is what a pass is *for*, so classifying twice
+costs one dispatch rather than two, and a note routed `triage` — which nothing here ever
+dispatches — stops being re-decided every time the button is pressed.
+
+**An `inline` note becomes a card immediately**, in `tasks/`, carrying `unattended: false`
+and `kind: inline`. It is the one route with nothing left to write, so there is nothing to
+wait in the lane for. The point is not bookkeeping: it puts a person's work on the same
+rails as everything else — one classify step, one place that says what is ready, one lane
+move to finish — instead of in a parallel world of notes that no lane-reading view could
+see (Karel, 2026-08-18: *"I would like the similar flow for all the files"*).
 
 **It reports before it spends.** Classification is one cheap dispatch over the whole
 lane; everything after it is opt-in. That ordering is the point: the person who wrote
@@ -25,9 +38,9 @@ that competes with the night for the same session window, so this command only e
 begins with headroom can lose it partway through a fan-out, and the whole point of
 `usage.check` is that a dispatch cannot be un-started.
 
-Deliberately not a lane: the report is a *view* over `inbox/`, regenerated on demand.
-A note leaves the lane when it becomes a card or when its inline work is done, so
-re-running is idempotent and there is no checklist state to lose.
+Deliberately not a lane: the report is a *view* over `inbox/`, regenerated on demand from
+the routes stamped on the notes themselves. It is a report, not a record — nothing reads
+it to decide what to do, so losing it costs a regeneration and not an answer.
 """
 from __future__ import annotations
 
@@ -62,7 +75,18 @@ SCRIBE_MODEL = "sonnet"
 CLASSIFY_TIMEOUT_S = 900
 SCRIBE_TIMEOUT_S = 900
 
-ROUTES = ("chore", "inline", "scribe", "triage")
+#: The vocabulary lives in `board` because it is written into frontmatter and the
+#: schema gate has to know it; this module is where it is *decided*.
+ROUTES = board.ROUTES
+
+#: Routes whose note stays in `inbox/` after the pass that decided them, carrying
+#: `route:` so the next pass knows not to ask again.
+#:
+#: `inline` is absent because an inline note does not stay — it becomes a card in
+#: `tasks/` immediately (`card_inline`). That is the whole of the difference between
+#: the two halves of `apply_routing`: these three are still waiting to become cards,
+#: and an inline note already is one.
+STAMPED_ROUTES = ("chore", "scribe", "triage")
 
 #: The routes `--scribe` can turn into cards, and the reason the set is not just
 #: `("scribe",)`.
@@ -77,9 +101,11 @@ ROUTES = ("chore", "inline", "scribe", "triage")
 #: permanently, accurately empty.
 #:
 #: The two that stay out are out for their own reasons, not by omission. `inline`
-#: is Karel's own work and gets no card *by definition* — that is what the route
-#: means. `triage` is never dispatched from here at all (see the module docstring):
-#: it is the expensive route and choosing when to spend it is a human's call.
+#: needs no scribe: its card is written deterministically by `card_inline` the moment
+#: the route is decided, because a card whose acceptance is "a person decided" has no
+#: envelope an agent could add. `triage` is never dispatched from here at all (see the
+#: module docstring): it is the expensive route and choosing when to spend it is a
+#: human's call.
 WRITABLE_ROUTES = ("chore", "scribe")
 
 #: A fenced block the model wrapped its JSON in. Tolerated rather than forbidden: the
@@ -89,7 +115,13 @@ _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
 @dataclass(frozen=True)
 class Note:
-    """One bare note in the inbox. Not a card — it has no schema to satisfy."""
+    """One note in the inbox, at whatever stage of becoming a card it has reached.
+
+    Not "a bare note": on any board somebody opens in Obsidian every note already
+    carries `state:` and `kanban_order:`, and after a routing pass it carries
+    `route:` as well. What makes it a note rather than a card is the lane it is in —
+    `inbox/` is `_UNTRIAGED`, where the schema asks for no sections at all.
+    """
 
     path: Path
     text: str
@@ -101,6 +133,21 @@ class Note:
     @property
     def size(self) -> int:
         return len(self.text)
+
+    @property
+    def fields(self) -> dict[str, str]:
+        return board.parse_fields(self.text)
+
+    @property
+    def route(self) -> str:
+        """The route stamped on this note, or "" if no pass has answered for it.
+
+        An unrecognised value reads as unrouted rather than raising: the field is
+        hand-editable in Obsidian, and a typo should cost one classify pass, not a
+        traceback in a command that is reading the whole lane.
+        """
+        found = self.fields.get("route", "").strip().lower()
+        return found if found in ROUTES else ""
 
 
 @dataclass
@@ -129,7 +176,7 @@ class Routing:
 
 
 def notes(root: Path) -> list[Note]:
-    """Every bare note in `inbox/`, oldest first.
+    """Every note in `inbox/`, oldest first, routed or not.
 
     `.gitkeep` and anything not markdown is skipped. Nothing here looks at `ideas/` —
     that lane is private and the hook would refuse the read anyway.
@@ -144,6 +191,26 @@ def notes(root: Path) -> list[Note]:
         except OSError as exc:
             print(f"  ! skipping {path.name} - unreadable ({exc})")
     return found
+
+
+def unrouted(found: list[Note]) -> list[Note]:
+    """The notes a classify pass still has a question about.
+
+    **This is what stops the classifier being paid twice for the same answer.**
+    Routing used to live only in `Routing.md`, a view regenerated from scratch on
+    every run, so a note sat in the lane being re-read and re-decided for as long as
+    it took to become a card — and a note routed `triage`, which nothing dispatches
+    automatically, was re-decided forever. Karel, 2026-08-18: *"Definitely not
+    running classifier multiple times."*
+
+    A note whose text has changed since it was routed is *not* picked up again by
+    this. That is deliberate: an edit does not necessarily invalidate the routing,
+    and quietly re-spending on a typo fix would be the same defect in a subtler form.
+    Deleting the `route:` line puts a note back in this set, and it is a human's call
+    — the inbox page marks a note edited since the pass that routed it, which is the
+    prompt to make it rather than a reason to spend on his behalf.
+    """
+    return [note for note in found if not note.route]
 
 
 def _extract_json(text: str) -> tuple[dict | None, str]:
@@ -335,6 +402,151 @@ def classify(found: list[Note], root: Path, *, model: str = CLASSIFIER_MODEL,
                 note=note.name, route="inline", why="classifier returned no entry",
                 confidence="low"))
     return routing
+
+
+#: What an `inline`-routed note becomes, in `tasks/`, the moment it is routed.
+#:
+#: **Every stamped value is one this step can actually know**, which is the rule
+#: `_CLOSED_INLINE` in `boardcmd` set and the reason both templates are this short:
+#:
+#: * `worker: none` / `recipe: none` — nothing will dispatch it, and naming an agent
+#:   would put its name on a person's work.
+#: * `unattended: false` — the field governs exactly one decision, "may the runner
+#:   start this", and for work routed to a person the answer is no. `runner.select`
+#:   and `chores.select` both already refuse on it, so this is the card declaring
+#:   itself to machinery that is already listening.
+#: * `kind: inline` — what tells this card apart from one a worker would take, in a
+#:   lane that holds both. It is also what exempts it from `## Approach`.
+#: * `tier: worker` — `_TIERS` is `{worker, lead}` and neither describes a human. The
+#:   lower is the honest choice: a tier is what a dispatcher would resolve to a
+#:   model, and nothing here will ever resolve it.
+#: * `verify: review` — the person who did the work is the person who would have
+#:   played it, so `testing/` would be asking Karel to verify himself.
+#:
+#: `## Acceptance` says who decides rather than inventing criteria. A note is routed
+#: `inline` *because* it has no machine-checkable brief; writing one here would
+#: fabricate the brief the route exists to do without.
+_INLINE_CARD = """\
+---
+id: {ident}
+title: "{title}"
+state: tasks
+tier: worker
+worker: none
+recipe: none
+unattended: false
+kind: inline
+verify: review
+created: {today}
+---
+
+## Intent
+
+{body}
+
+## Steps
+
+At the keyboard, not dispatched.
+
+## Acceptance
+
+- human: routed `inline` from `{lane}/{filename}` on {today}, which means a person is the process and their judgment that it is finished is the acceptance — there were never machine criteria to meet.
+
+## Open questions
+
+none
+"""
+
+
+def card_inline(root: Path, note: Note) -> str:
+    """Turn one `inline`-routed note into its card in `tasks/`. Returns the card id.
+
+    **The route that used to be the exception is now on the same rails as the rest.**
+    An inline note had no card *by definition*, so it stayed in `inbox/` while its
+    work happened somewhere else entirely — invisible to every lane-reading view,
+    re-routed by each classify pass, and closable only by a bespoke verb written for
+    the purpose. Karel, 2026-08-18: *"I would like the similar flow for all the files
+    — classify, triage if needed, work on them (inline or bulk or runner), review if
+    needed, move to testing / done, merge, push."*
+
+    So the card is the flow, and *how* the work gets done is a field on it rather
+    than a separate world: `unattended: false` says a person does it, and `tasks/`
+    says it is ready to be done. Nothing about the lanes changes to accommodate it.
+
+    The note's own text becomes `## Intent` — it is the best statement of what the
+    work is, and it was written before anyone knew the answer.
+    """
+    ident = board.slug(note.path.stem)
+    target = board.board_dir(root) / "tasks" / f"{ident}.md"
+    if target.exists():
+        raise FileExistsError(f"tasks/{ident}.md already exists")
+    body = board.FRONTMATTER.sub("", note.text, count=1).strip()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    textio.write_text_lf(target, _INLINE_CARD.format(
+        ident=ident, title=note.path.stem.replace('"', "'"),
+        today=dt.date.today().isoformat(), body=body or "(the note was empty)",
+        lane="inbox", filename=note.name))
+    note.path.unlink()
+    return ident
+
+
+def stamp_route(note: Note, route: str) -> str:
+    """Write `route:` onto the note, and return what its file should now contain.
+
+    A note with no frontmatter block gets one rather than being refused: `inbox/` is
+    `_UNTRIAGED`, so a block holding one field is legal there, and the alternative is
+    a lane where some notes remember their routing and some cannot.
+    """
+    if board.FRONTMATTER.match(note.text):
+        return board.set_fields(note.text, {"route": route})
+    return f"---\nroute: {route}\n---\n\n{note.text.lstrip()}"
+
+
+@dataclass
+class Applied:
+    """What the deterministic half of a pass did to the lane.
+
+    Separated from `Routing` because they answer different questions: the routing is
+    what the classifier *said*, and this is what the board *did* about it. A pass
+    that classified ten notes and moved none is a real state — every route already
+    stamped — and it should read as one rather than as a failure.
+    """
+
+    carded: list[str] = field(default_factory=list)
+    stamped: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+
+
+def apply_routing(root: Path, routing: Routing, found: list[Note]) -> Applied:
+    """Put every decision on disk: inline notes become cards, the rest get stamped.
+
+    **Deterministic, and that is the point.** No agent runs here — the classifier has
+    already answered, and this is the file work that answer implies. It is what makes
+    a routing pass have an effect on the lane instead of only on a view, and it is
+    why `unrouted` can be trusted the next time round.
+
+    Idempotent by construction: a note already carrying the route it is being given
+    is left alone, and one that has already become a card is not in `found` at all.
+    """
+    by_name = {note.name: note for note in found}
+    out = Applied()
+    for decision in routing.decisions:
+        note = by_name.get(decision.note)
+        if note is None:
+            continue
+        try:
+            if decision.route == "inline":
+                out.carded.append(card_inline(root, note))
+            elif decision.route in STAMPED_ROUTES:
+                if note.route == decision.route:
+                    continue
+                textio.write_text_lf(note.path, stamp_route(note, decision.route))
+                out.stamped.append(note.name)
+        except (OSError, ValueError, FileExistsError) as exc:
+            print(f"  ! {decision.note}: could not apply route "
+                  f"{decision.route!r} - {exc}")
+            out.failed.append(decision.note)
+    return out
 
 
 def cannot_card(root: Path) -> str:
@@ -543,7 +755,8 @@ def _commit(root: Path, what: str) -> None:
 #: addresses someone else's owner is the `project_agnostic` test's whole subject.
 #: Docstrings may name the origin project; runtime strings may not.
 ROUTE_HEADINGS: dict[str, tuple[str, str]] = {
-    "inline": ("Do now - inline", "You, at the keyboard. No card is written for these."),
+    "inline": ("Do now - inline", "Carded straight into tasks/ as `unattended: false`; "
+                                  "the lane is empty of these by the time you read it."),
     "chore": ("Chores - batch overnight", "Thin cards, verified as one batch."),
     "scribe": ("Scribe - needs the envelope only", "Already elaborated; no investigation."),
     "triage": ("Waiting on triage", "The expensive route. Launch it deliberately, "
@@ -601,13 +814,19 @@ def report(routing: Routing, found: list[Note], snapshot: usage.Snapshot,
 class RoutingView:
     """A routing pass as it can be read back off disk.
 
-    **Why this exists at all.** A note does not leave `inbox/` when it is routed —
-    routing is a *view*, deliberately, so re-running is idempotent and there is no
-    checklist state to lose. The cost of that design was paid by the panel, which
-    listed every note under "Not yet classified" whatever had happened to it: on
-    2026-08-17 all thirteen notes were classified and all thirteen still read as
-    unclassified, with the answer sitting in a file the page linked but did not
-    read. So the page reads it.
+    **Why this exists at all.** Routing used to live *only* here, in a regenerated
+    view, and a note carried no trace of having been decided. The cost was paid by
+    the panel, which listed every note under "Not yet classified" whatever had
+    happened to it: on 2026-08-17 all thirteen notes were classified and all thirteen
+    still read as unclassified, with the answer sitting in a file the page linked but
+    did not read. So the page reads it.
+
+    Since 2026-08-18 the durable answer is `route:` on the note (`Note.route`), and
+    this parser's remaining job is the part a frontmatter field cannot carry: the
+    classifier's one-line `why`, its confidence, and whether it thought the night
+    could take the work. A note whose `why` is missing here is still correctly
+    routed — which is why every reader treats this as decoration over `Note.route`
+    rather than as the source of it.
 
     Parsing our own generated markdown rather than writing a JSON sidecar is the
     deliberate choice: a second artefact is a second thing to keep in sync, to
@@ -787,25 +1006,51 @@ def set_route(root: Path, note: str, route: str, why: str,
     it*. Until 2026-08-17 nothing could: the route was written once by a pass over
     the whole lane and the only way to change one was to pay for another pass.
 
-    The view is rewritten rather than patched line by line, because it is a *view*
-    — `report()` is the one thing that knows its shape, and a second writer editing
-    its markdown in place is how a reader and a writer drift apart. The
+    **The note is written first, and it is the part that matters.** `route:` on the
+    file is the durable answer — `unrouted` reads it to decide what a pass still owes
+    a dispatch — so a correction that only rewrote the view would be undone by the
+    next classify pass, which is the failure the view-only design had all along.
+
+    Re-routing to `inline` cards the note on the spot, exactly as a classify pass
+    would. `reroute_to_triage` is the only caller today and it can never take that
+    branch, so nothing exercises it in production — it is here because a function
+    that takes a route must mean the same thing by a route as everything else does,
+    and the alternative is a correction that silently leaves the note in the lane.
+    A test covers it for that reason.
+
+    The view is then rewritten rather than patched line by line, because it is a
+    *view* — `report()` is the one thing that knows its shape, and a second writer
+    editing its markdown in place is how a reader and a writer drift apart. The
     classification timestamp is preserved on purpose: the routing pass really did
     happen when it says, and moving the stamp to now would make a correction look
     like a fresh classify pass nobody paid for. The `why` carries who corrected it.
+
+    Returns False when there is no such note in the lane — the one case where there
+    is nothing to correct.
     """
     if route not in ROUTES:
         raise ValueError(f"{route!r} is not one of {ROUTES}")
     view = read_view(root)
-    if note not in view.decisions:
+    found = notes(root)
+    target = next((n for n in found if n.name == note), None)
+    if target is None:
         return False
+
+    if route == "inline":
+        card_inline(root, target)
+    else:
+        textio.write_text_lf(target.path, stamp_route(target, route))
+
+    prior = view.of(note)
     view.decisions[note] = Decision(
         note=note, route=route, why=why, confidence="high",
-        dispatchable=view.decisions[note].dispatchable)
-    routing = Routing(decisions=list(view.decisions.values()))
+        dispatchable=prior.dispatchable if prior else True)
+    found = notes(root)
+    live = [d for d in view.decisions.values() if d.note in {n.name for n in found}]
     stamp = view.written or dt.datetime.now()
     textio.write_text_lf(root / OUT, report(
-        routing, notes(root), snapshot if snapshot is not None else usage.read(), stamp))
+        Routing(decisions=live), found,
+        snapshot if snapshot is not None else usage.read(), stamp))
     return True
 
 
@@ -838,6 +1083,32 @@ def read_view(root: Path) -> RoutingView:
         return parse_report((root / OUT).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return RoutingView()
+
+
+def recorded(root: Path, found: list[Note]) -> list[Decision]:
+    """Decisions already stamped on the notes, dressed back up as `Decision`s.
+
+    The report describes the *lane*, not the pass — so a note routed three passes
+    ago and still waiting on triage has to appear in it, or the view would empty
+    itself as the classifier stopped re-deciding notes it had already decided.
+
+    The note's own `route:` wins over the view: it is the durable record, and the
+    view is regenerated from it. The `why` is borrowed from the last report when it
+    still describes the same route, because that sentence is the classifier's and
+    this function cannot write a replacement for it.
+    """
+    view = read_view(root)
+    out: list[Decision] = []
+    for note in found:
+        if not note.route:
+            continue
+        prior = view.of(note.name)
+        if prior and prior.route == note.route:
+            out.append(prior)
+        else:
+            out.append(Decision(note=note.name, route=note.route,
+                                why="routed by an earlier pass"))
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -876,7 +1147,9 @@ def main(argv: list[str] | None = None) -> int:
         return _write_recorded(root, allow_paid=args.allow_paid)
 
     found = notes(root)
-    print(f"ingest: {len(found)} note(s) in {board.board_rel(root)}/inbox")
+    pending = unrouted(found)
+    print(f"ingest: {len(found)} note(s) in {board.board_rel(root)}/inbox, "
+          f"{len(pending)} unrouted")
     if not found:
         print("  nothing to route")
         return 0
@@ -888,8 +1161,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         print()
         for note in found:
-            print(f"  {note.name} ({note.size} B)")
+            print(f"  {note.name} ({note.size} B)"
+                  + (f" - already routed {note.route}" if note.route else ""))
         print("\n(dry run - nothing dispatched)")
+        return 0
+
+    # **The pass is over the notes with no answer yet, not over the lane.** A note
+    # keeps its `route:`, so re-running this command costs one dispatch for what has
+    # arrived since and nothing for what has not changed. When nothing has arrived it
+    # costs nothing at all, which is what makes it safe to press the button twice.
+    if not pending:
+        print("  every note already carries a route - nothing to classify")
+        print(f"  clear `route:` on a note to put it back in the queue")
         return 0
 
     if not _guard(args.allow_paid, "classifying").allow:
@@ -900,7 +1183,19 @@ def main(argv: list[str] | None = None) -> int:
     ensure_workspace_trusted(root)
 
     print(f"  classifying with {args.model} ...")
-    routing = classify(found, root, model=args.model)
+    routing = classify(pending, root, model=args.model)
+
+    # The deterministic half, before the view is written: it moves inline notes out
+    # of the lane, so a report generated first would describe an inbox that no longer
+    # exists. `found` is re-read for the same reason.
+    applied = apply_routing(root, routing, pending)
+    if applied.carded:
+        print(f"  carded {len(applied.carded)} inline note(s) into tasks/: "
+              f"{', '.join(applied.carded)}")
+    if applied.stamped:
+        print(f"  stamped {len(applied.stamped)} note(s) with their route")
+    found = notes(root)
+    routing = Routing(decisions=recorded(root, found), error=routing.error)
 
     now = dt.datetime.now()
     textio.write_text_lf(root / OUT, report(routing, found, snapshot, now))
@@ -909,14 +1204,24 @@ def main(argv: list[str] | None = None) -> int:
     # means, and it is why the dispatch dirty-check exempts it. Writing it and
     # not committing it left the report Karel reads sitting modified for hours on
     # 2026-08-17, indistinguishable from an edit somebody had made by hand.
-    _commit(root, f"routed {len(found)} note(s) in {board.board_rel(root)}/inbox")
+    _commit(root, f"routed {len(pending)} note(s) in {board.board_rel(root)}/inbox"
+                  + (f", carded {len(applied.carded)} inline" if applied.carded else ""))
 
     if routing.error:
         print(f"  classification failed - {routing.error}")
         return 1
 
+    # `inline` is counted from what was carded rather than from the view: those notes
+    # left the lane in `apply_routing`, so the view — which describes the lane — has
+    # nothing to say about them, and reporting a truthful zero would read as though
+    # the classifier had routed none.
     for route in ROUTES:
-        print(f"    {route:8} {len(routing.by_route(route))}")
+        count = len(applied.carded) if route == "inline" else len(routing.by_route(route))
+        print(f"    {route:8} {count}")
+    if applied.failed:
+        print(f"  ! {len(applied.failed)} note(s) could not be moved: "
+              f"{', '.join(applied.failed)}")
+        return 1
 
     if args.scribe:
         # Both writable buckets, in the order the report lists them, so the cheap
@@ -952,13 +1257,36 @@ def _write_recorded(root: Path, *, allow_paid: bool = False) -> int:
     act on one note; this is the same act on all of them.
     """
     view = read_view(root)
-    if not view.known:
-        print("ingest: no routing pass on record - classify the inbox first "
+    found = notes(root)
+    have = recorded(root, found)
+    # An empty lane is not a missing routing pass. The two used to be one branch,
+    # because the check was "has a pass ever been recorded" — and a lane whose notes
+    # have all become cards is the *success* state of this command, not a state that
+    # should send anyone back to classify.
+    if not found:
+        print(f"ingest: {board.board_rel(root)}/inbox is empty - nothing still in the "
+              f"lane to card")
+        return 0
+    if not have:
+        print("ingest: no note in the lane carries a route - classify the inbox first "
               "(`python -m nightshift.ingest`)")
         return 2
-    present = {note.name for note in notes(root)}
-    bucket = [d for route in WRITABLE_ROUTES for d in view.decisions.values()
-              if d.route == route and d.note in present]
+    # A note whose `route:` was set by hand — in Obsidian, or by the panel's re-route
+    # — has never been through the deterministic step, so an `inline` one is still
+    # sitting in the lane. Applying here as well as after a classify pass means both
+    # buttons converge on the same board state instead of one of them leaving work
+    # stranded in a group labelled "carded on the next pass".
+    applied = apply_routing(root, Routing(decisions=have), found)
+    if applied.carded:
+        print(f"  carded {len(applied.carded)} inline note(s) into tasks/: "
+              f"{', '.join(applied.carded)}")
+        # Committed here rather than left to the scribe's per-note commit below: a
+        # lane whose only routed notes were inline has an empty `bucket`, so nothing
+        # downstream runs and the moved files would sit in the working tree.
+        _commit(root, f"carded {len(applied.carded)} inline note(s) into tasks/")
+        found = notes(root)
+        have = recorded(root, found)
+    bucket = [d for route in WRITABLE_ROUTES for d in have if d.route == route]
     when = f", from the pass of {view.written:%Y-%m-%d %H:%M}" if view.written else ""
     print(f"ingest: {len(bucket)} note(s) to card{when}")
     if not bucket:
@@ -981,28 +1309,32 @@ def _write_one(root: Path, note: str, *, allow_paid: bool = False) -> int:
     pass over the whole lane — and re-classifying to answer a question already
     answered is the expense this module exists to avoid.
 
-    A note routed `inline` or `triage` is refused rather than quietly scribed. Both
-    refusals are the route's own meaning: `inline` has no card by definition, and
-    `triage` is never dispatched from here.
+    A note routed `triage` is refused rather than quietly scribed: it is never
+    dispatched from here. `inline` cannot reach this path at all — such a note became
+    a card the moment it was routed and is no longer in the lane.
+
+    The route is read off the note, not out of the view. Same reason `unrouted` does:
+    the note is the record, and the view is regenerated from it.
     """
     lane = board.board_dir(root) / "inbox"
     if not (lane / note).is_file():
         print(f"ingest: no note named {note!r} in {board.board_rel(root)}/inbox")
         return 2
-    view = read_view(root)
-    decision = view.of(note)
-    if decision is None:
+    found = next(n for n in notes(root) if n.name == note)
+    if not found.route:
         print(f"ingest: {note} has no routing yet - classify the inbox first "
               f"(`python -m nightshift.ingest`)")
         return 2
+    view = read_view(root)
+    prior = view.of(note)
+    decision = prior if prior and prior.route == found.route else Decision(
+        note=note, route=found.route, why="routed by an earlier pass")
     if decision.route not in WRITABLE_ROUTES:
         print(f"ingest: {note} is routed `{decision.route}`, and only "
               f"{' and '.join(WRITABLE_ROUTES)} can be written from here")
         if decision.route == "triage":
             print("  triage is the expensive route and is launched deliberately, "
                   "one note at a time, by a human")
-        elif decision.route == "inline":
-            print("  an inline note is your own work at the keyboard - it gets no card")
         return 2
 
     print(f"ingest: {note} ({decision.route})")

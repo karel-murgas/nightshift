@@ -221,7 +221,9 @@ def promote(root: Path, name: str) -> str:
 #: the panel's `Done` gesture — the sole route out of `inline` — could not close
 #: anything at all. A triaged card is told apart by the fields triage actually adds
 #: (`id`, `title`, `tier`, `worker`, …), never by the presence of a frontmatter block.
-_NOTE_BOOKKEEPING = frozenset({"state", "kanban_order"})
+#: `route:` joins them for the same reason: `ingest` stamps it on every note it has
+#: classified, so after any routing pass it is on notes that no triage has touched.
+_NOTE_BOOKKEEPING = frozenset({"state", "kanban_order", "route"})
 
 _CLOSED_INLINE = """\
 ---
@@ -284,7 +286,7 @@ def close_note(root: Path, name: str) -> str:
         raise BoardCommandError(
             f"{INBOX}/{filename} carries triage field(s) {', '.join(triaged)} — it is a "
             f"card being triaged, not a bare note, and a card advances through its own lanes")
-    ident = _slug(Path(filename).stem)
+    ident = board.slug(Path(filename).stem)
     target = board.board_dir(root) / "done" / f"{ident}.md"
     if target.exists():
         raise BoardCommandError(f"done/{ident}.md already exists — rename the note")
@@ -300,20 +302,6 @@ def close_note(root: Path, name: str) -> str:
     source.unlink()
     board.commit_board(root, f"board: closed inline note {filename} into done/")
     return f"{filename}: {INBOX}/ → done/{ident}.md"
-
-
-def _slug(stem: str) -> str:
-    """A note's filename as a card id: kebab-case, which is what `id` must be.
-
-    Real notes are called `Regenerate soundtrack.md`, and `card_schema` requires
-    `id` to equal the filename stem — so the rename is part of becoming a card,
-    exactly as it is for the scribe and for triage.
-    """
-    kept = [c.lower() if (c.isalnum() or c in "-_") else "-" for c in stem]
-    slug = "".join(kept)
-    while "--" in slug:
-        slug = slug.replace("--", "-")
-    return slug.strip("-") or "note"
 
 
 #: Where `create_note` may write. `inbox/` is the ordinary case; `ideas/` is

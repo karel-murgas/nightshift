@@ -83,7 +83,7 @@ _AUTHOR_FIELDS: tuple[str, ...] = (
     "unattended",
     "created",
 )
-_OPTIONAL_FIELDS = frozenset({"requires", "checker", "verify", "kind", "surface"})
+_OPTIONAL_FIELDS = frozenset({"requires", "checker", "verify", "kind", "surface", "route"})
 
 # Where in the running application this change shows up — free text, deliberately not
 # a vocabulary this package invents, because "hub" and "combat" are one project's
@@ -98,16 +98,32 @@ _OPTIONAL_FIELDS = frozenset({"requires", "checker", "verify", "kind", "surface"
 #           result should be, there is no fork, and the change has one obvious
 #           home. Dispatched in a batch and verified as a batch.
 #
-# The only thing the schema relaxes for a chore is `## Approach`, and the reason is
+#   inline  a person at the keyboard is the process. Carries `unattended: false`,
+#           so the night refuses it by the field that already governs that, not by
+#           being kept off the board.
+#
+# The only thing the schema relaxes for either is `## Approach`, and the reason is
 # specific rather than a convenience: for a one-prompter the *intent is* the
 # approach, so a mandated second section gets filled with a restatement of the
 # first. That is worse than its absence — it reads as a considered "how" and is
 # not one, and the digest inlines it as though it were. Everything else a card
 # owes stays owed.
 #
+# The same sentence is exactly true of inline work, and it is the reason `inline`
+# is a kind rather than a lane. The classifier routes a note there *because* a
+# person's judgment is the process; there is no "how" to state that its intent has
+# not already stated, and there are no machine criteria to write — `## Acceptance`
+# says a human decided, which is the honest brief rather than a fabricated one.
+#
 # Absent means "a full card", so no existing card changes meaning by this field
 # arriving.
-_KINDS = frozenset({"chore"})
+_KINDS = frozenset({_board.KIND_CHORE, _board.KIND_INLINE})
+
+# The classifier's answer, stamped onto the note so it survives the pass that made
+# it. Only `inbox/` may carry it: a note that has become a card left the routing
+# behind when it left the lane, and a stray `route:` on a card in `tasks/` means a
+# scribe copied frontmatter instead of advancing the note it was given.
+_ROUTES = frozenset(_board.ROUTES)
 
 # How a finished card gets verified, and therefore where a `reviewed` verdict
 # lands it. Author-owned like `tier:`, decided at triage, consumed by `settle()`
@@ -297,6 +313,22 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
     if "kind" in fields and fields["kind"] not in _KINDS:
         bad("kind", f"`kind: {fields['kind']}` — must be one of {sorted(_KINDS)}, or absent "
                     f"for a full card; an unknown kind would relax the wrong checks")
+    if "route" in fields:
+        if fields["route"] not in _ROUTES:
+            bad("route", f"`route: {fields['route']}` — must be one of {sorted(_ROUTES)}; "
+                         f"the classifier writes this field and `ingest` reads it back to "
+                         f"decide what a note still needs")
+        elif lane not in _UNTRIAGED:
+            bad("route", f"`route: {fields['route']}` on a card in `{lane}/` — routing is a "
+                         f"question about a note in inbox/, and a card that left the lane "
+                         f"answered it by becoming a card")
+    # An inline card is worked by a person, and `unattended: true` would offer it to
+    # the night, which would take it and produce work nobody asked an agent for. The
+    # two fields are one statement, so a card that says one and not the other is a
+    # card whose author changed their mind halfway.
+    if fields.get("kind") == _board.KIND_INLINE and fields.get("unattended", "").lower() == "true":
+        bad("unattended", "`kind: inline` with `unattended: true` — inline means a person is "
+                          "the process, so the night must not be offered the card")
     # A chore is by definition work with no fork in it, so `tier: lead` is a
     # contradiction rather than a combination — and it is the shape a misrouted note
     # takes, which makes this the cheapest place to catch one.
@@ -391,9 +423,11 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
     # not prose (03_board.md §12b). Only `tasks/`, not every actionable lane:
     # archived cards predate the rule and must not be retroactively reddened, and
     # a card carries the section forward once it advances out of `tasks/`.
-    # `kind: chore` is exempt: see `_KINDS` on why a mandated one-paragraph "how" on a
-    # one-prompter produces a restatement of `## Intent` rather than a second thought.
-    if (lane == "tasks" and fields.get("kind") != "chore"
+    # Both `kind:` values are exempt: see `_KINDS` on why a mandated one-paragraph
+    # "how" produces a restatement of `## Intent` rather than a second thought — for a
+    # one-prompter because the intent *is* the approach, and for inline work because
+    # the person doing it is the one who would have written the paragraph.
+    if (lane == "tasks" and fields.get("kind") not in _KINDS
             and not _has_section(sections, "approach", "subject")):
         out.append(
             Violation(

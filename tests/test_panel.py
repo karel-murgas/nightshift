@@ -1748,11 +1748,11 @@ _ROUTED = """\
 
 2 note(s) in `inbox/`.
 
-## Do now - inline (1)
+## Do now - inline (0)
 
-You, at the keyboard.
+Carded straight into tasks/.
 
-- **needs-you.md** - the note itself says to wait for a direction
+_none_
 
 ## Chores - batch overnight (0)
 
@@ -1764,9 +1764,11 @@ Already elaborated.
 
 - **ready.md** - already worked out, only the envelope is missing
 
-## Waiting on triage (0)
+## Waiting on triage (1)
 
-_none_
+The expensive route.
+
+- **forky.md** - the fork cannot be posed without the code
 """
 
 
@@ -1776,24 +1778,49 @@ def _notes(root: Path, **bodies: str) -> None:
         (lane / name).write_text(body, encoding="utf-8")
 
 
+def _routed(route: str, body: str = "a") -> str:
+    """A note as `ingest` leaves it: the route stamped on the note itself.
+
+    **The fixture has to carry it, because the page reads it there.** These tests
+    used to write the routing into `Routing.md` alone, which described a pass that
+    had happened and a note that did not remember it — and that gap is exactly what
+    let `/now` and `/inbox` disagree about the same file. The view still carries the
+    classifier's `why`; the *route* is on the note.
+    """
+    return f"---\nroute: {route}\n---\n\n{body}\n"
+
+
+def _inline_card(root: Path, card_id: str) -> Path:
+    """An inline note as it exists after routing: a card in `tasks/`, not a note."""
+    path = root / "Board" / "tasks" / f"{card_id}.md"
+    text = CARD.format(id=card_id, state="tasks", unattended="false")
+    path.write_text(text.replace("worker: code-thread", "worker: none")
+                        .replace("tier: worker", "tier: worker\nkind: inline"),
+                    encoding="utf-8", newline="")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", f"inline {card_id}")
+    return path
+
+
 def test_a_classified_note_stops_being_listed_as_unclassified(server):
     """The complaint, exactly: the routing had run, said so in a file the page
     linked, and the page went on calling every note unclassified."""
     base, root = server
-    _notes(root, **{"ready.md": "a", "needs-you.md": "b"})
+    _notes(root, **{"ready.md": _routed("scribe"), "forky.md": _routed("triage")})
     (root / board.ROUTING_VIEW).write_text(_ROUTED, encoding="utf-8")
 
     _, text = _get(base, "inbox")
 
     assert "Not yet classified" not in text
-    assert "Scribe" in text and "Do now" in text
+    assert "Scribe" in text and "Waiting on triage" in text
     assert "already worked out, only the envelope is missing" in text
     assert "Routed 17 Aug 09:51" in text
 
 
 def test_a_note_added_after_the_pass_is_the_only_unclassified_one(server):
     base, root = server
-    _notes(root, **{"ready.md": "a", "needs-you.md": "b", "brand-new.md": "c"})
+    _notes(root, **{"ready.md": _routed("scribe"), "forky.md": _routed("triage"),
+                    "brand-new.md": "c"})
     (root / board.ROUTING_VIEW).write_text(_ROUTED, encoding="utf-8")
 
     _, text = _get(base, "inbox")
@@ -1806,7 +1833,7 @@ def test_a_note_edited_after_it_was_routed_says_so(server):
     """The routing describes text that has since changed, and the whole value of
     the view is that it says what is true of the note as it stands."""
     base, root = server
-    _notes(root, **{"ready.md": "a", "needs-you.md": "b"})
+    _notes(root, **{"ready.md": _routed("scribe"), "forky.md": _routed("triage")})
     (root / board.ROUTING_VIEW).write_text(_ROUTED, encoding="utf-8")
     edited = root / "Board" / "inbox" / "ready.md"
     stamp = dt.datetime(2026, 8, 17, 18, 0).timestamp()
@@ -1885,7 +1912,7 @@ def test_a_chore_that_needs_another_machine_is_filed_as_that_instead(tmp_path):
 
 def test_a_writable_note_offers_the_verb_that_cards_it(server):
     base, root = server
-    _notes(root, **{"ready.md": "a", "needs-you.md": "b"})
+    _notes(root, **{"ready.md": _routed("scribe"), "forky.md": _routed("triage")})
     (root / board.ROUTING_VIEW).write_text(_ROUTED, encoding="utf-8")
 
     _, text = _get(base, "inbox")
@@ -1997,11 +2024,8 @@ def test_triage_with_no_note_still_opens_the_charter(server, monkeypatch):
 def test_the_triage_section_lists_the_notes_not_the_report_file(server):
     """It used to be one row for `Routing.md` and one button that named no note."""
     base, root = server
-    _notes(root, **{"forky.md": "a"})
-    (root / board.ROUTING_VIEW).write_text(_ROUTED.replace(
-        "## Waiting on triage (0)\n\n_none_",
-        "## Waiting on triage (1)\n\nThe expensive route.\n\n"
-        "- **forky.md** - the fork cannot be posed without the code"), encoding="utf-8")
+    _notes(root, **{"forky.md": _routed("triage")})
+    (root / board.ROUTING_VIEW).write_text(_ROUTED, encoding="utf-8")
 
     _, text = _get(base, "now")
     assert "forky.md" in text
@@ -2009,28 +2033,58 @@ def test_the_triage_section_lists_the_notes_not_the_report_file(server):
     assert "Routing.md" not in text.split("Waiting on triage")[1]
 
 
-def test_an_inline_note_is_on_the_page_about_your_own_work(server):
-    """`/now` answered "what needs me" from board lanes only, and an inline-routed
-    note is by definition work for Karel that will never become a card."""
+def test_the_triage_queue_survives_a_report_that_does_not_mention_the_note(server):
+    """The route is on the note and the `why` is in the view, so a report that has
+    gone stale costs the sentence and not the queue entry. Before the split there
+    was nothing to be stale *against*: a note the report did not name was a note
+    the panel could say nothing about at all."""
     base, root = server
-    _notes(root, **{"needs-you.md": "b"})
-    (root / board.ROUTING_VIEW).write_text(_ROUTED, encoding="utf-8")
+    _notes(root, **{"forky.md": _routed("triage")})
 
     _, text = _get(base, "now")
-    head, _, rest = text.partition("Notes routed to you")
-    assert "needs-you.md" in rest
-    assert "the note itself says to wait for a direction" in rest
-    assert panel.read_context(root).counts()["now"] == 1
+    assert "forky.md" in text
 
 
-def test_a_carded_note_stops_being_counted_as_needing_you(server):
-    """The count follows the lane, so carding a note removes it from both."""
+def test_inline_work_is_a_card_on_the_page_about_your_own_work(server):
+    """`/now` answers "what needs me" from board lanes, and inline work is now in
+    one — `tasks/`, with `unattended: false`. No second list, no second source."""
     base, root = server
-    _notes(root, **{"needs-you.md": "b"})
-    (root / board.ROUTING_VIEW).write_text(_ROUTED, encoding="utf-8")
+    _inline_card(root, "needs-you")
+
+    ctx = panel.read_context(root)
+    assert [c.card.id for c in ctx.do_now] == ["needs-you"]
+    assert ctx.counts()["now"] == 1
+
+    _, text = _get(base, "now")
+    head, _, rest = text.partition("Cards the night cannot take")
+    assert "needs-you" in rest
+
+
+def test_inline_work_is_in_exactly_one_place_on_the_panel(server):
+    """Karel, 2026-08-18: *"some cards are duplicated between now and inbox"*.
+
+    It was one note rendered from two sources — `/now` read the routing view for
+    notes routed `inline`, `/inbox` read the lane for every note — so the same file
+    was two rows on two pages with two different sets of buttons. The note is a card
+    now, and a card is in one lane.
+    """
+    base, root = server
+    _inline_card(root, "needs-you")
+
+    _, now = _get(base, "now")
+    _, inbox = _get(base, "inbox")
+    assert "needs-you" in now
+    assert "needs-you" not in inbox
+    assert "The inbox is empty." in inbox
+
+
+def test_a_finished_card_stops_being_counted_as_needing_you(server):
+    """The count follows the lane, so finishing the card removes it from both."""
+    base, root = server
+    path = _inline_card(root, "needs-you")
     assert panel.read_context(root).counts()["now"] == 1
 
-    (root / "Board" / "inbox" / "needs-you.md").unlink()
+    path.unlink()
     assert panel.read_context(root).counts()["now"] == 0
 
 
@@ -2061,14 +2115,15 @@ def test_closing_needs_a_note(server):
     assert "no note given" in data["message"]
 
 
-def test_an_inline_note_carries_the_button_on_both_pages_it_appears_on(server):
+def test_a_note_no_pass_will_process_can_still_be_closed_from_the_page(server):
+    """`close` is what is left for a note nothing else will move: one handled at the
+    keyboard before any pass reached it, or one overtaken by events. It stays on the
+    Inbox page, on the row, because that is the only page such a note appears on."""
     base, root = server
-    _notes(root, **{"needs-you.md": "b"})
-    (root / board.ROUTING_VIEW).write_text(_ROUTED, encoding="utf-8")
+    _notes(root, **{"needs-you.md": _routed("inline")})
 
-    for page in ("inbox", "now"):
-        _, text = _get(base, page)
-        assert "/api/close" in text, f"{page} offers no way to close it"
+    _, text = _get(base, "inbox")
+    assert "/api/close" in text
 
 
 def test_every_note_can_be_sent_to_triage_whatever_the_routing_said(server):

@@ -114,11 +114,28 @@ GENERATED_VIEWS: tuple[str, ...] = (DIGEST_VIEW, ROUTING_VIEW, CHORES_VIEW)
 # 03_board.md §2. Appended in this order when absent.
 RUNNER_FIELDS: tuple[str, ...] = ("attempts", "branch", "started", "finished")
 
-# The one non-default `kind:`, owned here for the same reason `LANES` is: it is the
-# board's vocabulary, and the schema gate, the dispatcher and the batch driver all
-# have to agree on the spelling. Absent means a full card, so no card written
-# before this existed changes meaning.
+# The non-default `kind:` values, owned here for the same reason `LANES` is: it is
+# the board's vocabulary, and the schema gate, the dispatcher and the batch driver
+# all have to agree on the spelling. Absent means a full card, so no card written
+# before either of these existed changes meaning.
 KIND_CHORE = "chore"
+#: A card whose process is a person at the keyboard. It carries `unattended: false`,
+#: so `runner.select` and `chores.select` both refuse it — the night cannot take it
+#: and is not meant to. Written by `ingest` when the classifier routes a note
+#: `inline`, and it is the field that tells such a card apart from one a worker
+#: would run, wherever the two sit in the same lane.
+KIND_INLINE = "inline"
+
+#: What the classifier can decide about a note, owned here rather than in `ingest`
+#: for the same reason the kinds are: the answer is written into frontmatter as
+#: `route:`, so the schema gate has to know the vocabulary too, and a gate importing
+#: the module that dispatches agents would be the wrong dependency entirely.
+#:
+#: The field's whole job is that the decision survives on the note. Until it did,
+#: routing lived only in a regenerated view, so every pass re-read and re-classified
+#: notes it had already answered for, and the panel had to consult that view to say
+#: anything true about a note's state.
+ROUTES: tuple[str, ...] = ("chore", "inline", "scribe", "triage")
 
 # The one frontmatter-block regex for the board (`board-parser-convergence`).
 # `digest.py` calls through `parse_fields`/`section` below and never needs this
@@ -171,6 +188,24 @@ def parse_fields(text: str) -> dict[str, str]:
             fields[key] = found.group(2).strip().strip('"').strip("'")
     flush()
     return fields
+
+
+def slug(stem: str) -> str:
+    """A note's filename as a card id: kebab-case, which is what `id` must be.
+
+    Real notes are called `Regenerate soundtrack.md`, and `card_schema` requires
+    `id` to equal the filename stem — so the rename is part of becoming a card,
+    exactly as it is for the scribe and for triage.
+
+    Board vocabulary, and therefore here: `boardcmd` closing a note by hand and
+    `ingest` carding an inline one have to agree on the id, or the same note
+    becomes two different cards depending on which path reached it first.
+    """
+    kept = [c.lower() if (c.isalnum() or c in "-_") else "-" for c in stem]
+    out = "".join(kept)
+    while "--" in out:
+        out = out.replace("--", "-")
+    return out.strip("-") or "note"
 
 
 def set_fields(text: str, values: dict[str, str | None]) -> str:

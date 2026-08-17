@@ -672,23 +672,33 @@ class Context:
                 if not c.dispatchable and c.card.requires
                 and c.card.requires not in capabilities and c.card.unattended]
 
-    @property
-    def inline_notes(self) -> list[tuple[ingest.Note, ingest.Decision]]:
-        """Notes the classifier sent back to Karel, for the page about Karel's work.
+    def notes_routed(self, route: str) -> list[tuple[ingest.Note, ingest.Decision | None]]:
+        """Notes in `inbox/` carrying this route, with the last report's `why` if it
+        still has one.
 
-        Not a lane and not a card — which is exactly why they were invisible from
-        `/now`: every section there reads a board lane, and an inline note stays a
-        note on purpose (`ingest`'s four routes: *"inline — Karel, at the keyboard.
-        No card is written for these"*).
+        **Keyed on the note, not on the view.** The two used to disagree — a page
+        reading the view listed notes the lane no longer held, and a page reading the
+        lane could say nothing about routes — and the disagreement is what showed one
+        note in two places at once. `Note.route` is the single answer both halves of
+        the panel now ask.
         """
-        return [(note, decision) for note in self.notes
-                if (decision := self.routing.of(note.name)) and decision.route == "inline"]
+        out = []
+        for note in self.notes:
+            if note.route != route:
+                continue
+            decision = self.routing.of(note.name)
+            out.append((note, decision if decision and decision.route == route else None))
+        return out
 
     @property
-    def triage_notes(self) -> list[tuple[ingest.Note, ingest.Decision]]:
-        """Notes the classifier said need the expensive route, newest routing first."""
-        return [(note, decision) for note in self.notes
-                if (decision := self.routing.of(note.name)) and decision.route == "triage"]
+    def triage_notes(self) -> list[tuple[ingest.Note, ingest.Decision | None]]:
+        """The triage queue: notes routed to the expensive pass and still waiting.
+
+        Nothing dispatches these automatically — that is the route's whole meaning —
+        so this is a queue in the ordinary sense, and it lives in `inbox/` because a
+        note awaiting triage is precisely what that lane is for.
+        """
+        return self.notes_routed("triage")
 
     @property
     def chores(self) -> list[Candidate]:
@@ -713,15 +723,22 @@ class Context:
     @property
     def do_now(self) -> list[Candidate]:
         """Everything else the night will not take — `unattended: false`,
-        `worker: none`, a broken schema. Which is the same list as the inline
-        notes: it needs a person present."""
+        `worker: none`, a broken schema. It needs a person present.
+
+        **`kind: inline` cards land here, and that is the whole of what this page
+        needed.** They used to be notes listed beside this section under a second
+        heading, because an inline note had no card to appear as a candidate; now
+        `ingest` cards them into `tasks/` with `unattended: false`, so the field that
+        already means "the night must not start this" puts them exactly where the
+        page was drawing them by hand.
+        """
         parked = {id(c) for c in self.elsewhere} | {id(c) for c in self.chores}
         return [c for c in self.candidates if not c.dispatchable and id(c) not in parked]
 
     def counts(self) -> dict[str, int]:
         return {
             "now": len(self.decisions) + len(self.do_now) + len(self.tonight)
-                   + len(self.elsewhere) + len(self.chores) + len(self.inline_notes),
+                   + len(self.elsewhere) + len(self.chores),
             "verify": len(self.testing) + len(self.review),
             "inbox": len(self.notes),
             "ideas": len(self.ideas),
@@ -1379,23 +1396,15 @@ def _render_now(ctx: Context) -> str:
             acts=_act("Read card", href=f"/card/{card.id}")
                  + _work_act(card=card.id, tier=card.tier, worker=card.worker,
                             lane=board.finished_lane(card))))
-    inline_rows = "".join(inline_rows)
-    # The other half of the same question. A note routed `inline` is, by the route's
-    # definition, work for Karel at the keyboard that will never become a card — so
-    # the page that answers "what needs me" was answering half of it and pointing at
-    # another page for the rest, with nothing on either saying so.
-    note_rows = "".join(
-        _row(marker="&rsaquo;",
-             body=(f'<span class="id">{_e(note.name)}</span>'
-                   + (f'<p class="why">{_e(decision.why)}</p>' if decision.why else "")
-                   + _meta([_chip("note", "mute"), f"{note.size} B"])),
-             acts=_act("Open note", href=f"/body/{_rel(ctx.root, note.path)}")
-                  + _work_act(note=note.name)
-                  + _done_act(note.name))
-        for note, decision in ctx.inline_notes)
-    body = ((_group("Cards the night cannot take") + inline_rows) if inline_rows else "")
-    if note_rows:
-        body += _group(f"Notes routed to you — {len(ctx.inline_notes)}") + note_rows
+    # One list, and it used to be two. A note routed `inline` was work for Karel that
+    # never became a card, so this page drew it from the routing view under a second
+    # heading — while the Inbox page drew the same note from the same lane under a
+    # third. Karel, 2026-08-18: *"some cards are duplicated between now and inbox"*.
+    # `ingest` now cards an inline note into `tasks/` the moment it is routed, so it
+    # arrives here as an ordinary candidate the night refuses, and it is in exactly
+    # one place on the whole panel.
+    body = ((_group("Cards the night cannot take") + "".join(inline_rows))
+            if inline_rows else "")
     # The one session on the page that carries nothing, and it belongs here rather
     # than on a row: every row's button is *about* that row, so a general session has
     # no row to sit on — but this is the section for keyboard work, so it is where
@@ -1409,7 +1418,7 @@ def _render_now(ctx: Context) -> str:
                             'card, no prompt and no charter — on the selected account, '
                             'like every other session this panel starts."')
                + '</div></div>')
-    out.append(_section("Do now", len(do_now) + len(ctx.inline_notes), body,
+    out.append(_section("Do now", len(do_now), body,
                         note="Work that needs you at the keyboard.",
                         bar=general,
                         empty="Nothing needs you at the keyboard."))
@@ -1482,11 +1491,16 @@ def _render_now(ctx: Context) -> str:
     waiting = ctx.triage_notes
     triage_rows = "".join(
         _row(marker="&rsaquo;",
+             # `decision` is None when the note carries `route: triage` but the last
+             # report does not describe it — a hand-set route, or a report older than
+             # the note. The route is still true; only the classifier's sentence about
+             # it is missing, so the row renders without it rather than not at all.
              body=(f'<span class="id">{_e(note.name)}</span>'
-                   + (f'<p class="why">{_e(decision.why)}</p>' if decision.why else "")
+                   + (f'<p class="why">{_e(decision.why)}</p>'
+                      if decision and decision.why else "")
                    + _meta([_chip("triage", "warn"), f"{note.size} B"]
                            + ([_chip(f"confidence {decision.confidence}", "warn")]
-                              if decision.confidence != "high" else []))),
+                              if decision and decision.confidence != "high" else []))),
              acts=_act("Open note", href=f"/body/{_rel(ctx.root, note.path)}")
                   + _act("Triage this",
                          onclick=f"post('/api/triage',{{note:'{_attr(note.name)}'}})",
@@ -1594,10 +1608,15 @@ def _render_verify(ctx: Context) -> str:
 #: reached yet, which is the only bucket the page used to have.
 _ROUTE_GROUPS: tuple[tuple[str, str, str], ...] = (
     ("", "Not yet classified", "warn"),
-    ("inline", "Do now — inline, at the keyboard", "mute"),
+    ("triage", "Waiting on triage — the expensive route", "warn"),
     ("chore", "Chores — batched overnight", "ok"),
     ("scribe", "Scribe — needs the envelope only", "ok"),
-    ("triage", "Waiting on triage — the expensive route", "warn"),
+    # A routing pass cards an inline note into `tasks/` on the spot, so this group is
+    # empty on every ordinary path and the Do now page is where such work appears.
+    # It is kept because `route:` is a field in a file somebody edits in Obsidian: a
+    # note set to `inline` by hand has not been through `apply_routing` yet, and a
+    # group that does not exist is how a note becomes invisible rather than pending.
+    ("inline", "Inline — carded on the next pass", "mute"),
 )
 
 
@@ -1619,15 +1638,16 @@ def _render_inbox(ctx: Context) -> str:
     ordered: dict[str, list[tuple[ingest.Note, ingest.Decision | None]]] = {
         route: [] for route, _, _ in _ROUTE_GROUPS}
     for note in ctx.notes:
+        # **The note's own `route:` decides the group, not the view.** The view is a
+        # report regenerated from these files; keying the page on it meant the page
+        # could disagree with the lane it was drawing, and a note that had left the
+        # lane went on being listed. `Note.route` already folds an unrecognised value
+        # to "", so an unknown route lands with the unclassified rather than in a
+        # bucket nothing renders.
+        route = note.route if note.route in ordered else ""
         decision = view.of(note.name)
-        # A route this page has no group for lands with the unrouted, never in a
-        # bucket nothing renders. Neither producer can currently emit one —
-        # `classify` folds an unknown route to `inline` and `parse_report` only
-        # assigns routes it has headings for — but a note silently missing from
-        # the page is the exact class of failure this whole pass was about, and
-        # "no producer can do that today" is a claim about today.
-        route = decision.route if decision and decision.route in ordered else ""
-        ordered[route].append((note, decision if route else None))
+        ordered[route].append(
+            (note, decision if decision and decision.route == route else None))
 
     rows = []
     position = 0
@@ -1670,8 +1690,7 @@ def _render_inbox(ctx: Context) -> str:
     # the second one unable to be opt-in about the second half and paying for a
     # fresh classify pass to re-learn what the report on disk already said. So the
     # second button now acts on the routing that exists: look, then write.
-    writable = sum(1 for note in ctx.notes
-                   if (d := ctx.routing.of(note.name)) and d.route in ingest.WRITABLE_ROUTES)
+    writable = sum(1 for note in ctx.notes if note.route in ingest.WRITABLE_ROUTES)
     write_label = f"Write the {writable} card(s)" if writable else "Write the cards"
     bar = ('<div class="barbox">'
            '<p>One cheap dispatch reads every note and sorts it, and spends nothing '
@@ -1691,7 +1710,11 @@ def _render_inbox(ctx: Context) -> str:
            + _editor("new-note", save="saveNew('new-note','inbox')", named=True,
                      placeholder="One or two sentences is enough."))
     unrouted = len(ordered.get("") or [])
-    if not view.known:
+    # Keyed on the notes as well as the view, because the two can now disagree in the
+    # one direction that matters: routes survive on the notes, so a `Routing.md` that
+    # was never written — or was deleted, it being a regenerable view — must not make
+    # a fully routed lane read as one nothing has looked at.
+    if not view.known and not any(note.route for note in ctx.notes):
         note = "No routing pass yet — Classify all is what fills this in."
     else:
         when = f"{view.written:%d %b %H:%M}" if view.written else "at an unrecorded time"
@@ -1786,13 +1809,14 @@ def _work_act(*, card: str = "", note: str = "", tier: str = "", worker: str = "
 
 
 def _done_act(note: str) -> str:
-    """The gesture that closes an inline note, because nothing else can.
+    """The gesture that files a note in `done/` without ever carding it.
 
-    Every other route's note is moved by the process that works it — the scribe
-    and triage move theirs into a lane as they card it, the runner moves cards as
-    it goes. `inline` means *you* are the process, so the move needs a hand, and
-    without one the note sat in `inbox/` after the work was done: re-routed by the
-    next classify pass, and listed by this page as still waiting.
+    Every route's note is moved by the process that works it — the scribe and triage
+    move theirs as they card it, `apply_routing` cards an inline one into `tasks/`,
+    the runner moves cards as it goes. What is left for this is the note nothing will
+    process: one somebody handled at the keyboard before any pass reached it, or one
+    that has been overtaken and should be recorded rather than deleted. `done/` is
+    the board's record of what happened, so it goes there rather than to `rm`.
     """
     return _act("Done", onclick=f"post('/api/close',{{note:'{_attr(note)}'}})",
                 extra='title="Files this note in done/ as a minimal card — what it '

@@ -29,7 +29,8 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import ingest, usage
+from nightshift import board, ingest, usage
+from nightshift.gates import card_schema
 
 import _fixtures
 
@@ -309,14 +310,67 @@ def test_scribe_covers_both_writable_buckets(tmp_path: Path,
     assert set(scribed) == {"alpha.md", "beta.md"}
 
 
-def test_an_inline_note_is_never_scribed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """`inline` means Karel does it and no card is written — that is the route's
-    definition, not a queue it is waiting in."""
+def test_an_inline_note_is_carded_without_a_scribe_dispatch(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """`inline` costs no agent, and it does not leave the note in the lane either.
+
+    Both halves matter and they used to be confused for each other. No scribe runs,
+    because a card whose acceptance is "a person decided" has no envelope an agent
+    could write — but the card is still written, deterministically, so the work sits
+    in `tasks/` on the same rails as everything else instead of in a note nothing
+    reads (Karel, 2026-08-18: *"I would like the similar flow for all the files"*).
+    """
     root = _repo(tmp_path, alpha="a")
     scribed = _routes(monkeypatch, {"alpha.md": "inline"})
     assert ingest.main(["--root", str(root), "--scribe"]) == 0
-    assert scribed == []
-    assert (root / "Board" / "inbox" / "alpha.md").exists()
+    assert scribed == [], "no agent is spent on a route that has nothing to investigate"
+    assert not (root / "Board" / "inbox" / "alpha.md").exists()
+
+    card = (root / "Board" / "tasks" / "alpha.md").read_text(encoding="utf-8")
+    fields = board.parse_fields(card)
+    assert fields["kind"] == "inline"
+    assert fields["unattended"] == "false", "the night must not be offered a person's work"
+    assert fields["worker"] == "none"
+    assert "## Open questions" in card and "## Acceptance" in card
+
+
+def test_the_inline_card_satisfies_the_schema_it_lands_in(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A card in `tasks/` is checked by `card_schema`, and this one is generated —
+    so nothing but this test stands between a template typo and a red board on a
+    lane nobody was editing."""
+    root = _repo(tmp_path, alpha="a")
+    _routes(monkeypatch, {"alpha.md": "inline"})
+    assert ingest.main(["--root", str(root)]) == 0
+    assert card_schema.check(root) == []
+
+
+def test_a_routed_note_is_not_classified_again(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+    """The whole economy of the module, and the thing the view-only design could not
+    do. Karel, 2026-08-18: *"Definitely not running classifier multiple times."*"""
+    root = _repo(tmp_path, alpha="a", beta="b")
+    seen = []
+
+    def record(name: str, prompt: str, *rest, **kw):
+        seen.append(sorted(re.findall(r"===== NOTE: (\S+)", prompt)))
+        return json.dumps({"notes": [
+            {"file": "alpha.md", "route": "triage", "why": "a fork"},
+            {"file": "beta.md", "route": "triage", "why": "a fork"}]}), ""
+
+    monkeypatch.setattr(ingest, "_dispatch", record)
+    monkeypatch.setattr(ingest.usage, "read", _healthy)
+    monkeypatch.setattr(ingest, "ensure_workspace_trusted", lambda root: None)
+
+    assert ingest.main(["--root", str(root)]) == 0
+    assert seen == [["alpha.md", "beta.md"]]
+
+    # Second run: both notes still sit in `inbox/` awaiting the expensive route, and
+    # neither is re-decided. Nothing dispatches triage, so under the old design this
+    # was the note that got re-classified forever.
+    assert ingest.main(["--root", str(root)]) == 0
+    assert seen == [["alpha.md", "beta.md"]], "no second dispatch"
+    assert "nothing to classify" in capsys.readouterr().out
 
 
 # ------------------------------------------- the note has to leave the lane
@@ -402,14 +456,17 @@ def test_only_refuses_a_triage_note_because_a_human_chooses_that_spend(
     assert "expensive route" in capsys.readouterr().out
 
 
-def test_only_refuses_an_inline_note_because_it_gets_no_card(
+def test_only_cannot_reach_an_inline_note_because_it_is_no_longer_a_note(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+    """The refusal this replaces was a message; now it is a structural fact. An
+    inline note becomes a card the moment it is routed, so the per-note scribe verb
+    has nothing to be pointed at — and cannot be talked into scribing one."""
     root = _repo(tmp_path, alpha="a")
     _routes(monkeypatch, {"alpha.md": "inline"})
     assert ingest.main(["--root", str(root)]) == 0
 
     assert ingest.main(["--root", str(root), "--only", "alpha.md"]) == 2
-    assert "your own work at the keyboard" in capsys.readouterr().out
+    assert "no note named" in capsys.readouterr().out
 
 
 def test_only_on_an_unrouted_note_says_to_classify_first(
@@ -674,14 +731,21 @@ def test_write_cards_ignores_a_recorded_note_that_has_since_left_the_lane(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
     """The report is a view over the lane, so an entry for a note somebody carded
     or deleted by hand is stale — and re-scribing it would be the duplicate this
-    whole check exists to prevent."""
+    whole check exists to prevent.
+
+    Structural since routes moved onto the notes: the departed note takes its
+    `route:` with it, so there is nothing left to act on rather than a stale entry
+    that has to be filtered. An empty lane is the success state of this command and
+    exits 0 — not a missing routing pass, which is a different sentence and a
+    different exit code.
+    """
     root = _repo(tmp_path, alpha="a")
     _routes(monkeypatch, {"alpha.md": "chore"})
     assert ingest.main(["--root", str(root)]) == 0
     (root / "Board" / "inbox" / "alpha.md").unlink()
 
     assert ingest.main(["--root", str(root), "--write-cards"]) == 0
-    assert "still in the lane" in capsys.readouterr().out
+    assert "nothing still in the lane to card" in capsys.readouterr().out
 
 
 # ---------------------------------------------- a bounce re-routes, as promised
@@ -860,7 +924,7 @@ def test_a_route_can_be_corrected_without_paying_for_another_pass(
     2026-08-17 nothing could: the only way to change one route was another pass
     over the whole lane."""
     root = _repo(tmp_path, alpha="a", beta="b")
-    _routes(monkeypatch, {"alpha.md": "triage", "beta.md": "inline"})
+    _routes(monkeypatch, {"alpha.md": "triage", "beta.md": "scribe"})
     ingest.main(["--root", str(root)])
 
     assert ingest.set_route(root, "alpha.md", "chore",
@@ -869,7 +933,32 @@ def test_a_route_can_be_corrected_without_paying_for_another_pass(
     view = ingest.read_view(root)
     assert view.of("alpha.md").route == "chore"
     assert "no fork" in view.of("alpha.md").why
-    assert view.of("beta.md").route == "inline", "the rest of the view is untouched"
+    assert view.of("beta.md").route == "scribe", "the rest of the view is untouched"
+    # And the note itself, which is the half that survives the next classify pass.
+    alpha = next(n for n in ingest.notes(root) if n.name == "alpha.md")
+    assert alpha.route == "chore"
+
+
+def test_correcting_a_route_to_inline_cards_the_note_there_and_then(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A correction and a classifier decision must not mean different things. If
+    `inline` cards the note when the classifier says it, it cards the note when
+    Karel overrules the classifier too — otherwise the note sits in a group the
+    panel has to label "carded on the next pass" and nobody presses it."""
+    root = _repo(tmp_path, alpha="a")
+    _routes(monkeypatch, {"alpha.md": "triage"})
+    ingest.main(["--root", str(root)])
+
+    assert ingest.set_route(root, "alpha.md", "inline", "I will just do it", _healthy())
+    assert not (root / "Board" / "inbox" / "alpha.md").exists()
+    assert board.parse_fields(
+        (root / "Board" / "tasks" / "alpha.md").read_text(encoding="utf-8")
+    )["kind"] == "inline"
+
+
+def test_set_route_on_a_note_that_is_not_there_is_refused(tmp_path: Path):
+    root = _repo(tmp_path, alpha="a")
+    assert ingest.set_route(root, "gone.md", "chore", "why", _healthy()) is False
 
 
 def test_a_route_that_is_not_a_route_is_refused(tmp_path: Path):
