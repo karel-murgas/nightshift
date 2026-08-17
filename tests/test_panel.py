@@ -1175,6 +1175,53 @@ def test_setup_launches_the_install_skill_and_does_not_perform_it(server, monkey
     assert opened["cmd"] == ["claude", "/install-nightshift"]
 
 
+def test_open_terminal_resolves_claude_instead_of_trusting_the_new_window_s_path(
+        monkeypatch, tmp_path):
+    """The CLI is not always on PATH — on Karel's box it lives in
+    `%USERPROFILE%\\.local\\bin`. Passing the bare name meant every launcher button
+    opened a console window reading `'claude' is not recognized` (2026-08-17)."""
+    spawned = []
+    monkeypatch.setattr(panel, "claude_binary", lambda: r"C:\Users\k\.local\bin\claude.exe")
+    monkeypatch.setattr(panel.subprocess, "Popen",
+                        lambda argv, **kw: spawned.append(argv) or _FakeProc())
+
+    panel.open_terminal(tmp_path, "claude", "--resume", "abc123")
+
+    argv = spawned[0]
+    assert "claude" not in argv, "the bare name was passed through to the new window"
+    assert r"C:\Users\k\.local\bin\claude.exe" in argv
+    assert argv[-2:] == ["--resume", "abc123"] or argv[-1].endswith("--resume abc123")
+
+
+def test_open_terminal_refuses_rather_than_opening_a_window_that_cannot_work(
+        monkeypatch, tmp_path):
+    """A window whose only content is `not recognized` is worse than a sentence the
+    page can render."""
+    monkeypatch.setattr(panel, "claude_binary", lambda: None)
+    monkeypatch.setattr(panel.subprocess, "Popen",
+                        lambda *a, **kw: pytest.fail("a terminal was opened anyway"))
+
+    with pytest.raises(panel.PanelError, match="CLAUDE_BIN"):
+        panel.open_terminal(tmp_path, "claude")
+
+
+def test_open_terminal_leaves_a_non_claude_command_alone(monkeypatch, tmp_path):
+    """The resolver is for the one name that needs it, not a rewrite of every argv."""
+    spawned = []
+    monkeypatch.setattr(panel, "claude_binary",
+                        lambda: pytest.fail("resolved a command that is not the CLI"))
+    monkeypatch.setattr(panel.subprocess, "Popen",
+                        lambda argv, **kw: spawned.append(argv) or _FakeProc())
+
+    panel.open_terminal(tmp_path, "git", "status")
+
+    assert "git" in spawned[0]
+
+
+class _FakeProc:
+    pid = 4242
+
+
 def test_every_update_write_is_a_subprocess_not_an_import(server, monkeypatch):
     """The panel may *read* the survey to render the page — that is arithmetic and
     file I/O, the same licence `board` and `usage` have. Every verb that writes goes
