@@ -55,6 +55,51 @@ from _runner_helpers import (  # noqa: F401  (fixtures register by name)
 )
 
 
+def test_two_fixture_repos_never_share_a_worktree_root(tmp_path):
+    """The isolation the whole file rests on, asserted directly rather than left
+    to every test cleaning up after itself.
+
+    `worktree_root` is `root.parent / f".{project}-worktrees"`, and the project name
+    and the card id are both constants in these fixtures — so if two fixture repos
+    ever share a parent again, they share one worktree path, and the first test that
+    leaves a checkout behind makes every later dispatch of that card id return
+    `failed` from `prepare_worktree` before the worker runs. That is what happened on
+    2026-08-18: 21 failures in this file, one xdist worker, every outcome `failed`
+    regardless of what the test was about, and green on every serial run because
+    files run alphabetically and the leak sorted after its victims.
+
+    This is the cheap half of the fix. `_worktree_repo`'s docstring carries the rest.
+    """
+    a = _worktree_repo(tmp_path / "one")
+    b = _worktree_repo(tmp_path / "two")
+    assert runner.worktree_root(a) != runner.worktree_root(b)
+
+
+def test_a_worktree_left_behind_does_not_reach_the_next_repo(tmp_path, monkeypatch):
+    """The failure mode itself, reproduced: one repo leaks its checkout, a second
+    dispatches the same card id, and the second must not care.
+
+    Before the fix this asserted `failed` with the detail `git worktree add failed:
+    Preparing worktree (new branch 'ai/probe')` — git's progress line on stderr,
+    which never says the directory was already there. The unhelpfulness of that
+    message is a good part of why the intermittency went undiagnosed.
+    """
+    leaker = _worktree_repo(tmp_path / "leaker")
+    _charter(leaker, "code-thread")
+    _card(leaker, "tasks", "probe")
+    runner.prepare_worktree(leaker, board.find(leaker, "probe"), "development_team")
+    assert (runner.worktree_root(leaker) / "probe").exists(), "the leak is the premise"
+
+    victim = _worktree_repo(tmp_path / "victim")
+    _charter(victim, "code-thread")
+    _card(victim, "tasks", "probe")
+    _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "implemented"})
+
+    result = runner.dispatch(victim, board.find(victim, "probe"), "development_team",
+                             "sonnet", 5.0, 120)
+    assert result.outcome == "review", result.detail
+
+
 def test_a_successful_dispatch_lands_the_card_in_review(tmp_path, monkeypatch):
     root = _worktree_repo(tmp_path)
     _charter(root, "code-thread")

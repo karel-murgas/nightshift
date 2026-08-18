@@ -309,8 +309,37 @@ def _worktree_repo(tmp_path: Path) -> Path:
     worktree and run its real acceptance step. The gate harness is stubbed by
     `_gates_pass_by_default` substituting `runner.GATE_ARGV` — deliberately NOT
     by writing `.ai/gates/run.py` here, which is what previously hid the gate
-    runner's move behind a file only the fixture created."""
-    root = _repo(tmp_path)
+    runner's move behind a file only the fixture created.
+
+    **The repo goes in a subdirectory of `tmp_path`, and that is load-bearing.**
+    `runner.worktree_root` is `root.parent / f".{project}-worktrees"` — outside the
+    repo on purpose, so `doc_scan`, `card_schema` and the digest do not walk it. Put
+    the repo *at* `tmp_path` and that resolves to `tmp_path.parent`, which pytest
+    shares between every test in the session (serially) or on the worker (under
+    xdist). The project name is `dungeoneer` in every fixture manifest and the card
+    id is `probe` in nearly every dispatch test, so all three components were
+    constant and **every dispatch test in the suite resolved to one absolute path**:
+    `tmp_path.parent/.dungeoneer-worktrees/probe`. `tmp_path` isolated the repo and
+    not the worktree, because the worktree is deliberately not in the repo.
+
+    Nothing failed while every test cleaned up after itself. One that did not —
+    `test_an_api_error_before_verification_gives_the_attempt_back_and_hands_over`
+    ends by calling `prepare_worktree` for an assertion about the returned *mode*
+    and drops the checkout — left that shared path occupied, and then every later
+    `probe` dispatch on the same worker died in `prepare_worktree`'s first lines:
+    `git worktree add` refuses a non-empty directory, so `dispatch` returned
+    `failed` before the worker ran, whatever the test was actually about. Measured
+    2026-08-18: 21 failures in `test_runner_dispatch.py`, all on `gw1`, every one
+    reporting `failed` including the cases expecting `limited` and `interrupted`.
+
+    Invisible serially, because files run alphabetically and `dispatch` sorts before
+    `review`, so the leak always landed after its victims. `--dist loadfile` hands a
+    file to whichever worker frees up, which made it a coin flip per run.
+
+    One extra directory level is the whole fix: `root.parent` becomes `tmp_path`,
+    which pytest already guarantees is unique per test.
+    """
+    root = _repo(tmp_path / "repo")
     subprocess.run(["git", "branch", "-M", "development_team"], cwd=root, check=True)
     tests = root / "tests"
     tests.mkdir(exist_ok=True)
