@@ -788,7 +788,30 @@ def touched(changed: set[str], repo_root: Path | None) -> Selection:
 # one file on one worker, so a file's module-level state and in-file ordering are
 # preserved — the game suite is safe under `loadfile` but flakes under the default
 # `--dist load`, which splits a file across workers (runner-test-selection).
-XDIST_ARGS: tuple[str, ...] = ("-n", "auto", "--dist", "loadfile")
+#: Never replace a worker that died. **xdist's default is to respawn one, and that
+#: respawn is the step immediately before the deadlock this framework keeps hitting**
+#: — `preflight._run_subset` records it twice on 2026-08-16 and it recurred
+#: 2026-08-18: a worker dies, xdist brings up a replacement, the replacement never
+#: rejoins the scheduler, and from then on every worker parks on a `threading.Event`
+#: waiting for the controller while the controller parks on `queue.get()` waiting for
+#: a worker. Nothing computes, nothing prints, and the only thing that ends it is a
+#: wall-clock ceiling 40 minutes away.
+#:
+#: Measured on a five-test fixture that kills its own worker with `os._exit`
+#: (2026-08-18): with the default policy the session hung until killed at 90s; with
+#: this flag it finished in 0.77s, exit 1, reporting `worker 'gw0' crashed while
+#: running tests/test_crasher.py::test_kills_its_worker` and running the other four
+#: tests normally. So the flag does not merely avoid the hang — it converts an
+#: unbounded silent wait into a failure that NAMES THE TEST that caused it, which is
+#: the diagnosis nobody has ever had while staring at a stalled preflight.
+#:
+#: The trade is deliberate and one-directional: a crash that xdist could have
+#: recovered from now fails the run. That is the right side to err on, because the
+#: recovery empirically IS the deadlock, and a worker dying mid-suite is a defect
+#: worth surfacing rather than papering over.
+NO_RESPAWN: tuple[str, ...] = ("--max-worker-restart=0",)
+
+XDIST_ARGS: tuple[str, ...] = ("-n", "auto", "--dist", "loadfile", *NO_RESPAWN)
 
 # Why `-n auto` is not always safe, and what replaces it (2026-07-31).
 #
@@ -980,7 +1003,7 @@ def parallel_args(available: bool | None = None, workers: int | None = _PROBE) -
     capped = probed_worker_count() if workers is _PROBE else workers
     if capped is None:
         return XDIST_ARGS
-    return ("-n", str(capped), "--dist", "loadfile")
+    return ("-n", str(capped), "--dist", "loadfile", *NO_RESPAWN)
 
 
 # --- 3. How to judge it -------------------------------------------------------

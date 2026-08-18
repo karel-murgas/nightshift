@@ -486,7 +486,7 @@ def test_parallel_args_are_loadfile_not_the_default_load():
     it; `loadfile` keeps a file's tests on one worker. The distinction is the whole
     reason parallelising is safe, so it is asserted, not assumed."""
     args = suite.parallel_args(available=True, workers=None)
-    assert args == ("-n", "auto", "--dist", "loadfile")
+    assert args == ("-n", "auto", "--dist", "loadfile", *suite.NO_RESPAWN)
     assert args[args.index("--dist") + 1] == "loadfile", "plain `load` would reintroduce the flake"
 
 
@@ -495,7 +495,7 @@ def test_parallel_args_still_use_loadfile_when_the_worker_count_is_capped():
     a capped run that quietly switched to `--dist load` would trade the OOM for
     the flake it was already avoiding."""
     args = suite.parallel_args(available=True, workers=6)
-    assert args == ("-n", "6", "--dist", "loadfile")
+    assert args == ("-n", "6", "--dist", "loadfile", *suite.NO_RESPAWN)
 
 
 # --- worker_count: the memory cap (2026-07-31) --------------------------------
@@ -616,6 +616,29 @@ def test_probed_worker_count_agrees_with_the_pure_function():
         os.cpu_count(), suite.available_memory_gb())
 
 
+def test_a_dead_worker_is_never_replaced():
+    """The respawn is the step before the deadlock, so the flag that forbids it is
+    policy, not tuning.
+
+    A worker dies, xdist brings up a replacement, the replacement never rejoins the
+    scheduler, and from then on every process is parked: workers on a
+    `threading.Event` waiting for the controller, the controller on `queue.get()`
+    waiting for a worker. It consumes no CPU and prints nothing, so it is
+    indistinguishable from a slow run until somebody samples the stacks -- recorded
+    twice on 2026-08-16 in `preflight._run_subset`, and hit again 2026-08-18.
+
+    Measured on a five-test fixture whose middle test calls `os._exit` (2026-08-18):
+    the default policy hung until killed at 90s; with this flag the session ended in
+    0.77s, exit 1, naming `worker 'gw0' crashed while running ...` and passing the
+    other four. Asserted for every branch that returns flags at all, because a cap
+    that only holds on the uncapped path is the one that will not hold here.
+    """
+    for args in (suite.parallel_args(available=True, workers=None),
+                 suite.parallel_args(available=True, workers=6),
+                 suite.XDIST_ARGS):
+        assert "--max-worker-restart=0" in args, args
+
+
 def test_parallel_args_degrade_to_serial_without_xdist():
     """A missing optional plugin must cost speed, not correctness. `pytest -n auto`
     without xdist is `error: unrecognized arguments`, exit 4, no JUnit report —
@@ -631,7 +654,8 @@ def test_parallel_args_probes_the_interpreter_and_the_box_by_default():
         assert suite.parallel_args() == ()
         return
     capped = suite.probed_worker_count()
-    expected = suite.XDIST_ARGS if capped is None else ("-n", str(capped), "--dist", "loadfile")
+    expected = (suite.XDIST_ARGS if capped is None
+                else ("-n", str(capped), "--dist", "loadfile", *suite.NO_RESPAWN))
     assert suite.parallel_args() == expected
 
 
@@ -642,7 +666,7 @@ def test_the_default_argv_is_always_a_usable_pytest_invocation():
     args = suite.parallel_args()
     if not args:
         return
-    assert args[0] == "-n" and args[2:] == ("--dist", "loadfile")
+    assert args[0] == "-n" and args[2:] == ("--dist", "loadfile", *suite.NO_RESPAWN)
     assert args[1] == "auto" or int(args[1]) >= 1
 
 
