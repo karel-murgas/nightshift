@@ -24,3 +24,19 @@ dist/
 # new Path()/-chain reconstruction, which resolves a gitignored candidate
 # structurally instead of needing a per-file appeal.
 .ai/stale_ledger.json
+
+# The Obsidian vault's own config, plugins and theme. This repo's `Board/` is opened
+# in Obsidian the same way a consuming project's is, so the same per-machine editor
+# state accumulates here: `workspace.json` is rewritten on every pane move, and the
+# plugin dirs churn while the board is merely being *used*.
+#
+# Never tracked here, so this only stops it starting -- but the sibling project has
+# already paid for the tracked version twice (2026-08-01): `git ls-files` is the scope
+# of gate `line_endings`, so one CRLF write by Obsidian reddens a suite no card touched,
+# and a dirty tree outside `Board/` makes the runner refuse to dispatch at all. Both
+# gates live in this package, so both hazards are this repo's too.
+#
+# The board's view definition is tracked separately, so the kanban survives a fresh
+# clone; the plugins and theme are reinstalled through Obsidian, which is how they got
+# here in the first place.
+.obsidian/
