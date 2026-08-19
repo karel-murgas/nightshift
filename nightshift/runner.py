@@ -1829,7 +1829,19 @@ whoever picks this up wants a ranking, not a tie.
 # principle as `_CHECKER_PROMPT`: the runner builds this context, so there is no
 # path by which the worker's prompt, transcript or reasoning reaches the reviewer
 # — it sees the diff, the criteria and the repo, and nothing about how the change
-# was made (§16). The verdict is a two-way ROUTING decision, not a quality score.
+# was made (§16). The verdict is a routing decision, not a quality score.
+#
+# Three-way since `reviewer-needs-fix-verdict` (2026-08-19). The original two-way
+# contract (`ok` / `needs_decision`) forced every non-`ok` finding through the same
+# lane whether or not it actually needed the maintainer's judgment — a concrete,
+# verifiable defect with one correct fix (a wrong date, a misattributed commit, a
+# name that does not match the code) got the identical "wake a human" treatment as
+# a genuine ambiguity only they could resolve. `needs_decision` sat on the board
+# waiting for an answer that was really "go check `git log`", the maintainer's time
+# spent on something the next attempt could have applied directly. `needs_fix`
+# closes that gap: it is drain.py's own principle ("'review this diff' is not a
+# decision — it is work") extended one step further — *fixing* a diff whose defect
+# has one verifiable correct answer is not a decision either.
 _REVIEW_PROMPT = """\
 Review the finished diff below against the card's acceptance criteria and the surrounding \
 code, at **tier: lead** (resolved to model `{model}`).
@@ -1848,26 +1860,41 @@ exact branch — do not re-check anything they cover, and run `python -m nightsh
 once to see what that is rather than assuming, since the gate list is this project's and \
 grows as it earns rules. Spend your attention only on what no script can see.
 
-Your verdict is exactly two-way, and it is a routing decision:
+Your verdict is exactly three-way, and it is a routing decision:
+- `ok` — nothing needs the maintainer's judgment before it merges. This is the common case. \
+`ok` does not mean perfect; every `ok` card is still tested by the maintainer at testing/. \
+Style you dislike or a cleaner refactor you can imagine is neither of the other two verdicts.
+- `needs_fix` — the diff has a concrete, **objectively verifiable** defect with one correct \
+answer: a fact you can confirm yourself (check `git log`, read the code it describes, run a \
+calculation) rather than a preference. A claim the diff makes that is simply wrong; a value \
+computed incorrectly; a docstring or comment that does not match what the code does; a \
+reference to the wrong commit, date or symbol. State the defect **and** its correct fix — \
+precise enough that a worker who never saw your reasoning can apply it without re-deriving \
+it. This is not a lesser `needs_decision`: if you are choosing between the two because you \
+are unsure whether your fix is *right*, it is `needs_decision`; choose `needs_fix` only when \
+you would bet on the fix yourself.
 - `needs_decision` — merging this needs the maintainer's judgment first: an ambiguity in the \
-card the worker resolved by guessing, a design judgment call, a behaviour that may not be \
-what they want, or a value/name/rule the card left open and the worker picked.
-- `ok` — nothing needs their judgment before it merges. This is the common case. `ok` does \
-not mean perfect; every `ok` card is still tested by the maintainer at testing/. Style you \
-dislike or a cleaner refactor you can imagine is not `needs_decision`.
+card the worker resolved by guessing, a design judgment call with more than one defensible \
+answer, a behaviour that may not be what they want, or a value/name/rule the card left open \
+and the worker picked. If two people could disagree about the right answer, this is it — \
+`needs_fix` is reserved for the case where nobody reasonable would.
 
 Write your verdict to:
   {verdict_path}
 as JSON, exactly these keys:
-  {{"verdict": "ok" | "needs_decision",
+  {{"verdict": "ok" | "needs_fix" | "needs_decision",
+    "finding": "<if needs_fix: the defect, verified, and its correct fix, precise enough to \
+apply without re-deriving it. Empty string otherwise.>",
     "question": "<if needs_decision: what was attempted, what is ambiguous, the candidate \
 answers, and what each would imply — those four parts are what makes the question \
-answerable. Empty string if ok.>",
+answerable. Empty string otherwise.>",
     "notes": "<one or two sentences of reasoning the runner can log>"}}
 
-On `needs_decision` the `question` is put in front of the maintainer verbatim, with no human \
-in between, so it must stand alone and be answerable in fifteen seconds from a phone. You \
-never edit, fix or merge — you report, the runner routes.
+On `needs_fix` the `finding` goes back to a worker for another attempt, with no human in the \
+loop — so it must be self-contained enough to act on alone. On `needs_decision` the \
+`question` is put in front of the maintainer verbatim, with no human in between, so it must \
+stand alone and be answerable in fifteen seconds from a phone. You never edit, fix or merge \
+— you report, the runner routes.
 
 --- acceptance criteria, verbatim from the card ---
 {criteria}
@@ -1885,6 +1912,10 @@ class Dispatch:
     # review stage *or* a human's eye", and those two states behind one lane name are
     # what hid `review/` having no exit at all) |
     # "reviewed" (the diff reviewer said ok — settle merges and lands it in testing/) |
+    # "needs_fix" (the reviewer found a concrete, verifiable defect with one correct
+    # answer — settle sends the card back to tasks/ for another attempt, bounded by
+    # the same attempt_limit as "failed"; only escalates to needs-decision if the
+    # limit is exhausted) |
     # "needs_decision" (the reviewer flagged a choice for Karel) | "parked" |
     # "failed" | "limited" | "blocked" | "interrupted" (an API disconnection
     # that never reached verification — gives the attempt back like "blocked",
@@ -2045,7 +2076,7 @@ def verdict_survives_a_wall(stage: str, verdict: dict, *, rounds_left: int = 0) 
       cannot spend rounds 2-3 in a closed window, and the path below it would
       file the card as *"did not pass this in 1 round(s)"* — parking a card that
       had two rounds it never received.
-    * `REVIEWER_STAGE` — the two routings the reviewer exists to produce. Its
+    * `REVIEWER_STAGE` — the three routings the reviewer exists to produce. Its
       whole output *is* the verdict file, so a complete one means it finished.
     * `STALE_STAGE` — its own `complete: true`, which the prompt already defines
       as "I finished reading the whole document".
@@ -2065,7 +2096,7 @@ def verdict_survives_a_wall(stage: str, verdict: dict, *, rounds_left: int = 0) 
             return True
         return rounds_left <= 0 and called in ("revise", "reject")
     if stage == REVIEWER_STAGE:
-        return str(verdict.get("verdict", "")).lower() in ("ok", "needs_decision")
+        return str(verdict.get("verdict", "")).lower() in ("ok", "needs_fix", "needs_decision")
     if stage == STALE_STAGE:
         return bool(verdict.get("complete"))
     return False
@@ -3874,6 +3905,10 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
 
     * `needs_decision` — the reviewer flagged a choice for Karel; settle files it
       to needs-decision/ with the reviewer's question.
+    * `needs_fix` — the reviewer found a concrete, verifiable defect with one
+      correct answer; settle sends the card back to tasks/ for another attempt
+      carrying the finding, bounded by the same attempt_limit as an ordinary
+      `failed` retry.
     * `reviewed` — the reviewer said `ok`; settle merges and lands it in testing/.
     * `review` (unchanged from the input) — the graceful fallback. An artefact-only
       card (art: no commit to review), no CLI, a wall, a timeout or an unreadable
@@ -3940,6 +3975,13 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
     called = str(verdict.get("verdict", "")).lower()
     _log(f"    {REVIEWER_AGENT}: {called or '(no verdict)'} — "
          f"{str(verdict.get('notes', ''))[:80]}")
+    if called == "needs_fix":
+        finding = str(verdict.get("finding", "")).strip()
+        return Dispatch("needs_fix", finding or
+                        "The reviewer flagged a fixable defect but recorded no finding — "
+                        "treat that as itself needing a look; the diff and the review are "
+                        f"in `.ai/runs/{card.id}/attempt-{card.attempts}/`.",
+                        total, result.rounds, wall)
     if called == "needs_decision":
         question = str(verdict.get("question", "")).strip()
         return Dispatch("needs_decision", question or
@@ -4105,6 +4147,25 @@ def _error_section(card_id: str, attempt: int, result: Dispatch, *,
             f"(`ai/{card_id}@failed-N` — `prune_rescue_branches`) rather than deleted at "
             f"the next cold start, until the card leaves `tasks/` for good.")
     return "\n\n".join(parts)
+
+
+def _review_finding_section(card_id: str, finding: str) -> str:
+    """The `## Review Finding` body written on a `needs_fix` verdict.
+
+    Deliberately not `## Error` — the gates and the full test suite had already
+    passed; nothing crashed. And not `## Question` — nothing here needs the
+    maintainer's judgment, only a fix. The next attempt is the reader: `finding`
+    is the reviewer's own account of the defect and its correct answer, precise
+    enough (by the reviewer's prompt) to apply without re-deriving it.
+    """
+    return "\n\n".join([
+        "The reviewer found a fixable defect — not a judgment call — in a diff whose "
+        "gates and tests had already passed:",
+        finding,
+        f"This attempt's commits stay on `ai/{card_id}` and are preserved as a rescue "
+        f"branch once this card is dispatched again. Apply this fix directly; it does "
+        f"not need re-deriving.",
+    ])
 
 
 def _card_text_on_branch(root: Path, branch: str, relpath: str) -> str | None:
@@ -4293,14 +4354,46 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
         board.move(root, card, "needs-decision")
         return f"{card_id}: → needs-decision/ (parked)"
 
-    # The two outcomes the review stage produces (automate-review-step). Where a
-    # `reviewed` one lands is the card's own declaration, `verify:` — `play` for a
-    # card with a surface Karel can exercise, `review` for one with none, where the
-    # reviewer's `ok` *is* the acceptance (unplayable-cards-still-land-in-testing).
-    # Until 2026-08-06 every finished card went to testing/ regardless, so eleven of
-    # the sixteen cards waiting there were waiting on a verification he had no way
-    # to perform, and the five he should actually play were buried among them.
-    # `needs_decision` still diverts to needs-decision/ from either value.
+    if result.outcome == "needs_fix":
+        # A concrete, verifiable defect — not a decision. Same principle drain.py
+        # already states for a card that merely could not be reviewed ("'review
+        # this diff' is not a decision — it is work"), one step further: applying
+        # a fix with one correct answer is not a decision either. It goes back to
+        # tasks/ for another attempt, bounded by the same attempt_limit as an
+        # ordinary `failed` retry — never straight to needs-decision/, which
+        # would spend Karel's judgment on something the next attempt can just do.
+        finding = result.detail or "The reviewer flagged a fixable defect but recorded none."
+        if card.attempts >= attempt_limit(card):
+            # The same class of "fixable" defect survived every attempt this
+            # card gets — that is no longer mechanical, whatever the reviewer
+            # called it. Escalate rather than retry forever.
+            card.write_section(
+                "Question",
+                f"The reviewer found a fixable-looking defect across all {card.attempts} "
+                f"attempts this card gets, and it kept recurring rather than getting fixed "
+                f"— something about it is not as mechanical as it looked, or a later attempt "
+                f"reintroduced it. Most recent finding:\n\n{finding}")
+            board.move(root, card, "needs-decision")
+            return (f"{card_id}: → needs-decision/ (a reviewer-flagged fix recurred across "
+                    f"{card.attempts} attempts)")
+        card.write_section("Review Finding", _review_finding_section(card_id, finding))
+        if card.lane == "tasks":
+            board.commit_board(
+                root, f"board: {card_id} attempt {card.attempts} needs a fix, will retry")
+        else:
+            board.move(root, card, "tasks")
+        return f"{card_id}: attempt {card.attempts} needs a fix, will retry ({finding[:80]})"
+
+    # The three outcomes the review stage produces (automate-review-step,
+    # reviewer-needs-fix-verdict). Where a `reviewed` one lands is the card's own
+    # declaration, `verify:` — `play` for a card with a surface Karel can exercise,
+    # `review` for one with none, where the reviewer's `ok` *is* the acceptance
+    # (unplayable-cards-still-land-in-testing). Until 2026-08-06 every finished card
+    # went to testing/ regardless, so eleven of the sixteen cards waiting there were
+    # waiting on a verification he had no way to perform, and the five he should
+    # actually play were buried among them. `needs_decision` still diverts to
+    # needs-decision/ from either value; `needs_fix` is handled above it, back to
+    # tasks/ rather than needs-decision/, because it never needed Karel at all.
     if result.outcome == "needs_decision":
         card.write_section("Question", result.detail or
                            "The reviewer flagged this for your decision but recorded no "

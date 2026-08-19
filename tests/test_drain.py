@@ -267,6 +267,27 @@ def test_a_needs_decision_verdict_files_the_question_for_a_human(tmp_path, monke
     assert not _merged_into_base(root, "a-card"), "a card awaiting a decision merged"
 
 
+def test_a_needs_fix_verdict_sends_the_card_back_to_tasks_not_needs_decision(
+        tmp_path, monkeypatch):
+    """A concrete, verifiable defect is not a decision (reviewer-needs-fix-verdict):
+    the card goes back to `tasks/` for another attempt, carrying the reviewer's
+    finding, rather than parking in `needs-decision/` for Karel to read something
+    the next attempt can just fix."""
+    root = _repo(tmp_path, ("a-card", "play"))
+    _branch_with_a_commit(root, "a-card")
+    _Reviewer({"verdict": "needs_fix",
+               "finding": "the docstring names the wrong helper"}).install(monkeypatch)
+
+    result = drain.drain(root, BASE)
+
+    assert [o.state for o in result.outcomes] == [drain.NEEDS_FIX]
+    assert _lane_of(root, "a-card") == "tasks"
+    card = board.find(root, "a-card")
+    assert "wrong helper" in board.section(card.text, "Review Finding")
+    assert board.section(card.text, "Question") == ""
+    assert not _merged_into_base(root, "a-card"), "a card needing a fix merged"
+
+
 def test_an_unreadable_verdict_leaves_the_card_where_it_was(tmp_path, monkeypatch):
     """Degrading to 'a human looks' is always safe; guessing a routing is not.
     The drain must not turn a failed review into a lane change."""
