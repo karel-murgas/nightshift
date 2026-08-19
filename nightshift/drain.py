@@ -88,6 +88,14 @@ reviewed. That lane means a decision only a human can make, and *"review this
 diff"* is not a decision — it is work. Moving the problem to a lane that gets read
 more often would hide it rather than fix it.
 
+Nor is a card routed there merely because the reviewer found something wrong with
+it (`reviewer-needs-fix-verdict`, 2026-08-19). A `needs_fix` verdict is a concrete,
+verifiable defect with one correct answer, not a choice — "apply this fix" is not
+a decision either, so `runner.settle` sends the card back to `tasks/` for another
+attempt instead, the same bounded retry an ordinary `failed` attempt gets. Only a
+fix that keeps recurring past the card's attempt limit escalates to
+`needs-decision/`, because at that point it has stopped being mechanical.
+
     python -m nightshift.drain --dry-run          # what the lane holds, and what would run
     python -m nightshift.drain                    # review everything with a diff
     python -m nightshift.drain --card <id>        # one card — the panel's per-row button
@@ -115,11 +123,14 @@ BLOCKED_SECTION = "Merge"
 
 #: What happened to one card in a pass.
 #:   REVIEWED      — the reviewer said ok; `settle` merged it and moved it on
+#:   NEEDS_FIX     — the reviewer found a fixable defect; `settle` sent it back to
+#:                   `tasks/` for another attempt (or, past its attempt limit, on to
+#:                   needs-decision/ — either way `settle` decides, this is just the log)
 #:   NEEDS_DECISION— the reviewer flagged a choice; `settle` filed it with the question
 #:   LEFT          — the review could not conclude; the card stays in `review/`
 #:   SKIPPED       — no commits on its branch; nothing to review, nothing spent
 #:   NOT_REACHED   — the pass stopped before this card; it is untouched
-REVIEWED, NEEDS_DECISION = "reviewed", "needs-decision"
+REVIEWED, NEEDS_FIX, NEEDS_DECISION = "reviewed", "needs-fix", "needs-decision"
 LEFT, SKIPPED, NOT_REACHED = "left", "skipped", "not-reached"
 
 
@@ -237,9 +248,11 @@ def drain(root: Path, base: str, *, card_id: str = "", limit: int = 0,
                                         how_to_test=_how_to_test(card, branch)),
             base, card_budget, test_timeout)
 
-        if reviewed.outcome in ("reviewed", "needs_decision"):
+        if reviewed.outcome in ("reviewed", "needs_fix", "needs_decision"):
             landed = runner.settle(root, card.id, reviewed)
-            state = REVIEWED if reviewed.outcome == "reviewed" else NEEDS_DECISION
+            state = (REVIEWED if reviewed.outcome == "reviewed"
+                     else NEEDS_FIX if reviewed.outcome == "needs_fix"
+                     else NEEDS_DECISION)
             result.outcomes.append(Outcome(card.id, state, landed, reviewed.cost_usd))
         else:
             result.outcomes.append(Outcome(

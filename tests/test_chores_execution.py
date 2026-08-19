@@ -555,6 +555,28 @@ def test_a_needs_decision_stops_the_whole_batch_from_merging(tmp_path, monkeypat
     assert branches.strip()
 
 
+def test_a_needs_fix_also_stops_the_whole_batch_from_merging(tmp_path, monkeypatch):
+    """A batch diff has no single item to bounce back to `tasks/` for another
+    attempt (reviewer-needs-fix-verdict) — only the combined result — so
+    `needs_fix` gets the same block-and-hand-over treatment as `needs_decision`
+    here, not the per-item retry a single dispatched card gets."""
+    root = _repo(tmp_path, ("a", "review", "x"), ("b", "review", "x"))
+    _Worker(edits={"a": _touch("a"), "b": _touch("b")},
+            review={"verdict": "needs_fix", "finding": "wrong constant name"}).install(
+        monkeypatch)
+    code, _ = chores.execute(root)
+
+    assert code == 4
+    assert "mod_a" not in _git(root, "show", "development_team:myapp/mod_a.py").stdout
+    for card_id in ("a", "b"):
+        card = board.find(root, card_id)
+        assert card.lane == "review"
+        assert "wrong constant name" in card.text
+    branches = _git(root, "for-each-ref", "--format=%(refname:short)",
+                    "refs/heads/chores/").stdout
+    assert branches.strip()
+
+
 def test_nothing_merges_without_a_review(tmp_path, monkeypatch):
     """A green suite is not acceptance on its own. When the reviewer cannot be
     reached the batch waits for a human rather than landing unreviewed."""

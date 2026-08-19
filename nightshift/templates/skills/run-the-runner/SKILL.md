@@ -141,6 +141,7 @@ Each card ends in exactly one lane, and the run log says which:
 | Outcome | Lane | Means |
 |---|---|---|
 | reviewed ok | `testing/` | Gates + tests passed and the diff reviewer said `ok`; the runner **rebased `ai/<id>` onto `{{integration}}`, re-verified and merged it**. {{maintainer}} tests it |
+| `needs_fix` | `tasks/`, or `needs-decision/` past the attempt limit | Gates + tests passed but the reviewer found a concrete, verifiable defect with one correct answer — no {{maintainer}} involved, it goes straight back for another attempt carrying the `## Review Finding`. Only escalates to `needs-decision/` if it keeps recurring past the card's attempts |
 | reviewer flagged a choice | `needs-decision/` | Gates + tests passed but the reviewer needs {{maintainer}}'s judgment; the question is on the card |
 | `review` | `review/` | Fell back to a human review — an artefact-only card (art), or the reviewer/rebase-merge could not decide (a wall, a conflict). The `## Merge` note says why |
 | `parked` | `needs-decision/` | The worker hit a real ambiguity and wrote a `## Question`. **A success state**, not a failure |
@@ -149,7 +150,8 @@ Each card ends in exactly one lane, and the run log says which:
 | `blocked` | stays in `tasks/` | The gate harness itself crashed. Attempt given back, and the night stops: no card can be judged until it is fixed |
 
 A wall is **not** an outcome of its own when the stage that met it had already written a
-complete verdict. A checker that wrote `pass`, a reviewer that wrote `ok`/`needs_decision`, a
+complete verdict. A checker that wrote `pass`, a reviewer that wrote `ok`/`needs_fix`/
+`needs_decision`, a
 `stale-hunter` that wrote `complete: true`, or a worker that wrote `outcome: parked` and only
 *then* hit the wall on its wrap-up call has finished its work — the verdict is honoured, the
 card settles in the lane above on its own merits, and the attempt is spent. The run log says

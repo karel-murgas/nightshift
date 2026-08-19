@@ -91,6 +91,22 @@ def test_a_needs_decision_verdict_carries_the_reviewers_question(tmp_path, monke
     assert "HP or heat" in result.detail
 
 
+def test_a_needs_fix_verdict_carries_the_reviewers_finding(tmp_path, monkeypatch):
+    """The third routing (reviewer-needs-fix-verdict): a concrete, verifiable
+    defect goes back as `needs_fix`, carrying the reviewer's own finding — not a
+    question, an instruction the next attempt can act on directly."""
+    root = _worktree_repo(tmp_path)
+    _tier_binding(root)
+    card = _reviewed_branch(root, tmp_path)
+    _stub_reviewer(monkeypatch, {"verdict": "needs_fix",
+                                 "finding": "credits commit a0bc0c2, not this card"})
+
+    result = runner.review_stage(root, card, runner.Dispatch("review", "x", 0.1),
+                                 "development_team", 0.0, 120)
+    assert result.outcome == "needs_fix"
+    assert "a0bc0c2" in result.detail
+
+
 def test_the_review_stage_skips_an_artefact_only_card(tmp_path, monkeypatch):
     """Art produces no commit on its branch, so there is no diff to review and
     nothing to merge. The stage leaves it exactly as before — a human eye at
@@ -294,6 +310,21 @@ def test_a_reviewer_that_walls_after_needs_decision_still_carries_the_question(
                                  "development_team", 0.0, 120)
     assert result.outcome == "needs_decision"
     assert "which cap?" in result.detail
+    assert result.wall is not None
+
+
+def test_a_reviewer_that_walls_after_needs_fix_still_carries_the_finding(
+        tmp_path, monkeypatch):
+    root = _worktree_repo(tmp_path)
+    _tier_binding(root)
+    card = _reviewed_branch(root, tmp_path)
+    _stub_reviewer(monkeypatch, {"verdict": "needs_fix", "finding": "wrong constant name"},
+                   wall=limits.Wall(limits.SESSION, None, "usage limit reached"))
+
+    result = runner.review_stage(root, card, runner.Dispatch("review", "x", 0.1),
+                                 "development_team", 0.0, 120)
+    assert result.outcome == "needs_fix"
+    assert "wrong constant name" in result.detail
     assert result.wall is not None
 
 
@@ -548,6 +579,50 @@ def test_settle_needs_decision_files_a_schema_valid_question(tmp_path):
     assert settled.lane == "needs-decision"
     assert "## Question" in settled.text
     assert "HP or heat" in settled.text
+    probe_violations = [str(v) for v in card_schema.check(root) if "probe" in str(v)]
+    assert probe_violations == []
+
+
+def test_settle_needs_fix_sends_the_card_back_to_tasks_with_a_review_finding(tmp_path):
+    """A `needs_fix` verdict is not a decision — the card stays in `tasks/` (unlike
+    `needs_decision`, which diverts to needs-decision/) for another attempt, and
+    carries the reviewer's finding in a section of its own, distinct from `## Error`
+    (nothing crashed) and `## Question` (nothing needs Karel)."""
+    from nightshift.gates import card_schema
+
+    root = _worktree_repo(tmp_path)
+    card = _reviewed_branch(root, tmp_path)  # attempts=1, well under MAX_ATTEMPTS
+    card.write({"started": "2026-07-24T03:00:00"})
+
+    message = runner.settle(root, "probe", runner.Dispatch(
+        "needs_fix", "this claims commit X did the fix; git log shows commit Y did it "
+        "on 2026-08-07 — name Y instead"))
+    settled = board.find(root, "probe")
+    assert settled.lane == "tasks"
+    assert "## Review Finding" in settled.text
+    assert "commit Y did it" in settled.text
+    assert "## Question" not in settled.text
+    assert "will retry" in message
+    probe_violations = [str(v) for v in card_schema.check(root) if "probe" in str(v)]
+    assert probe_violations == []
+
+
+def test_settle_needs_fix_escalates_to_needs_decision_past_the_attempt_limit(tmp_path):
+    """A `needs_fix` that keeps recurring across every attempt the card gets has
+    stopped being mechanical — it escalates to needs-decision/ like a genuine
+    `needs_decision` would, rather than looping the card forever."""
+    from nightshift.gates import card_schema
+
+    root = _worktree_repo(tmp_path)
+    card = _reviewed_branch(root, tmp_path)
+    card.write({"started": "2026-07-24T03:00:00", "attempts": str(runner.MAX_ATTEMPTS)})
+
+    message = runner.settle(root, "probe", runner.Dispatch("needs_fix", "still wrong"))
+    settled = board.find(root, "probe")
+    assert settled.lane == "needs-decision"
+    assert "## Question" in settled.text
+    assert "still wrong" in settled.text
+    assert "needs-decision" in message
     probe_violations = [str(v) for v in card_schema.check(root) if "probe" in str(v)]
     assert probe_violations == []
 

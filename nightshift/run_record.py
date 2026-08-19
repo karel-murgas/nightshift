@@ -66,6 +66,17 @@ KEEP = 30
 # (`chores` module docstring), not a fact about the card being wrong — the card
 # goes back to `tasks/` intact, to be dispatched normally. Counting it as a failure
 # would report a working detector as a nightly breakage.
+#
+# `needs_fix` (reviewer-needs-fix-verdict, 2026-08-19) is the same shape as
+# `bounced` and is excluded for the same reason: in the ordinary case it also
+# sends the card back to `tasks/` intact for a normal redispatch, so it is not a
+# failure (gates+tests already passed) and not a decision (no human involved). It
+# is recorded here as the bare string "needs_fix" every time, even the rarer case
+# where `settle` escalates it to needs-decision/ after the card's attempts run
+# out — `FAILED_OUTCOMES`'s own "failed" string has the identical retry-vs-retire
+# ambiguity already and nothing distinguishes them there either. The board-lane
+# section of the digest (not this file) is what actually shows a card now sitting
+# in needs-decision/, regardless of how the dispatch that put it there was logged.
 DECISION_OUTCOMES = frozenset({"parked", "needs_decision"})
 LANDED_OUTCOMES = frozenset({"review", "reviewed"})
 FAILED_OUTCOMES = frozenset({"failed"})

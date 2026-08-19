@@ -970,11 +970,16 @@ def _review(work: Path, base: str, branch: str, out_dir: Path,
     answerable across the set, and a reviewer holding the combined diff can see an
     interaction between two items that per-item review structurally cannot.
 
-    A `needs_decision` about one item stops the **whole** batch. That is the price of
-    reviewing a batch as one unit and it is paid deliberately: merging past a request
-    for a decision is the one thing no stage here is allowed to do, and splitting the
-    batch on the reviewer's say-so would mean guessing which items its question was
-    about. The branch survives, so the answer is a merge by hand rather than lost work.
+    A `needs_decision` — or `needs_fix` — about one item stops the **whole** batch.
+    That is the price of reviewing a batch as one unit and it is paid deliberately:
+    merging past a request for a decision is the one thing no stage here is allowed
+    to do, and splitting the batch on the reviewer's say-so would mean guessing which
+    items its question was about. `needs_fix` gets the same treatment here as
+    `needs_decision`, not the per-card retry `runner.review_stage` gives a single
+    dispatched card: a batch diff has no single item to bounce back to `tasks/`
+    for another attempt, only the combined result, so there is nothing to retry
+    into. The branch survives, so the answer is a merge by hand rather than lost
+    work either way.
     """
     try:
         model = tiers.resolve(work, "lead")
@@ -993,6 +998,10 @@ def _review(work: Path, base: str, branch: str, out_dir: Path,
         question = str(verdict.get("question", "")).strip()
         return ("the reviewer flagged something for a decision: "
                 + (question or "it stated no question, which is itself worth a look"))
+    if called == "needs_fix":
+        finding = str(verdict.get("finding", "")).strip()
+        return ("the reviewer found a fixable defect: "
+                + (finding or "it stated no finding, which is itself worth a look"))
     if wall is not None:
         return "the review hit a usage limit before it reached a verdict"
     return "the review returned no usable verdict"
