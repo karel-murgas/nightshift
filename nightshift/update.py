@@ -506,6 +506,19 @@ def merge(found: Survey, finding: Finding, *, permission_mode: str,
 
     Like `fix`, it does not commit: the result lands dirty in the working tree, where the
     diff is the thing that keeps an automated merge honest.
+
+    **Two things a first reading gets wrong here, and they compound.** The second is
+    what the receipt is told afterwards: see the comment at the recording call.
+
+    **A zero exit is not evidence the merge happened.** The agent can finish cleanly
+    having written nothing — it hits a permission prompt it cannot answer, or decides
+    the file needs no change — and until 2026-08-20 that was recorded as a completed
+    merge. The consequence was the opposite of safe: `_record` stored the hash of the
+    *unmerged* file, so `now == was` on the next survey and the verdict fell from
+    `conflict` to `stale` — out of the set nothing may touch and into `APPLIES`, where
+    `--apply` overwrites it with the template. A verb that failed to change a file
+    thereby marked that file safe to clobber. So the write is verified against the
+    bytes, not against the exit code, and an agent that changed nothing is an error.
     """
     if finding.staged is None:
         raise UpdateError(f"{finding.rel} has no template to merge.")
@@ -525,6 +538,7 @@ def merge(found: Survey, finding: Finding, *, permission_mode: str,
             f"could read both versions and write neither. Pass `--permission-mode "
             f"acceptEdits` for this merge, or set it in {AI_DIR}/hosts.json.")
 
+    before = _on_disk(found.root / finding.rel)
     out_dir = found.root / runner.RUNS / "merge"
     out_dir.mkdir(parents=True, exist_ok=True)
     scratch = found.root / (finding.rel + ".nightshift-new")
@@ -540,11 +554,27 @@ def merge(found: Survey, finding: Finding, *, permission_mode: str,
                              prompt=text)
     result = runner._terminal_result(done.stdout or "")
     scratch.unlink(missing_ok=True)
-    if done.returncode == 0:
-        merged = _on_disk(found.root / finding.rel)
-        if merged is not None:
-            _record(found.root, {finding.rel: init.content_hash(merged)})
-    return done.returncode, str(result.get("result") or "").strip()
+    final = str(result.get("result") or "").strip()
+    if done.returncode != 0:
+        return done.returncode, final
+    merged = _on_disk(found.root / finding.rel)
+    if merged is None or merged == before:
+        # Read the bytes, not the exit code. See the docstring: recording here is what
+        # turns a protected `conflict` into an overwritable `stale`.
+        return 1, (f"{finding.rel} — the agent exited 0 but the file is unchanged, so "
+                   f"nothing was merged and the receipt is untouched. Its own account "
+                   f"of what it did follows; a permission prompt it could not answer "
+                   f"is the usual cause." + chr(10) * 2 + final)
+    # `declined`, not `created` — and this is the whole difference between a merge
+    # that settles and one that re-arms. `created` means "this is what nightshift
+    # wrote here", so storing the merged bytes in it makes `now == was` on the next
+    # survey while the template still differs, which is the definition of `stale`:
+    # the verb would hand `--apply` permission to overwrite the merge with the raw
+    # template. What a merge actually establishes is what `keep` establishes — this
+    # template version was seen and answered — so it is recorded the same way, and
+    # the file reads as the operator's own until the template moves again.
+    _record(found.root, {}, declined={finding.rel: init.content_hash(finding.staged)})
+    return 0, final
 
 
 def _model(root: Path) -> str:
