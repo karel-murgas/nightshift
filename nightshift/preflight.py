@@ -5,9 +5,17 @@
 Everything else in `.ai/` is a trigger or a report — a hook that asks, a script
 that counts. This is the single place that can *refuse*. It runs the checks a
 session's work must pass before it leaves the branch, and it records a receipt
-keyed by the commit it validated. `.ai/hooks/preflight_guard.py` (a `PreToolUse`
+for the content it validated. `.ai/hooks/preflight_guard.py` (a `PreToolUse`
 hook on `git push` / `git merge` / `gh pr create`) reads that receipt and denies
 the operation when the commit being published has none.
+
+**A receipt is about a tree, not a commit** (`is_validated`). The three expensive
+checks all read the working tree and nothing else, so re-running them over
+byte-identical files cannot reach a different verdict — and keying on the SHA
+alone made `git merge --no-ff` unpushable by construction, because it mints a new
+commit over content validated seconds earlier. The SHA is still recorded and still
+matched first; the tree is what makes a merge, an amended message or a clean
+rebase cost nothing.
 
 **Why here and not at commit time.** Commits are cheap and frequent; a check on
 every one would be tuned out within a day (`.ai/recipes/hint.py`'s own lesson).
@@ -108,9 +116,11 @@ if hasattr(sys.stdout, "reconfigure"):
 
 # The receipt is per-checkout, machine-local, ephemeral state — the same
 # category as `.ai/host.json` — so it is gitignored, not committed. It holds the
-# last few validated commit SHAs so that validating a feature branch and then
-# switching to the integration branch to merge it still resolves (the hook looks
-# up the SHA being *published*, which for a merge is the source branch's tip).
+# last few validated commits, each with its tree, so that validating a feature
+# branch and then switching to the integration branch to merge it still resolves
+# (the hook looks up the SHA being *published*, which for a merge is the source
+# branch's tip — and for the push that follows is a merge commit whose tree the
+# feature tip already carried; see `is_validated`).
 RECEIPT = Path(".ai") / ".preflight"
 RECEIPT_KEEP = 20
 # Where the pytest run leaves its artefacts. Under `.ai/runs/`, which is already
@@ -177,6 +187,17 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
 
 def head_sha(root: Path) -> str:
     return _git(root, "rev-parse", "HEAD").stdout.strip()
+
+
+def tree_of(root: Path, rev: str = "HEAD") -> str:
+    """The tree object `rev` points at — the content, with no history attached.
+
+    Two commits with the same tree hold byte-identical files, whatever their
+    parents, message or author. That is what makes it the right key for a receipt:
+    the gates, the audit and pytest all read the working tree and nothing else, so
+    a verdict about a tree is a verdict about every commit that carries it.
+    """
+    return _git(root, "rev-parse", f"{rev}^{{tree}}").stdout.strip()
 
 
 @dataclass
@@ -675,6 +696,8 @@ def write_receipt(root: Path, sha: str, no_corrections: str | None,
     branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     entries.append({
         "sha": sha,
+        # The content this verdict is actually about — see `is_validated`.
+        "tree": tree_of(root, sha),
         "branch": branch,
         "when": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "no_corrections": no_corrections,
@@ -685,8 +708,50 @@ def write_receipt(root: Path, sha: str, no_corrections: str | None,
 
 
 def is_validated(root: Path, sha: str) -> bool:
-    """Does a receipt exist for exactly this commit? Used by the guard hook."""
-    return any(e.get("sha") == sha for e in _load_receipt(root))
+    """Has this commit's *content* been validated? Used by the guard hook.
+
+    An exact SHA match, or a receipt for any commit carrying the same tree.
+
+    **The tree match is why merging no longer costs a second full preflight.**
+    Keyed on the SHA alone, `git merge --no-ff` was unpushable by construction: it
+    mints a new commit object over content that was validated seconds earlier, so
+    the guard denied the push and the whole run had to happen again over
+    byte-identical files. Measured 2026-08-19 on `ai/panel-activity-decide` —
+    branch tip and merge commit both at tree `254dad63`, two 13-minute runs, the
+    second one incapable of reaching a different verdict than the first.
+
+    That it *cannot* differ is the point, not a convenience. The three expensive
+    checks are pure functions of the working tree: `gates.run` and `audit --check`
+    walk files, and pytest imports them. None reads a commit message, a parent or
+    an author. So a tree is the natural unit of "what was checked", and the SHA was
+    only ever a proxy for it — a proxy that is exact when nothing else changed and
+    wrong in the one direction that matters: it denies work already proven.
+
+    It also covers, for free, the other ways a SHA moves without the content
+    moving: `commit --amend` on a message, a rebase that replays cleanly, a
+    cherry-pick of the same change.
+
+    **What a tree match does not attest.** A handful of preflight's checks are
+    about the branch rather than the files — `paired-branches`, the framework
+    freshness line, and the corrections diff, which is computed against a base that
+    a merge may have moved. Those ran against this content on whichever branch it
+    was validated on, and are not re-derived here. That is a deliberate, bounded
+    trade: they are the cheap checks, they are advisory about *where* work is
+    happening rather than *whether it is sound*, and re-running the expensive three
+    to re-derive them is what this exists to stop. A real merge — one where the
+    integration branch had moved — produces a tree neither parent carries, matches
+    nothing, and is validated in full, which is the case the strictness is for.
+    """
+    entries = _load_receipt(root)
+    if any(e.get("sha") == sha for e in entries):
+        return True
+    tree = tree_of(root, sha)
+    # No tree, no match: an unreadable rev must never widen what is accepted, and
+    # an old receipt written before this field existed has `tree` absent — `None`
+    # would otherwise equal `None` and validate everything.
+    if not tree:
+        return False
+    return any(e.get("tree") == tree for e in entries)
 
 
 def main(argv: list[str] | None = None) -> int:

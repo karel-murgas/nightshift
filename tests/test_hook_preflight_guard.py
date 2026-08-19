@@ -143,6 +143,88 @@ def test_a_receipt_for_an_older_commit_does_not_unblock_the_new_tip(tmp_path):
     assert new[:8] in _reason(decision)
 
 
+# --- one tree, several commits ----------------------------------------------------
+#
+# The receipt attests to *content*. Keyed on the SHA alone, the ordinary
+# validate-then-merge-then-push sequence was unpushable by construction: the merge
+# mints a new commit over files that were validated seconds earlier, and the guard
+# demanded the whole run again to reach the only verdict it could reach.
+
+
+def test_pushing_a_no_ff_merge_of_a_validated_branch_is_allowed(tmp_path):
+    """The sequence this fixes, end to end. Measured 2026-08-19 on
+    `ai/panel-activity-decide`: branch tip and merge commit both at tree
+    `254dad63`, and the push was denied after a passing 13-minute preflight."""
+    session = _repo(tmp_path, "session")
+    target = _repo(tmp_path, "target")
+    _git(target, "checkout", "-q", "-b", "feature")
+    tip = _commit(target, "two")
+    preflight.write_receipt(target, tip, None)
+
+    _git(target, "checkout", "-q", "main")
+    _git(target, "merge", "-q", "--no-ff", "feature", "-m", "merge feature")
+    merge = _git(target, "rev-parse", "HEAD")
+    assert merge != tip, "a --no-ff merge must be its own commit, or this proves nothing"
+    assert _git(target, "rev-parse", "HEAD^{tree}") == _git(target, "rev-parse", f"{tip}^{{tree}}")
+
+    assert _verdict(preflight_guard.decide(f"git -C {target} push", session)) == "allow"
+
+
+def test_an_amended_message_does_not_re_arm_the_guard(tmp_path):
+    """Same files, new SHA. Re-running the suite over byte-identical content to
+    approve a reworded commit message is work that cannot change its own answer."""
+    session = _repo(tmp_path, "session")
+    target = _repo(tmp_path, "target")
+    _validate(target)
+    _git(target, "commit", "-q", "--amend", "-m", "one, said better")
+
+    assert _verdict(preflight_guard.decide(f"git -C {target} push", session)) == "allow"
+
+
+def test_a_merge_that_actually_changes_content_is_still_guarded(tmp_path):
+    """The strictness is for exactly this: when the integration branch has moved,
+    the merge produces a tree neither parent carries, so nothing attests to it and
+    it is validated in full. A tree match must never be reachable by combining two
+    separately-validated trees."""
+    session = _repo(tmp_path, "session")
+    target = _repo(tmp_path, "target")
+    _git(target, "checkout", "-q", "-b", "feature")
+    (target / "from-feature.txt").write_text("f\n", encoding="utf-8", newline="\n")
+    _git(target, "add", "-A")
+    _git(target, "commit", "-q", "-m", "feature side")
+    tip = _git(target, "rev-parse", "HEAD")
+    preflight.write_receipt(target, tip, None)
+
+    _git(target, "checkout", "-q", "main")
+    (target / "from-main.txt").write_text("m\n", encoding="utf-8", newline="\n")
+    _git(target, "add", "-A")
+    _git(target, "commit", "-q", "-m", "main moved")
+    _validate(target)
+    _git(target, "merge", "-q", "--no-ff", "feature", "-m", "real merge")
+
+    decision = preflight_guard.decide(f"git -C {target} push", session)
+    assert _verdict(decision) == "deny", "the merged tree was never validated"
+
+
+def test_a_receipt_written_before_trees_were_recorded_validates_nothing_extra(tmp_path):
+    """An old receipt has no `tree` field. Two `None`s comparing equal would turn
+    every entry into a wildcard — the widening direction, on the file that decides
+    what may leave the branch."""
+    session = _repo(tmp_path, "session")
+    target = _repo(tmp_path, "target")
+    _validate(target)
+    path = target / preflight.RECEIPT
+    entries = json.loads(path.read_text(encoding="utf-8"))
+    for entry in entries:
+        entry.pop("tree", None)
+    path.write_text(json.dumps(entries), encoding="utf-8", newline="\n")
+
+    new = _commit(target, "two")
+    decision = preflight_guard.decide(f"git -C {target} push", session)
+    assert _verdict(decision) == "deny"
+    assert new[:8] in _reason(decision)
+
+
 def test_a_cd_earlier_in_the_command_moves_the_repo_that_is_checked(tmp_path):
     """`cd ../other && git push` is how the incident was actually typed. Following it
     needs the `;`/`&&` operators to be tokens, which plain `shlex.split` does not do."""
