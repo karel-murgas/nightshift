@@ -285,6 +285,64 @@ def test_a_chore_dispatches_on_the_cheap_tier_as_a_short_alias(tmp_path, monkeyp
     assert worker.models[:1] == ["sonnet"]
 
 
+def test_the_batch_writes_its_own_run_record(tmp_path, monkeypatch):
+    """A batch that does not testify is indistinguishable from one that never ran.
+
+    It did not write a record until 2026-08-18, and the consequence was not a
+    missing statistic: the Command Center reads the newest record to say what ran,
+    so a morning that had just finished a 23-minute batch reported "Last run" as a
+    night from a fortnight earlier. The `kind` is what stops the roster then reading
+    as a night's — a batch and a night are not the same event.
+    """
+    from nightshift import run_record
+
+    root = _repo(tmp_path, ("a", "review", "inner"))
+    _Worker(edits={"a": _touch("a")}).install(monkeypatch)
+    chores.execute(root)
+
+    records = run_record.read_all(root)
+    assert records, "the batch left no record of itself"
+    record = records[0]
+    assert record["kind"] == "chores"
+    assert record["complete"], "a batch that reached its own end says so"
+    assert [d["card"] for d in record["dispatched"]] == ["a"]
+    # `reviewed` once it has landed — `review` is what it carries while the batch
+    # review is still ahead of it.
+    assert record["dispatched"][0]["outcome"] == "reviewed"
+    assert run_record.landed(record), "a landed chore must read as landed"
+
+
+def test_a_bounced_chore_is_recorded_as_a_routing_signal_not_a_failure(tmp_path,
+                                                                      monkeypatch):
+    """A bounce is the worker reporting the item was not a one-prompter after all —
+    the signal the batch exists to produce. Counted under Failed it would report a
+    working detector as a nightly breakage, and the card goes back to `tasks/`
+    intact either way."""
+    from nightshift import run_record
+
+    root = _repo(tmp_path, ("a", "review", "inner"))
+    _Worker(edits={"a": _touch("a")},
+            verdicts={"a": {"outcome": "parked",
+                            "summary": "which save format?"}}).install(monkeypatch)
+    chores.execute(root)
+
+    record = run_record.read_all(root)[0]
+    assert record["dispatched"][0]["outcome"] == "bounced"
+    assert not run_record.failures(record), "a bounce is not a failure"
+    assert not run_record.landed(record)
+
+
+def test_a_refusal_before_the_board_is_read_leaves_no_record(tmp_path, monkeypatch):
+    """A batch that never got as far as looking at the board must not leave a record
+    claiming it ran — the panel would then headline a run that did nothing."""
+    from nightshift import run_record
+
+    root = _repo(tmp_path, ("a", "review", "inner"))
+    monkeypatch.setattr(chores.runner, "acquire_lock", lambda root: False)
+    chores.execute(root)
+    assert run_record.read_all(root) == []
+
+
 def test_phase_one_runs_only_the_tests_that_reach_the_change(tmp_path, monkeypatch):
     """The narrow slice, and it must be narrow *by selection* rather than by luck:
     the batch's own run is what covers everything else."""

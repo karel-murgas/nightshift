@@ -61,6 +61,7 @@ from pathlib import Path
 
 from nightshift import board  # the single card model (`board-parser-convergence`)
 from nightshift import corrections  # backlog() for the harvest-nudge line (12_corrections_lifecycle.md)
+from nightshift import decide  # one parser for `## Question`, shared with the panel's form
 from nightshift import run_record  # the run's own account of itself — the source for half 1
 from nightshift import stale_sweep  # read_status() for the fallback Staleness line
 from nightshift import textio  # Digest.md is committed; write_text would CRLF it on Windows
@@ -256,36 +257,22 @@ def _first_question_line(card: Card) -> str:
     return "(see the card)"
 
 
-def _bullets(lines: list[str]) -> list[str]:
-    """Each top-level list item in `lines`, with its wrapped plain continuation
-    lines joined in — so an option that ran onto a second source line is one
-    whole string, not a fragment cut at the wrap (Karel's "random end of line",
-    2026-07-28). A following *bullet* starts a new item and is never folded in,
-    which keeps a card that nests bullets under an option from swallowing them."""
-    out: list[str] = []
-    current: str | None = None
-    for line in lines:
-        if _LIST_ITEM.match(line):
-            if current is not None:
-                out.append(current)
-            current = _LIST_ITEM.match(line).group(1)
-        elif current is not None:
-            if line.strip():
-                current += " " + line.strip()
-            else:
-                out.append(current)
-                current = None
-    if current is not None:
-        out.append(current)
-    return out
-
-
 def _candidates(card: Card) -> list[str]:
     """Each option with its implication kept, wrapped lines joined and the clip
     landing on a clean boundary — so the digest carries the actual choice, whole,
-    not a label or a fragment cut at a source line-break."""
-    return [_clip_clean(_plain(b), 120)
-            for b in _bullets(_section(card.text, "Question").splitlines())]
+    not a label or a fragment cut at a source line-break.
+
+    Parsing moved to `decide` on 2026-08-18, when the Command Center grew a form for
+    answering these. Two parsers for one convention would drift, and the drift would
+    be silent and consequential: the morning report would list one set of options and
+    the form would offer another, for the same card, with no way to notice. What lives
+    here now is only the digest's own clipping.
+    """
+    # `raw`, not `text`: the digest is quoting the card, and the `*(recommended)*`
+    # mark is the most useful thing on the line. The form uses `text`, which has it
+    # stripped — see `decide.Option`.
+    return [_clip_clean(_plain(option.raw), 120)
+            for sub in decide.parse(card.text) for option in sub.options]
 
 
 def _decision_lines(card: Card, indent: str = "    ") -> list[str]:
@@ -294,24 +281,26 @@ def _decision_lines(card: Card, indent: str = "    ") -> list[str]:
     A multi-decision card structures its Question as bold sub-question headers
     (`**1 — …**`) with options under each; those are shown nested — each
     sub-question, then its options, wrapped lines joined and clipped cleanly. A
-    single-picker card has no such headers, so its options sit at one indent."""
-    lines = _section(card.text, "Question").splitlines()
-    headers = [
-        i for i, line in enumerate(lines)
-        if (s := line.strip()).startswith("**") and not _LIST_ITEM.match(line)
-    ]
-    if len(headers) < 2:
+    single-picker card has no such headers, so its options sit at one indent.
+
+    **This used to be wrong on real cards, in both directions**, which is what sharing
+    the parser fixed. The old list-item pattern saw only `-`/`*` bullets, so a card
+    whose options were numbered `1.` / `2.` yielded none; and the sub-question test was
+    "the line starts with `**`", which any emphasised prose satisfies — so
+    `command-center-back-buttons` had its two narration paragraphs
+    (`**What I found:**`, `**This needs a decision…**`) listed as if they were the
+    choices, while its two actual options went unmentioned. `decide.parse` requires a
+    bold lead-in to have list items under it before believing it heads a question.
+    """
+    subs = decide.parse(card.text)
+    if len(subs) < 2:
         return [f"{indent}- {c}" for c in _candidates(card)]
 
     out: list[str] = []
-    for n, start in enumerate(headers):
-        end = headers[n + 1] if n + 1 < len(headers) else len(lines)
-        seg = lines[start:end]
-        first = next((i for i, line in enumerate(seg) if _LIST_ITEM.match(line)), len(seg))
-        header = " ".join(line.strip() for line in seg[:first] if line.strip())
-        out.append(f"{indent}- {_clip_clean(_plain(header), 120)}")
-        for opt in _bullets(seg[first:]):
-            out.append(f"{indent}    - {_clip_clean(_plain(opt), 120)}")
+    for sub in subs:
+        out.append(f"{indent}- {_clip_clean(_plain(sub.prompt), 120)}")
+        for option in sub.options:
+            out.append(f"{indent}    - {_clip_clean(_plain(option.raw), 120)}")
     return out
 
 

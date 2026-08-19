@@ -566,6 +566,44 @@
   }
   .doc th { font-family: var(--mono); color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.08em; }
 
+  /* The answering form. One block per sub-question, options stacked rather than
+     inline: a real option is a whole sentence with its consequence attached, so a
+     row of radio buttons would truncate exactly the part you are choosing between. */
+  .decide-q { padding: 0.2rem 1.5rem 1rem; max-width: 78ch; }
+  .decide-q h3 {
+    font-family: var(--mono);
+    font-size: var(--step-0);
+    color: var(--ink-dim);
+    font-weight: 600;
+    margin: 0.9rem 0 0.5rem;
+  }
+  .pickone {
+    display: flex;
+    gap: 0.6rem;
+    align-items: baseline;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid transparent;
+    line-height: 1.55;
+    cursor: pointer;
+  }
+  .pickone:hover { border-color: var(--line); background: var(--ground); }
+  .pickone input { margin-top: 0.25rem; flex: 0 0 auto; }
+  .pickone span { flex: 1 1 auto; }
+  .pickone .dim { color: var(--ink-faint); }
+  .decide-q textarea {
+    width: 100%;
+    min-height: 6rem;
+    background: var(--ground);
+    color: var(--ink);
+    border: 1px solid var(--line);
+    padding: 0.6rem 0.7rem;
+    font-family: var(--mono);
+    font-size: var(--step-0);
+    line-height: 1.6;
+    resize: vertical;
+  }
+  .decide-q textarea:focus-visible { outline: 1px solid var(--phosphor); outline-offset: -1px; }
+
   .editor { padding: 0 1.5rem 1.1rem; display: none; }
   .editor.open { display: block; }
   .editor textarea {
@@ -675,7 +713,14 @@ function toast(message, bad) {
    So the message is parked in sessionStorage and re-shown by the page that
    replaces this one. sessionStorage rather than a query parameter: it is not
    part of the address, so it does not survive a bookmark, a share or a manual
-   refresh — the message belongs to this tab and this moment. */
+   refresh — the message belongs to this tab and this moment.
+
+   **No longer the usual path.** Since the live refresh landed, a successful verb
+   swaps the changed regions in place instead of reloading, so the toast is never
+   destroyed and never needs carrying. This stays for the cases that still replace
+   the document — a verb that navigates, and any future one that must — because the
+   failure it fixes (the panel appearing to answer only when it has bad news) comes
+   back the moment one of those exists without it. */
 var TOAST_KEY = "ns_toast";
 
 function toastAfterReload(message, bad) {
@@ -717,8 +762,12 @@ function post(path, body, opts) {
     var message = result.data.message || (result.ok ? "done" : "refused");
     toast(message, !result.ok);
     if (result.ok && opts.reload !== false) {
-      toastAfterReload(message, false);
-      setTimeout(function () { location.reload(); }, 900);
+      /* Was `location.reload()`. The soft refresh shows the same changed board
+         without throwing away the scroll position, the ticks or anything half-typed
+         — and the toast survives on its own, because the page it is sitting on is
+         never replaced. `toastAfterReload` is kept for the paths that still do
+         reload the document; see its comment. */
+      setTimeout(softRefresh, 400);
     }
     return result;
   }).catch(function (err) { toast(String(err), true); });
@@ -775,70 +824,106 @@ function persistOrder(list) {
   });
 }
 
-document.querySelectorAll("#queue, #ideasrows").forEach(function (list) {
-  var held = null;
+/* ---- delegated, and that is load-bearing ----
 
-  list.addEventListener("dragstart", function (e) {
-    var row = e.target.closest(".row");
-    if (!row || row.classList.contains("no-grip")) { return; }
-    held = row;
-    row.classList.add("dragging");
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", "row");
-  });
+   These used to be bound per list: `document.querySelectorAll("#queue, #ideasrows")`
+   at load, one set of listeners each. That was fine while the only way the DOM
+   changed was a full page reload, which rebinds everything by construction. The live
+   refresh replaces a section's HTML in place, and a replaced `#queue` is a *new*
+   element with none of those listeners — so dragging would have gone on looking
+   perfectly normal and silently stopped saving order, which is the worst shape a bug
+   can take on a board whose whole job is remembering what you decided.
 
-  list.addEventListener("dragend", function () {
-    if (held) { held.classList.remove("dragging"); }
-    list.querySelectorAll(".drag-over").forEach(function (r) { r.classList.remove("drag-over"); });
-    held = null;
-    renumber(list);
-    persistOrder(list);
-  });
+   Bound on `document` instead, matching on the way up. The listeners therefore
+   survive any swap, because they were never attached to the thing being swapped.
+   `held` lives out here for the same reason. */
+var held = null;
 
-  list.addEventListener("dragover", function (e) {
-    if (!held) { return; }
-    e.preventDefault();
-    var over = e.target.closest(".row");
-    if (!over || over === held || over.classList.contains("no-grip")) { return; }
-    list.querySelectorAll(".drag-over").forEach(function (r) { r.classList.remove("drag-over"); });
-    over.classList.add("drag-over");
-    var box = over.getBoundingClientRect();
-    var after = (e.clientY - box.top) > box.height / 2;
-    over.parentNode.insertBefore(held, after ? over.nextSibling : over);
-  });
+function dragList(node) {
+  return node ? node.closest("#queue, #ideasrows") : null;
+}
 
-  list.addEventListener("drop", function (e) { e.preventDefault(); });
+document.addEventListener("dragstart", function (e) {
+  var list = dragList(e.target);
+  if (!list) { return; }
+  var row = e.target.closest(".row");
+  if (!row || row.classList.contains("no-grip")) { return; }
+  held = row;
+  row.classList.add("dragging");
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", "row");
+});
+
+document.addEventListener("dragend", function (e) {
+  var list = dragList(held) || dragList(e.target);
+  if (held) { held.classList.remove("dragging"); }
+  if (!list) { held = null; return; }
+  list.querySelectorAll(".drag-over").forEach(function (r) { r.classList.remove("drag-over"); });
+  held = null;
+  renumber(list);
+  persistOrder(list);
+});
+
+document.addEventListener("dragover", function (e) {
+  if (!held) { return; }
+  var list = dragList(held);
+  if (!list || !list.contains(e.target)) { return; }
+  e.preventDefault();
+  var over = e.target.closest(".row");
+  if (!over || over === held || over.classList.contains("no-grip")) { return; }
+  list.querySelectorAll(".drag-over").forEach(function (r) { r.classList.remove("drag-over"); });
+  over.classList.add("drag-over");
+  var box = over.getBoundingClientRect();
+  var after = (e.clientY - box.top) > box.height / 2;
+  over.parentNode.insertBefore(held, after ? over.nextSibling : over);
+});
+
+document.addEventListener("drop", function (e) {
+  if (dragList(e.target)) { e.preventDefault(); }
 });
 
 /* ---- one selection model, two ways to drive it ---- */
 
-var queue = document.getElementById("queue");
-var picks = queue ? Array.prototype.slice.call(queue.querySelectorAll(".pick")) : [];
-var pickedOut = document.getElementById("picked");
-var slider = document.getElementById("takefirst");
-var sliderOut = document.getElementById("takefirstout");
+/* Looked up on every call rather than captured once, for the same reason the drag
+   handlers are delegated: after a refresh has swapped the Tonight section, a list of
+   checkbox elements captured at load points at nodes no longer in the document, and
+   "Run the ticked" would faithfully send the ticks of a page that is gone. */
+function pickBoxes() {
+  var queue = document.getElementById("queue");
+  return queue ? Array.prototype.slice.call(queue.querySelectorAll(".pick")) : [];
+}
 
 function pickedIds() {
   var ids = [];
-  picks.forEach(function (p) { if (p.checked) { ids.push(p.dataset.id); } });
+  pickBoxes().forEach(function (p) { if (p.checked) { ids.push(p.dataset.id); } });
   return ids;
 }
 
 function countPicked() {
+  var picks = pickBoxes();
+  var pickedOut = document.getElementById("picked");
+  var slider = document.getElementById("takefirst");
+  var sliderOut = document.getElementById("takefirstout");
   var n = pickedIds().length;
   if (pickedOut) { pickedOut.textContent = n + " of " + picks.length; }
   if (slider && sliderOut) { slider.value = String(n); sliderOut.textContent = String(n); }
 }
-picks.forEach(function (p) { p.addEventListener("change", countPicked); });
 
-if (slider) {
-  slider.addEventListener("input", function () {
-    var take = Number(slider.value);
-    picks.forEach(function (p, i) { p.checked = i < take; });
-    if (sliderOut) { sliderOut.textContent = String(take); }
-    if (pickedOut) { pickedOut.textContent = take + " of " + picks.length; }
-  });
-}
+document.addEventListener("change", function (e) {
+  if (e.target && e.target.classList && e.target.classList.contains("pick")) { countPicked(); }
+});
+
+document.addEventListener("input", function (e) {
+  if (!e.target || e.target.id !== "takefirst") { return; }
+  var picks = pickBoxes();
+  var sliderOut = document.getElementById("takefirstout");
+  var pickedOut = document.getElementById("picked");
+  var take = Number(e.target.value);
+  picks.forEach(function (p, i) { p.checked = i < take; });
+  if (sliderOut) { sliderOut.textContent = String(take); }
+  if (pickedOut) { pickedOut.textContent = take + " of " + picks.length; }
+});
+
 countPicked();
 
 /* `post` attaches the override itself, so these say only what they are. */
@@ -853,15 +938,21 @@ function runChores() { post("/api/chores/run", {}); }
 
 /* ---- verify: mark one OK now, or tick several and save ---- */
 
-var ticks = Array.prototype.slice.call(document.querySelectorAll(".tick"));
-var tickedOut = document.getElementById("ticked");
+/* Looked up per call, and delegated — same reason as `pickBoxes` and the drag
+   handlers: a refresh can replace the Play-through section under us. */
+function tickBoxes() {
+  return Array.prototype.slice.call(document.querySelectorAll(".tick"));
+}
 function countTicked() {
+  var tickedOut = document.getElementById("ticked");
   var n = 0;
-  ticks.forEach(function (t) { if (t.checked && !t.disabled) { n += 1; } });
+  tickBoxes().forEach(function (t) { if (t.checked && !t.disabled) { n += 1; } });
   if (!tickedOut) { return; }
   tickedOut.textContent = n === 0 ? "Nothing ticked." : (n === 1 ? "1 card ticked." : n + " cards ticked.");
 }
-ticks.forEach(function (t) { t.addEventListener("change", countTicked); });
+document.addEventListener("change", function (e) {
+  if (e.target && e.target.classList && e.target.classList.contains("tick")) { countTicked(); }
+});
 countTicked();
 
 function markOK(button, cardId) {
@@ -880,7 +971,7 @@ function markOK(button, cardId) {
 
 function saveTicked() {
   var ids = [];
-  ticks.forEach(function (t) { if (t.checked && !t.disabled) { ids.push(t.dataset.id); } });
+  tickBoxes().forEach(function (t) { if (t.checked && !t.disabled) { ids.push(t.dataset.id); } });
   if (!ids.length) { toast("nothing ticked", true); return; }
   post("/api/verified-many", { card_ids: ids });
 }
@@ -933,6 +1024,204 @@ function saveNew(slug, lane) {
   if (!name || !name.value.trim()) { toast("give it a filename first", true); return; }
   post("/api/note", { name: name.value.trim(), body: field ? field.value : "", lane: lane });
 }
+
+/* ---- answering a parked card ----
+
+   Reads the ticked radio per sub-question, in document order, so `picks[i]` lines up
+   with `decide.parse()[i]` on the server. An unticked group — or the deliberate
+   "something else" option, which carries an empty value — sends "" for that slot, and
+   the server records only the ones that were answered. A partial answer is a real
+   thing: a card can batch three decisions and you may only be sure of two. */
+function answerCard(cardId) {
+  var groups = {};
+  document.querySelectorAll('.decide-q input[type=radio]').forEach(function (r) {
+    if (!(r.name in groups)) { groups[r.name] = ""; }
+    if (r.checked) { groups[r.name] = r.value; }
+  });
+  var picks = Object.keys(groups).sort(function (a, b) {
+    return Number(a.slice(1)) - Number(b.slice(1));
+  }).map(function (k) { return groups[k]; });
+  var note = document.getElementById("answernote");
+  post("/api/answer", { card_id: cardId, picks: picks, note: note ? note.value : "" })
+    .then(function (r) {
+      /* Clear it only once the server has it: a cleared box after a refusal would
+         throw away exactly the words that were hardest to write. */
+      if (r && r.ok && note) { note.value = ""; }
+    });
+}
+
+function sendToTasks(cardId) {
+  post("/api/tasks", { card_id: cardId });
+}
+
+/* ---- the live refresh ----------------------------------------------------
+
+   The panel reports on things that take minutes — a night, a chore batch, a
+   classify pass — and until now it reported on them only when you pressed
+   something. A page you have to reload to trust is a page you stop trusting: the
+   meters were stale, the live-run section froze at whatever was true when you opened it,
+   and a batch could finish, land and write its report with nothing on screen
+   moving.
+
+   **Nothing here reloads the page**, and that is the whole design rather than an
+   optimisation. A reload is the one operation guaranteed to destroy every piece of
+   work in progress on the page: the scroll position, the caret in a half-typed
+   answer, the cards you have just unticked, a row mid-drag. So the server re-renders
+   the page it already knows how to render, and the client replaces only the regions
+   whose HTML actually differs — leaving anything you are touching alone.
+
+   Three decisions per region, in order:
+
+     identical  -> do nothing at all. The common case on a quiet board, and it means
+                   an idle tab mutates no DOM and cannot flicker.
+     busy       -> skip it, try again next tick. "Busy" is narrow on purpose: a drag
+                   in flight, or the focus being inside it. Every *other* region still
+                   updates, which is the point of doing this per region rather than
+                   per page — editing an idea in place must not freeze the allowance
+                   meters three inches away.
+     otherwise  -> swap it, then put back the handful of things that are user state
+                   rather than server state (see `carryState`).
+
+   The regions are matched by id, so a section without one is simply never swapped.
+   `_section(sec_id=...)` is where those come from. */
+
+var REFRESH_MS = 10000;
+
+/* User state that lives in the DOM and has no server-side truth to re-render from.
+   Everything here is something you *did* to this page that the board does not know
+   about yet, so a swap has to carry it across by hand. Kept deliberately short: if
+   this list grows long it is a sign the page is holding state that belongs on disk. */
+function carryState(oldRegion, newRegion) {
+  /* The Tonight ticks and the paid-override, by the id the server already writes. */
+  oldRegion.querySelectorAll("input[type=checkbox]").forEach(function (was) {
+    var now = null;
+    if (was.id) {
+      now = newRegion.querySelector("#" + CSS.escape(was.id));
+    } else if (was.dataset.id) {
+      now = newRegion.querySelector(
+        'input[type=checkbox][data-id="' + CSS.escape(was.dataset.id) + '"]');
+    }
+    if (now) { now.checked = was.checked; }
+  });
+  /* An editor the user has opened, and whatever they have typed into it. */
+  oldRegion.querySelectorAll("textarea, input[type=text]").forEach(function (was) {
+    if (!was.value) { return; }
+    var holder = was.closest("[id]");
+    if (!holder) { return; }
+    var now = newRegion.querySelector("#" + CSS.escape(holder.id));
+    var field = now ? now.querySelector(was.tagName.toLowerCase()) : null;
+    if (field && !field.value) { field.value = was.value; }
+  });
+  oldRegion.querySelectorAll(".open[id]").forEach(function (was) {
+    var now = newRegion.querySelector("#" + CSS.escape(was.id));
+    if (now) { now.classList.add("open"); }
+  });
+}
+
+/* Narrow by design — see the header. A region is busy only while you are actually
+   working inside it; merely having scrolled to it is not busy, or nothing would
+   ever update. */
+function regionBusy(region) {
+  if (held && region.contains(held)) { return true; }
+  var focused = document.activeElement;
+  if (focused && focused !== document.body && region.contains(focused)) { return true; }
+  return false;
+}
+
+/* Swap one region in place, honouring the three decisions in the header. Returns
+   true when it was left alone because something in it is in flight. */
+function swapRegion(here, next) {
+  if (!here || !next) { return false; }
+  if (here.outerHTML === next.outerHTML) { return false; }
+  if (regionBusy(here)) { return true; }
+  var replacement = next.cloneNode(true);
+  carryState(here, replacement);
+  here.replaceWith(replacement);
+  return false;
+}
+
+function sectionsOf(scope) {
+  return Array.prototype.slice.call(scope.querySelectorAll("main > section"));
+}
+
+function sectionKey(list) {
+  return list.map(function (s) { return s.id || "?"; }).join("|");
+}
+
+function applyRefresh(html) {
+  var fresh = new DOMParser().parseFromString(html, "text/html");
+
+  ["rail", "statusrail"].forEach(function (id) {
+    swapRegion(document.getElementById(id), fresh.getElementById(id));
+  });
+
+  /* Sections come and go — `sec-lastjob` appears exactly when the newest thing that
+     ran wrote no run record, and a run starting or ending changes the set. Matching
+     purely by id silently handles neither: a section that vanished would never be
+     touched again and would sit there stale forever, and a new one would never be
+     inserted because there is nothing here to replace. So the *shape* is checked
+     first, and a changed shape is rebuilt wholesale rather than patched. */
+  var here = sectionsOf(document);
+  var next = sectionsOf(fresh);
+  var main = document.querySelector("main");
+  if (!main) { return; }
+
+  /* Every page ends with a footer carrying counts, so it goes stale like anything
+     else — and it is also the node the rebuild below must insert *before*. */
+  var footer = main.querySelector("footer");
+  swapRegion(footer, fresh.querySelector("main > footer"));
+  footer = main.querySelector("footer");
+
+  if (sectionKey(here) === sectionKey(next)) {
+    here.forEach(function (section, i) { swapRegion(section, next[i]); });
+    return;
+  }
+  /* Rebuilding moves nodes the user may be working in, so it waits for them —
+     the one case where one busy region holds up the others, and the honest trade:
+     half-rebuilding a page whose shape changed would leave it incoherent. */
+  if (here.some(regionBusy)) { return; }
+  var byId = {};
+  here.forEach(function (s) { if (s.id) { byId[s.id] = s; } });
+  here.forEach(function (s) { s.remove(); });
+  next.forEach(function (s) {
+    var replacement = s.cloneNode(true);
+    if (s.id && byId[s.id]) { carryState(byId[s.id], replacement); }
+    /* Before the footer, never appended past it — `main` is
+       statusrail · sections · footer, and appending would put a new section
+       underneath the page's closing line. */
+    main.insertBefore(replacement, footer);
+  });
+}
+
+function currentPage() {
+  var page = location.pathname.replace(/^\/+|\/+$/g, "");
+  return page || "now";
+}
+
+/* Only the five rendered pages can refresh: a card, a diff or a log is a document
+   that does not change while you read it, and asking the server to re-render one
+   would be work nobody asked for. */
+var REFRESHABLE = ["now", "verify", "inbox", "ideas", "run", "system"];
+
+function softRefresh() {
+  var page = currentPage();
+  if (REFRESHABLE.indexOf(page) === -1) { return Promise.resolve(); }
+  return fetch("/api/refresh?page=" + encodeURIComponent(page))
+    .then(function (r) { return r.ok ? r.text() : null; })
+    .then(function (html) { if (html) { applyRefresh(html); } })
+    .catch(function () { /* the panel was closed, or the box went to sleep: say nothing */ });
+}
+
+/* Hidden tabs do not poll. Each tick is a board scan plus a couple of `git`
+   subprocesses on the server side, and three forgotten tabs would triple that
+   forever for nobody's benefit. */
+setInterval(function () {
+  if (document.visibilityState === "visible") { softRefresh(); }
+}, REFRESH_MS);
+
+document.addEventListener("visibilitychange", function () {
+  if (document.visibilityState === "visible") { softRefresh(); }
+});
 </script>
 </body>
 </html>

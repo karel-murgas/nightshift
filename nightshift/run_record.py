@@ -58,6 +58,14 @@ KEEP = 30
 # once here rather than re-derived by every reader. `limited`/`blocked` are in
 # none of them on purpose: neither is a fact about the card (the attempt is given
 # back), so neither belongs under Failed. They surface as the run's stop reason.
+#
+# `bounced` is a chore batch's addition and is in none of them for the same reason,
+# spelled out because it is the one an unwary reader would "fix" into Failed: a
+# bounce is the worker opening the code and reporting that the item was not a
+# one-prompter after all. That is the routing signal the batch exists to produce
+# (`chores` module docstring), not a fact about the card being wrong — the card
+# goes back to `tasks/` intact, to be dispatched normally. Counting it as a failure
+# would report a working detector as a nightly breakage.
 DECISION_OUTCOMES = frozenset({"parked", "needs_decision"})
 LANDED_OUTCOMES = frozenset({"review", "reviewed"})
 FAILED_OUTCOMES = frozenset({"failed"})
@@ -116,6 +124,24 @@ class Record:
             "cost_usd": round(cost_usd, 2), "landed": landed,
             "evidence": evidence, "at": _now(),
         })
+        self.save()
+
+    def set_dispatched(self, entries: list[dict]) -> None:
+        """Replace the whole dispatch list, for a producer whose outcomes *change*.
+
+        `dispatched()` appends, which is right for the runner: a card settles once
+        and what it settled to is final the moment it is known. A chore batch is not
+        like that. An item is green at the end of phase 1, and phase 2 can still take
+        it back out — `chores._drop` re-parks an item whose branch would not merge or
+        whose commit reddened the batch suite. Appending a second entry for the same
+        card would leave the record saying a chore both landed and was dropped, with
+        nothing to say which is current; `chores` therefore holds its `Batch` as the
+        truth and re-states the whole list here whenever it changes.
+
+        Still flushed on every call, so the property that matters is unchanged: a
+        batch killed mid-phase leaves a record of everything settled up to that point.
+        """
+        self.data["dispatched"] = list(entries)
         self.save()
 
     def skipped(self, entries: list[tuple[str, str]]) -> None:
