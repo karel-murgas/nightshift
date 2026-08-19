@@ -146,11 +146,14 @@ def _card(root: Path, lane: str, card_id: str, *, unattended: str = "true",
 def _reset_account():
     """`_ACCOUNT` is process-wide, in-memory state (by design — see the module
     docstring). A test that selected one must not leak it into the next, and the
-    same goes for the cached meter reading."""
+    same goes for the cached meter reading and for the tier choice, which is the
+    same shape of state for the same reason."""
     panel._ACCOUNT = panel.AccountState()
+    panel._TIER = panel.TierChoice()
     panel._METERS = None
     yield
     panel._ACCOUNT = panel.AccountState()
+    panel._TIER = panel.TierChoice()
     panel._METERS = None
 
 
@@ -2650,3 +2653,417 @@ def test_already_serving_says_no_when_nothing_is_there():
     port = free.getsockname()[1]
     free.close()
     assert panel.already_serving(port) is False
+
+
+# --------------------------------------------------------------------- the tier
+#
+# One dropdown and one tick in the status rail, governing every interactive session
+# the panel opens and nothing the runner dispatches. Karel, 2026-08-19: *"With
+# unattended: false, I should be able to pick a model ... We need to utilize sonnet
+# everywhere where it is enough."*
+
+
+def test_the_tier_menu_is_read_from_the_binding_never_written_here(tmp_path):
+    """§16's rule: the `tier: → model` binding lives in exactly one document. A menu
+    built from a dict in `panel.py` would be a second one, going stale the day the
+    block is edited — so the aliases move when the document moves."""
+    root = _repo(tmp_path)
+    assert panel.tier_menu(root) == [("worker", "sonnet"), ("lead", "opus")]
+
+    doc = root / ".claude" / "memory" / "ai_team" / "00_architecture.md"
+    doc.write_text("```tier-binding\nworker = haiku\nlead = opus\n```\n", encoding="utf-8")
+    assert panel.tier_menu(root) == [("worker", "haiku"), ("lead", "opus")]
+
+
+def test_an_unreadable_binding_yields_an_empty_menu_rather_than_raising(tmp_path):
+    """The rail renders in a repo with no install — that is the whole reason
+    `bootstrap` writes the launcher before the install runs."""
+    root = _repo(tmp_path)
+    (root / ".claude" / "memory" / "ai_team" / "00_architecture.md").unlink()
+    assert panel.tier_menu(root) == []
+
+
+def test_selecting_an_undeclared_tier_is_refused(tmp_path):
+    root = _repo(tmp_path)
+    with pytest.raises(panel.PanelError) as exc:
+        panel.select_tier(root, "genius", False)
+    assert "genius" in str(exc.value)
+    assert panel._TIER.tier == "", "a refused selection must not have been applied"
+
+
+def test_without_the_override_a_card_keeps_the_tier_it_declares(tmp_path):
+    """Karel: *"I want the cards with predefined tier to keep that."*"""
+    root = _repo(tmp_path)
+    panel.select_tier(root, "lead", False)
+    assert panel.effective_tier("worker") == "worker"
+
+
+def test_without_the_override_a_card_declaring_nothing_takes_the_choice(tmp_path):
+    """There is nothing to outrank, and the alternative is the CLI's default model
+    chosen by nobody — the state the control exists to end."""
+    root = _repo(tmp_path)
+    panel.select_tier(root, "worker", False)
+    assert panel.effective_tier("") == "worker"
+
+
+def test_with_the_override_the_choice_beats_the_card(tmp_path):
+    """Karel: *"with it on, it overrides card"*."""
+    root = _repo(tmp_path)
+    panel.select_tier(root, "worker", True)
+    assert panel.effective_tier("lead") == "worker"
+
+
+def test_no_choice_at_all_leaves_everything_exactly_as_it_was(tmp_path):
+    """The default state of the control is "changes nothing", so the feature landing
+    cannot alter what a button did yesterday."""
+    _repo(tmp_path)
+    assert panel.effective_tier("worker") == "worker"
+    assert panel.effective_tier("") == ""
+
+
+def test_every_card_row_names_the_tier_its_session_would_open_at(server):
+    """Karel: *"chosen tier should be visible on each card (lead, worker, none)"*."""
+    base, root = server
+    _card(root, "tasks", "a-card")                 # the CARD template is `tier: worker`
+    _, text = _get(base, "now")
+    assert "tier worker" in text
+
+
+def test_a_row_says_none_when_no_tier_is_in_force_anywhere(server):
+    base, root = server
+    path = _card(root, "tasks", "a-card")
+    path.write_text(path.read_text(encoding="utf-8").replace("tier: worker", "tier: "),
+                    encoding="utf-8", newline="")
+    _, text = _get(base, "now")
+    assert "tier none" in text
+
+
+def test_a_row_shows_the_overriding_tier_not_the_frontmatters(server):
+    """The chip and the `Work on this` beside it are the two halves of the same
+    answer. A row that kept saying `worker` while the button spent `opus` would be
+    the one failure this control could introduce that is worse than not having it."""
+    base, root = server
+    _card(root, "tasks", "a-card")
+    panel.select_tier(root, "lead", True)
+    _, text = _get(base, "now")
+    assert "tier lead" in text
+    assert "tier worker" not in text
+
+
+def test_the_tier_control_is_in_the_status_rail_so_it_is_on_every_page(server):
+    """Same argument as the account chip: the tier in force must be visible at the
+    moment of the click, and the clicks are on more than one page."""
+    base, _ = server
+    for page in panel.PAGES:
+        _, text = _get(base, page)
+        assert 'id="tierpick"' in text, page
+        assert 'id="tieroverride"' in text, page
+        assert "worker &middot; sonnet" in text, page
+
+
+def test_the_rail_selects_blur_themselves_so_it_does_not_freeze(server):
+    """A `<select>` keeps focus after its own `onchange`, and the live refresh skips
+    a region it is focused inside. Every select in the rail therefore lets go."""
+    base, _ = server
+    _, text = _get(base, "now")
+    rail = text[text.index('<div class="statusrail"'):text.index("<script")]
+    found = re.findall(r"<select[^>]*>", rail)
+    assert len(found) == 2, f"expected the account and the tier select, got {found}"
+    for control in found:
+        assert "this.blur()" in control, control
+
+
+def test_a_work_session_opens_at_the_overriding_tier(server, monkeypatch):
+    base, root = server
+    _card(root, "tasks", "stun-grenade")           # `tier: worker`
+    panel.select_tier(root, "lead", True)
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    _, data = _post(base, "api/work", {"card": "stun-grenade"})
+
+    argv = opened[0]
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert "lead" in data["message"] and "worker" in data["message"], (
+        "the reply must say both, or a card silently ran at a tier it did not declare")
+
+
+def test_a_work_session_without_the_override_still_honours_the_card(server, monkeypatch):
+    base, root = server
+    _card(root, "tasks", "stun-grenade")           # `tier: worker`
+    panel.select_tier(root, "lead", False)
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    _post(base, "api/work", {"card": "stun-grenade"})
+
+    argv = opened[0]
+    assert argv[argv.index("--model") + 1] == "sonnet"
+
+
+def test_the_general_session_takes_the_chosen_tier(server, monkeypatch):
+    """It has no card to inherit from, and it is the button most likely to be
+    pressed for something small."""
+    base, root = server
+    panel.select_tier(root, "worker", False)
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    _post(base, "api/session", {})
+
+    argv = opened[0]
+    assert argv[argv.index("--model") + 1] == "sonnet"
+
+
+def test_the_tier_choice_never_reaches_a_dispatch(server, monkeypatch):
+    """A run honours the tier its card declares — `hooks/tier_guard.py` enforces it.
+    This control governs the sessions a person sits in front of, and nothing else."""
+    base, root = server
+    _card(root, "tasks", "a-card")
+    panel.select_tier(root, "lead", True)
+    captured = {}
+
+    def fake_spawn(module, args, root_arg):
+        captured["args"] = args
+        return 7
+
+    monkeypatch.setattr(panel, "spawn_background", fake_spawn)
+    # Same reason as `test_dispatch_spawns_the_runner_for_an_ordinary_account`:
+    # without it this reads whatever `~/.claude.json` says on the machine running
+    # the suite, and the veto is not what is under test here.
+    monkeypatch.setattr(panel.usage, "read_identity",
+                        lambda path: panel.usage.Identity(fetched=True,
+                                                          has_extra_usage_enabled=False))
+    status, data = _post(base, "api/dispatch", {"card_id": "a-card"})
+
+    assert status == 200, data
+    assert captured["args"] == ["--card", "a-card"]
+
+
+# ------------------------------------------------- the general session's home
+#
+# Karel, 2026-08-19: *"I don't see general purpose 'start conversation' button. To
+# work on something directly without a card. It should be part of the 'always on'
+# panel."* It existed, in the `Do now` bar on `/now` — one page, below the fold,
+# inside a section about something else.
+
+
+def test_the_general_session_button_is_on_every_page(server):
+    base, _ = server
+    for page in panel.PAGES:
+        _, text = _get(base, page)
+        assert "New session here" in text, page
+
+
+def test_the_general_session_button_is_offered_exactly_once_per_page(server):
+    """Two copies would be two buttons whose tooltips can drift apart."""
+    base, root = server
+    _card(root, "tasks", "a-card", unattended="false")   # populates `Do now`
+    _, text = _get(base, "now")
+    assert text.count("New session here") == 1
+
+
+# ------------------------------------------------------------------- Talk
+#
+# Karel, 2026-08-19: *"'talk' button not just opens conversation, but make it
+# continue. It should allow me to ask a question first."*
+
+
+def _talk_argv(server, monkeypatch) -> list[str]:
+    base, _ = server
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+    status, data = _post(base, "api/talk", {"session_id": "7e9fde3c-3d5f-44df-829b"})
+    assert status == 200, data
+    return opened[0]
+
+
+def test_talk_resumes_the_session_it_was_given(server, monkeypatch):
+    argv = _talk_argv(server, monkeypatch)
+    assert argv[argv.index("--resume") + 1] == "7e9fde3c-3d5f-44df-829b"
+
+
+def test_talk_tells_the_resumed_session_to_wait_for_the_question(server, monkeypatch):
+    """The transcript restores the worker's charter — the CLI records it as
+    `agent-setting` on the first line of the session's `.jsonl` — so without this
+    the session comes back as an autonomous worker and reads a question as an
+    instruction to carry on."""
+    argv = _talk_argv(server, monkeypatch)
+    appended = argv[argv.index("--append-system-prompt") + 1]
+    assert "wait for their question" in appended
+    assert "Do not resume" in appended
+
+
+def test_talk_does_not_re_assert_the_charter_over_that_instruction(server, monkeypatch):
+    argv = _talk_argv(server, monkeypatch)
+    assert "--agent" not in argv
+
+
+def test_talk_carries_the_same_posture_as_every_other_launcher(server, monkeypatch):
+    """It used to build its own argv, which made it the one button on the page with
+    no permission mode, no name and no remote control."""
+    argv = _talk_argv(server, monkeypatch)
+    assert "--permission-mode" in argv
+    assert "--name" in argv
+
+
+def test_talk_opens_with_nothing_said_so_the_first_word_is_yours(server, monkeypatch):
+    """`--` fences a *prompt*, and a prompt is a first user turn. There must not be
+    one: the whole point is that the first question is Karel's."""
+    argv = _talk_argv(server, monkeypatch)
+    assert "--" not in argv
+
+
+def test_talk_refuses_without_a_session(server):
+    base, _ = server
+    status, data = _post(base, "api/talk", {})
+    assert status == 400
+    assert "session_id" in data["message"]
+
+
+# ------------------------------------------------ a parked card's question count
+#
+# Karel, 2026-08-19: *"I do now see in one card '4 decisions' but these are 4
+# answers to 1 decision. It is confusing."*
+
+
+_ONE_QUESTION_FOUR_OPTIONS = """
+## Question
+
+- **A — do it this way** — because of one thing.
+- **B — do it that way** — because of another.
+- **C — do neither** — and here is why.
+- **D — wait** — until something else lands.
+"""
+
+
+def _park(root, card_id: str):
+    path = _card(root, "needs-decision", card_id)
+    path.write_text(path.read_text(encoding="utf-8") + _ONE_QUESTION_FOUR_OPTIONS,
+                    encoding="utf-8", newline="")
+    return path
+
+
+def test_a_card_asking_one_thing_four_ways_reports_one_question(server):
+    base, root = server
+    _park(root, "which-way")
+    _, text = _get(base, "now")
+    assert "1 question" in text
+    assert "4 decision" not in text
+
+
+def test_the_option_count_still_rides_along(server):
+    """The two numbers answer different worries — "how much of my evening is this"
+    and "do I have to compose the answer myself" — and only the first is the count."""
+    base, root = server
+    _park(root, "which-way")
+    _, text = _get(base, "now")
+    assert "4 option(s) offered" in text
+
+
+def test_the_phrase_pluralises_on_the_question_not_the_options():
+    assert panel._asks(1, 4) == "1 question · 4 option(s) offered"
+    assert panel._asks(3, 9) == "3 questions · 9 option(s) offered"
+    assert panel._asks(1, 0) == "1 question"
+
+
+# ------------------------------------------------------------ the live refresh
+#
+# Two client-side properties, checked in the served asset because that is where
+# they live. Karel, 2026-08-19: *"When I change an account, the information doesn't
+# refresh until I reload the page"* and *"it should even show some small countdown"*.
+
+
+def _app() -> str:
+    return panel.TEMPLATE.read_text(encoding="utf-8")
+
+
+def test_a_focused_select_no_longer_freezes_the_region_it_sits_in():
+    """`regionBusy` counted any focus as work in flight. The account `<select>`
+    keeps focus after its own `onchange`, so `#statusrail` — the region holding it —
+    was skipped on every tick from the moment the account changed."""
+    js = _app()
+    assert "holdsUnsavedInput" in js
+    assert 'if (node.tagName !== "INPUT") { return false; }' in js
+    assert "focused !== document.body && region.contains(focused)" not in js
+
+
+def test_the_countdown_and_the_refresh_are_one_clock():
+    """A fixed `setInterval` beside a separately-tracked deadline is the shape that
+    lets the badge count down to a tick an action has already brought forward."""
+    js = _app()
+    assert "scheduleRefresh(REFRESH_MS);" in js
+    assert "nextRefreshAt = Date.now() + delay;" in js
+    assert "}, REFRESH_MS);" not in js, (
+        "the poll must be the chained timeout, not a second clock beside the badge")
+
+
+def test_the_countdown_lives_outside_every_swapped_region():
+    """A countdown inside the rail, a section or the footer would differ from the
+    server's copy every second — forcing a swap on every tick and undoing the
+    "identical -> do nothing" rule the whole refresh is built on."""
+    js = _app()
+    shell = js[js.index('<div class="shell">'):js.index('<div id="toast">')]
+    assert 'id="ticker"' not in shell
+
+
+# ------------------------------------------------------------ drag and drop
+#
+# Karel, 2026-08-19: *"I see the green line at the right position ... but the card
+# lands one position below that."*
+
+
+def test_there_is_no_second_claim_about_where_the_card_will_land():
+    """`.drag-over` drew a bar across the target's **top** edge unconditionally,
+    while the insertion below it is conditional — past the halfway mark the row goes
+    *after* the target. So every drop in a row's bottom half was drawn one position
+    above where the card went. The line is gone rather than corrected: `insertBefore`
+    already moves the real row, and `persistOrder` reads that same DOM order, so the
+    moved row cannot disagree with the outcome — it is the outcome."""
+    js = _app()
+    # The operative forms, not the word: the comment above the handler explains
+    # what `.drag-over` used to be, and must go on being allowed to.
+    assert 'classList.add("drag-over")' not in js
+    assert ".row.drag-over {" not in js
+    assert 'querySelectorAll(".drag-over")' not in js
+
+
+def test_the_dragged_row_is_outlined_where_it_currently_sits():
+    js = _app()
+    assert ".row.dragging {" in js
+    assert "inset 0 2px 0 0 var(--phosphor), inset 0 -2px 0 0 var(--phosphor)" in js
+
+
+def test_the_tier_verb_round_trips_over_the_wire(server):
+    """The controls post this, so this is what has to work — the unit tests above
+    call `select_tier` directly and would not notice a broken route."""
+    base, root = server
+    status, data = _post(base, "api/tier", {"tier": "worker", "override": True})
+    assert status == 200, data
+    assert panel._TIER == panel.TierChoice(tier="worker", override=True)
+    assert "worker" in data["message"] and "overriding" in data["message"]
+
+    status, data = _post(base, "api/tier", {"tier": "", "override": False})
+    assert status == 200, data
+    assert panel._TIER == panel.TierChoice()
+    assert "no choice" in data["message"]
+
+
+def test_the_tier_verb_refuses_an_undeclared_tier_over_the_wire(server):
+    base, _ = server
+    status, data = _post(base, "api/tier", {"tier": "genius", "override": False})
+    assert status == 400
+    assert "genius" in data["message"]
+
+
+def test_the_tier_tick_is_not_carried_across_a_swap(server):
+    """`carryState` copies every tick across a region swap, which is right for one
+    the board has never heard of and wrong for one that posted itself the moment it
+    changed — a second tab's swap would quietly revert a choice made in the first."""
+    base, _ = server
+    _post(base, "api/tier", {"tier": "worker", "override": True})
+    _, text = _get(base, "now")
+    tick = re.search(r'<input type="checkbox" id="tieroverride"[^>]*>', text).group(0)
+    assert 'data-server="1"' in tick, tick
+    assert "checked" in tick, "the server must render the choice it is holding"
+    assert 'input[type=checkbox]:not([data-server])' in _app()

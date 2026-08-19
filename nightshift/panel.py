@@ -233,6 +233,97 @@ def _guard_dispatch_account(waived: bool = False) -> None:
 
 
 # --------------------------------------------------------------------------
+# The tier in force — process-wide, in-memory, never persisted. Same shape as
+# the account above, and for the same reason: it is a property of this sitting
+# at the panel, not a setting the repo should wake up carrying.
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class TierChoice:
+    """What tier an interactive session this panel opens should run at.
+
+    **A tier, never a model.** §16's rule is that the `tier: → model` binding lives
+    in exactly one document and that no caller names a model. A dropdown offering
+    `opus` and `sonnet` would be a second binding, written in a Python file, going
+    stale the day the block is edited — so the control offers the tiers §16
+    declares and *shows* what each currently resolves to. The label moves when §16
+    moves; nothing here knows a model name.
+
+    Two fields rather than one, because Karel asked one control for two behaviours
+    (2026-08-19): *"I want the cards with predefined tier to keep that. Other than
+    that one dropdown in status [rail] is nice. Dropdown should have an override
+    checkbox — with it on, it overrides card. With it off, card's tier is picked if
+    present."* So `tier` is the choice and `override` is whether the choice outranks
+    a card that already declares one.
+
+    A card with **no** `tier:` takes the choice either way. There is nothing for it
+    to outrank, and the alternative is the CLI's default model picked by nobody —
+    which is the state this control exists to end (Karel: *"we need to utilize
+    sonnet everywhere where it is enough"*).
+
+    **Nothing here reaches the runner.** A dispatched card runs at the tier its
+    frontmatter declares, checked by `hooks/tier_guard.py`; this governs only the
+    sessions the panel opens for a person at the keyboard, which is exactly the
+    population `unattended: false` describes.
+    """
+
+    tier: str = ""
+    override: bool = False
+
+
+_TIER = TierChoice()
+
+
+def tier_menu(root: Path) -> list[tuple[str, str]]:
+    """`[(tier, model alias)]` as §16's block declares them, in `KNOWN_TIERS` order.
+
+    Read per render rather than cached: the binding lives in a document a session
+    may edit between two page loads, and a dropdown offering a model the table no
+    longer names is precisely the drift `tiers` exists to refuse. An unreadable
+    binding yields an empty menu rather than an exception — the rail must still
+    render in a repo whose `binding_doc` is missing, which is every repo that has
+    not been installed yet.
+    """
+    try:
+        binding = tiers.binding(root)
+    except tiers.TierError:
+        return []
+    return [(name, binding[name]) for name in tiers.KNOWN_TIERS if name in binding]
+
+
+def select_tier(root: Path, tier: str, override: bool) -> TierChoice:
+    """Set the tier every subsequent interactive session opens at.
+
+    `tier=""` means "no choice" — a card's own tier still applies, and a session
+    with no card gets the CLI's default. Validated against the binding for the same
+    reason `select_account` validates its label: a typo that silently selected
+    nothing would be indistinguishable from the control not working.
+    """
+    global _TIER
+    known = {name for name, _ in tier_menu(root)}
+    if tier and tier not in known:
+        listed = ", ".join(sorted(known)) or "(the tier binding could not be read)"
+        raise PanelError(f"no tier named {tier!r} — declared: {listed}")
+    _TIER = TierChoice(tier=tier, override=bool(override))
+    return _TIER
+
+
+def effective_tier(card_tier: str = "") -> str:
+    """The tier a session opened *right now* would run at, for a card declaring
+    `card_tier` (empty for a session that has no card).
+
+    The single place `TierChoice`'s two-field rule is applied. Every caller that
+    launches goes through it and so does the chip on every row, so the row and the
+    button beside it cannot disagree — a panel that says `worker` and spends `opus`
+    is worse than one that offered no choice at all.
+    """
+    if _TIER.override:
+        return _TIER.tier
+    return card_tier or _TIER.tier
+
+
+# --------------------------------------------------------------------------
 # The one command-running helper. Every write/dispatch verb goes through one
 # of these — never a re-implementation of board or runner logic.
 # --------------------------------------------------------------------------
@@ -424,7 +515,7 @@ def open_terminal(root: Path, *command: str) -> None:
 
 
 def session_argv(root: Path, *, name: str = "", prompt: str = "", tier: str = "",
-                 agent: str = "") -> list[str]:
+                 agent: str = "", resume: str = "", system_append: str = "") -> list[str]:
     """The `claude` invocation for an interactive session this panel launches.
 
     **The button used to open a bare `claude` and stop there**, which is a launcher
@@ -467,6 +558,25 @@ def session_argv(root: Path, *, name: str = "", prompt: str = "", tier: str = ""
     a dead window. Team and Enterprise plans have the feature off until an Owner
     enables it, which no amount of argv gets around.
 
+    **`resume` is how `Talk` comes back through here, and it had to.** That button
+    used to build its own `claude --resume <id>` by hand, which meant it was the one
+    launcher on the page with no account posture, no permission mode, no name and no
+    remote control — the exact list of omissions the paragraph above was written
+    about, surviving in the one place that did not call this function. Resuming is a
+    *property of a session*, not a different kind of thing to launch, so it is a
+    keyword here rather than a second builder.
+
+    `system_append` rides with it and is why `Talk` now opens waiting for you. A
+    resumed transcript restores the worker's charter — the CLI records it as
+    `agent-setting` in the very first line of the `.jsonl` — so the session that
+    comes back is still an autonomous worker whose brief is to land the card, and
+    anything typed at it is read as an instruction about that work rather than a
+    question about it. Karel, 2026-08-19: *"'talk' button not just opens
+    conversation, but make it continue. It should allow me to ask a question
+    first."* `--append-system-prompt` is what changes the posture without changing
+    the transcript; `--agent` is deliberately *not* passed on a resume, so the
+    charter is not re-asserted on top of the instruction that supersedes it.
+
     Flag order is load-bearing in one place: `--remote-control` takes an *optional*
     positional name, so the token after it must start with `-` or it eats it.
     `--name` follows it for that reason. The long form rather than `-n`, because
@@ -496,6 +606,10 @@ def session_argv(root: Path, *, name: str = "", prompt: str = "", tier: str = ""
         argv.append("--remote-control")
     if name:
         argv += ["--name", name]
+    if resume:
+        argv += ["--resume", resume]
+    if system_append:
+        argv += ["--append-system-prompt", system_append]
     if tier:
         try:
             argv += ["--model", tiers.resolve(root, tier)]
@@ -991,13 +1105,46 @@ def _tag_chips(card: board.Card) -> list[str]:
     return [_chip(tag, "warn" if tag == "nightshift" else "mute") for tag in card.tags]
 
 
+def _tier_chip(card: board.Card) -> str:
+    """What tier a session opened on this card *right now* would run at.
+
+    Karel, 2026-08-19: *"chosen tier should be visible on each card (lead, worker,
+    none)"*. The value is `effective_tier`'s and not the card's, so the row states
+    what the button beside it will do rather than what the frontmatter says. Those
+    are the same sentence until the rail's override is ticked — and the moment they
+    diverge is the only moment this chip earns its space.
+
+    Amber when the rail is beating a tier the card declared, because that is the
+    one reading a glance can get wrong: the card still says `tier: worker` in its
+    frontmatter and on `/card/`, and nothing else on the page would say the session
+    is not going to honour it.
+    """
+    tier = effective_tier(card.tier)
+    beaten = bool(card.tier) and tier != card.tier
+    if beaten:
+        title = f"the rail's choice, overriding this card's own `tier: {card.tier}`"
+    elif card.tier:
+        title = f"the card's own `tier: {card.tier}`"
+    elif tier:
+        title = "the rail's choice — this card declares no tier of its own"
+    else:
+        title = ("no tier anywhere: the session opens on whatever model the CLI "
+                 "defaults to. Pick one in the rail.")
+    return (f'<span class="chip {"warn" if beaten else "mute"}" '
+            f'title="{_e(title)}">tier {_e(tier or "none")}</span>')
+
+
 def _card_body(card: board.Card, *, meta: list[str] | None = None, why: str = "") -> str:
     out = [f'<span class="id">{_e(card.id)}</span>']
     if card.title and card.title != card.id:
         out.append(f'<span class="title">{_e(card.title)}</span>')
     if why:
         out.append(f'<p class="why">{_e(why)}</p>')
-    out.append(_meta(_tag_chips(card) + (meta or [])))
+    # The tier chip sits on *every* card row rather than only the ones with a
+    # `Work on this` beside them. A card in `review/` or `needs-decision/` is one
+    # click from a session too — `/decide/` carries the button — and a fact that
+    # appears on some rows and not others reads as a property of the card.
+    out.append(_meta(_tag_chips(card) + [_tier_chip(card)] + (meta or [])))
     return "".join(out)
 
 
@@ -1316,6 +1463,15 @@ def _account_html(ctx: Context) -> str:
     # load, so the answer is never stale.
     selector = ""
     if rail.accounts:
+        # `this.blur()` rides in front of the post, and it is the whole of the
+        # freeze Karel reported on 2026-08-19. A `<select>` keeps focus after its
+        # own `onchange`; the live refresh treated any focus inside a region as
+        # work in flight; `#statusrail` is the region this control sits in. So the
+        # account changed on the server and the one panel that names it was the one
+        # panel that would not redraw — "the information doesn't refresh until I
+        # reload the page (or go to other)". `regionBusy` no longer counts a select
+        # as busy either; both halves are kept, because either alone leaves a route
+        # back to a rail that never updates.
         options = ['<option value="">(ambient)</option>']
         for account in rail.accounts:
             selected = " selected" if account.label == rail.account_label else ""
@@ -1323,7 +1479,7 @@ def _account_html(ctx: Context) -> str:
                            f'{_e(account.label)}</option>')
         selector = ('<br><select title="Accounts declared in [[accounts]], each a '
                     'separate CLAUDE_CONFIG_DIR" '
-                    'onchange="post(\'/api/account\',{label:this.value})">'
+                    'onchange="this.blur();post(\'/api/account\',{label:this.value})">'
                     + "".join(options) + "</select>")
     # The override lives here, next to the account it waives and on every page —
     # §3.4 is explicit that the account in force must be visible *at the moment of
@@ -1340,11 +1496,73 @@ def _account_html(ctx: Context) -> str:
     switch = _act("Switch account", onclick="post('/api/switch-account',{})",
                   extra='title="Opens a terminal running `claude auth login`. The '
                         'sign-in is a browser flow, so the panel launches it and does '
-                        'not carry it out; reload this page afterwards and the rail '
-                        'will name whoever is logged in then."')
+                        'not carry it out; the rail will name whoever is logged in '
+                        'within a refresh tick."')
+    # The one session on the page that carries nothing. It lived in the `Do now`
+    # bar on `/now` until 2026-08-19, which put the panel's only general-purpose
+    # session on one page, below the fold, inside a section about something else —
+    # Karel: *"I don't see general purpose 'start conversation' button ... It
+    # should be part of the 'always on' panel."* It belongs beside the account and
+    # the tier for the plain reason that those are the two things it spends, and
+    # this block is the one that is on every page.
+    general = _act("New session here", onclick="post('/api/session',{})",
+                   extra='title="Opens an interactive session in this repo with no '
+                         'card and no charter — on the account and at the tier named '
+                         'just above, like every other session this panel starts."')
     return (f'<p class="account">account <b>{_e(label)}</b>{never}<br>{_e(email)}'
-            f'{selector}</p><div class="acts" style="justify-content:flex-start">'
-            f'{switch}{override}</div>')
+            f'{selector}</p>{_tier_html(ctx)}'
+            f'<div class="acts" style="justify-content:flex-start">'
+            f'{switch}{general}{override}</div>')
+
+
+def _tier_html(ctx: Context) -> str:
+    """The tier control: one dropdown, one tick, beside the account it spends on.
+
+    Here rather than on a row because a tier is a property of *this sitting at the
+    panel* — the same argument `_account_html` makes for the account and the paid
+    override, and the same "one control, one state" rule: a second copy on a card
+    row would be a second selection that can disagree with this one.
+
+    The options name the tier **and** what §16 currently binds it to, because the
+    choice being made is about spend and `worker` alone does not say `sonnet`. The
+    aliases are read from the binding on every render and never written down here.
+
+    Both controls post the same verb carrying both values, so the pair is always
+    written together — a tick that arrived without its tier would be a state the
+    server can hold and no page ever showed.
+    """
+    menu = tier_menu(ctx.root)
+    if not menu:
+        # No readable binding — an uninstalled repo, or a `binding_doc` that has
+        # moved. Say so, rather than render an empty dropdown that looks broken.
+        return ('<p class="account dim">no tier binding &mdash; sessions open on '
+                "the CLI's default model</p>")
+    options = ["<option value=\"\">(no choice &mdash; the CLI's default)</option>"]
+    for name, model in menu:
+        chosen = " selected" if name == _TIER.tier else ""
+        options.append(f'<option value="{_e(name)}"{chosen}>'
+                       f'{_e(name)} &middot; {_e(model)}</option>')
+    ticked = " checked" if _TIER.override else ""
+    send = ("post('/api/tier',{tier:document.getElementById('tierpick').value,"
+            "override:document.getElementById('tieroverride').checked})")
+    # `this.blur()` first, and it is not cosmetic. The live refresh treats a region
+    # it is focused inside as busy and skips it, so a select that keeps focus after
+    # its own onchange freezes the whole status rail — the account dropdown's bug,
+    # reported the same day, and this control would have inherited it verbatim.
+    select_title = ("The tier every interactive session this panel opens runs at. "
+                    "Dispatched cards are unaffected: a run honours the tier its "
+                    "own card declares.")
+    tick_title = ("Off: a card's own `tier:` wins, and this choice fills in only "
+                  "for cards that declare none. On: this choice wins everywhere, "
+                  "and every row's tier chip turns amber to say so.")
+    return (
+        '<p class="account">tier '
+        f'<select id="tierpick" onchange="this.blur();{send}" '
+        f'title="{_e(select_title)}">' + "".join(options) + '</select></p>'
+        f'<label class="override soft" title="{_e(tick_title)}">'
+        f'<input type="checkbox" id="tieroverride" data-server="1"{ticked} '
+        f'onchange="this.blur();{send}"> Override the card</label>'
+    )
 
 
 def _statusrail_html(ctx: Context) -> str:
@@ -1394,13 +1612,32 @@ def _chores_section(ctx: Context) -> str:
                     sec_id="chores")
 
 
+def _asks(questions: int, options: int) -> str:
+    """The parked-card chip: how many things it asks, and how much is pre-written.
+
+    Two numbers in one phrase because they answer different worries — "how much of
+    my evening is this" and "do I have to compose the answer myself" — and because
+    the previous single number silently answered the second while being read as the
+    first.
+    """
+    head = "1 question" if questions == 1 else f"{questions} questions"
+    return f"{head} · {options} option(s) offered" if options else head
+
+
 def _render_now(ctx: Context) -> str:
     out = []
 
+    # **Questions, not options.** This counted `sum(len(s.options) ...)` and called
+    # the result "decision(s)", so a card asking one thing four ways announced
+    # itself as "4 decisions" — Karel, 2026-08-19: *"these are 4 answers to 1
+    # decision. It is confusing."* A parked card's cost is how many things it asks
+    # you, and the options are what makes each one cheap to answer, so the two
+    # numbers pull in opposite directions and only the first belongs in the chip.
+    # The option count rides along as the reassuring half of the same sentence.
     rows = "".join(
         _row(marker="?", body=_card_body(
                 card, meta=[_e(f"in needs-decision/ · {card.fields.get('created', '')}")]
-                     + ([_chip(f"{n} decision(s)", "warn")] if n else [])),
+                     + ([_chip(_asks(questions, options), "warn")] if questions else [])),
              acts=_act("Read card", href=f"/card/{card.id}")
                   # The one row on the page whose action is *answering* rather than
                   # dispatching. Until this existed the section could only point at the
@@ -1408,8 +1645,9 @@ def _render_now(ctx: Context) -> str:
                   # an editor, the `## Thread` convention and the attributor token from
                   # memory. Cards sat parked for weeks with the answer already known.
                   + _act("Answer", href=f"/decide/{card.id}", primary=True))
-        for card, n in ((c, sum(len(s.options) for s in decide.parse(c.text)))
-                        for c in ctx.decisions)
+        for card, questions, options in (
+            (c, len(subs), sum(len(s.options) for s in subs))
+            for c, subs in ((c, decide.parse(c.text)) for c in ctx.decisions))
     )
     out.append(_section("Decide", len(ctx.decisions), rows,
                         note="Nothing else moves until this does.",
@@ -1437,22 +1675,12 @@ def _render_now(ctx: Context) -> str:
     # one place on the whole panel.
     body = ((_group("Cards the night cannot take") + "".join(inline_rows))
             if inline_rows else "")
-    # The one session on the page that carries nothing, and it belongs here rather
-    # than on a row: every row's button is *about* that row, so a general session has
-    # no row to sit on — but this is the section for keyboard work, so it is where
-    # you would look for it. Kept because the alternative is opening an editor for
-    # everything the board does not know about yet (Karel, 2026-08-17: *"so I don't
-    # have to use VSC for general stuff like I'm doing just now"*).
-    general = ('<div class="barbox"><p>For work the board does not know about yet.</p>'
-               '<div class="acts">'
-               + _act("New session here", onclick="post('/api/session',{})",
-                      extra='title="Opens an interactive session in this repo with no '
-                            'card, no prompt and no charter — on the selected account, '
-                            'like every other session this panel starts."')
-               + '</div></div>')
+    # `New session here` used to be this section's bar. It is in the status rail
+    # now (`_account_html`), which is on every page rather than below the fold on
+    # one — see that function. Nothing replaced it here: a bar exists to act on the
+    # rows above it, and this section's rows each carry their own button.
     out.append(_section("Do now", len(do_now), body,
                         note="Work that needs you at the keyboard.",
-                        bar=general,
                         empty="Nothing needs you at the keyboard.",
                         sec_id="donow"))
 
@@ -1828,7 +2056,13 @@ def _work_act(*, card: str = "", note: str = "", tier: str = "", worker: str = "
     """
     if card:
         target = f"{{card:'{_attr(card)}'}}"
-        detail = " · ".join(x for x in (f"{tier} tier" if tier else "",
+        # The tier the click will actually use, which is the rail's when it is
+        # overriding — `tier` here is the card's own. A tooltip promising the
+        # frontmatter's tier beside a chip showing the rail's would be the two
+        # halves of `effective_tier` disagreeing in the one place a click is
+        # about to spend money on the answer.
+        opens_at = effective_tier(tier)
+        detail = " · ".join(x for x in (f"{opens_at} tier" if opens_at else "",
                                         worker if worker and worker != "none" else "") if x)
         title = (f"Opens an interactive session on this card"
                  + (f" ({detail})" if detail else "")
@@ -3209,6 +3443,21 @@ class Handler(BaseHTTPRequestHandler):
             state = select_account(root, str(body.get("label", "")))
             return f"account: {state.label or '(ambient)'}"
 
+        if path == "api/tier":
+            # Server-side, like the account and unlike the paid override. It has to
+            # be: every card row renders a chip saying what tier a session on it
+            # would open at, and a choice held only in the browser could not be read
+            # by the renderer that draws them. Still per-process and never written
+            # to disk — a tier the repo woke up carrying would be a decision nobody
+            # made this morning.
+            choice = select_tier(root, str(body.get("tier", "")),
+                                 bool(body.get("override")))
+            if not choice.tier:
+                return "tier: no choice — cards keep their own, the rest take the default"
+            return (f"tier: {choice.tier}"
+                    + (", overriding every card" if choice.override
+                       else ", for cards that declare none"))
+
         if path == "api/switch-account":
             # A browser sign-in against the one config directory. The panel is a
             # launcher: it opens the terminal and stops there. The cached meters go
@@ -3268,18 +3517,41 @@ class Handler(BaseHTTPRequestHandler):
             # asked to keep (2026-08-17: *"there can be a one button for that (so I
             # don't have to use VSC for general stuff)"*) — a session in this repo,
             # on the selected account, for work that has no card and no note yet.
-            open_terminal(root, *session_argv(root, name="general"))
-            return "opened a session in this repo — no card, no prompt"
+            #
+            # Empty of *work*, not of posture: with no card there is nothing to
+            # inherit a tier from, so the rail's choice applies outright. This is
+            # the button most likely to be opened for something small, which is
+            # exactly the population Karel wants on sonnet.
+            tier = effective_tier()
+            open_terminal(root, *session_argv(root, name="general", tier=tier))
+            return (f"opened a session in this repo — no card, no prompt"
+                    f"{f', {tier} tier' if tier else ''}")
 
         if path == "api/work":
             return _work_verb(root, body)
 
         if path == "api/talk":
+            # **Resumed as a conversation, not as a worker.** `claude --resume <id>`
+            # alone brought the attempt's charter back with the transcript — the CLI
+            # stores it as `agent-setting` on the first line of the session's
+            # `.jsonl` — so the thing that answered was still an autonomous worker
+            # whose brief was to land the card, and a question read to it as an
+            # instruction. Karel, 2026-08-19: *"'talk' button not just opens
+            # conversation, but make it continue. It should allow me to ask a
+            # question first."*
+            #
+            # In place rather than forked, his call: `/run` names one session per
+            # attempt, and a fork would give the row a second id that the record
+            # does not carry. The cost, stated because it is real — the questions
+            # and answers land in the attempt's own transcript, so that file stops
+            # being purely what the night did.
             session = str(body.get("session_id", ""))
             if not session:
                 raise PanelError("no session_id given")
-            open_terminal(root, "claude", "--resume", session)
-            return f"opened a terminal resuming {session}"
+            open_terminal(root, *session_argv(
+                root, name=f"talk {session[:8]}", resume=session,
+                tier=effective_tier(), system_append=worker_prompt.RESUMED_FOR_TALK))
+            return f"resuming {session} for a conversation — ask it something"
 
         if path == "api/triage":
             # **With the note named, when one is given.** The button used to open
@@ -3297,6 +3569,7 @@ class Handler(BaseHTTPRequestHandler):
             lane = board.board_rel(root)
             open_terminal(root, *session_argv(
                 root, name=f"triage {note}".strip(), agent="triage",
+                tier=effective_tier(),
                 prompt=(worker_prompt.INTERACTIVE_TRIAGE.format(
                     note_path=f"{lane.as_posix()}/inbox/{note}", lane=lane.as_posix())
                     if note else "")))
@@ -3337,9 +3610,11 @@ def _work_verb(root: Path, body: dict) -> str:
             how_to_test=(worker_prompt.HOW_TO_TEST_STEP if card.verify == "play" else ""),
             tool_economy=worker_prompt.TOOL_ECONOMY, card_body=card.text,
         )
+        tier = effective_tier(card.tier)
         open_terminal(root, *session_argv(root, name=card.id, prompt=prompt,
-                                         tier=card.tier, agent=card.worker))
-        return (f"working {card.id} → {lane}/ — {card.tier or 'default'} tier"
+                                         tier=tier, agent=card.worker))
+        return (f"working {card.id} → {lane}/ — {tier or 'default'} tier"
+                + (f" (card says {card.tier})" if card.tier and tier != card.tier else "")
                 + (f", {card.worker}" if card.worker and card.worker != "none" else ""))
 
     if note:
@@ -3351,8 +3626,12 @@ def _work_verb(root: Path, body: dict) -> str:
             tool_economy=worker_prompt.TOOL_ECONOMY,
             note_body=path.read_text(encoding="utf-8"),
         )
-        open_terminal(root, *session_argv(root, name=note, prompt=prompt, tier="lead"))
-        return f"working {note}"
+        # A note has no frontmatter to declare a tier, so `lead` is this verb's own
+        # default — and the rail, when it has been given a choice, is a person
+        # saying otherwise about the session in front of them.
+        tier = effective_tier("lead")
+        open_terminal(root, *session_argv(root, name=note, prompt=prompt, tier=tier))
+        return f"working {note} — {tier or 'default'} tier"
 
     raise PanelError("no card or note given")
 
