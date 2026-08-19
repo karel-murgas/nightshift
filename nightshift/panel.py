@@ -3137,13 +3137,28 @@ def render_decide(root: Path, card_id: str) -> str:
 
 def render_document(root: Path, *, title: str, subtitle: str, body: str,
                     acts: str = "") -> str:
-    """A card or a diff, framed. `body` is already-safe HTML."""
+    """A card or a diff, framed. `body` is already-safe HTML.
+
+    **Back returns to wherever this page was opened from, not always to `/now`.**
+    Every document-style page (`/card`, `/diff`, `/log`, `/decide`, `/body`,
+    `/update-diff`) is a real full-page navigation — there is no client-side router
+    here, only `/api/refresh` polling a page that is already open — so the browser's
+    own history stack already has "the page this was opened from" sitting one entry
+    back. `history.back()` reads that stack instead of a hardcoded destination, so
+    NOW -> card A -> diff B unwinds B -> A -> NOW instead of jumping straight to NOW
+    from anywhere. The `history.length>1` guard is for a page opened with no prior
+    entry in this tab (a direct load or a bookmark), where `history.back()` would
+    silently do nothing — that case still falls back to `/now`, matching the old
+    behaviour exactly.
+    """
     ctx = read_context(root)
     head = (f'<div class="sec-head"><h2>{_e(title)}</h2>'
             f'<p class="note">{_e(subtitle)}</p></div>')
+    back = _act("Back",
+               onclick="history.length>1?history.back():location.assign('/now')")
     content = (f'<section>{head}<div class="doc">{body}</div>'
                f'<div class="barbox"><p></p><div class="acts">{acts}'
-               f'{_act("Back", href="/now")}</div></div></section>')
+               f'{back}</div></div></section>')
     return render_shell(ctx, title=title, active="", content=content)
 
 

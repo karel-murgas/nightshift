@@ -920,6 +920,27 @@ def test_a_card_page_shows_its_fields_and_its_prose(server):
     assert "Command Center" in text, "a card opens inside the panel, not as a bare dump"
 
 
+def test_back_uses_browser_history_instead_of_a_hardcoded_page(server):
+    """Back used to be a hardcoded `href="/now"` on every document-style page, so
+    opening NOW -> a card -> its diff and pressing Back on the diff jumped straight to
+    NOW instead of back to the card. There is no client-side router here — every one
+    of these is a real full-page navigation — so the fix reads the tab's own history
+    stack instead of hardcoding a destination, and the same markup covers every
+    document page rather than each one needing to know where it was opened from."""
+    base, root = server
+    _card(root, "tasks", "a-card")
+    back_button = ('<button type="button" class="act" '
+                   'onclick="history.length>1?history.back():location.assign(\'/now\')"')
+
+    _, card_text = _get(base, "card/a-card")
+    assert back_button in card_text
+    assert '>Back</a>' not in card_text, "Back must not be a link to a fixed page"
+
+    _, diff_text = _get(base, "diff/a-card")
+    assert back_button in diff_text
+    assert '>Back</a>' not in diff_text, "Back must not be a link to a fixed page"
+
+
 # ------------------------------------------------------------------ the tag shows
 
 
