@@ -491,3 +491,107 @@ def test_deadness_is_checked_not_inferred_from_absence_in_the_template():
     assert not update.dead_hook(live)
     assert update.dead_hook(gone)
     assert not update.dead_hook(unrelated), "a non-nightshift command is not ours to judge"
+
+
+# --- outgoing: what this copy has that the template does not ------------------
+#
+# The direction nothing watched until 2026-08-20. `update` answered "should I take
+# the template's version" and never "did this project write something the framework
+# should have". Four months of rules stayed in one repo because of it.
+
+
+def _para(*lines: str) -> str:
+    return chr(10) + chr(10).join(lines) + chr(10)
+
+
+def test_a_substitution_is_not_drift_in_either_direction():
+    """The case the whole measure exists to dismiss. Personalising a template --
+    a name for a token, a citation re-pointed at a document that exists here --
+    changes lines without either side gaining anything, and a changed-line count
+    reports it as drift forever."""
+    template = _para("Ask {{maintainer}} first.", "See the design notes.")
+    mine = _para("Ask Karel first.", "See `00_architecture.md` s11.")
+
+    assert update.drift(template, mine) == (0, 0)
+
+
+def test_a_passage_only_this_copy_has_counts_ahead():
+    template = _para("One line.")
+    mine = _para("One line.", "A rule this project wrote.", "With a reason.",
+                 "And a consequence.")
+
+    ahead, behind = update.drift(template, mine)
+    assert ahead == 3
+    assert behind == 0
+
+
+def test_a_passage_only_the_template_has_counts_behind():
+    template = _para("One line.", "Something upstream added.", "Two lines of it.")
+    mine = _para("One line.")
+
+    ahead, behind = update.drift(template, mine)
+    assert (ahead, behind) == (0, 2)
+
+
+def test_an_expanded_section_counts_only_its_excess():
+    """A section both sides have, one far longer -- `replace`, not `insert`, which
+    is why counting inserted lines alone under-reported the real charters."""
+    template = _para("## Findings", "Keep them short.")
+    mine = _para("## Findings", "Keep them short.", "The bar is whether the worker",
+                 "would get it wrong, not whether", "it saves a tool call.")
+
+    ahead, _ = update.drift(template, mine)
+    assert ahead == 3
+
+
+def test_outgoing_survives_a_decline(repo, monkeypatch):
+    """The point of the whole view. `keep` answers the INCOMING question and goes
+    silent; if that silence covered the outgoing one too, a project's own rules
+    would become invisible the moment somebody chose their own version -- which is
+    exactly how this went unnoticed."""
+    _move_template(monkeypatch, TRACKED)
+    _edit(repo, TRACKED, suffix=_para("## Our rule", "It has a reason.",
+                                      "And a line more.", "And its consequence."))
+
+    found = update.survey(repo)
+    assert update.find(found, TRACKED).upstreamable
+    update.keep(found, update.find(found, TRACKED))
+
+    after = update.survey(repo)
+    assert update.find(after, TRACKED).verdict == update.DECLINED
+    assert update.find(after, TRACKED).upstreamable, (
+        "declining the template's version hid what this repo had written")
+    assert TRACKED in [f.rel for f in after.outgoing]
+
+
+def test_a_one_line_surplus_is_below_the_floor(repo, monkeypatch):
+    """`OUTGOING_FLOOR` is the line between personalisation and content. Without it
+    every install is permanently `ahead` by its own name."""
+    _move_template(monkeypatch, TRACKED)
+    _edit(repo, TRACKED, suffix=chr(10) + "one more line" + chr(10))
+
+    assert not update.find(update.survey(repo), TRACKED).upstreamable
+
+
+def test_outgoing_blocks_print_only_what_is_ours(repo, monkeypatch):
+    """Not a diff: a diff of a personalised file is mostly the personalisation."""
+    _move_template(monkeypatch, TRACKED)
+    _edit(repo, TRACKED, suffix=_para("## Our rule", "It has a reason.",
+                                      "And a line more.", "And its consequence."))
+
+    text = update.outgoing_blocks(update.find(update.survey(repo), TRACKED), repo)
+
+    assert "## Our rule" in text
+    assert "moved upstream" not in text, "printed the template's side too"
+
+
+def test_outgoing_is_sorted_worst_first(repo, monkeypatch):
+    """A list nobody can triage is a list nobody reads."""
+    _move_template(monkeypatch, TRACKED)
+    _edit(repo, TRACKED, suffix=_para(*[f"line {i}" for i in range(20)]))
+    other = ".claude/agents/code-thread.md"
+    _move_template(monkeypatch, other)
+    _edit(repo, other, suffix=_para("a", "b", "c", "d"))
+
+    rows = update.survey(repo).outgoing
+    assert [f.rel for f in rows[:2]] == [TRACKED, other]

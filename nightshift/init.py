@@ -226,12 +226,7 @@ def tokens(root: Path, tables: dict[str, dict]) -> dict[str, str]:
         "{{package}}": str(packages[0]) if packages else name,
         "{{project}}": str(name),
         "{{integration}}": str(tables.get("branches", {}).get("integration") or "the integration branch"),
-        # Declared wins over git. `git config user.name` is a *commit identity* and
-        # is frequently a handle rather than a name (`karel-murgas`), and this token
-        # is how a charter addresses the person — so a project that says what to call
-        # them says it once, here. Falls back to git so an install that never
-        # declares one still renders a concrete name instead of a bare token.
-        "{{maintainer}}": str(project.get("maintainer") or "") or _git_user(root),
+        "{{maintainer}}": _maintainer(root, project),
         "{{hostname}}": socket.gethostname(),
         "{{board}}": board_root,
         "{{private_lane}}": PRIVATE_LANE,
@@ -269,6 +264,36 @@ def _git_out(root: Path, *args: str) -> str:
     except (OSError, subprocess.SubprocessError):
         return ""
     return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def _maintainer(root: Path, project: dict) -> str:
+    """The name the charters address the operator by, most specific source first.
+
+    Three sources, and the order is the point:
+
+    1. `.ai/hosts.json`'s entry for this machine. Identity is a property of a
+       *person*, and a project-wide field gives two people one answer -- so the
+       per-machine file, which is already committed and already keyed by hostname,
+       is where a second maintainer states their own name without overwriting the
+       first (the maintainer, 2026-08-20: *"Imagine two people working on the same
+       project..."*).
+    2. `[project].maintainer`, the project-wide default. Right for a solo repo,
+       which most are, and the only answer a fresh clone has before anyone has
+       configured a box.
+    3. `git config user.name`. Last, because it is a *commit identity* rather than
+       a name and is frequently a handle -- the case that started this.
+
+    A lazy import: `runner` owns the hostname lookup and the untracked `host.json`
+    override, and re-deriving either here would be a second copy of a rule. It is
+    lazy rather than top-level because `init` is the bootstrap module and `runner`
+    pulls in a third of the package.
+    """
+    from nightshift import runner
+
+    per_machine = runner.host_setting(root, "maintainer", "")
+    return (str(per_machine or "").strip()
+            or str(project.get("maintainer") or "").strip()
+            or _git_user(root))
 
 
 def _git_user(root: Path) -> str:
