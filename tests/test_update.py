@@ -370,6 +370,92 @@ def test_a_merge_refuses_before_it_spends_anything(repo, monkeypatch):
     assert (repo / TRACKED).read_text(encoding="utf-8") == mine
 
 
+def _agent_that_writes_nothing(monkeypatch, repo: Path):
+    """Stand in for a merge agent that exits 0 having touched no file — what a
+    permission prompt it cannot answer actually looks like from out here."""
+    from nightshift import runner
+
+    class _Done:
+        returncode = 0
+        stdout = json.dumps({"type": "result", "result": "merged it, honest"})
+
+    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(runner, "_run_worker",
+                        lambda *a, **k: _Done())
+
+
+def test_a_merge_that_wrote_nothing_is_not_recorded_as_done(repo, monkeypatch):
+    """A zero exit is not evidence. The agent can finish cleanly having written
+    nothing, and recording that stores the hash of the UNMERGED file — after which
+    `now == was` and the verdict falls from `conflict` to `stale`, which is inside
+    `APPLIES`. So the verb that failed would have marked the file safe for `--apply`
+    to overwrite with the template. Found 2026-08-20 against the Dungeoneer install,
+    on the first real merge ever dispatched."""
+    _move_template(monkeypatch, TRACKED)
+    mine = _edit(repo, TRACKED)
+    _agent_that_writes_nothing(monkeypatch, repo)
+
+    found = update.survey(repo)
+    assert update.find(found, TRACKED).verdict == update.CONFLICT
+
+    code, message = update.merge(found, update.find(found, TRACKED),
+                                 permission_mode="acceptEdits")
+
+    assert code != 0, "an agent that changed nothing reported success"
+    assert "unchanged" in message
+    assert "merged it, honest" in message, "the agent's own account is still shown"
+    assert (repo / TRACKED).read_text(encoding="utf-8") == mine
+    assert update.find(update.survey(repo), TRACKED).verdict == update.CONFLICT, (
+        "the file left the protected set and became overwritable")
+
+
+def test_a_merge_that_wrote_nothing_leaves_no_scratch_file(repo, monkeypatch):
+    """The failure path has to clean up too, or the next survey sees a stray
+    `.nightshift-new` that no verb owns."""
+    _move_template(monkeypatch, TRACKED)
+    _edit(repo, TRACKED)
+    _agent_that_writes_nothing(monkeypatch, repo)
+
+    found = update.survey(repo)
+    update.merge(found, update.find(found, TRACKED), permission_mode="acceptEdits")
+
+    assert not (repo / (TRACKED + ".nightshift-new")).exists()
+
+
+def test_a_merge_that_really_wrote_does_not_leave_the_result_overwritable(repo, monkeypatch):
+    """The other half of the same boundary, and the worse bug of the two: recording
+    the merged bytes as `created` means "nightshift wrote this", so the next survey
+    sees `now == was` with the template still different — `stale`, which `--apply`
+    overwrites. The verb would have handed away the merge it had just paid an agent
+    to produce. A merge answers a template version, exactly as `keep` does, so it is
+    recorded as `declined`."""
+    _move_template(monkeypatch, TRACKED)
+    _edit(repo, TRACKED)
+    from nightshift import runner
+
+    class _Done:
+        returncode = 0
+        stdout = json.dumps({"type": "result", "result": "done"})
+
+    def _write(*a, **k):
+        (repo / TRACKED).write_text("the merged result" + chr(10),
+                                    encoding="utf-8", newline="")
+        return _Done()
+
+    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(runner, "_run_worker", _write)
+
+    found = update.survey(repo)
+    code, _ = update.merge(found, update.find(found, TRACKED),
+                           permission_mode="acceptEdits")
+
+    assert code == 0
+    verdict = update.find(update.survey(repo), TRACKED).verdict
+    assert verdict not in update.APPLIES, (
+        f"a merged file is `{verdict}` — inside the set `--apply` overwrites")
+    assert verdict == update.DECLINED
+
+
 def test_a_projects_own_hook_through_project_script_is_not_stripped(repo):
     """Found by running the updater against the first real repo it ever saw.
 
