@@ -386,6 +386,19 @@ def test_a_chore_at_lead_tier_is_a_contradiction(tmp_path):
     assert "nothing to decide" in _rules(card_schema.check(_board(tmp_path, "tasks", body)))
 
 
+def test_an_unattended_false_chore_is_a_contradiction(tmp_path):
+    """The same contradiction on the other axis. A chore is dispatched by
+    `chores.execute()` in a batch that runs with nobody at the keyboard, so
+    `unattended: false` describes a card the only path that takes chores must refuse.
+    `chores.eligible()` does refuse it — but only after `select()` has counted it as a
+    candidate, so `ad-sound-for-recharge` sat for a fortnight under the Command
+    Center's `Chores` heading beside a button that could never take it, reporting
+    itself as "left out of this batch" on every run."""
+    body = _CHORE.replace("unattended: true", "unattended: false")
+    assert "could never be taken" in _rules(
+        card_schema.check(_board(tmp_path, "tasks", body)))
+
+
 def test_absent_kind_means_a_full_card_so_no_existing_card_changes_meaning(tmp_path):
     root = _board(tmp_path, "tasks", _GOOD.format(id="probe", lane="tasks"))
     assert card_schema.check(root) == []

@@ -66,11 +66,13 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import socket
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import board, gitmerge, manifest, runner, suite, textio, tiers, usage
+from nightshift import (board, gitmerge, manifest, run_record, runner, suite, textio,
+                        tiers, usage)
 from nightshift.runner import repo_root
 
 #: Written at the repo root next to the digest, because that is the vault root. The
@@ -204,11 +206,17 @@ def cost_note(turns: int, wall_s: float) -> str:
     return ", ".join(parts)
 
 
-def eligible(card: board.Card) -> str:
+def eligible(card: board.Card, *, capabilities: frozenset[str] | set[str]) -> str:
     """Why `card` cannot join a batch, or `""` if it can.
 
     Kept separate from `select` so the reason can be reported per card. A chore that is
     silently absent from a batch is indistinguishable from one that was never written.
+
+    `capabilities` is this machine's, from `runner.host_capabilities()` — required
+    rather than defaulted, because the check it feeds is one this function did not have
+    until 2026-08-18 and a default of "assume none" or "assume all" would both be wrong
+    silently. Two callers now ask this question (the batch itself, and the panel
+    deciding what to list under `Chores`), and neither may answer it differently.
     """
     if card.kind != KIND:
         return "not a chore"
@@ -218,6 +226,16 @@ def eligible(card: board.Card) -> str:
         return "tier: lead - a chore has nothing to decide"
     if card.fields.get("unattended", "true").strip().lower() != "true":
         return "unattended: false - the batch runs without a human present"
+    # The same precondition `runner.select` enforces for a dispatched card, and its
+    # absence here was a real hole rather than a tidiness point: `requires:` is what
+    # keeps an art or audio card off the laptop that has no ComfyUI stack, and a chore
+    # was exempt from it for no reason anybody chose. `ad-sound-for-recharge` is
+    # `requires: gpu-box`, and was kept off this box only by *also* carrying
+    # `unattended: false` — remove that flag, as the schema now demands, and the laptop
+    # would have dispatched it. Declared capabilities, never probed: see `host_config`.
+    if card.requires and card.requires not in capabilities:
+        return (f"requires: {card.requires} - {socket.gethostname()} does not declare it; "
+                f"the batch runs where the card can actually be done")
     if card.worker in ("", "none"):
         return "no worker - nothing would pick it up"
     try:
@@ -235,10 +253,11 @@ def select(root: Path, *, limit: int = DEFAULT_BATCH,
     """The chores that form the next batch, and every one that was left out with why."""
     chosen: list[board.Card] = []
     skipped: list[Skipped] = []
+    capabilities = runner.host_capabilities(root)
     for card in board.cards(root, lane):
         if card.kind != KIND:
             continue                      # not a chore at all: not "skipped", just other work
-        why = eligible(card)
+        why = eligible(card, capabilities=capabilities)
         if why:
             skipped.append(Skipped(card.id, why))
             continue
@@ -614,6 +633,58 @@ def _workspace(root: Path, base: str) -> tuple[Path, str]:
     return work, ""
 
 
+#: How a `Batch` outcome state reads in a run record. The record's vocabulary is the
+#: runner's, and mapping onto it rather than inventing a parallel one is what lets the
+#: digest and the Command Center report a batch and a night through the same accessors
+#: (`run_record.landed`/`failures`/`decisions`).
+#:
+#: `done` is `review`, not `reviewed`: at the end of phase 1 the item is green on its
+#: own branch and the batch review has not happened yet, which is exactly what `review`
+#: means for a dispatched card. It becomes `reviewed` once the batch lands.
+#:
+#: `bounced` and `blocked` map to themselves and are in none of the record's three
+#: sets — see the comment on `DECISION_OUTCOMES` for why a bounce must not be a
+#: failure. A `_drop` shows up as `parked`, which is what the batch itself calls it;
+#: the reason (would not merge / reddened the suite) rides in `detail`.
+_RECORD_OUTCOME = {
+    "done": "review", "bounced": "bounced", "parked": "parked",
+    "blocked": "blocked", "pending": "",
+}
+
+
+def _record_outcomes(record: run_record.Record, batch: Batch,
+                     cards: dict[str, board.Card], model: str, *,
+                     landed: bool = False) -> None:
+    """Re-state the batch's outcomes into the record. Cheap, and safe to call often.
+
+    Called at every point the batch changes rather than once at the end, so a batch
+    that is killed — or that dies on a red suite — still leaves a record of what it had
+    settled. See `run_record.Record.set_dispatched` for why this replaces rather than
+    appends.
+    """
+    entries = []
+    for outcome in batch.outcomes:
+        state = outcome.state
+        mapped = _RECORD_OUTCOME.get(state, state)
+        if landed and state == "done":
+            mapped = "reviewed"
+        card = cards.get(outcome.card_id)
+        entries.append({
+            "card": outcome.card_id,
+            "title": outcome.title or (card.title if card else ""),
+            "worker": card.worker if card else "",
+            "model": model, "attempt": 1, "outcome": mapped,
+            "detail": outcome.detail, "cost_usd": 0.0,
+            "landed": cost_note(outcome.turns, outcome.wall_s),
+            "evidence": "", "at": _now_iso(),
+        })
+    record.set_dispatched(entries)
+
+
+def _now_iso() -> str:
+    return dt.datetime.now().replace(microsecond=0).isoformat()
+
+
 def execute(root: Path, *, limit: int = DEFAULT_BATCH, allow_paid: bool = False,
             card_budget: float = 0.0, test_timeout: int = 600,
             batch_test_timeout: int = BATCH_TEST_TIMEOUT_S,
@@ -623,6 +694,13 @@ def execute(root: Path, *, limit: int = DEFAULT_BATCH, allow_paid: bool = False,
     Exit codes: 0 the batch landed (or there was nothing to do), 1 a refusal before
     anything was dispatched, 3 the money rule stopped it, 4 work was done but the
     batch did not land and is waiting on a human.
+
+    **The batch opens a run record** (`run_record`), exactly as a night does. Until
+    2026-08-18 it did not, and the consequence was not a missing statistic: the
+    Command Center's Run page reads the newest record to say what ran, so a morning
+    that had just finished a 23-minute batch reported "Last run" as a night from a
+    fortnight earlier. A run that does not testify is indistinguishable from one that
+    never happened, which is the whole argument `run_record`'s docstring makes.
     """
     now = now or dt.datetime.now()
     try:
@@ -642,26 +720,40 @@ def execute(root: Path, *, limit: int = DEFAULT_BATCH, allow_paid: bool = False,
 
     if not runner.acquire_lock(root):
         return 1, Batch()
+    record = run_record.null()
     try:
         work, why = _workspace(root, base)
         if why:
             print(f"refusing to run - {why}")
             return 1, Batch()
 
+        # Opened here for the same reason the runner opens its own after the work root
+        # is fixed and before `select()`: it must land in the checkout whose digest will
+        # read it, and the skip list needs somewhere to go. Every refusal above this
+        # line still holds the no-op record, so a batch that never got as far as looking
+        # at the board does not leave a record claiming it ran.
+        record = run_record.start(work, kind="chores", label=f"batch of up to {limit}",
+                                  host=socket.gethostname())
+
         chosen, skipped = select(work, limit=limit)
         batch = Batch(skipped=list(skipped))
+        record.skipped([(entry.card_id, entry.reason) for entry in skipped])
         print(f"chores: {len(chosen)} selected, {len(skipped)} left out")
         for entry in skipped:
             print(f"  - {entry.card_id}: {entry.reason}")
         if not chosen:
             textio.write_text_lf(work / OUT, report(batch, now))
             print(f"  nothing to dispatch; wrote {OUT}")
+            record.stop("nothing to dispatch")
+            record.finish()
             return 0, batch
 
         try:
             model = tiers.resolve(work, CHORE_TIER)
         except tiers.TierError as exc:
             print(f"refusing to run - {exc}")
+            record.stop(str(exc))
+            record.finish()
             return 1, Batch()
 
         # Headless `-p` has no trust dialog, so an untrusted workspace makes every
@@ -688,6 +780,7 @@ def execute(root: Path, *, limit: int = DEFAULT_BATCH, allow_paid: bool = False,
                                       card_budget=card_budget, test_timeout=test_timeout)
             outcome.how_to_test = result.how_to_test
             batch.outcomes.append(outcome)
+            _record_outcomes(record, batch, cards, model)
             if outcome.state == "blocked":
                 stopped = outcome.detail
                 for later in chosen[index + 1:]:
@@ -697,28 +790,43 @@ def execute(root: Path, *, limit: int = DEFAULT_BATCH, allow_paid: bool = False,
                 break
 
         survivors = [o.card_id for o in batch.survivors]
-        print(f"phase 1: {len(survivors)} survivor(s), "
-              f"{len(batch.by_state('bounced'))} bounced, "
-              f"{len(batch.by_state('parked'))} parked, "
-              f"{len(batch.by_state('blocked'))} not reached")
+        _record_outcomes(record, batch, cards, model)
+        phase1 = (f"phase 1: {len(survivors)} survivor(s), "
+                  f"{len(batch.by_state('bounced'))} bounced, "
+                  f"{len(batch.by_state('parked'))} parked, "
+                  f"{len(batch.by_state('blocked'))} not reached")
+        print(phase1)
+        record.note(phase1)
         if not survivors:
             textio.write_text_lf(work / OUT, report(batch, now))
             print(f"  nothing survived to merge; wrote {OUT}")
+            record.stop("nothing survived phase 1 to merge")
+            record.finish(dispatched=len(batch.outcomes))
             return 0, batch
 
         code = _land_the_batch(work, base, batch, cards, survivors, now,
                                allow_paid=allow_paid, card_budget=card_budget,
                                batch_test_timeout=batch_test_timeout,
-                               stopped_early=bool(stopped))
+                               stopped_early=bool(stopped), record=record,
+                               model=model)
         return code, batch
     finally:
+        # `complete` separates a batch that reached its own end from one that was
+        # killed, so it is set on every path out — including the ones that raise.
+        # Already-finished records are not reopened: `finish` is idempotent enough
+        # for that, and re-stamping would move the finish time of a batch that ended
+        # cleanly minutes earlier.
+        if not record.data.get("complete"):
+            record.stop("the batch ended without reaching its own end")
+            record.finish(dispatched=len(record.data.get("dispatched", [])))
         runner.release_lock(root)
 
 
 def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.Card],
                     survivors: list[str], now: dt.datetime, *, allow_paid: bool,
                     card_budget: float, batch_test_timeout: int,
-                    stopped_early: bool) -> int:
+                    stopped_early: bool, record: run_record.Record,
+                    model: str) -> int:
     """Phases 2 and 3: merge the survivors, verify once, review once, land once."""
     branch = batch_branch(now)
     out_dir = work / runner.RUNS / "_chores" / f"{now:%Y%m%d-%H%M}"
@@ -750,6 +858,8 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
             for card_id, reason in refused:
                 _drop(work, batch, cards, card_id,
                       f"its branch would not merge onto the batch: {reason}")
+            if refused:
+                _record_outcomes(record, batch, cards, model)
             if not order:
                 why = "no surviving branch would merge onto the batch"
                 break
@@ -770,6 +880,7 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
             print(f"  bisect names {culprit}; dropping it and re-verifying")
             _drop(work, batch, cards, culprit,
                   f"reddened the batch suite; found by bisecting the merge order. {why}")
+            _record_outcomes(record, batch, cards, model)
             order = [c for c in order if c != culprit]
         else:
             # Out of rounds without a green result. A second red is evidence about
@@ -797,6 +908,7 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
         runner._git(work, "worktree", "prune")
 
     suite_line = f"{total} test(s), green" if landed else (why or "not run")
+    record.note(f"batch branch {branch} - suite: {suite_line}")
     if landed:
         print(f"phase 3: {branch} merged into {base}")
         for card_id in order:
@@ -804,6 +916,7 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
             print("  " + _land(work, cards[card_id], outcome, branch, remote))
         runner._git(work, "branch", "-d", branch)
     else:
+        record.stop(why)
         print(f"the batch did not land - {why}")
         for card_id in order:
             print("  " + _hand_over(
@@ -811,6 +924,11 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
                 f"This chore is green on `ai/{card_id}` and was merged onto the batch "
                 f"branch `{branch}`, which did not land: {why}. The batch branch still "
                 f"exists; resolve it there, or merge this card's branch by hand."))
+
+    # After `_land`, so a chore that reached `testing/`/`done/` records `reviewed`
+    # rather than the `review` it carried while the batch review was still ahead of it.
+    _record_outcomes(record, batch, cards, model, landed=landed)
+    record.finish(dispatched=len(batch.outcomes))
 
     textio.write_text_lf(work / OUT, report(batch, now, branch=branch, suite=suite_line))
     board.commit_board(work, f"chores: batch {branch}", extra_paths=(str(OUT),))

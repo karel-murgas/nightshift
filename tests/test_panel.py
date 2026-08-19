@@ -989,6 +989,99 @@ def test_an_old_record_is_not_presented_as_this_run(server):
     assert "2026-08-01" in text, "the date is what stops it reading as today"
 
 
+def test_refresh_returns_the_same_page_the_browser_is_looking_at(server):
+    """One rendering path, deliberately. A purpose-built refresh payload is a second
+    thing to keep in step with every section added, and the first time it fell behind
+    the panel would quietly stop updating whatever nobody remembered to add to it."""
+    base, root = server
+    for page in panel.PAGES:
+        _, page_html = _get(base, page)
+        _, refreshed = _get(base, f"api/refresh?page={page}")
+        assert refreshed == page_html, page
+
+
+def test_every_region_the_refresh_swaps_is_addressable(server):
+    """The client matches regions by id. A section without one is never swapped, so
+    it silently goes stale — which is exactly the failure the refresh exists to fix,
+    reintroduced one section at a time."""
+    base, root = server
+    for page in panel.PAGES:
+        _, text = _get(base, page)
+        assert 'id="rail"' in text and 'id="statusrail"' in text, page
+        main = text.split("<main>", 1)[1].split("</main>")[0]
+        opened = re.findall(r"<section\b[^>]*>", main)
+        assert opened, page
+        for tag in opened:
+            assert ' id="sec-' in tag, f"{page}: a section with no id — {tag}"
+
+
+def test_an_unknown_page_is_refused_rather_than_rendered(server):
+    base, _ = server
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _get(base, "api/refresh?page=../etc")
+    assert caught.value.code == 400
+
+
+def _record(root: Path, stamp: str, **fields) -> Path:
+    records = root / ".ai" / "runs" / "records"
+    records.mkdir(parents=True, exist_ok=True)
+    path = records / f"{stamp}.json"
+    path.write_text(json.dumps({"complete": True, "dispatched": [], **fields}),
+                    encoding="utf-8")
+    return path
+
+
+def test_a_chore_batch_is_reported_as_a_chore_batch_not_as_a_night(server):
+    """The sequel to the stale-date bug, and the reason the heading names the kind.
+    With the dates right the page was *still* misread: "Last run" over a roster of
+    cards reads as the night, and the thing that had just finished was a batch."""
+    base, root = server
+    _record(root, "20260818-111700", started="2026-08-18T11:17:00",
+            finished="2026-08-18T11:41:00", kind="chores", host="KMu-NTB",
+            dispatched=[{"card": "perks-tinkering", "outcome": "reviewed"},
+                        {"card": "cc-back-buttons", "outcome": "parked"}],
+            notes=[{"at": "2026-08-18T11:40:00",
+                    "message": "batch branch chores/20260818-1117 - suite: 1939 test(s), green"}])
+
+    _, text = _get(base, "run")
+
+    assert "chore batch" in text, "the kind is what stops it reading as a night"
+    assert "perks-tinkering" in text and "cc-back-buttons" in text
+    assert "1939 test(s), green" in text, "a batch's phases are part of its story"
+
+
+def test_the_newest_thing_that_ran_wins_even_when_it_wrote_no_record(tmp_path, monkeypatch):
+    """A classify pass or a preflight dispatches no cards, so it writes no run
+    record — only a job record. Reading the newest *record* to answer "what just
+    happened" is what let a fortnight-old night headline a page opened minutes after
+    an `ingest` pass finished."""
+    root = _repo(tmp_path)
+    _record(root, "20260801-101700", started="2026-08-01T10:17:00", kind="run",
+            dispatched=[{"card": "old-card", "outcome": "reviewed"}])
+    _finished_job(root, "ingest")
+
+    ctx = panel.read_context(root)
+    source, _, job = panel.latest_activity(ctx)
+    assert source == "job" and job.label == "ingest"
+    assert "Last ingest" in panel.render_page("run", root)
+
+
+def test_a_run_this_panel_did_not_start_still_shows_as_running(server, monkeypatch):
+    """`Running now` used to list only what a button here had spawned, so a night
+    started by Task Scheduler — or a batch started from a terminal — left the one
+    section whose subject is "what is happening" saying nothing was."""
+    base, root = server
+    _record(root, "20260818-020000", started="2026-08-18T02:00:00", kind="run",
+            complete=False, dispatched=[])
+    status = root / ".ai" / "runs" / "status.json"
+    status.parent.mkdir(parents=True, exist_ok=True)
+    status.write_text(json.dumps(_beat(minutes_ago=1.0, pid=os.getpid())),
+                      encoding="utf-8")
+
+    _, text = _get(base, "run")
+    assert "Nothing automated is running" not in text
+
+
 def test_not_taken_reads_the_board_not_a_stale_skip_list(server):
     """The record's `skipped` belongs to whichever run wrote it — two weeks ago
     here — so it confidently listed cards that had since been finished."""
@@ -1900,6 +1993,161 @@ def test_a_chore_that_needs_another_machine_is_filed_as_that_instead(tmp_path):
     ctx = panel.read_context(root)
     assert [c.card.id for c in ctx.elsewhere] == ["gpu-chore"]
     assert ctx.chores == []
+
+
+def test_a_chore_the_batch_would_refuse_is_not_listed_as_batch_work(tmp_path):
+    """`kind: chore` alone is not enough to list a card under the button that runs
+    the batch. `ad-sound-for-recharge` was `kind: chore` with `unattended: false` —
+    which `chores.eligible()` refuses — so every batch reported it as "left out"
+    while this section went on advertising it as work the button would take. The
+    section asks the batch what it would take, so the two answers cannot differ.
+    """
+    root = _repo(tmp_path)
+    path = _chore(root, "manual-chore")
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        "unattended: true", "unattended: false"), encoding="utf-8", newline="")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "unattended false")
+
+    ctx = panel.read_context(root)
+    assert ctx.chores == [], "the batch would refuse it, so it is not batch work"
+    # It needs a person at the keyboard, which is exactly what `Do now` is for —
+    # and unlike the Chores section, that one offers a button that helps.
+    assert "manual-chore" in [c.card.id for c in ctx.do_now]
+
+
+# ------------------------------------------------- answering a parked decision
+
+
+_PARKED = """\
+---
+id: {id}
+title: "{id}, parked"
+state: needs-decision
+tier: worker
+worker: code-thread
+recipe: none
+unattended: true
+verify: play
+created: 2026-08-18
+---
+
+## Intent
+
+Something is undecided.
+
+## Acceptance
+
+- decided
+
+## Open questions
+
+{open}
+
+## Question
+
+- **A** — do it now
+- **B** — wait for phase 5 *(recommended)*
+"""
+
+
+def _parked(root: Path, card_id: str, *, attributor: str = "karel",
+            open_questions: str = "none") -> Path:
+    if attributor:
+        manifest_path = root / ".ai" / "manifest.toml"
+        manifest_path.write_text(
+            manifest_path.read_text(encoding="utf-8")
+            + f'\n[board]\ndecision_attributor = "{attributor}"\n',
+            encoding="utf-8", newline="")
+    path = root / "Board" / "needs-decision" / f"{card_id}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_PARKED.format(id=card_id, open=open_questions),
+                    encoding="utf-8", newline="")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", f"parked {card_id}")
+    return path
+
+
+def test_a_parked_card_offers_a_way_to_answer_it(server):
+    """The Decide section could only point at the card, so the cheapest decision on
+    the board — tick B, done — still cost an editor, the `## Thread` convention and
+    the attributor token from memory. Cards sat parked with the answer already known.
+    """
+    base, root = server
+    _parked(root, "forky")
+
+    _, text = _get(base, "now")
+    assert "/decide/forky" in text
+
+
+def test_the_form_offers_the_cards_own_options_with_the_recommendation_marked(server):
+    base, root = server
+    _parked(root, "forky")
+
+    status, text = _get(base, "decide/forky")
+    assert status == 200
+    assert "do it now" in text and "wait for phase 5" in text
+    assert "recommended" in text
+    # "None of these" is a real answer; a picker without it silently turns one into
+    # no answer at all.
+    assert "Something else" in text
+
+
+def test_answering_writes_the_thread_entry_and_leaves_the_card_parked(server):
+    base, root = server
+    _parked(root, "forky")
+
+    status, data = _post(base, "api/answer",
+                         {"card_id": "forky", "picks": ["**B** — wait for phase 5"],
+                          "note": "and revisit in September"})
+    assert status == 200, data
+    text = (root / "Board" / "needs-decision" / "forky.md").read_text(encoding="utf-8")
+    assert "· karel" in text
+    assert "> **B** — wait for phase 5" in text
+    assert "> and revisit in September" in text
+    assert (root / "Board" / "needs-decision" / "forky.md").is_file(), "still parked"
+
+
+def test_answering_without_a_declared_attributor_is_refused(server):
+    """A guessed token makes the digest's answered-but-not-moved nudge silently never
+    fire while reporting a clean board."""
+    base, root = server
+    _parked(root, "forky", attributor="")
+
+    status, data = _post(base, "api/answer", {"card_id": "forky", "picks": ["**A** — do it now"]})
+    assert status >= 400
+    assert "decision_attributor" in data.get("message", "")
+
+
+def test_sending_a_card_with_open_questions_to_tasks_is_refused(server):
+    """`card_schema` refuses a card in `tasks/` with open questions, so a button that
+    moved it anyway would simply turn the board red on the next gate run."""
+    base, root = server
+    _parked(root, "forky", open_questions="- what about old saves?")
+
+    status, data = _post(base, "api/tasks", {"card_id": "forky"})
+    assert status >= 400
+    assert "open questions" in data.get("message", "")
+    assert (root / "Board" / "needs-decision" / "forky.md").is_file()
+
+
+def test_a_prose_only_question_is_still_answerable(server):
+    """A card that asks in prose has nothing to tick — and those are the hard ones,
+    so refusing them would invert the point of the feature."""
+    base, root = server
+    path = _parked(root, "prosey")
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        "- **A** — do it now\n- **B** — wait for phase 5 *(recommended)*\n",
+        "Should regen tick before or after the enemy acts?\n"),
+        encoding="utf-8", newline="")
+
+    status, text = _get(base, "decide/prosey")
+    assert status == 200
+    assert "nothing to tick" in text
+    status, data = _post(base, "api/answer",
+                         {"card_id": "prosey", "picks": [], "note": "After."})
+    assert status == 200, data
+    assert "> After." in path.read_text(encoding="utf-8")
 
 
 # --------------------------------------------------------------------------

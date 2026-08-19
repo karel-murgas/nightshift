@@ -75,9 +75,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen
 
-from nightshift import (board, branches, drain, freshness, ingest, init, jobs,
-                        manifest, preflight, run_record, textio, tiers, update,
-                        usage, worker_prompt)
+from nightshift import (board, branches, chores, decide, drain, freshness, ingest,
+                        init, jobs, manifest, preflight, run_record, textio, tiers,
+                        update, usage, worker_prompt)
 from nightshift.manifest import ManifestError, find_root
 from nightshift.runner import (
     RUNS,
@@ -714,11 +714,23 @@ class Context:
 
         A chore that *also* wants another machine is left to `elsewhere`, which is
         the more useful of the two facts: the batch here cannot take it either.
+
+        **`kind: chore` is not on its own enough to list a card here**, and listing it
+        on that alone is what put `ad-sound-for-recharge` under this heading beside a
+        `Run chores` button that could never take it: the card was `unattended: false`,
+        which `chores.eligible()` refuses, so every batch reported it as "left out" and
+        the panel went on advertising it as batch work. The section now asks the batch
+        itself what it would take, so the answer here and the answer there cannot
+        differ. A chore it refuses falls through to `do_now` — which is where a card
+        needing a person at the keyboard belongs, and which gives it a `Work on this`
+        button instead of a button that does nothing for it.
         """
         elsewhere = {id(c) for c in self.elsewhere}
+        capabilities = host_capabilities(self.root)
         return [c for c in self.candidates
                 if not c.dispatchable and c.card.kind == board.KIND_CHORE
-                and id(c) not in elsewhere]
+                and id(c) not in elsewhere
+                and not chores.eligible(c.card, capabilities=capabilities)]
 
     @property
     def do_now(self) -> list[Candidate]:
@@ -990,13 +1002,23 @@ def _card_body(card: board.Card, *, meta: list[str] | None = None, why: str = ""
 
 
 def _section(title: str, count: int, rows: str, *, note: str = "", sub: str = "",
-             bar: str = "", empty: str = "", rows_id: str = "") -> str:
+             bar: str = "", empty: str = "", rows_id: str = "",
+             sec_id: str = "") -> str:
+    """One titled block of the page.
+
+    `sec_id` is what the live refresh swaps on. Every section that can change while
+    you are looking at it should carry one: the client re-renders the page, matches
+    regions up by id, and replaces only the ones whose HTML actually differs. A
+    section with no id is simply never swapped — safe, but it goes stale, so the
+    absence should be a decision rather than an oversight.
+    """
     head = [f'<div class="sec-head"><h2>{_e(title)}</h2>'
             f'<span class="count">{count}</span>']
     if note:
         head.append(f'<p class="note">{_e(note)}</p>')
     head.append("</div>")
-    out = ["<section>", "".join(head)]
+    out = [f'<section id="sec-{_e(sec_id)}">' if sec_id else "<section>",
+           "".join(head)]
     if sub:
         out.append(f'<p class="sec-sub">{sub}</p>')
     # The id is what the drag-and-drop and the take-first slider bind to; a
@@ -1028,7 +1050,7 @@ def _rail_html(ctx: Context, active: str) -> str:
                      f'<span class="n">{counts[page]}</span></a>')
     links = "".join(links)
     return (
-        '<nav class="rail">'
+        '<nav class="rail" id="rail">'
         f'<div class="wordmark"><b>Command Center</b><span>{_e(project)}</span></div>'
         f'<div class="pages">{links}</div>'
         f'<div class="machine">{"<br>".join(machine_lines(ctx.root))}</div>'
@@ -1328,7 +1350,7 @@ def _account_html(ctx: Context) -> str:
 def _statusrail_html(ctx: Context) -> str:
     fresh_class = "" if ctx.rail.freshness_known else "warn"
     return (
-        '<div class="statusrail"><div class="top">'
+        '<div class="statusrail" id="statusrail"><div class="top">'
         + _runbox_html(ctx) + _meters_html(ctx) +
         '</div>'
         f'<p class="tallyline" style="padding:0 1.5rem 0.9rem;margin:0">'
@@ -1368,7 +1390,8 @@ def _chores_section(ctx: Context) -> str:
     return _section("Chores", len(ctx.chores), "".join(rows),
                     note="Batched, not dispatched one at a time.",
                     bar=bar if rows else "",
-                    empty="No chores are waiting.")
+                    empty="No chores are waiting.",
+                    sec_id="chores")
 
 
 def _render_now(ctx: Context) -> str:
@@ -1376,13 +1399,22 @@ def _render_now(ctx: Context) -> str:
 
     rows = "".join(
         _row(marker="?", body=_card_body(
-                card, meta=[_e(f"in needs-decision/ · {card.fields.get('created', '')}")]),
-             acts=_act("Read card", href=f"/card/{card.id}"))
-        for card in ctx.decisions
+                card, meta=[_e(f"in needs-decision/ · {card.fields.get('created', '')}")]
+                     + ([_chip(f"{n} decision(s)", "warn")] if n else [])),
+             acts=_act("Read card", href=f"/card/{card.id}")
+                  # The one row on the page whose action is *answering* rather than
+                  # dispatching. Until this existed the section could only point at the
+                  # card, so the cheapest possible decision — tick B, done — still cost
+                  # an editor, the `## Thread` convention and the attributor token from
+                  # memory. Cards sat parked for weeks with the answer already known.
+                  + _act("Answer", href=f"/decide/{card.id}", primary=True))
+        for card, n in ((c, sum(len(s.options) for s in decide.parse(c.text)))
+                        for c in ctx.decisions)
     )
     out.append(_section("Decide", len(ctx.decisions), rows,
                         note="Nothing else moves until this does.",
-                        empty="Nothing is waiting on a decision."))
+                        empty="Nothing is waiting on a decision.",
+                        sec_id="decide"))
 
     do_now = ctx.do_now
     inline_rows = []
@@ -1421,7 +1453,8 @@ def _render_now(ctx: Context) -> str:
     out.append(_section("Do now", len(do_now), body,
                         note="Work that needs you at the keyboard.",
                         bar=general,
-                        empty="Nothing needs you at the keyboard."))
+                        empty="Nothing needs you at the keyboard.",
+                        sec_id="donow"))
 
     out.append(_chores_section(ctx))
 
@@ -1482,7 +1515,8 @@ def _render_now(ctx: Context) -> str:
     out.append(_section("Tonight", len(tonight), body, rows_id="queue",
                         note="Drag to set the order. Ticked cards are what a run takes.",
                         bar=bar if tonight else "",
-                        empty="Nothing is dispatchable here right now."))
+                        empty="Nothing is dispatchable here right now.",
+                        sec_id="tonight"))
 
     # The notes themselves, one row each, each with its own button — not a single
     # row for `Routing.md` and one "Launch triage" that named no note. Triage takes
@@ -1508,7 +1542,8 @@ def _render_now(ctx: Context) -> str:
         for note, decision in waiting)
     out.append(_section("Waiting on triage", len(waiting), triage_rows,
                         note="One at a time, deliberately — it is the expensive route.",
-                        empty="Nothing is waiting on triage."))
+                        empty="Nothing is waiting on triage.",
+                        sec_id="triage"))
 
     out.append(f'<footer>Board on {_e(current_branch(ctx.root))} &middot; '
                f'{_e(ctx.rail.freshness_line)}</footer>')
@@ -1567,7 +1602,8 @@ def _render_verify(ctx: Context) -> str:
                              "to <code>done/</code> straight away; ticking several and saving "
                              "does the same in one go."),
                         bar=bar if ctx.testing else "",
-                        empty="Nothing is waiting to be played."))
+                        empty="Nothing is waiting to be played.",
+                        sec_id="playthrough"))
 
     stuck = []
     review_rows = []
@@ -1595,7 +1631,8 @@ def _render_verify(ctx: Context) -> str:
                 '<b>Review it</b> runs the drain over this one card.</p></div>')
     out.append(_section("Under review", len(ctx.review), flag + "".join(review_rows),
                         note="The reviewer's lane, not yours.",
-                        empty="Nothing is at rest in review/."))
+                        empty="Nothing is at rest in review/.",
+                        sec_id="underreview"))
 
     out.append(f'<footer>{len(ctx.testing)} card(s) on {_e(ctx.base)} awaiting a '
                f'play-through</footer>')
@@ -1722,7 +1759,7 @@ def _render_inbox(ctx: Context) -> str:
                 + (f" · {unrouted} note(s) added since" if unrouted else "")
                 + f" · {board.ROUTING_VIEW} has the full report")
     return _section("Inbox", len(ctx.notes), rows, note=note,
-                    bar=bar, empty="The inbox is empty.") + (
+                    bar=bar, empty="The inbox is empty.", sec_id="inbox") + (
         f'<footer>{len(ctx.notes)} note(s) in inbox</footer>')
 
 
@@ -1883,7 +1920,7 @@ def _render_ideas(ctx: Context) -> str:
            "they are listed by name instead. Cards drag, on Now.")
     return _section("Ideas", len(ctx.ideas), "".join(rows), note="Edit in place; promote "
                     "when one is ready.", sub=sub, bar=bar,
-                    empty="No ideas parked.") + (
+                    empty="No ideas parked.", sec_id="ideas") + (
         f'<footer>{board.board_rel(ctx.root).as_posix()}/{board.PRIVATE_LANE} &middot; '
         f'committed and pushed, never read by anything else</footer>')
 
@@ -1932,17 +1969,45 @@ JOB_TAIL_BYTES = 8_000
 
 
 def _running_section(ctx: Context) -> str:
-    """What this panel has started and has not finished — and nothing else.
+    """Every automated process running right now, wherever it was started.
 
-    **Only the live one.** Karel, 2026-08-17: *"started from here — I don't think
+    **Only the live ones.** Karel, 2026-08-17: *"started from here — I don't think
     we need a full history at the top of the page ... only current run."* Right:
     the top of a page called Run is where "what is happening" belongs, and a
     fortnight of finished jobs above the night's own roster pushes the thing you
     came for below the fold. The history moved to `_job_history_section`, beside
     the earlier nights it belongs with.
+
+    **"Wherever it was started" is new, and the old scope was a real blind spot.**
+    This section used to be documented as "what this panel has started, and nothing
+    else" — it listed `jobs` records, which only exist for commands a button here
+    spawned. A night started by Task Scheduler, or a batch started from a terminal,
+    was therefore absent from the one section on the panel whose whole subject is
+    what is running: the heartbeat in `status.json` said a card was mid-dispatch and
+    the page said nothing was happening. The run itself is now a row, via the same
+    `run_is_live` the rail asks — never a second liveness rule, because that
+    question carries a pid-recycling trap documented once at `run_is_live` and
+    nowhere else.
     """
     live = [job for job in ctx.jobs if jobs.state(job) == jobs.RUNNING]
     rows = []
+    status = ctx.rail.run_status
+    record = _latest_record(ctx.root)
+    dispatching = run_is_live(status, record)
+    # The run first: it is the expensive thing, and a batch that a panel button did
+    # start would otherwise be represented only by the wrapper's command line.
+    if dispatching:
+        card_id = str(status.get("card") or "")
+        facts = [str(status.get("phase") or ""), str(status.get("worker") or ""),
+                 str(status.get("model") or "")]
+        elapsed = elapsed_since(str(status.get("since") or ""))
+        rows.append(
+            f'<tr><td class="mark m-now">&middot;</td>'
+            f'<td class="card">{_e(card_id or _kind_label(record))}</td>'
+            f'<td class="lane">{_e(elapsed)}</td>'
+            f'<td class="said">{_e(" · ".join(f for f in facts if f))}</td>'
+            f'<td class="num">{_act("Stop after this card", onclick="post(\'/api/stop\',{})")}'
+            f'</td></tr>')
     for job in live:
         rows.append(
             f'<tr><td class="mark m-now">&middot;</td>'
@@ -1951,11 +2016,14 @@ def _running_section(ctx: Context) -> str:
             f'<td class="said"><code>{_e(job.command)}</code></td>'
             f'<td class="num">{_act("Output", href=f"/log/{job.ident}")}</td></tr>')
         rows.append(_job_detail(ctx, job))
-    return _section("Running now", len(live),
+    count = len(live) + (1 if dispatching else 0)
+    return _section("Running now", count,
                     f'<div class="roster"><table><tbody>{"".join(rows)}</tbody></table></div>'
                     if rows else "",
-                    note="Started from this panel, still going.",
-                    empty="Nothing this panel started is still running.")
+                    note="Anything automated that is going right now, wherever it "
+                         "was started from.",
+                    empty="Nothing automated is running.",
+                    sec_id="running")
 
 
 def _job_detail(ctx: Context, job: jobs.Job) -> str:
@@ -2052,12 +2120,123 @@ def _job_history_section(ctx: Context) -> str:
                     f'<div class="roster"><table><tbody>{"".join(rows)}</tbody></table></div>'
                     if rows else "",
                     note="Every verb the buttons have spawned on this machine.",
-                    empty="No button on this panel has started anything yet.")
+                    empty="No button on this panel has started anything yet.",
+                    sec_id="jobhistory")
+
+
+#: How a run record's `kind` reads on the page. The record's own vocabulary is the
+#: runner's argv (`run` is a night, `card` is one named card, `chores` is a batch);
+#: none of those three words says on its own what it was, which is precisely how the
+#: heading managed to present a fortnight-old night as the thing that just happened.
+_KINDS = {"run": "night", "card": "single card", "chores": "chore batch"}
+
+
+def _kind_label(record: dict) -> str:
+    kind = str(record.get("kind") or "")
+    return _KINDS.get(kind, kind or "run")
+
+
+def latest_activity(ctx: Context) -> tuple[str, dict, jobs.Job | None]:
+    """The newest automated process of any kind: `(source, record, job)`.
+
+    `source` is `"record"` or `"job"`; exactly one of the latter two is meaningful.
+
+    **Why this is not just `_latest_record`.** Two families of thing run here and
+    only one of them wrote a record. A night, a single card and (since 2026-08-18) a
+    chore batch open a `run_record`; `ingest`, `preflight`, `drain` and `update` do
+    not, because they dispatch no cards and a record shaped around a dispatch list
+    would be mostly empty fields. They leave a `jobs` record instead. Reading only
+    the first family is what produced the bug this function exists for: a batch that
+    finished at 11:41 was invisible, and the page confidently reported a night from
+    2026-08-02 under a heading that says "Last run".
+
+    So both families are compared on the one axis they share — when they started —
+    and the newest wins. Ties go to the record, which is the richer artefact: a
+    batch started from a panel button has *both*, and the record is the one that can
+    say what the batch did rather than what command line started it.
+    """
+    record = _latest_record(ctx.root)
+    newest_job = ctx.jobs[0] if ctx.jobs else None
+    record_at = str(record.get("started") or "")
+    job_at = ""
+    if newest_job is not None and newest_job.started_at is not None:
+        job_at = newest_job.started_at.isoformat()
+    if newest_job is not None and job_at > record_at:
+        return "job", {}, newest_job
+    if record_at:
+        return "record", record, None
+    return ("job", {}, newest_job) if newest_job is not None else ("none", {}, None)
+
+
+def _last_job_section(ctx: Context, job: jobs.Job) -> str:
+    """The newest background command that wrote no run record, with its overview.
+
+    Same treatment `_job_detail` gives a *live* job, applied to a finished one: a verb
+    whose output this package owns gets parsed into a roster (`ingest`), and everything
+    else gets its tail, which is honest about being raw rather than pretending to a
+    structure nobody has written. The difference from `_job_history_section` is that
+    this one is at the top and carries the detail — because it is the answer to "what
+    just happened", not a row in a list you are looking something up in.
+    """
+    status = jobs.state(job)
+    _, word = _JOB_MARK.get(status, ("", status))
+    mark = {jobs.DONE: '<td class="mark m-ok">&check;</td>',
+            jobs.FAILED: '<td class="mark m-bad">&times;</td>'}.get(
+                status, '<td class="mark m-wait">?</td>')
+    said = word if status != jobs.FAILED else f"{word} — exit {job.exit_code}"
+    rows = [f'<tr>{mark}<td class="card">{_e(job.label)}</td>'
+            f'<td class="lane">{_e(jobs.elapsed(job))}</td>'
+            f'<td class="said">{_e(said)} &mdash; <code>{_e(job.command)}</code></td>'
+            f'<td class="num">{_act("Output", href=f"/log/{job.ident}")}</td></tr>',
+            _job_detail(ctx, job)]
+    started = job.started_at
+    when = f"{started:%d %b %H:%M}" if started else ""
+    today = bool(started) and started.date() == dt.date.today()
+    return _section(f"Last {job.label}", 1,
+                    f'<div class="roster"><table><tbody>{"".join(rows)}</tbody></table></div>',
+                    note=f"{'today ' + when[-5:] if today else when} · "
+                         f"the most recent thing that ran here",
+                    sec_id="lastjob")
+
+
+def _chores_phase_rows(record: dict) -> str:
+    """A chore batch's phase notes, as rows rather than a paragraph.
+
+    A batch's story is not told by its dispatch list alone: which branch it built,
+    whether the one suite run over the merged result was green, and why it did not
+    land are all facts about the *batch*, and `chores` records them as notes. The
+    night has no equivalent — it merges card by card — so this is chores-only rather
+    than something every record grows a section for.
+    """
+    rows = []
+    for note in record.get("notes", []):
+        rows.append(f'<tr><td class="mark m-wait">&middot;</td>'
+                    f'<td class="card"></td><td class="lane"></td>'
+                    f'<td class="num"></td><td class="num"></td>'
+                    f'<td class="said">{_e(str(note.get("message", "")))}</td>'
+                    f'<td class="num"></td></tr>')
+    if reason := str(record.get("stop_reason") or ""):
+        rows.append(f'<tr><td class="mark m-bad">&times;</td>'
+                    f'<td class="card"></td><td class="lane"></td>'
+                    f'<td class="num"></td><td class="num"></td>'
+                    f'<td class="said">{_e(reason)}</td>'
+                    f'<td class="num"></td></tr>')
+    return "".join(rows)
 
 
 def _render_run(ctx: Context) -> str:
     record = _latest_record(ctx.root)
     out = [_running_section(ctx)]
+
+    # When the newest thing that ran wrote no record — an `ingest` pass, a preflight —
+    # it goes above the newest record rather than only into the history at the foot of
+    # the page. "What happened most recently" is the question this page is opened with,
+    # and answering it with the newest *record* is exactly the substitution that made
+    # the page report a fortnight-old night while a batch had just finished.
+    source, _, newest_job = latest_activity(ctx)
+    if source == "job" and newest_job is not None:
+        out.append(_last_job_section(ctx, newest_job))
+
     dispatched = record.get("dispatched", [])
 
     body = []
@@ -2098,14 +2277,23 @@ def _render_run(ctx: Context) -> str:
                         f'<td class="num"></td><td class="said"></td>'
                         f'<td class="num"></td></tr>')
 
+    if str(record.get("kind") or "") == "chores":
+        body.append(_chores_phase_rows(record))
+
     # "This run" is a claim about *now*, and the newest record can be weeks old —
     # on first inspection this page presented a run from two weeks earlier under
     # that heading, with a start time and no date, which reads as this morning.
+    #
+    # **The heading now names the kind too**, for the sequel to that same bug: the
+    # dates were right and the page was still misread, because "Last run" over a
+    # roster of cards reads as the night, and the thing that had actually just run
+    # was a chore batch. A date fixes "when"; only the kind fixes "what".
     started = str(record.get("started", ""))
     today = started[:10] == dt.date.today().isoformat()
     heading = "This run" if live else ("Today's run" if today else "Last run")
-    when = f"{started[:10]} {started[11:16]}" if started else ""
-    note = (f"{when} on {record.get('host', '?')} · "
+    when = ("today " + started[11:16] if today
+            else f"{started[:10]} {started[11:16]}") if started else ""
+    note = (f"{_kind_label(record)} · {when} on {record.get('host', '?')} · "
             f"{'in flight' if live else ('complete' if record.get('complete') else 'ended without finishing')}"
             ) if started else ""
     bar = ('<div class="barbox">'
@@ -2118,7 +2306,8 @@ def _render_run(ctx: Context) -> str:
                         f'<div class="roster"><table><tbody>{"".join(body)}</tbody></table></div>'
                         if body else "", note=note, bar=bar,
                         sub="What the morning digest would have told you, except now.",
-                        empty="No run has been recorded on this machine yet."))
+                        empty="No run has been recorded on this machine yet.",
+                        sec_id="lastrun"))
 
     # Read off the board as it stands, **not** off the record's `skipped` list.
     # That list belongs to whichever run wrote it, and the newest run here was two
@@ -2135,7 +2324,8 @@ def _render_run(ctx: Context) -> str:
     out.append(_section("Not taken", len(left_out), rows,
                         note="As the board stands now — never silent, a card left "
                              "out says why.",
-                        empty="Every card in tasks/ is dispatchable here."))
+                        empty="Every card in tasks/ is dispatchable here.",
+                        sec_id="nottaken"))
 
     earlier = run_record.read_all(ctx.root)[1:6]
     rows = []
@@ -2153,7 +2343,8 @@ def _render_run(ctx: Context) -> str:
         )
     out.append(_section("Earlier runs", len(earlier),
                         f'<div class="roster"><table><tbody>{"".join(rows)}</tbody></table></div>'
-                        if rows else "", empty="No earlier runs on this machine."))
+                        if rows else "", empty="No earlier runs on this machine.",
+                        sec_id="earlierruns"))
 
     out.append(_job_history_section(ctx))
 
@@ -2222,7 +2413,8 @@ def _system_setup(ctx: Context) -> str:
             "machine — then writes the manifest, the board, the gates and the hooks.</p>")
         acts = _act("Set up nightshift", onclick="post('/api/setup')", primary=True)
         return _section("Setup", 1, _row(marker="+", body=body, acts=acts),
-                        note="This page works before the install. That is the point.")
+                        note="This page works before the install. That is the point.",
+                        sec_id="setup")
 
     receipt = init.read_receipt(ctx.root) or {}
     created = init.receipt_created(receipt)
@@ -2230,7 +2422,8 @@ def _system_setup(ctx: Context) -> str:
         f"<b>Installed</b><p class='note'>{len(created)} file(s) written by nightshift, "
         f"recorded in {_e(init.RECEIPT)} — that record is what lets an update tell your "
         f"edits from ours.</p>"))
-    return _section("Setup", 0, rows, note="What this install put in the repo.")
+    return _section("Setup", 0, rows, note="What this install put in the repo.",
+                    sec_id="setup")
 
 
 def _system_files(ctx: Context) -> str:
@@ -2240,7 +2433,7 @@ def _system_files(ctx: Context) -> str:
     try:
         found = update.survey(ctx.root)
     except update.UpdateError as exc:
-        return _section("Project files", 0, "", empty=str(exc))
+        return _section("Project files", 0, "", empty=str(exc), sec_id="projectfiles")
 
     rows = []
     for finding in found.by(update.STALE, update.MISSING):
@@ -2276,7 +2469,8 @@ def _system_files(ctx: Context) -> str:
             f"{len(found.by(update.FROZEN_V))} frozen")
     return _section("Project files", found.changes + len(found.by(update.CONFLICT)),
                     "".join(rows), note=note, bar=bar,
-                    empty="Every file nightshift owns here matches its template.")
+                    empty="Every file nightshift owns here matches its template.",
+                    sec_id="projectfiles")
 
 
 #: The read-only and repair verbs, as one table rather than five near-identical
@@ -2308,7 +2502,8 @@ def _system_verbs(ctx: Context) -> str:
                                                  f"<p class='note'>{_e(note)}</p>",
                          acts=_act(button, onclick=f"post('/api/system/{ident}')")))
     return _section("Checks and repair", 0, "".join(rows),
-                    note="Each one is the command you would have typed.")
+                    note="Each one is the command you would have typed.",
+                    sec_id="checks")
 
 
 def _system_danger(ctx: Context) -> str:
@@ -2334,7 +2529,8 @@ def _system_danger(ctx: Context) -> str:
         _act("Uninstall", onclick=f"confirmUninstall('{_attr(name)}')"),
     ])
     return _section("Danger", 0, _row(marker="!", body=body, acts=acts),
-                    note="Nothing here runs without a second, typed confirmation.")
+                    note="Nothing here runs without a second, typed confirmation.",
+                    sec_id="danger")
 
 
 def _system_verb(name: str, root: Path, *, waived: bool, body: dict) -> str:
@@ -2617,6 +2813,94 @@ def render_job(root: Path, ident: str) -> str:
         acts=_act("Reload", href=f"/log/{job.ident}"))
 
 
+def render_decide(root: Path, card_id: str) -> str:
+    """The answering form for one parked card.
+
+    **A page rather than a row.** The Decide section on `/now` lists what is waiting;
+    this is where you sit down with one of them. The options on a real card are whole
+    sentences with their consequences attached — `audio-generation-pipeline` batches
+    three decisions with three prose options each — and none of that fits in a row
+    beside a button.
+
+    **Deterministic all the way through.** The options come from the card's own
+    `## Question` via `decide.parse`; picking one writes that option's text into
+    `## Thread` verbatim. Nothing is summarised, nothing is inferred, and no model is
+    consulted — see `decide`'s module docstring for why that rule is stricter here than
+    elsewhere. `Chat about it` is the escape hatch when the question needs a
+    conversation, and it deliberately writes nothing.
+    """
+    card = board.find(root, card_id)
+    if card is None:
+        return render_document(root, title=card_id, subtitle="no such card",
+                               body="<p>That card is not on the board.</p>")
+    subquestions = decide.parse(card.text)
+    who = decide.attributor(root)
+
+    blocks = []
+    question = board.section(card.text, "Question")
+    if question:
+        blocks.append(f'<div class="doc">{markdown(question)}</div>')
+
+    for index, sub in enumerate(subquestions):
+        options = []
+        for choice, option in enumerate(sub.options):
+            mark = _chip("recommended", "ok") if option.recommended else ""
+            options.append(
+                f'<label class="pickone">'
+                f'<input type="radio" name="q{index}" value="{_attr(option.text)}"'
+                f'{" checked" if option.recommended else ""}>'
+                f'<span>{_md_inline(_e(option.text))} {mark}</span></label>')
+        # Always offered, and never pre-selected: an enumerated list is triage's best
+        # guess at the shape of the decision, and "none of these" is a real answer that
+        # a picker without it silently converts into no answer at all.
+        options.append(
+            f'<label class="pickone"><input type="radio" name="q{index}" value="">'
+            f'<span class="dim">Something else — say what below</span></label>')
+        prompt = (f'<h3>{_md_inline(_e(sub.prompt))}</h3>' if sub.prompt else "")
+        blocks.append(f'<div class="decide-q">{prompt}{"".join(options)}</div>')
+
+    if not subquestions:
+        blocks.append('<p class="note">This card asks in prose rather than offering a '
+                      'picker, so there is nothing to tick — write the answer below.</p>')
+
+    blocks.append('<div class="decide-q"><h3>In your own words</h3>'
+                  '<textarea id="answernote" rows="6" placeholder="Recorded verbatim, '
+                  'as a quote, under your name. Optional when you have ticked '
+                  'something."></textarea></div>')
+
+    settled = decide.open_questions_settled(card.text)
+    # Deliberately three separate buttons rather than one that decides for you. An
+    # answer is not a ticket to `tasks/` — see `decide.write_answer` on
+    # park-over-promote — so recording one and advancing the card are two clicks.
+    acts = (
+        _act("Record the answer",
+             onclick=f"answerCard('{_attr(card.id)}')", primary=True,
+             extra='title="Writes what you ticked into the card\'s ## Thread, dated and '
+                   'signed. The card does not move."')
+        + _act("Re-triage this",
+               onclick=f"post('/api/triage',{{card:'{_attr(card.id)}'}})",
+               extra='title="Opens triage on the card, for when the answer changed its '
+                     'shape enough to need re-scoping."')
+        + _act("Send to tasks", onclick=f"sendToTasks('{_attr(card.id)}')",
+               disabled=not settled,
+               extra='title="' + ("Sets state: tasks and reconciles."
+                                  if settled else
+                                  "Its ## Open questions is not `none` yet, and "
+                                  "card_schema refuses a card in tasks/ with open "
+                                  "questions — answer them on the card first.") + '"')
+        + _work_act(card=card.id, tier=card.tier, worker=card.worker, primary=False)
+    )
+    signed = (f"Signed <code>{_e(who)}</code>, today." if who else
+              '<b class="warn">No <code>[board].decision_attributor</code> in the '
+              'manifest — an answer cannot be recorded until one is declared.</b>')
+    body = ("".join(blocks)
+            + f'<p class="note">{signed} The answer goes in <code>## Thread</code>; '
+              f'the card stays in <code>{_e(card.lane)}/</code> until you move it.</p>')
+    return render_document(root, title=card.id,
+                           subtitle=f"{card.lane}/ · {card.title}",
+                           body=body, acts=acts)
+
+
 def render_document(root: Path, *, title: str, subtitle: str, body: str,
                     acts: str = "") -> str:
     """A card or a diff, framed. `body` is already-safe HTML."""
@@ -2679,12 +2963,28 @@ class Handler(BaseHTTPRequestHandler):
         if path in _RENDER:
             self._send(200, render_page(path, self.root).encode("utf-8"))
             return
+        if path == "api/refresh":
+            # The live refresh, and deliberately **the same bytes as the page** rather
+            # than a purpose-built payload: the client re-renders whichever page it is
+            # on and swaps the regions whose HTML actually differs. A second rendering
+            # path here would be a second thing to keep in step with every section
+            # added, and the first time it fell behind the panel would quietly stop
+            # updating the part nobody remembered to add to it.
+            wanted = parse_qs(parsed.query).get("page", [""])[0]
+            if wanted not in _RENDER:
+                self._send_json(400, {"ok": False, "message": f"no page {wanted!r}"})
+                return
+            self._send(200, render_page(wanted, self.root).encode("utf-8"))
+            return
         if path == "api/body":
             wanted = parse_qs(parsed.query).get("path", [""])[0]
             try:
                 self._send_json(200, {"body": read_body(self.root, wanted)})
             except PanelError as exc:
                 self._send_json(400, {"ok": False, "message": str(exc)})
+            return
+        if path.startswith("decide/"):
+            self._send(200, render_decide(self.root, path[len("decide/"):]).encode("utf-8"))
             return
         if path.startswith("card/"):
             card = board.find(self.root, path[len("card/"):])
@@ -2829,6 +3129,36 @@ class Handler(BaseHTTPRequestHandler):
             card_id = str(body.get("card_id", ""))
             args = ["--card", card_id] + paid
             return f"reviewing {card_id} (pid {spawn_background('drain', args, root)})"
+
+        if path == "api/answer":
+            # No dispatch guard and no `paid`: this spends nothing, starts nothing and
+            # calls no model. It is a person typing into a file, which is the whole
+            # point of the feature — see `decide`.
+            card_id = str(body.get("card_id", ""))
+            picks = [str(p) for p in body.get("picks", [])]
+            note = str(body.get("note", ""))
+            try:
+                return decide.write_answer(root, card_id, picks, note)
+            except decide.DecideError as exc:
+                raise PanelError(str(exc)) from exc
+
+        if path == "api/tasks":
+            # The deliberate second click after an answer. Guarded on the same
+            # condition `card_schema` enforces, so the button cannot turn the board red:
+            # a card whose `## Open questions` is not `none` may not sit in `tasks/`.
+            card_id = str(body.get("card_id", ""))
+            card = board.find(root, card_id)
+            if card is None:
+                raise PanelError(f"no card `{card_id}`")
+            if not decide.open_questions_settled(card.text):
+                raise PanelError(
+                    f"`{card_id}` still has open questions — `card_schema` refuses a "
+                    f"card in tasks/ with any, so answer them on the card first")
+            text = re.sub(r"^state:.*$", "state: tasks", card.text, count=1,
+                          flags=re.MULTILINE)
+            textio.write_text_lf(card.path, text)
+            moved = run_command("reconcile", ["--apply"], root)
+            return f"{card_id} → tasks/ · {_verb(moved)}"
 
         if path == "api/reorder":
             return _verb(run_command("boardcmd", ["reorder", str(body.get("card_id", "")),

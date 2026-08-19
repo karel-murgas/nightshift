@@ -109,6 +109,27 @@ def test_a_lead_tier_chore_is_a_contradiction_and_left_out(tmp_path):
     assert "nothing to decide" in skipped[0].reason
 
 
+def test_a_chore_requiring_another_machine_is_left_out(tmp_path):
+    """`runner.select` has always enforced `requires:`; this did not, and the gap was
+    real rather than tidy. `ad-sound-for-recharge` is `requires: gpu-box` on a laptop
+    with no ComfyUI stack, and the only thing keeping it off this box was that it *also*
+    carried `unattended: false`. Drop that flag — as `card_schema` now demands, since
+    the two are a contradiction — and the batch would have dispatched an audio card on
+    a machine that cannot make audio."""
+    root = _repo(tmp_path, {"id": "artwork", "extra": "requires: gpu-box\n"})
+    _, skipped = chores.select(root)
+    assert len(skipped) == 1 and "requires: gpu-box" in skipped[0].reason
+
+
+def test_a_chore_requiring_a_capability_this_host_declares_is_taken(tmp_path):
+    root = _repo(tmp_path, {"id": "artwork", "extra": "requires: gpu-box\n"})
+    (root / ".ai").mkdir(parents=True, exist_ok=True)
+    (root / ".ai" / "host.json").write_text(
+        '{"capabilities": ["gpu-box"]}', encoding="utf-8")
+    chosen, skipped = chores.select(root)
+    assert [c.id for c in chosen] == ["artwork"] and skipped == []
+
+
 def test_the_batch_limit_holds_and_the_overflow_is_named(tmp_path):
     root = _repo(tmp_path, *[{"id": f"c{n}"} for n in range(5)])
     chosen, skipped = chores.select(root, limit=2)

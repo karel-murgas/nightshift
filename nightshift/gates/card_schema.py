@@ -336,6 +336,20 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
         bad("kind", "`kind: chore` with `tier: lead` — a chore is work with nothing to "
                     "decide; if it needs judgment it is not a chore, so drop the kind or "
                     "route the note to triage")
+    # The same contradiction on the other axis, and it was found the same way: a chore
+    # is dispatched by `chores.execute()` as a batch, which runs with nobody at the
+    # keyboard, so `unattended: false` says the card must never be taken by the only
+    # path that takes chores. `chores.eligible()` does refuse it — but only after
+    # `select()` has already counted it as a candidate, so the card spent a fortnight
+    # sitting under the panel's "Chores" heading beside a `Run chores` button that
+    # could never take it, and reported itself as "left out of this batch" every run.
+    # Caught here instead, where the card is written rather than where it is skipped.
+    if (fields.get("kind") == _board.KIND_CHORE
+            and fields.get("unattended", "").lower() == "false"):
+        bad("unattended", "`kind: chore` with `unattended: false` — a chore is dispatched "
+                          "in a batch that runs with nobody present, so this card could "
+                          "never be taken; if it needs a person at the keyboard it is not "
+                          "a chore, so drop the kind or set the flag true")
     if "verify" in fields and fields["verify"] not in _VERIFY:
         bad("verify", f"`verify: {fields['verify']}` — must be one of {sorted(_VERIFY)}; "
                       f"`settle()` reads it to decide whether a finished card lands in "
