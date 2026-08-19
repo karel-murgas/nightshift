@@ -366,3 +366,41 @@ def test_written_files_are_lf(repo):
     for rel in (".gitattributes", "CLAUDE.md", ".ai/manifest.toml",
                 ".claude/agents/code-thread.md"):
         assert b"\r\n" not in (repo / rel).read_bytes(), rel
+
+
+def test_a_per_machine_maintainer_beats_the_project_wide_one(repo):
+    """Identity belongs to a PERSON, and `[project].maintainer` can hold one
+    answer -- so two people on one repo get one name between them. The maintainer,
+    2026-08-20: *"Imagine two people working on the same project..."* `hosts.json`
+    is already committed and already keyed by hostname, so it is where the second
+    person says their own name without overwriting the first."""
+    import json
+    import socket
+
+    _init(repo)
+    manifest = repo / ".ai" / "manifest.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "[project]", '[project]' + chr(10) + 'maintainer = "Project Default"', 1),
+        encoding="utf-8", newline="")
+    hosts = repo / ".ai" / "hosts.json"
+    config = json.loads(hosts.read_text(encoding="utf-8"))
+    config[socket.gethostname()] = {"maintainer": "This Machine"}
+    hosts.write_text(json.dumps(config, indent=2) + chr(10), encoding="utf-8", newline="")
+
+    from nightshift import update
+    assert init.tokens(repo, update.manifest_tables(repo))["{{maintainer}}"] == "This Machine"
+
+
+def test_an_unconfigured_machine_falls_through_to_the_project(repo):
+    """The fallback chain has to survive a box nobody has configured, or a fresh
+    clone renders a bare token in every charter."""
+    _init(repo)
+    manifest = repo / ".ai" / "manifest.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "[project]", '[project]' + chr(10) + 'maintainer = "Project Default"', 1),
+        encoding="utf-8", newline="")
+
+    from nightshift import update
+    assert init.tokens(repo, update.manifest_tables(repo))["{{maintainer}}"] == "Project Default"

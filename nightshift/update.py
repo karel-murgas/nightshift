@@ -106,6 +106,49 @@ STALE, MISSING, CONFLICT, DECLINED, YOURS, CURRENT, UNTRACKED, FROZEN_V = (
 #: nothing to do, or something only a person can decide.
 APPLIES = (STALE, MISSING)
 
+#: How many surplus lines a copy needs before `--outgoing` mentions it. Not a
+#: confidence threshold — it is the line between *personalisation* and *content*.
+#: Substituting a name or re-pointing a citation nets one or two lines and is
+#: never upstreamable by definition; a rule somebody wrote is a paragraph. Set to
+#: 1 and every install is permanently "ahead" by its own name, which is a report
+#: nobody reads twice.
+OUTGOING_FLOOR = 3
+
+
+def _lines(text: str) -> list[str]:
+    """Split on lines with CRLF normalised — a checkout's line endings are not drift."""
+    return text.replace(chr(13) + chr(10), chr(10)).splitlines()
+
+
+def drift(template: str, current: str) -> tuple[int, int]:
+    """`(ahead, behind)` — surplus lines each side holds that the other does not.
+
+    Counted from `SequenceMatcher` opcodes rather than from a line diff, because
+    the two things this has to tell apart both show up as changed lines. A
+    *substitution* — this project's name for the template's token, a citation
+    re-pointed at a document that exists here — is a `replace` of roughly equal
+    size, and nets nothing on either side. *Content* is a block one side simply
+    has: an `insert`, or a `replace` where one side is far longer. So each opcode
+    contributes only its excess, and personalisation cancels itself out.
+
+    Measured against the five real conflicts this was built for: the two charters
+    carrying rules nobody had upstreamed came out 121 and 73 lines ahead, and the
+    two whose only difference was the maintainer's name and some `§` citations
+    came out 0. That separation is the whole value; a plain changed-line count
+    reports all four as drift and buries the two that matter.
+    """
+    left = _lines(template)
+    right = _lines(current)
+    ahead = behind = 0
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+            None, left, right, autojunk=False).get_opcodes():
+        theirs, ours = i2 - i1, j2 - j1
+        if tag in ("insert", "replace"):
+            ahead += max(0, ours - theirs)
+        if tag in ("delete", "replace"):
+            behind += max(0, theirs - ours)
+    return ahead, behind
+
 
 @dataclass
 class Finding:
@@ -120,10 +163,27 @@ class Finding:
     verdict: str
     #: What the template says today. `None` for a path we no longer ship.
     staged: str | None = None
+    #: Lines this copy has that the template does not, and vice versa. Both are
+    #: read — by `report` and by `--outgoing` — which is the bar the note above
+    #: sets for carrying a field at all.
+    ahead: int = 0
+    behind: int = 0
 
     @property
     def actionable(self) -> bool:
         return self.verdict in APPLIES
+
+    @property
+    def upstreamable(self) -> bool:
+        """Whether this copy carries enough the template lacks to be worth a look.
+
+        Deliberately independent of `verdict`, and that independence is the whole
+        feature. `declined` answers *"do I want the template's version here"* and
+        goes silent once answered — which is exactly how a rule written in a
+        project stops being visible to the framework. The outgoing question is a
+        different question and is never silenced by the incoming answer.
+        """
+        return self.ahead >= OUTGOING_FLOOR
 
 
 @dataclass
@@ -135,6 +195,18 @@ class Survey:
     settings: str | None = None
     settings_added: int = 0
     settings_removed: int = 0
+    #: `rel -> (ahead, behind)`, filled during the loop and stamped onto the
+    #: findings at the end. Kept here rather than computed twice.
+    drifts: dict[str, tuple[int, int]] = field(default_factory=dict)
+
+    @property
+    def outgoing(self) -> list[Finding]:
+        """Files carrying content the template lacks, worst first.
+
+        Never filtered by verdict — see `Finding.upstreamable`.
+        """
+        return sorted((f for f in self.findings if f.upstreamable),
+                      key=lambda f: f.ahead, reverse=True)
 
     def by(self, *verdicts: str) -> list[Finding]:
         return [f for f in self.findings if f.verdict in verdicts]
@@ -253,6 +325,7 @@ def survey(root: Path) -> Survey:
             continue
         now = init.content_hash(current)
         ahead = init.content_hash(staged)
+        out.drifts[rel] = drift(staged, current)
         if now == was:
             out.findings.append(
                 Finding(rel, CURRENT if ahead == was else STALE, staged))
@@ -269,6 +342,8 @@ def survey(root: Path) -> Survey:
             out.findings.append(Finding(rel, verdict, staged))
 
     _survey_settings(out, root)
+    for finding in out.findings:
+        finding.ahead, finding.behind = out.drifts.get(finding.rel, (0, 0))
     return out
 
 
@@ -441,6 +516,28 @@ def diff(finding: Finding, root: Path) -> str:
         fromfile=f"{finding.rel} (yours)", tofile=f"{finding.rel} (nightshift)"))
 
 
+def outgoing_blocks(finding: Finding, root: Path) -> str:
+    """The passages this copy has and the template does not, with nothing else.
+
+    Not a diff: a diff of a personalised file is mostly the personalisation, which
+    is the noise this whole view exists to drop. Only the blocks where our side is
+    longer are printed, each headed by where it sits, so the question a reader is
+    actually answering — *is this a rule the framework should carry?* — is the only
+    one on screen.
+    """
+    current = _on_disk(root / finding.rel) or ""
+    ours, theirs = _lines(current), _lines(finding.staged or "")
+    out: list[str] = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+            None, theirs, ours, autojunk=False).get_opcodes():
+        if tag not in ("insert", "replace") or (j2 - j1) <= (i2 - i1):
+            continue
+        out.append(chr(10) + f"  {finding.rel}:{j1 + 1} — {j2 - j1} line(s) here, "
+                   f"{i2 - i1} in the template")
+        out.extend(f"    {line}" for line in ours[j1:j2])
+    return chr(10).join(out)
+
+
 def take(found: Survey, finding: Finding) -> str:
     """Overwrite with the template, keeping the replaced file beside it.
 
@@ -598,6 +695,28 @@ _HEADINGS = {
 }
 
 
+def _outgoing_report(found: Survey) -> str:
+    """The list. Prints the honest nothing rather than an empty section."""
+    rows = found.outgoing
+    nl = chr(10)
+    if not rows:
+        return (nl + "  Nothing outgoing — no installed file carries a passage "
+                "the template lacks." + nl)
+    rule = "=" * 66
+    body = [nl + rule + nl + "  outgoing — yours, not the template's" + nl + rule + nl]
+    for finding in rows:
+        body.append(f"  {finding.ahead:>5} line(s)  {finding.rel}")
+    body.append(
+        nl + "  These are passages this project wrote and the framework never "
+        "received." + nl +
+        "  `--outgoing <path>` prints them. Some are rightly local — a project's "
+        "own vocabulary," + nl +
+        "  its own citations — and some are rules the framework should carry; "
+        "telling those" + nl +
+        "  apart is a judgment, which is why nothing here decides it for you." + nl)
+    return nl.join(body)
+
+
 def report(found: Survey) -> None:
     for verdict, (heading, mark) in _HEADINGS.items():
         rows = found.by(verdict)
@@ -650,6 +769,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="record that you chose your version of one file")
     parser.add_argument("--merge", metavar="PATH", default=None,
                         help="dispatch an agent to merge one file's two versions")
+    parser.add_argument("--outgoing", metavar="PATH", nargs="?", const="", default=None,
+                        help="what your copies carry that the templates do not. Bare: "
+                             "the list. With a PATH: the passages themselves")
     parser.add_argument("--permission-mode", default=None,
                         help="what the merge agent may do. Needs at least acceptEdits")
     args = parser.parse_args(argv)
@@ -667,6 +789,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
+        if args.outgoing is not None:
+            if args.outgoing:
+                text = outgoing_blocks(find(found, args.outgoing), root)
+                print(text if text else
+                      "  nothing here that the template does not already have")
+                return 0
+            print(_outgoing_report(found))
+            return 0
         if args.diff:
             text = diff(find(found, args.diff), root)
             print(text if text else "  identical — nothing between the two versions")
@@ -689,6 +819,9 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"\n{'═' * 66}\n  nightshift update\n  {root}\n{'═' * 66}")
     report(found)
+    if found.outgoing:
+        print(f"  {len(found.outgoing)} file(s) carry passages the templates do not "
+              f"— `--outgoing` to see which.")
     if not args.apply:
         if found.changes:
             print(f"\n  {found.changes} change(s) available — `--apply` to take them.\n")

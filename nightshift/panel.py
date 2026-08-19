@@ -2707,6 +2707,36 @@ def _system_files(ctx: Context) -> str:
                     sec_id="projectfiles")
 
 
+def _system_outgoing(ctx: Context) -> str:
+    """What this install carries that the templates never received.
+
+    On the System page and not behind a flag, because the direction it watches is
+    the one that failed silently for four months: `update` answered "should I take
+    the template's version" every time anyone looked, and nothing ever asked
+    whether a rule written here should go the other way. A report nobody runs is
+    the same as no report, and the person who would run it is the one already
+    reading this page.
+    """
+    if not installed(ctx.root):
+        return ""
+    try:
+        found = update.survey(ctx.root)
+    except update.UpdateError:
+        return ""
+    rows = [
+        _row(marker="^", body=(
+            f"<b>{_e(f.rel)}</b><p class='note'>{f.ahead} line(s) here that the "
+            f"template does not have</p>"),
+             acts=_act("Read", href=f"/update-outgoing?path={f.rel}"))
+        for f in found.outgoing
+    ]
+    return _section(
+        "Outgoing", len(rows), "".join(rows),
+        note="passages this project wrote that the framework never received",
+        empty="Nothing here that the templates do not already carry.",
+        sec_id="outgoing")
+
+
 #: The read-only and repair verbs, as one table rather than five near-identical
 #: blocks. `(id, label, button, blurb, dispatches)` — `dispatches` is what decides
 #: whether the account veto applies, because it is what decides whether it spends.
@@ -2800,6 +2830,7 @@ def _render_system(ctx: Context) -> str:
     return "".join([
         _system_setup(ctx),
         _system_files(ctx),
+        _system_outgoing(ctx),
         _system_verbs(ctx),
         _system_danger(ctx),
     ])
@@ -3304,6 +3335,23 @@ class Handler(BaseHTTPRequestHandler):
                 subtitle="yours (-) against nightshift's (+)",
                 body=f"<pre>{_e(text or 'identical')}</pre>",
                 acts=acts).encode("utf-8"))
+            return
+        if path == "update-outgoing":
+            # The other direction. Not a diff: a diff of a personalised file is
+            # mostly the personalisation, and the question here is only "is this a
+            # rule the framework should carry".
+            target = parse_qs(parsed.query).get("path", [""])[0]
+            try:
+                found = update.survey(self.root)
+                finding = update.find(found, target)
+                text = update.outgoing_blocks(finding, self.root)
+            except update.UpdateError as exc:
+                self._send_text(400, str(exc))
+                return
+            self._send(200, render_document(
+                self.root, title=f"{finding.rel} · outgoing",
+                subtitle=f"{finding.ahead} line(s) here that the template does not have",
+                body=f"<pre>{_e(text or 'nothing outgoing')}</pre>").encode("utf-8"))
             return
         self._send_text(404, "not found")
 
