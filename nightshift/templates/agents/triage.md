@@ -184,6 +184,18 @@ worker (§5). The honest output is *two* cards: an actionable one for
 The leash: **a card you invented must name the note it came from and say why it was
 invented.** Without that you are not triaging, you are making up work.
 
+## Never hard-wrap a card's prose
+
+Write every paragraph, bullet and picker option as **one continuous source line**, however
+long. Cards live in `{{board}}/` and are read in Obsidian, whose editor shows each source line
+as its own row instead of reflowing the paragraph — so a manual ~90-column wrap makes a card
+read as broken short rows, and a `` `code` `` span that opens on one line and closes on a
+later one does not survive the split at all: CommonMark closes a code span at the next
+backtick regardless of the newline between, so the wrapped span leaks unescaped text and
+Obsidian stops rendering the rest of the file. This is the opposite of the hard-wrap-for-diffs
+convention most repos use for their docs — deliberately, because those are not edited in
+Obsidian and cards are. Full reasoning: `.claude/skills/manage-board/SKILL.md`.
+
 ## Every card you write must pass the schema
 
 Run `python -m nightshift.gates.run card_schema` before you finish. A card the schema rejects is
@@ -218,8 +230,9 @@ happened at scale: on 2026-07-23 the board held ten `tasks/` cards and **none** 
 dispatchable, because the field had been read as "no human needs to check this."
 
 It does not mean that. The human checkpoints are **downstream** of the runner — a card that
-runs overnight lands in `review/` for Claude and then `testing/` for {{maintainer}} before it reaches
-`{{integration}}` (§11). the origin project's maintainer, 2026-07-23: *"it is OK if the results need to be
+runs overnight lands in `review/` for Claude and then `testing/` for {{maintainer}} before it
+reaches the integration branch — whose name is `.ai/manifest.toml`'s `[branches].integration`
+and nowhere else (§11), because a project may rename it and prose will not follow. the origin project's maintainer, 2026-07-23: *"it is OK if the results need to be
 manually verified."* A judgment half in `## Acceptance` is **normal and expected**; §3 has
 you split acceptance in two precisely because both halves are ordinary. "The badge is
 legible at hub scale" and "3 damage feels right in play" are `testing/`'s job, not reasons
@@ -277,17 +290,79 @@ depicts, which is `## Subject` / `## Style`, and no prose "how" is judged for a 
 The card is a briefing for a cold worker, so it kills *re-discovery* — which file matters,
 what the dead ends were, the constraint you found the hard way. That is worth its length.
 What is **not** worth keeping is thinking-out-loud: restating a rejected option three times,
-narrating the search. Write the conclusion and the one fact that supports it. A finding
-earns its place by saving the worker a tool call; a paragraph that only shows your work
-does not.
+narrating the search. Write the conclusion and the one fact that supports it.
 
-## What the gates already prove — do not hand-check these
+### The bar: would the worker get it *wrong*?
+
+**A finding earns its place if the worker would plausibly get it wrong — not merely spend a
+tool call getting it.**
+
+The old bar was *"a finding earns its place by saving the worker a tool call"*, and it was
+calibrated for a worker that would be a local model, where a call was expensive and might
+come back wrong. Neither half holds now, and the second is the one that matters: **the worker
+has to open those files to edit them regardless.** An enumerated list of call sites is therefore
+discovered twice and written down once for nothing — and worse, the written copy is the one
+that can be stale, because a grep runs against the tree as it is today while your list was
+true when you wrote it.
+
+So the dividing line is **not** cost, it is **reliability**:
+
+- *"This number is what it is because {{maintainer}} decided so on <date>"* — **survives.** No
+  amount of reading the codebase yields it; it exists only because a conversation happened.
+- *"Here are the 14 call sites"* — **does not.** Grep finds those and does not hallucinate
+  them. It is strictly more accurate than you are.
+
+**You may name files; you must not transcribe or enumerate what a grep answers.** Naming the
+three modules a change lives in saves an aimless sweep and cannot be wrong in a way that
+matters. A table of fifty `file:line` rows is not a finding.
+
+### Three shapes that qualify
+
+Everything that earns its place is one of these, and each is a line or two, not a section:
+
+1. **A decision, with its owner and date.** The number that was picked, the option rejected
+   and why, the constraint accepted. Unrecoverable from the source.
+2. **An invariant the worker cannot see from one site.** A property of the whole set,
+   established by work the worker will not redo — which is what licenses a mechanical sweep
+   instead of dozens of judgment calls.
+3. **A trap — where the obvious action is the wrong one.** The highest-value kind, because it
+   is defined by the worker getting it wrong. Name the file, state the hazard, stop: *"that
+   test reads as broken but is the specification of the old behaviour — re-point it, do not
+   delete it."*
+
+If you cannot state a finding without a table, ask whether the table is the finding or
+whether the property it demonstrates is. It is almost always the property.
+
+## What the gates and the charters already prove — this section outranks the thoroughness ones
 
 `card_schema` checks required fields, `id`/filename agreement, `state`/lane agreement,
 tier validity, unknown fields, that `worker:` and `recipe:` resolve to real files, that
 `tasks/` has no live open question, and that a parked card has a `## Question`.
-`nightshift/reconcile.py` handles the file move. Spend your attention on whether the card is
-*right*, not on whether it is *well-formed*.
+`nightshift/reconcile.py` handles the file move.
+
+**This section outranks the thoroughness ones.** The sections above demand thoroughness — be
+no worse than a chat, anchor a magnitude in its neighbours, batch every decision. They govern
+**what the card decides**. This one governs **what the card writes down**, and the two stop
+pulling against each other once the split is visible: *be exhaustive about the judgment,
+silent about the mechanics.*
+
+Two things you therefore do not write:
+
+**1. Do not hand-check what a gate proves.** If a card names a gate, that naming is the whole
+of it; bullets restating the gate's own criteria underneath are a second, hand-copied
+specification that drifts from the first while both look authoritative.
+
+**2. Do not restate a charter.** A checker's standing criteria live in its charter, once, and
+it applies them whether or not your card repeats them. *"Gates green, full pytest green"*,
+*"every criterion has a test that fails without the change"*, *"the memory files are
+updated"* — those are `code-reviewer.md`'s standing questions and `code-thread.md`'s
+close-out, and a copy on the card is a copy that goes stale.
+
+**The test is one question: would this criterion read identically on the next card of the
+same kind?** If yes, it is not this card's criterion. Delete it and let the charter carry it.
+What the card owes is the part no charter could know.
+
+Spend your attention on whether the card is *right*, not on whether it is *well-formed*.
 
 ## Your checker boundary
 

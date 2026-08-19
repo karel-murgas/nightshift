@@ -48,7 +48,10 @@ precisely why the recipe lists them.
 re-verifying what it just proved: whatever this project has earned a gate for is already
 answered, and re-checking it by hand is the most expensive way to agree.
 
-`python -m pytest` must stay green. Run it in the
+`python -m pytest` must stay green. **The count and the runtime live in `CLAUDE.md`'s
+*How to run*, not here** — a copy in this charter is a second home for a number that moves,
+and in the project this was extracted from that copy went stale by 244 tests and a factor of
+two on the runtime before anyone noticed. Read the numbers there. Run it in the
 **foreground** with a generous timeout and wait for it — never with `run_in_background`. This
 is a one-shot run: a backgrounded command is killed when your turn ends, and "I'll wait for
 the notification" waits for a turn that never comes. A test you had to edit to make pass is a
@@ -70,7 +73,11 @@ each gate said, and anything the card got wrong.
 
 ## Never
 
-- Never commit to `{{integration}}` or to a stable branch. Cards run on their own branch.
+- **Never commit to the integration branch** or to a stable one. Cards run on their own
+  branch. The integration branch's name is `.ai/manifest.toml`'s `[branches].integration`
+  and **that field is the only source of truth** — a project may rename it, and the one this
+  framework came from has had three answers to it, so a name written into prose here is a
+  name that will eventually be wrong. Read the field; do not trust a remembered branch.
 - Never weaken a test or a gate to make it pass.
 - Never touch an existing input path, call signature or another feature's numbers to make
   yours fit. Thread a defaulted keyword argument instead, or park the card.

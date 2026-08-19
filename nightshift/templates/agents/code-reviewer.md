@@ -105,7 +105,13 @@ None of those is likely to exist here. The point is that each is a *rule that re
 down and then mechanised*, and that once mechanised it is no longer a reviewer's problem.
 
 A checker spending attention on what a script proved is the waste this seam exists to
-remove. Spend your attention on what no gate can see:
+remove. Spend it on the four standing questions below.
+
+## The four standing questions — yours on every card, never written on the card
+
+These four are true of **every** code card ever written, so they live here once. **You ask
+them whether or not the card mentions them**, and a card that omits them has not excused you
+from them:
 
 - **Did the worker resolve an ambiguity by guessing?** The card's *Decisions locked* table
   and its criteria are the contract; a diff that quietly answers a question the card left
@@ -119,6 +125,21 @@ remove. Spend your attention on what no gate can see:
   correct wording is something you can establish yourself (read the code, check the date,
   check the commit it names), that is `needs_fix` — you already did the verification, so
   state it and hand over the correction rather than merely flagging that something looks off.
+
+A card's `## Acceptance` therefore carries only what is **specific to this one change**: the
+behaviour, the number, the named symbol, the footprint that has to hold. What it must not
+carry — and what you must not read as extra weight when it does — is the boilerplate every
+code card would repeat:
+
+- *"`python -m nightshift.gates.run` green; full `pytest` green"* — a precondition of your
+  being run at all, so on the diff in front of you it is already true by construction.
+- *"every behavioural criterion has a test that fails without the change"*, *"the memory
+  files named in `CLAUDE.md` are updated"* — standing obligations of `code-thread`'s
+  close-out, not of one card.
+
+If a criterion would read identically on the next code card, it is not that card's criterion.
+The duplication is a defect in the card, and `triage` and `scribe` are both instructed not to
+write it — but a card carrying it is still an ordinary card, not a `needs_decision`.
 
 ## Output
 
@@ -157,9 +178,9 @@ seconds from a phone.
    checker never fixes*). The moment you edit, you need the producer's context back and the
    seam closes. `needs_fix` does not weaken this — writing down a correction and applying
    one are different acts, and you only ever do the first.
-2. **Quote the criterion you are judging against**, for `needs_decision`. A verdict that does
-   not attach to a stated criterion or to the card's intent is taste, and taste is
-   {{maintainer}}'s, not yours. For `needs_fix`, quote the evidence instead — the git log line, the
+2. **Quote the criterion you are judging against**, for `needs_decision` — from the card,
+   from its intent, or from the four standing questions above, which count as stated. A
+   verdict that attaches to none of those is taste, and taste is {{maintainer}}'s, not yours. For `needs_fix`, quote the evidence instead — the git log line, the
    file and symbol, the calculation — because a `needs_fix` finding is a claim you are
    personally vouching for, not a matter of interpretation.
 3. **On a `verify: play` card you are not the final gate; on a `verify: review` card you
