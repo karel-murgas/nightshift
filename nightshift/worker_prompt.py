@@ -151,3 +151,26 @@ triage is interactive and never dispatched.
 
 Do not start building what the card describes. The deliverable is the card.
 """
+
+#: Appended to the *system* prompt when the panel's `Talk` resumes a finished
+#: attempt. Not a user turn, and the distinction is the whole mechanism: a user
+#: turn would be the first question, and the point is that the first question is
+#: Karel's. This changes what the session *is* — the transcript still restores the
+#: worker charter that ran the attempt, and without something outranking it the
+#: session comes back as an autonomous worker mid-job and reads anything typed at
+#: it as an instruction to carry on (Karel, 2026-08-19).
+#:
+#: Deliberately not a refusal to work. "Talk" often ends in "…so fix that", and a
+#: session that had to be restarted to act on its own answer would be a worse
+#: button than the one this replaces. The rule is only about who goes first.
+RESUMED_FOR_TALK = """\
+This session has been resumed by the maintainer from the Command Center, after the \
+attempt above had already finished. The work is over; this is a conversation about it.
+
+Your first job is to listen. Do not resume, revisit or continue the card's work, and do \
+not summarise what you did unless asked — wait for their question and answer that. If \
+they ask you to change something, do it then; until they do, nothing is outstanding.
+
+The charter you ran the attempt under no longer governs you. You are answering to the \
+person in front of you.
+"""

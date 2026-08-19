@@ -354,8 +354,14 @@
   }
   .row:last-child { border-bottom: 0; }
   .row:hover { background: var(--panel); }
-  .row.drag-over { box-shadow: inset 0 2px 0 0 var(--phosphor); }
-  .row.dragging { opacity: 0.4; }
+  /* The dragged row is itself the indicator, outlined top and bottom where it
+     currently sits — see the `dragover` handler for why there is no separate
+     insertion line any more. */
+  .row.dragging {
+    opacity: 0.55;
+    background: var(--panel);
+    box-shadow: inset 0 2px 0 0 var(--phosphor), inset 0 -2px 0 0 var(--phosphor);
+  }
 
   .grip {
     font-family: var(--mono);
@@ -456,6 +462,10 @@
     cursor: pointer;
   }
   .override input { accent-color: var(--amber); margin: 0; }
+  /* The tier override changes which model a session opens on. Amber is reserved
+     for the one tick that waives a spending rule; this one costs less, not more. */
+  .override.soft { color: var(--ink-dim); }
+  .override.soft input { accent-color: var(--phosphor); }
 
   .group-label {
     font-family: var(--mono);
@@ -658,6 +668,28 @@
   }
   #toast.bad { border-color: var(--ember); color: var(--ember); }
 
+  /* Deliberately outside `.shell`, beside the toast: `applyRefresh` swaps the rail,
+     the sections and the footer, and a countdown living in any of them would differ
+     from the server's copy every single second — which would force a swap on every
+     tick and undo the "identical -> do nothing" rule the whole refresh is built on. */
+  #ticker {
+    position: fixed;
+    bottom: 1rem;
+    left: 1rem;
+    z-index: 200;
+    padding: 0.3rem 0.55rem;
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+    color: var(--ink-faint);
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    font-variant-numeric: tabular-nums;
+  }
+  #ticker:hover { color: var(--phosphor); border-color: var(--phosphor-d); }
+  #ticker.now { color: var(--phosphor); }
+
   @media (max-width: 58rem) {
     .shell { grid-template-columns: 1fr; }
     .rail { position: static; max-height: none; border-right: 0; border-bottom: 1px solid var(--line); gap: 1.2rem; }
@@ -681,6 +713,7 @@
   </main>
 </div>
 <div id="toast"></div>
+<div id="ticker" hidden title="How long until this page re-reads the board. Click to do it now."></div>
 <script>
 /* Every action is a POST to a verb that already works from a command line; this
    file only decides which one and shows what it said. */
@@ -858,12 +891,34 @@ document.addEventListener("dragend", function (e) {
   var list = dragList(held) || dragList(e.target);
   if (held) { held.classList.remove("dragging"); }
   if (!list) { held = null; return; }
-  list.querySelectorAll(".drag-over").forEach(function (r) { r.classList.remove("drag-over"); });
   held = null;
   renumber(list);
   persistOrder(list);
 });
 
+/* ---- the row shows its own destination ----
+
+   This drew a separate insertion line: `.drag-over` on the row under the cursor,
+   styled `inset 0 2px 0 0` — a bar across that row's **top** edge, unconditionally.
+   The insertion below is conditional: past the halfway mark the row is moved to
+   *after* the target, not before it. So for every drop in the bottom half of a row
+   the line was drawn one position above where the card actually went, and Karel
+   read the line rather than the rows, which is what a line is for. Reported
+   2026-08-19: "I see the green line at the right position ... but the card lands
+   one position below that."
+
+   The line is gone rather than corrected, because a second indicator was never
+   needed. `insertBefore` already moves the real row on every `dragover`, so the
+   destination is on screen as the thing that will be saved — `persistOrder` reads
+   this same DOM order on `dragend`. Outlining that row (`.row.dragging`) therefore
+   cannot disagree with the outcome: it *is* the outcome. A drawn line is a second
+   claim about where the card will land, and a second claim is a thing that can be
+   wrong.
+
+   The early return on `over === held` is also load-bearing now. Once the row has
+   been moved under the cursor, the next `dragover` often targets `held` itself;
+   with a separate marker that left the old row lit and the line froze mid-drag,
+   which is the other half of "sometimes the position is not clear". */
 document.addEventListener("dragover", function (e) {
   if (!held) { return; }
   var list = dragList(held);
@@ -871,8 +926,6 @@ document.addEventListener("dragover", function (e) {
   e.preventDefault();
   var over = e.target.closest(".row");
   if (!over || over === held || over.classList.contains("no-grip")) { return; }
-  list.querySelectorAll(".drag-over").forEach(function (r) { r.classList.remove("drag-over"); });
-  over.classList.add("drag-over");
   var box = over.getBoundingClientRect();
   var after = (e.clientY - box.top) > box.height / 2;
   over.parentNode.insertBefore(held, after ? over.nextSibling : over);
@@ -1092,8 +1145,15 @@ var REFRESH_MS = 10000;
    about yet, so a swap has to carry it across by hand. Kept deliberately short: if
    this list grows long it is a sign the page is holding state that belongs on disk. */
 function carryState(oldRegion, newRegion) {
-  /* The Tonight ticks and the paid-override, by the id the server already writes. */
-  oldRegion.querySelectorAll("input[type=checkbox]").forEach(function (was) {
+  /* The Tonight ticks and the paid-override, by the id the server already writes.
+
+     `[data-server]` opts a control *out*, and the tier override is the first to
+     need it. Carrying is right for a tick the board has never heard of — the
+     server's re-render cannot know it — and exactly wrong for one that posted
+     itself the moment it changed: the freshly rendered value is then the better
+     answer, and copying the old one over it would make a second tab's swap quietly
+     revert a choice made in the first. */
+  oldRegion.querySelectorAll("input[type=checkbox]:not([data-server])").forEach(function (was) {
     var now = null;
     if (was.id) {
       now = newRegion.querySelector("#" + CSS.escape(was.id));
@@ -1118,14 +1178,37 @@ function carryState(oldRegion, newRegion) {
   });
 }
 
-/* Narrow by design — see the header. A region is busy only while you are actually
-   working inside it; merely having scrolled to it is not busy, or nothing would
-   ever update. */
+/* Busy means **there is user state in here that a swap would destroy**, which is a
+   narrower thing than "the focus is in here" and the difference was a real freeze.
+   Any focus counted, so selecting an account left the focus on the `<select>` that
+   had just posted — and `#statusrail`, the region holding that select, was busy
+   from then until you clicked somewhere else. The account had changed on the server
+   and every subsequent tick skipped the one region that would have said so. Karel,
+   2026-08-19: "When I change an account, the information doesn't refresh until I
+   reload the page (or go to other)."
+
+   So the test is what the focused control holds rather than where it is. A textarea
+   or a text field holds words nobody else has; a slider mid-drag holds a position
+   the server has never seen. A checkbox, a radio and a `<select>` hold none — the
+   ticks are carried across by `carryState`, and a select's value was posted the
+   instant it changed, so the swapped-in copy is the *better* answer. A button holds
+   nothing at all.
+
+   `this.blur()` on the two selects is belt to this braces: it also restores the
+   focus ring to somewhere sensible after a control replaces itself. */
+function holdsUnsavedInput(node) {
+  if (!node || node === document.body) { return false; }
+  if (node.isContentEditable) { return true; }
+  if (node.tagName === "TEXTAREA") { return true; }
+  if (node.tagName !== "INPUT") { return false; }
+  var kind = (node.type || "text").toLowerCase();
+  return ["checkbox", "radio", "button", "submit", "reset"].indexOf(kind) === -1;
+}
+
 function regionBusy(region) {
   if (held && region.contains(held)) { return true; }
   var focused = document.activeElement;
-  if (focused && focused !== document.body && region.contains(focused)) { return true; }
-  return false;
+  return !!(focused && holdsUnsavedInput(focused) && region.contains(focused));
 }
 
 /* Swap one region in place, honouring the three decisions in the header. Returns
@@ -1206,22 +1289,75 @@ var REFRESHABLE = ["now", "verify", "inbox", "ideas", "run", "system"];
 function softRefresh() {
   var page = currentPage();
   if (REFRESHABLE.indexOf(page) === -1) { return Promise.resolve(); }
+  /* Rescheduled from *here*, not from the timer that called it — an action's own
+     `post` refresh 400 ms after a click is a real read of the board, and leaving
+     the clock alone would have run another one 400 ms later. The countdown is the
+     same clock, so it cannot promise a tick that has already been brought forward. */
+  scheduleRefresh(REFRESH_MS);
   return fetch("/api/refresh?page=" + encodeURIComponent(page))
     .then(function (r) { return r.ok ? r.text() : null; })
     .then(function (html) { if (html) { applyRefresh(html); } })
     .catch(function () { /* the panel was closed, or the box went to sleep: say nothing */ });
 }
 
-/* Hidden tabs do not poll. Each tick is a board scan plus a couple of `git`
-   subprocesses on the server side, and three forgotten tabs would triple that
-   forever for nobody's benefit. */
-setInterval(function () {
-  if (document.visibilityState === "visible") { softRefresh(); }
-}, REFRESH_MS);
+/* ---- the countdown ------------------------------------------------------
+
+   A page that renews itself silently is a page you cannot tell from a frozen one,
+   which is exactly the confusion the account-selector freeze above caused: the
+   symptom of a region being skipped and the symptom of nothing having changed are
+   the same symptom. Karel, 2026-08-19: "Maybe it should even show some small
+   countdown to see, when information will be renewed."
+
+   `setTimeout` chained rather than `setInterval`, because the countdown and the
+   refresh have to be one clock. With a fixed interval, any early refresh — every
+   successful action triggers one — left the badge counting down to a tick that had
+   already happened, and a countdown that lies is worse than none.
+
+   Clicking it refreshes now. Cheap to offer, since that is the same call the timer
+   makes, and it is the natural gesture once a number is on screen. */
+var nextRefreshAt = 0;
+
+function scheduleRefresh(delay) {
+  clearTimeout(window._refreshTimer);
+  nextRefreshAt = Date.now() + delay;
+  /* Hidden tabs do not poll. Each tick is a board scan plus a couple of `git`
+     subprocesses on the server side, and three forgotten tabs would triple that
+     forever for nobody's benefit — so a hidden tab re-arms the clock and reads
+     nothing, and `visibilitychange` brings it back the moment you return. */
+  window._refreshTimer = setTimeout(function () {
+    if (document.visibilityState === "visible") { softRefresh(); }
+    else { scheduleRefresh(REFRESH_MS); }
+  }, delay);
+}
+
+function drawTicker() {
+  var el = document.getElementById("ticker");
+  if (!el) { return; }
+  if (REFRESHABLE.indexOf(currentPage()) === -1) { el.hidden = true; return; }
+  el.hidden = false;
+  if (document.visibilityState !== "visible") {
+    el.className = "";
+    el.textContent = "paused · tab hidden";
+    return;
+  }
+  var left = Math.ceil((nextRefreshAt - Date.now()) / 1000);
+  el.className = left <= 0 ? "now" : "";
+  el.textContent = left <= 0 ? "reading the board…" : "refresh in " + left + "s";
+}
+
+document.getElementById("ticker").onclick = function () { softRefresh(); };
+/* Four times a second, so the number never sits a whole second behind the clock it
+   is reporting. It writes one short string into one element outside every swapped
+   region, so it costs nothing the refresh has to care about. */
+setInterval(drawTicker, 250);
 
 document.addEventListener("visibilitychange", function () {
   if (document.visibilityState === "visible") { softRefresh(); }
+  drawTicker();
 });
+
+scheduleRefresh(REFRESH_MS);
+drawTicker();
 </script>
 </body>
 </html>
