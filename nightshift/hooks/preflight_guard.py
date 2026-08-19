@@ -8,10 +8,10 @@ branch's work outward — and denies the tool call when the commit being publish
 has no preflight receipt.
 
 **It is instant, and that is the design.** The expensive checks (pytest, the
-gate suite) ran once, in the preflight, and left a receipt keyed by SHA. This
-hook only resolves the relevant SHA and looks it up. A hook that itself ran the
-suite would run it on every push attempt, which is exactly the cost the receipt
-exists to avoid.
+gate suite) ran once, in the preflight, and left a receipt. This hook only
+resolves the relevant SHA and looks it up. A hook that itself ran the suite would
+run it on every push attempt, which is exactly the cost the receipt exists to
+avoid.
 
 **Which SHA it checks:**
 
@@ -19,8 +19,14 @@ exists to avoid.
 * `git merge <ref>` — the tip of `<ref>`. You validate a feature branch, then
   switch to the integration branch to merge it; the receipt for the feature tip
   is what must exist, not one for the integration branch you are sitting on. The
-  receipt file keeps the last several SHAs precisely so this cross-branch lookup
-  resolves.
+  receipt file keeps the last several commits precisely so this cross-branch
+  lookup resolves.
+
+**A lookup matches on content, not only on identity** (`preflight.is_validated`).
+The merge above and the push that follows it are two different SHAs over one tree,
+so a SHA-only receipt denied the second and demanded the whole run again over
+byte-identical files. What this hook asks is therefore "has this content been
+validated", which is the question it was always trying to ask.
 
 **Which REPOSITORY it checks: the one the command acts on, never the session's.**
 
