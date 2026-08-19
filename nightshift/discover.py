@@ -9,15 +9,18 @@ Three confidence levels, and they are not decoration — `init` treats each one
 differently:
 
 * `HIGH` — a fact read off the tree. Accepted unless the operator objects.
-* `CONFIRM` — a guess. `init` never writes one without being told to. Three fields
-  are here, and they split into two kinds:
+* `CONFIRM` — a guess. `init` never writes one without being told to. Five fields
+  are here (it said three until 2026-08-20, having missed both
+  `board.decision_attributor` and `project.maintainer` joining), and they split into
+  two kinds:
 
   - **`branches.integration` is required and is asked every time**, including under
     `--yes`, because nothing downstream works without it and a plausible wrong
     answer is worse than none. Dungeoneer is the cautionary case: `dev` is *stable*
     there and is a forbidden base, which no heuristic would ever guess.
-  - **`memory.orientation` and `layering.forbid` are optional**, so the honest
-    non-interactive answer is to omit them. Each is a *claim* — "these are the files
+  - **`memory.orientation`, `layering.forbid`, `board.decision_attributor` and
+    `project.maintainer` are optional**, so the honest non-interactive answer is to
+    omit them. Each is a *claim* — "these are the files
     every session loads", "this dependency runs one way" — and a claim nobody made
     is not a default. Until 2026-08-02 both were written silently: `init` on a fresh
     repo emitted a `[[layering.forbid]]` rule its operator had never seen, and this
@@ -343,6 +346,29 @@ def tier_binding_doc(root: Path) -> Proposal:
                     "no document carries a ```tier-binding block yet — init writes one")
 
 
+def maintainer(root: Path) -> Proposal:
+    """The name the templates address the operator by — always CONFIRM.
+
+    Proposed from `git config user.name` because that is the only name this tool
+    can see, and refused HIGH for the same reason `decision_attributor` is: git's
+    user.name is whatever the operator typed into a commit identity once, and on
+    the origin project that is the GitHub handle `karel-murgas`. A charter reading
+    *"a choice only karel-murgas can make"* is not wrong so much as nobody's actual
+    name, and `update` re-renders every template on every survey — so an unconfirmed
+    guess here is not a one-off blemish, it is permanent drift against the installed
+    copies (2026-08-20, five conflicts in the Dungeoneer install).
+    """
+    name = _git(root, "config", "user.name")
+    if not name:
+        return Proposal("project.maintainer", None, CONFIRM,
+                        "no git user.name to guess from — declare the name the agent "
+                        "charters should address you by")
+    return Proposal("project.maintainer", name, CONFIRM,
+                    f"guessed from git user.name — every `{{{{maintainer}}}}` in a charter "
+                    f"or skill becomes `{name}`, so confirm it is a name and not a "
+                    f"commit handle")
+
+
 # --- [board] ----------------------------------------------------------------
 
 
@@ -602,6 +628,7 @@ def survey(root: Path) -> list[Proposal]:
         integration_branch(root, stable_name),
         *worker_config(root, str(name.value) if name.value else None),
         tier_binding_doc(root),
+        maintainer(root),
         decision_attributor(root),
         memory_orientation(root, doc_list),
         budget(root),

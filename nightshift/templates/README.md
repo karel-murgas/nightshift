@@ -32,8 +32,19 @@ because a template that needs a dependency to read is a template nobody audits.
 | `{{package}}` | `[project].source_dirs[0]` |
 | `{{project}}` | `[project].name` |
 | `{{integration}}` | `[branches].integration` |
-| `{{maintainer}}` | `git config user.name` |
+| `{{maintainer}}` | `[project].maintainer`, falling back to `git config user.name` |
 | `{{hostname}}` | `socket.gethostname()` |
+| `{{board}}` | `[board].root` |
+| `{{private_lane}}` | `board.PRIVATE_LANE` |
+| `{{decision_attributor}}` | `[board].decision_attributor`, falling back to the git handle |
+| `{{board_columns}}` | generated from `board.LANES`, in flow order |
+
+`{{maintainer}}` reads the declared name before git's because `user.name` is a
+*commit identity* and is frequently a handle rather than a name — and this token is
+how a charter addresses the person. That only started to matter once `update`
+existed: it re-renders every template on every survey, so an unconfirmed guess is not
+a blemish on one freshly written file, it is a permanent conflict against every
+installed copy, reappearing on each future template move.
 
 An unrendered `{{...}}` left in a written file is a bug, and
 `test_templates.py::test_no_token_survives_rendering` fails on it — a template

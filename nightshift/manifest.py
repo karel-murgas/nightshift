@@ -102,8 +102,18 @@ class Project:
     package's own checkout is the exception, and pointing those gates at
     `source_dirs` instead would quietly adopt "no subprocess result may be
     discarded" as a rule about a project's application code. See `gates/scope.py`.
+
+    `maintainer` is the name the templates address the operator by — every
+    `{{maintainer}}` in a charter or a skill. It falls back to `git config
+    user.name`, which is what it was read from outright until 2026-08-20, and that
+    is a *commit identity*, not a name: Dungeoneer's is `karel-murgas`, so every
+    re-render addressed him by his GitHub handle. Harmless on a first install,
+    because nobody compares a fresh file to anything — but `update` re-renders on
+    every survey, so the wrong name reappeared as conflict noise in five files at
+    once and would have again on every future template move.
     """
     name: str = ""
+    maintainer: str = ""
     source_dirs: tuple[str, ...] = ()
     extra_source_dirs: tuple[str, ...] = ()
     tooling_dirs: tuple[str, ...] = ()
@@ -507,7 +517,8 @@ def _unknown(table: dict, known: tuple[str, ...], where: str) -> list[Problem]:
 _KNOWN_TABLES = ("project", "tests", "branches", "board", "worker", "memory",
                  "layering", "i18n", "dead_code", "audit", "accounts", "tiers")
 _KNOWN: dict[str, tuple[str, ...]] = {
-    "project": ("name", "source_dirs", "extra_source_dirs", "tooling_dirs", "doc_files"),
+    "project": ("name", "maintainer", "source_dirs", "extra_source_dirs",
+                "tooling_dirs", "doc_files"),
     "tests": ("dir", "parallel", "timeout_s"),
     "branches": ("integration", "stable", "forbidden_extra"),
     "board": ("root",),
@@ -633,6 +644,7 @@ def parse(data: dict, root: Path) -> Manifest:
         root=root,
         project=Project(
             name=str(project_t.get("name", "") or root.name),
+            maintainer=str(project_t.get("maintainer", "") or ""),
             source_dirs=_as_str_tuple(project_t.get("source_dirs", []), "project.source_dirs"),
             extra_source_dirs=_as_str_tuple(project_t.get("extra_source_dirs", []),
                                             "project.extra_source_dirs"),

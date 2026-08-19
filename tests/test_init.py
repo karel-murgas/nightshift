@@ -132,6 +132,29 @@ def test_the_maintainer_token_comes_from_git(repo):
     assert "Alex Rivera" in charter
 
 
+def test_a_declared_maintainer_beats_the_git_identity(repo):
+    """git's `user.name` is a commit identity, and on the origin project it is the
+    handle `karel-murgas` — so the charters addressed him by it, and `update`
+    re-rendered it into five conflicts (2026-08-20). A declared name wins."""
+    _init(repo)
+    manifest = repo / ".ai" / "manifest.toml"
+    declared = manifest.read_text(encoding="utf-8").replace(
+        "[project]", '[project]{}maintainer = "Alex"'.format(chr(10)), 1)
+    manifest.write_text(declared, encoding="utf-8", newline="")
+
+    from nightshift import update
+    tokens = init.tokens(repo, update.manifest_tables(repo))
+    assert tokens["{{maintainer}}"] == "Alex"
+
+
+def test_an_undeclared_maintainer_still_falls_back_to_git(repo):
+    """The fallback is what keeps a bare token out of a charter on an install that
+    never answered the question."""
+    _init(repo)
+    from nightshift import update
+    assert init.tokens(repo, update.manifest_tables(repo))["{{maintainer}}"] == "Alex Rivera"
+
+
 def test_dated_quotes_keep_their_original_attribution(repo):
     """The templates carry verbatim quotes from the origin project, and
     re-signing one with whoever installs this would be a lie inside a document

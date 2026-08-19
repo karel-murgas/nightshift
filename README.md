@@ -588,7 +588,7 @@ marker for the same purpose.
 <!-- generated:manifest-fields -->
 | Table | Fields | Purpose |
 |---|---|---|
-| `[project]` | `name=''`, `source_dirs=()`, `extra_source_dirs=()`, `tooling_dirs=()`, `doc_files=('CLAUDE.md',)` | What the code under test is called and where it lives. |
+| `[project]` | `name=''`, `maintainer=''`, `source_dirs=()`, `extra_source_dirs=()`, `tooling_dirs=()`, `doc_files=('CLAUDE.md',)` | What the code under test is called and where it lives. |
 | `[tests]` | `dir='tests'`, `parallel=True`, `timeout_s=0` | `dir` is where pytest is pointed. |
 | `[branches]` | `integration=None`, `stable='main'`, `forbidden_extra=()` | `integration` has no default on purpose (module docstring). |
 | `[board]` | `root='Board'` | Lane names are framework config, not project facts (D5), so they are not here — only where the board lives, and who signs a decision on it. |
