@@ -273,3 +273,20 @@ def test_discovery_reads_nightshift_itself_correctly():
     assert by_key["tests.parallel"] is True
     assert by_key["worker.fence_env"] == "NIGHTSHIFT_FENCE_ALLOW"
     assert by_key["worker.harvest_dirs"] is None, "no assets dir here, so nothing to harvest"
+
+
+def test_the_maintainer_is_proposed_from_git_but_never_high(tmp_path):
+    """A commit identity is not a name — the origin project's `user.name` is the
+    handle `karel-murgas`, and `{{maintainer}}` is how a charter addresses a person.
+    Confirmed, never assumed."""
+    _fixtures.git_init(tmp_path, branch="main", name="Alex Rivera")
+    proposal = discover.maintainer(tmp_path)
+    assert proposal.key == "project.maintainer"
+    assert proposal.value == "Alex Rivera"
+    assert proposal.confidence == discover.CONFIRM
+
+
+def test_the_maintainer_proposal_is_in_the_survey(tmp_path):
+    """A proposal nothing surveys is a field `init` never offers."""
+    _fixtures.git_init(tmp_path, branch="main", name="Alex Rivera")
+    assert "project.maintainer" in {p.key for p in discover.survey(tmp_path)}

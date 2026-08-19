@@ -226,7 +226,12 @@ def tokens(root: Path, tables: dict[str, dict]) -> dict[str, str]:
         "{{package}}": str(packages[0]) if packages else name,
         "{{project}}": str(name),
         "{{integration}}": str(tables.get("branches", {}).get("integration") or "the integration branch"),
-        "{{maintainer}}": _git_user(root),
+        # Declared wins over git. `git config user.name` is a *commit identity* and
+        # is frequently a handle rather than a name (`karel-murgas`), and this token
+        # is how a charter addresses the person — so a project that says what to call
+        # them says it once, here. Falls back to git so an install that never
+        # declares one still renders a concrete name instead of a bare token.
+        "{{maintainer}}": str(project.get("maintainer") or "") or _git_user(root),
         "{{hostname}}": socket.gethostname(),
         "{{board}}": board_root,
         "{{private_lane}}": PRIVATE_LANE,
