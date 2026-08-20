@@ -185,10 +185,15 @@ code { font-family:var(--mono); font-size:.88em; background:var(--panel-2);
 .d-box  { fill:#0D120F; stroke:#1D2721; stroke-width:1.5; }
 .d-box.me { stroke:#E8B54F; stroke-width:2; }
 .d-box.ok { stroke:#4FE88A; stroke-width:2; }
+.d-box.fail { stroke:#E0614F; stroke-width:2; }
 .d-t { font-family:var(--sans); font-weight:700; font-size:13px; fill:#C4D2C6; }
 .d-t.am { fill:#E8B54F; } .d-t.ph { fill:#4FE88A; }
 .d-s { font-family:var(--sans); font-weight:400; font-size:11px; fill:#7C8C80; }
 .d-m { font-family:var(--mono); font-weight:700; font-size:9.5px; letter-spacing:.16em; fill:#55645A; }
+/* Verdikt revize se píše k čáře, ne do vlastního rámečku — jinak by na
+   snímku stály dvě krabice pro jednu věc (verdikt a složka, kam vede). */
+.d-v { font-family:var(--mono); font-weight:700; font-size:10.5px; fill:#C4D2C6; }
+.d-v.ph { fill:#4FE88A; } .d-v.am { fill:#E8B54F; } .d-v.fail { fill:#E0614F; }
 .d-flow { fill:none; stroke:#55645A; stroke-width:1.5; }
 .d-flow.ph { stroke:#2E9459; }
 .d-flow.am { stroke:#E8B54F; stroke-dasharray:5 4; }
@@ -363,10 +368,10 @@ pre .p { color:var(--phosphor); }
 <section class="slide">
   <div class="inner">
     <p class="kicker">II · cesta nápadu</p>
-    <h2 class="sm">Od věty v mobilu k hotové kartě.</h2>
+    <h2 class="sm">Od jedné věty k hotové kartě.</h2>
     <div class="flowwrap">
-      <svg class="flow" viewBox="0 0 700 214" role="img"
-           aria-label="Cesta nápadu. Vlevo ideas — moje soukromé nápady, ze kterých promotnutím vzniká poznámka v inbox. Poznámku přečte třídič a přiřadí jí jednu ze čtyř cest: chore, scribe, inline nebo triage. Chore, scribe a triage vedou do tasks, kde karta čeká na moje schválení. Inline drží člověk a dělá se u klávesnice.">
+      <svg class="flow" viewBox="0 0 700 272" role="img"
+           aria-label="Cesta nápadu. Vlevo ideas — moje soukromé nápady, ze kterých promotnutím vzniká poznámka v inbox. Poznámku přečte třídič a přiřadí jí jednu ze čtyř cest: chore, scribe, inline nebo triage. Chore, scribe a triage vedou do tasks, kde karta čeká na moje schválení. Inline drží člověk a dělá se u klávesnice. Triage může místo karty vrátit i jen otázku, která jde rovnou do needs-decision/.">
         <defs>
           <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
             <path d="M0 0 L10 5 L0 10 z" fill="#55645A"/>
@@ -380,23 +385,23 @@ pre .p { color:var(--phosphor); }
         </defs>
 
         <!-- ideas -->
-        <rect class="d-box me" x="8" y="16" width="132" height="52" rx="4"/>
+        <rect class="d-box me" x="8" y="16" width="132" height="58" rx="4"/>
         <text class="d-m" x="22" y="36" fill="#E8B54F">IDEAS/</text>
         <text class="d-s" x="22" y="53">soukromé — sem</text>
         <text class="d-s" x="22" y="65">nesmí ani skript</text>
 
         <!-- inbox -->
-        <rect class="d-box me" x="8" y="106" width="132" height="52" rx="4"/>
+        <rect class="d-box me" x="8" y="106" width="132" height="58" rx="4"/>
         <text class="d-m" x="22" y="126" fill="#E8B54F">INBOX/</text>
         <text class="d-s" x="22" y="143">jedna věta, bez formy,</text>
         <text class="d-s" x="22" y="155">klidně z mobilu</text>
 
-        <path class="d-flow am" d="M74 68 V104" marker-end="url(#aa)"/>
+        <path class="d-flow am" d="M74 74 V104" marker-end="url(#aa)"/>
         <text class="d-s" x="82" y="91">„promote“</text>
 
         <!-- třídič -->
         <path class="d-flow" d="M140 132 H184" marker-end="url(#a)"/>
-        <rect class="d-box ok" x="186" y="98" width="128" height="68" rx="4"/>
+        <rect class="d-box ok" x="186" y="98" width="128" height="72" rx="4"/>
         <text class="d-t ph" x="200" y="120">Třídič</text>
         <text class="d-s" x="200" y="137">přečte poznámky</text>
         <text class="d-s" x="200" y="149">a nic jiného</text>
@@ -409,11 +414,11 @@ pre .p { color:var(--phosphor); }
         <path class="d-flow am" d="M344 132 H390" marker-end="url(#aa)"/>
         <path class="d-flow ph" d="M344 132 V186 H390" marker-end="url(#ap)"/>
 
-        <rect class="d-box" x="392" y="4" width="130" height="44" rx="4"/>
+        <rect class="d-box ok" x="392" y="4" width="130" height="44" rx="4"/>
         <text class="d-t" x="404" y="24">chore</text>
         <text class="d-s" x="404" y="39">tenká karta, do dávky</text>
 
-        <rect class="d-box" x="392" y="56" width="130" height="44" rx="4"/>
+        <rect class="d-box ok" x="392" y="56" width="130" height="44" rx="4"/>
         <text class="d-t" x="404" y="76">scribe</text>
         <text class="d-s" x="404" y="91">jen obálka, bez pátrání</text>
 
@@ -421,9 +426,15 @@ pre .p { color:var(--phosphor); }
         <text class="d-t am" x="404" y="130">inline</text>
         <text class="d-s" x="404" y="145">já, u klávesnice</text>
 
-        <rect class="d-box" x="392" y="164" width="130" height="44" rx="4"/>
+        <rect class="d-box ok" x="392" y="164" width="130" height="44" rx="4"/>
         <text class="d-t" x="404" y="184">triage</text>
         <text class="d-s" x="404" y="199">drahá cesta: čte kód</text>
+
+        <path class="d-flow am" d="M457 208 V224" marker-end="url(#aa)"/>
+        <text class="d-s" x="464" y="219">vzácně</text>
+        <rect class="d-box me" x="392" y="224" width="160" height="38" rx="4"/>
+        <text class="d-m" x="404" y="240" fill="#E8B54F" style="font-size:8px;letter-spacing:.1em">NEEDS-DECISION/</text>
+        <text class="d-s" x="404" y="253">otázka, ne karta</text>
 
         <!-- Tři strojové cesty se slévají na jednu páteř a vcházejí do tasks/
              jedním hrotem; inline si drží vlastní jantarový vstup, protože je
@@ -447,6 +458,7 @@ pre .p { color:var(--phosphor); }
       <span><i class="am"></i>drží člověk</span>
       <span><i></i>dělá stroj</span>
       <span>Třídič nečte kód. To je celý trik.</span>
+      <span>Triage vzácně vrátí jen otázku — rovnou do needs-decision/.</span>
     </div>
   </div>
 </section>
@@ -455,27 +467,145 @@ pre .p { color:var(--phosphor); }
 <section class="slide">
   <div class="inner">
     <p class="kicker">II · proč třídič vůbec je</p>
-    <h2 class="sm">Dvě poznámky stály hodinu.<br>Protože jeden agent dělal dvě práce.</h2>
-    <p class="say">Zjistit, <b>co ta práce je</b>, vyžaduje číst kód. <b>Napsat kartu</b>, která to popisuje, ne. Dřív to dělal jeden agent najednou — takže <em>každá</em> poznámka platila cenu té drahé půlky.</p>
+    <h2 class="sm">Čtyři cesty ke kartě.</h2>
+    <p class="say">Dle typu úkolu.</p>
     <div class="mechs">
       <div class="mech">
         <div class="h">chore<small>dávkou přes noc</small></div>
-        <p>Poznámka už řekla, co změnit a jak má vypadat výsledek. Jedna zjevná změna, špatný výsledek je vidět. <b>Ověřuje se po dávce, ne po kusu</b> — osm chore je jeden běh testů, ne osm.</p>
+        <p>Jednoduché zadání. Dělá se v dávce se společnou kontrolou na konci</p>
       </div>
       <div class="mech">
-        <div class="h">inline<small>já, hned</small></div>
-        <p>Není co dopisovat, tak se z ní stane karta rovnou. Ne kvůli evidenci — aby <b>i moje vlastní práce byla na nástěnce vidět</b> a počítala se.</p>
+        <div class="h">inline<small>Interaktivně</small></div>
+        <p>Složitější věci, kde je třeba mojí spolupráce.</p>
       </div>
       <div class="mech">
         <div class="h">scribe<small>levný agent</small></div>
-        <p>Poznámka je rozmyšlená a chybí jí jen forma. Nečte kód. Když na to nestačí, <b>vrátí to na triage</b> — místo aby si kritéria vymyslel.</p>
+        <p>Samonosné zadání, vyplní se jen formality pro automatickou práci.</p>
       </div>
       <div class="mech">
         <div class="h">triage<small>drahý agent</small></div>
-        <p>Ve hře je rozvětvení, které nejde ani položit bez čtení kódu. <b>Jediná cesta, která to čtení platí</b> — a spouští se vědomě, ne automaticky.</p>
+        <p>Pro složitější úkoly. Čte kód a definuje postup levnějšímu modelu.</p>
       </div>
     </div>
-    <p class="foot"><b>Rozhodnutí se zapíše do poznámky</b> jako <code>route:</code>. Takže se netřídí pokaždé znovu — druhý průchod stojí nulu, a poznámku poslanou na triage nikdo omylem nespustí přes noc.</p>
+    <p class="foot">Rozhodnutí se zapíše jako <code>route:</code> — podruhé se netřídí.</p>
+  </div>
+</section>
+
+<!-- 6b ── co se děje dál ───────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">II · co se děje dál</p>
+    <h2 class="sm">Karta v <code>tasks/</code>. Co s ní.</h2>
+    <div class="flowwrap">
+      <svg class="flow" viewBox="0 0 930 495" role="img"
+           aria-label="Co se děje s kartou po tasks. Karta se dělá jedním ze tří způsobů — u klávesnice, v dávce přes den, nebo v noci bez dozoru. Všechny tři projdou kontrolami a testy. Inline pak jde rovnou k výsledku bez revize, protože u toho byl Karel. Dávku i noční práci čte revize — u dávky najednou, u karty samotnou. Revize má tři verdikty, psané u čar: ok jde buď rovnou do done, nebo u karet s verify play nejdřív do testing, kde to Karel vyzkouší; needs_fix vrací kartu zpět do tasks na další pokus a po třetím marném pokusu padá do failed; needs_decision odloží kartu do needs-decision, a jakmile Karel odpoví, vrací se taky do tasks.">
+        <defs>
+          <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#55645A"/>
+          </marker>
+          <marker id="bb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#E8B54F"/>
+          </marker>
+          <marker id="bp" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#2E9459"/>
+          </marker>
+          <marker id="bf" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#E0614F"/>
+          </marker>
+        </defs>
+
+        <!-- tasks -->
+        <rect class="d-box me" x="8" y="143" width="110" height="54" rx="4"/>
+        <text class="d-m" x="20" y="164" fill="#E8B54F">TASKS/</text>
+        <text class="d-s" x="20" y="183">čeká na práci</text>
+
+        <!-- tři způsoby práce; inline je jantarový, protože ho drží člověk -->
+        <path class="d-flow am" d="M118 170 H128 V44 H138" marker-end="url(#bb)"/>
+        <path class="d-flow ph" d="M118 170 H138" marker-end="url(#bp)"/>
+        <path class="d-flow ph" d="M118 170 H128 V296 H138" marker-end="url(#bp)"/>
+
+        <rect class="d-box me" x="138" y="16" width="130" height="56" rx="4"/>
+        <text class="d-t am" x="150" y="38">u klávesnice</text>
+        <text class="d-s" x="150" y="55">inline, hned</text>
+
+        <rect class="d-box ok" x="138" y="142" width="130" height="56" rx="4"/>
+        <text class="d-t" x="150" y="164">dávka přes den</text>
+        <text class="d-s" x="150" y="181">chore, do noci</text>
+
+        <rect class="d-box ok" x="138" y="268" width="130" height="56" rx="4"/>
+        <text class="d-t" x="150" y="290">noc bez dozoru</text>
+        <text class="d-s" x="150" y="307">scribe, triage</text>
+
+        <!-- všechny tři do kontrol, každá vlastním hrotem -->
+        <path class="d-flow am" d="M268 44 H283 V155 H298" marker-end="url(#bb)"/>
+        <path class="d-flow ph" d="M268 170 H298" marker-end="url(#bp)"/>
+        <path class="d-flow ph" d="M268 296 H283 V185 H298" marker-end="url(#bp)"/>
+
+        <rect class="d-box ok" x="298" y="142" width="120" height="56" rx="4"/>
+        <text class="d-t" x="310" y="164">kontroly</text>
+        <text class="d-s" x="310" y="181">+ testy, zelené</text>
+
+        <!-- inline obchází revizi a připojuje se rovnou k výstupní páteři -->
+        <path class="d-flow am" d="M358 142 V100 H580"/>
+        <text class="d-s" x="368" y="94" fill="#E8B54F">inline: bez revize</text>
+
+        <path class="d-flow ph" d="M418 170 H448" marker-end="url(#bp)"/>
+
+        <rect class="d-box ok" x="448" y="142" width="110" height="56" rx="4"/>
+        <text class="d-t ph" x="460" y="164">Revize</text>
+        <text class="d-s" x="460" y="181">karta, nebo dávka</text>
+
+        <!-- ok ─ nahoru k výsledku -->
+        <path class="d-flow ph" d="M558 170 H580 V44 H660" marker-end="url(#bp)"/>
+        <text class="d-v ph" x="588" y="140">ok</text>
+        <text class="d-s" x="588" y="36" fill="#E8B54F">verify: play</text>
+
+        <rect class="d-box me" x="660" y="16" width="110" height="56" rx="4"/>
+        <text class="d-m" x="672" y="38" fill="#E8B54F">TESTING/</text>
+        <text class="d-s" x="672" y="55">hraju to</text>
+
+        <path class="d-flow ph" d="M770 44 H800" marker-end="url(#bp)"/>
+
+        <rect class="d-box ok" x="800" y="16" width="110" height="56" rx="4"/>
+        <text class="d-m" x="812" y="38" fill="#4FE88A">DONE/</text>
+        <text class="d-s" x="812" y="55">hotovo</text>
+
+        <!-- ok u karty, která se nehraje, jde do done rovnou -->
+        <path class="d-flow ph" d="M620 44 V95 H855 V72" marker-end="url(#bp)"/>
+        <text class="d-s" x="640" y="112">verify: review — bez testing</text>
+
+        <!-- needs_fix ─ dolů a zpátky do tasks -->
+        <path d="M503 198 V350 H70 V197" marker-end="url(#bp)"
+              style="fill:none;stroke:#2E9459;stroke-dasharray:5 4;stroke-width:1.5"/>
+        <text class="d-v ph" x="300" y="342">needs_fix → další pokus</text>
+
+        <!-- a když ani třetí pokus nepohne, rovnou dolů do failed -->
+        <path d="M503 350 V393" marker-end="url(#bf)"
+              style="fill:none;stroke:#E0614F;stroke-dasharray:5 4;stroke-width:1.5"/>
+        <text class="d-v fail" x="513" y="376">po 3. pokusu</text>
+
+        <rect class="d-box fail" x="443" y="395" width="120" height="48" rx="4"/>
+        <text class="d-m" x="455" y="415" fill="#E0614F">FAILED/</text>
+        <text class="d-s" x="455" y="432">větší problém</text>
+
+        <!-- needs_decision ─ dolů do složky, a po mé odpovědi zpátky -->
+        <path class="d-flow am" d="M558 170 H580 V296 H620" marker-end="url(#bb)"/>
+        <text class="d-v am" x="588" y="250">needs_decision</text>
+
+        <rect class="d-box me" x="620" y="268" width="160" height="56" rx="4"/>
+        <text class="d-m" x="632" y="289" fill="#E8B54F" style="font-size:8px;letter-spacing:.1em">NEEDS-DECISION/</text>
+        <text class="d-s" x="632" y="307">čeká na mě</text>
+
+        <path d="M700 324 V460 H30 V197" marker-end="url(#bb)"
+              style="fill:none;stroke:#E8B54F;stroke-dasharray:5 4;stroke-width:1.5"/>
+        <text class="d-s" x="280" y="476" fill="#E8B54F">odpověděl jsem → zpět do tasks/</text>
+      </svg>
+    </div>
+    <div class="legend">
+      <span><i class="am"></i>drží člověk</span>
+      <span><i></i>dělá stroj</span>
+      <span>Inline nejde přes revizi — byl jsem u toho. Chore se revidují jako celá dávka, ne karta po kartě.</span>
+    </div>
   </div>
 </section>
 
@@ -503,7 +633,7 @@ pre .p { color:var(--phosphor); }
 <section class="slide">
   <div class="inner">
     <p class="kicker">III · command center</p>
-    <h2 class="sm">Šest stránek. Jedna otázka na každou.</h2>
+    <h2 class="sm">Šest stránek. Každá zodpovídá jednu otázku.</h2>
     <div class="cc">
       <div class="cc-rail">
         <div class="cc-mark">nightshift<span>dungeoneer · test</span></div>
@@ -525,7 +655,7 @@ pre .p { color:var(--phosphor); }
         </div>
       </div>
     </div>
-    <p class="say"><b>Now</b> — co čeká na mě. <b>Verify</b> — co si mám zahrát. <b>Inbox</b> — poznámky a jejich cesty. <b>Ideas</b> — soukromá hromádka. <b>Run</b> — co právě běží a jak dopadla noc. <b>System</b> — instalace a údržba.</p>
+    <p class="say"><b>Now</b> — co čeká na mě. <b>Verify</b> — co mám otestovat. <b>Inbox</b> — poznámky a jejich cesty. <b>Ideas</b> — backlog nápadů. <b>Run</b> — co právě běží a jak dopadl běh. <b>System</b> — instalace a údržba.</p>
     <p class="foot">Je to <b>lokální stránka nad jedním repozitářem</b> — pustí se dvojklikem, běží u mě na počítači, nic neposílá ven. A funguje <b>ještě před instalací</b>: první, co se v ní dá udělat, je nainstalovat nightshift.</p>
   </div>
 </section>
@@ -536,7 +666,7 @@ pre .p { color:var(--phosphor); }
     <p class="kicker">III · a čím není</p>
     <h2 class="sm">Server, který sám neumí nic.</h2>
     <ul class="plain">
-      <li><span class="mark ok">→</span><span><b>Každé tlačítko je příkaz, který bych napsal i ručně.</b> Panel nedrží žádnou vlastní logiku — jen spustí <code>python -m nightshift.&lt;něco&gt;</code>. Kdyby zítra shořel, workflow běží dál z příkazové řádky.</span></li>
+      <li><span class="mark ok">→</span><span><b>Každé tlačítko je příkaz, který bych napsal i ručně.</b> Panel nedrží žádnou vlastní logiku — jen spustí <code>python -m nightshift.&lt;něco&gt;</code>. Workflow může klidně běže z příkazové řádky.</span></li>
       <li><span class="mark ok">→</span><span><b>Žádný chat.</b> Je to spouštěč, evidence a výpis. Když je potřeba si promluvit, otevře terminál s běžnou session — a sám do ní nenapíše ani řádek.</span></li>
       <li><span class="mark ok">→</span><span><b>Žádný jazykový model uvnitř.</b> Číst stav nástěnky je aritmetika nad soubory. Všechno, co potřebuje model, je podproces, který panel odpálí a nečeká na něj.</span></li>
       <li><span class="mark am">!</span><span><b>A tohle jsme se naučili až provozem.</b> Tlačítko „roztřiď vše“ zafungovalo dokonale a vypadalo, že nedělá nic — výstup šel do koše. Úspěch a okamžitá smrt byly z prohlížeče <b>k nerozeznání.</b> Dneska každý spuštěný proces nechá záznam <em>dřív, než vůbec vznikne.</em></span></li>
@@ -556,7 +686,7 @@ pre .p { color:var(--phosphor); }
       </div>
       <div class="mech">
         <div class="h">Kontroly<small>hlídač na každé pravidlo</small></div>
-        <p><b>43</b> malých skriptů, každý hlídá jedno pravidlo. Běží po každé úpravě souboru, celé za ~18 s. <b>Co umí ohlídat skript, nemá zůstat v próze.</b></p>
+        <p><b>43</b> malých skriptů, každý hlídá jedno pravidlo. Běží po každé úpravě souboru, celé za ~7 s. <b>Co umí ohlídat skript, nemá zůstat v próze.</b></p>
       </div>
       <div class="mech">
         <div class="h">Log oprav<small>motor celé věci</small></div>
@@ -564,10 +694,38 @@ pre .p { color:var(--phosphor); }
       </div>
       <div class="mech">
         <div class="h">Revize<small>čtvrtý pár očí</small></div>
-        <p>Hotový diff čte agent, který <b>neviděl zadání ani úvahy</b> toho, kdo ho psal — jen kritéria a repozitář. Vrací jeden ze tří verdiktů.</p>
+        <p>Hotový diff čte agent, který <b>neviděl zadání ani úvahy</b> toho, kdo ho psal — jen kritéria a repozitář. Vrací <b>ok</b>, <b>needs_fix</b>, nebo <b>needs_decision</b>.</p>
       </div>
     </div>
     <p class="say">Vlastní kopie projektu na disku pro každý úkol (<code>worktree</code>) je pátá, ale nudná: dva úkoly si nepřepíšou soubory a hlavní větev zůstane nedotčená až do konce.</p>
+  </div>
+</section>
+
+<!-- 10b ── testy, rychlost ─────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">IV · testy — rychlost je vlastnost</p>
+    <h2 class="sm">Pomalý test motivuje ho obcházet.</h2>
+    <p class="say">Testy, které trvají moc dlouho, <em>zdržují</em> — a člověk se jim snaží vyhýbat. Rychlost proto není detail, je to podmínka.</p>
+    <div class="duo">
+      <div class="panel">
+        <div class="big">Nightshift: 1&nbsp;018 s → 174 s <small style="font-size:.6em">(5,9×)</small></div>
+        <ul>
+          <li>Každý test si stavěl <b>vlastní git repozitář</b> — <code>git init</code>, commit, znovu a znovu.</li>
+          <li>Dnes: jedna šablona, postavená <b>jednou za proces</b>, a <code>copytree</code> na test.</li>
+          <li>Nová kontrola hlídá, aby se ruční <code>git init</code> v testu už nevrátil.</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <div class="big">Dungeoneer: 263 s → 94 s <small style="font-size:.6em">(2,8×)</small></div>
+        <ul>
+          <li><code>pytest -n auto --dist loadfile</code> — paralelně, po souborech, ne napříč nimi.</li>
+          <li><code>auto</code> je <b>ohraničené volnou pamětí</b>, ne počtem jader.</li>
+          <li>Bez toho stropu run jednou <b>spadl s celým systémem</b> — dneska ~50–115 s podle toho, kolik paměti je zrovna volno.</li>
+        </ul>
+      </div>
+    </div>
+    <p class="foot">Dvě různé techniky — sdílená fixtura a paralelní běh — se stejným efektem: <b>rychlý test se pustí častěji, a tak chytí víc.</b></p>
   </div>
 </section>
 
@@ -580,7 +738,7 @@ pre .p { color:var(--phosphor); }
       <div class="cls">
         <div class="top"><span class="pct">35&nbsp;%</span><span class="nm">„Odvozeno, neověřeno“</span></div>
         <div class="track"><i style="width:35%"></i></div>
-        <p>Tvrzení o kódu, které vzniklo úvahou místo pohledu do souboru. Zdaleka nejčastější třída — a dělá ji stroj i člověk. Za čtyři týdny povyrostla, ne zmenšila.</p>
+        <p>Tvrzení o kódu, které vzniklo úvahou místo pohledu do souboru. Zdaleka nejčastější třída — a dělá ji stroj i člověk. Za čtyři týdny povyrostla, ne se zmenšila.</p>
       </div>
       <div class="cls">
         <div class="top"><span class="pct">14&nbsp;%</span><span class="nm">„Kontrola přestala kontrolovat“</span></div>
@@ -593,9 +751,14 @@ pre .p { color:var(--phosphor); }
         <p>Kód se zavolal, neudělal nic a nikomu to nedošlo — protože se nic nerozbilo.</p>
       </div>
     </div>
+    <p class="say">A nejdůležitější číslo: <em>kdo chybu našel</em> — dřív, než napáchala škodu.</p>
+    <div class="grid" style="grid-template-columns:repeat(3,1fr)">
+      <div class="cell"><span class="n">45&nbsp;%</span><span class="l">našel <b>Claude</b> sám, při práci</span></div>
+      <div class="cell"><span class="n">27&nbsp;%</span><span class="l">chytil <b>stroj</b> — test, audit, kontrola</span></div>
+      <div class="cell"><span class="n hot">24&nbsp;%</span><span class="l">jsem musel odchytit <b>já</b></span></div>
+    </div>
     <p class="foot"><b>Ale tohle je to číslo, na kterém záleží: u 37&nbsp;% zápisů dnes existuje kontrola, která tu chybu chytí.</b>
-       Dalších 32&nbsp;% je mechanicky chytatelných a hlídač na ně zatím není — to je backlog, ne výmluva. 17&nbsp;% potřebuje úsudek a hlídač mít nikdy nebude.
-       <b>Kdo chybu našel:</b> Claude 45&nbsp;%, já 24&nbsp;%, stroj (test, audit, kontrola) 27&nbsp;%.</p>
+       Dalších 32&nbsp;% je mechanicky chytatelných a hlídač na ně zatím není — to je backlog, ne výmluva. 17&nbsp;% potřebuje úsudek a hlídač mít nikdy nebude.</p>
   </div>
 </section>
 
@@ -604,12 +767,12 @@ pre .p { color:var(--phosphor); }
   <div class="inner">
     <p class="kicker">IV · revize<span class="new">tento týden</span></p>
     <h2 class="sm">Dva verdikty nestačily.</h2>
-    <p class="say">Revize uměla říct jen <b>„v pořádku“</b> nebo <b>„na tohle potřebuju Karla“</b>. Jenže spousta nálezů je <em>vada s jedinou správnou odpovědí</em> — a ta budila člověka úplně zbytečně.</p>
+    <p class="say">Revize uměla říct jen <b>„v pořádku“</b> nebo <b>„na tohle potřebuju Karla“</b>. Jenže spousta nálezů je <em>vada s jedinou správnou odpovědí</em> — a ta si žádala člověka úplně zbytečně.</p>
     <div class="verdicts">
       <div class="vd ok">
         <span class="to">→ testing/</span>
         <b>ok</b>
-        <p>Nic, co by potřebovalo můj úsudek, než se to sloučí.</p>
+        <p>Nic, co by potřebovalo můj úsudek před mergem.</p>
       </div>
       <div class="vd fix">
         <span class="to">→ zpět na další pokus</span>
@@ -650,7 +813,7 @@ pre .p { color:var(--phosphor); }
     <div class="grid">
       <div class="cell"><span class="n hot">82</span><span class="l">hotových karet — <b>22 z nich za posledních deset dní</b></span></div>
       <div class="cell"><span class="n">3&nbsp;875</span><span class="l">testů celkem — 1 939 hra, 1 936 nástroj</span></div>
-      <div class="cell"><span class="n hot">43</span><span class="l">kontrol, ~18 s, po každé úpravě souboru</span></div>
+      <div class="cell"><span class="n hot">43</span><span class="l">kontrol, ~7 s, po každé úpravě souboru</span></div>
       <div class="cell"><span class="n">167</span><span class="l">zapsaných oprav, 15 tříd chyb</span></div>
       <div class="cell"><span class="n hot">37&nbsp;%</span><span class="l">oprav už hlídá kontrola, která je chytí</span></div>
       <div class="cell"><span class="n warm">57&nbsp;%</span><span class="l">ze 77 pravidel něco hlídá — <b>43&nbsp;% je pouhá próza</b></span></div>
@@ -671,7 +834,7 @@ pre .p { color:var(--phosphor); }
     <ul class="plain">
       <li><span class="mark">✕</span><span>Hlídač četl soubor, který se mezitím přestěhoval jinam. <b>Byl zelený a nečetl nic</b> — tři týdny.</span></li>
       <li><span class="mark">✕</span><span>Nástroj, kterým jsem ty chyby počítal, viděl jen polovinu archivu. Na největší třídu chyb hlásil <b>„0“</b>.</span></li>
-      <li><span class="mark">✕</span><span>Karta měla značku v zápisu, který parser neuměl přečíst. <b>35 kontrol zelených</b> — a karta přitom vůbec neměla jít do noci.</span></li>
+      <li><span class="mark">✕</span><span>Karta měla v zápisu neplatnou značku. Parser ji tiše přeskočil — a s ní i pravidlo, které mělo tuhle kartu z noci vyřadit. <b>35 kontrol bylo zelených</b>, ale žádná z nich zrovna tohle nehlídala.</span></li>
       <li><span class="mark">✕</span><span>Stránka panelu psala u <b>každé</b> poznámky „nezařazeno“. Zařazení proběhlo správně, jen se do souboru nikdo nepodíval. <b>Dokonalá práce k nerozeznání od žádné.</b></span></li>
     </ul>
     <p class="say">Všechny našel až člověk. <em>Zelená není důkaz</em> — je to jen absence nálezu.</p>
@@ -684,7 +847,7 @@ pre .p { color:var(--phosphor); }
     <p class="kicker">VI · otevřené problémy</p>
     <h2 class="sm">Kam jsem se za čtyři týdny nedostal.</h2>
     <ul class="plain">
-      <li><span class="mark">!</span><span><b>Žádné pískoviště.</b> Aby noční běh mohl pracovat, dostane práva na celý počítač. Není to kontejner. Otevřený problém, ne vyřešený — a instalátor se na to ptá právě proto.</span></li>
+      <li><span class="mark">!</span><span><b>Žádné pískoviště.</b> Aby noční běh mohl pracovat, dostane práva na celý počítač. Není to kontejner. Otevřený problém, ne vyřešený — ainstalátor na to upozorňuje.</span></li>
       <li><span class="mark">!</span><span><b>43&nbsp;% pravidel hlídá jen próza.</b> Platí, dokud si na ně AI vzpomene. Z toho je asi tři čtvrtiny mechanicky chytatelných — hlídač na ně jen ještě nikdo nenapsal.</span></li>
       <li><span class="mark">!</span><span><b>Velká karta = špatné zadání.</b> Čím víc toho karta chce, tím hůř to dopadne. Kontrola na to upozorní, ale hranice je odhad, ne měření.</span></li>
       <li><span class="mark">!</span><span><b>Změna přes dva repozitáře.</b> Půlka v projektu, půlka v nástroji — testy pak byly zelené nebo červené podle toho, co měl vedle sebe ten druhý. <b>39 spadlých testů</b>, než mi to došlo.</span></li>
@@ -713,7 +876,7 @@ pre .p { color:var(--phosphor); }
           <li><b>Malý projekt nebo prototyp.</b> Režie převáží užitek.</li>
           <li><b>JavaScript, TypeScript, cokoli jiného.</b> Část kontrol čte přímo Python — ty by se musely napsat znovu.</li>
           <li><b>Tým, kde tuhle roli plní code review a CI.</b> Pak je to duplikát.</li>
-          <li><b>Prostředí, kde agent nesmí na stroj.</b> Viz předchozí snímek.</li>
+          <li><b>Prostředí, kde agent nesmí na stroj.</b> Viz předchozí slide.</li>
         </ul>
       </div>
     </div>
@@ -732,6 +895,7 @@ nightshift bootstrap
 
 <span class="c"># a pak už jen tohle — instalace se dělá odsud:</span>
 <span class="p">command-center.bat</span>   <span class="c">/   ./command-center.sh</span></pre>
+    <p class="foot"><b>Vyvíjeno a testováno jen na Windows.</b> Cesty pro Mac/Linux (<code>command-center.sh</code>) v kódu existují, ale nikdy neběžely mimo Windows — chybí tester. Pull requesty vítány.</p>
     <div class="warnbox">
       <p><b>Než to pustíš přes noc:</b> aby worker mohl sám psát kód, potřebuje práva na celý počítač — není to kontejner ani pískoviště. Instalátor se na to zeptá a <b>nikdy to nenastaví za tebe.</b></p>
     </div>
