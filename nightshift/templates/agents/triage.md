@@ -218,7 +218,7 @@ Frontmatter (§2) — **you write these; {{maintainer}} never does:**
   card goes to `testing/` carrying a `## How to test` the worker writes; `review` means it
   has none — a gate, a deletion, inner wiring — so the reviewer's `ok` is the acceptance and
   it goes straight to `done/`. **When unsure, `play`.** The asymmetry is the whole rule: a
-  card wrongly sent to `testing/` costs him ten seconds of reading, and a card wrongly sent
+  card wrongly sent to `testing/` costs them ten seconds of reading, and a card wrongly sent
   to `done/` was never looked at by anyone. You decide this up front, the same way you decide
   `tier:`; you do **not** write the scenario — the work does not exist yet.
 - `created`: today, ISO.

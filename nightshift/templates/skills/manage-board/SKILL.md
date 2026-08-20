@@ -54,7 +54,7 @@ whole reason the skill exists.
 - **Never hand-drag a card file between lanes**, and never tell {{maintainer}} to. State changes go
   through `## Thread` + `state:` + `reconcile` (below). A raw file move leaves `state:`
   behind and reconcile reads it as a drag.
-- **Never invent frontmatter {{maintainer}} would not write.** They never writes any; triage fits it.
+- **Never invent frontmatter {{maintainer}} would not write.** They never write any; triage fits it.
   If a card needs `tier`/`worker`/`unattended`, that is a triage judgment — make it as one,
   do not guess to fill the field.
 - **Never write code or touch `{{package}}/`** from this skill. Refining a card is planning;

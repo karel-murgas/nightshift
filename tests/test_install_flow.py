@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import builtins
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -624,6 +625,63 @@ def test_no_shipped_template_carries_a_trace_of_the_project_it_came_from():
                 offenders.append(f"{path.relative_to(init.TEMPLATES).as_posix()} names {name}")
     assert offenders == []
 
+
+#: Gendered third-person pronouns. A set and a tokeniser rather than a regex with
+#: word boundaries, because the first version of this shipped a literal backspace
+#: where it meant `\b` and passed against 2,970 real matches. A character class
+#: with no escape in it cannot be mangled that way, and reads better besides.
+_GENDERED = frozenset({"he", "him", "his", "himself", "she", "her", "hers", "herself"})
+
+
+def _words(line: str) -> list[str]:
+    return re.findall("[A-Za-z]+", line)
+
+
+def test_no_shipped_template_assigns_the_maintainer_a_gender():
+    """The templates address whoever installs them, and nothing here knows who that
+    is. They/them is the only form correct for every reader — and for a project with
+    two maintainers it is the only form that can be correct at all.
+
+    A rule and not a preference, because the failure is silent: a stray `him` reads
+    fine to whoever wrote it and is wrong for everybody else. Two survived the
+    2026-08-06 genericisation and were found only when a consuming project diffed its
+    own copies back — `triage.md` still said "costs him ten seconds".
+    """
+    offenders = []
+    for path in sorted(init.TEMPLATES.rglob("*.md")):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for word in _words(line):
+                if word.lower() in _GENDERED:
+                    offenders.append(
+                        f"{path.relative_to(init.TEMPLATES).as_posix()}:{number}"
+                        f" says {word!r}")
+    assert offenders == []
+
+
+def test_no_shipped_template_disagrees_with_its_own_they():
+    """The cost of the rule above, and why it needs its own check: rewriting `he
+    writes` as `they writes` fixes the pronoun and breaks the verb. `manage-board`
+    shipped "They never writes any" from that same genericisation.
+
+    A heuristic — `they`, optionally one adverb, then a word ending in `s` — and
+    deliberately so. It is cheap, it has no false positive in anything this framework
+    ships, and the alternative is a parser nobody will maintain for a rule this rare.
+    """
+    allowed = {"always", "perhaps", "sometimes", "less", "its", "this", "as", "is"}
+    offenders = []
+    for path in sorted(init.TEMPLATES.rglob("*.md")):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            words = [w.lower() for w in _words(line)]
+            for i, word in enumerate(words[:-1]):
+                if word != "they":
+                    continue
+                nxt = words[i + 1]
+                if not nxt.endswith("s") or nxt.endswith(("ss", "us")) or nxt in allowed:
+                    continue
+                offenders.append(
+                    f"{path.relative_to(init.TEMPLATES).as_posix()}:{number}"
+                    f" — {word!r} {nxt!r}")
+    assert offenders == []
 
 def test_every_doc_that_offers_the_kanban_names_the_plugin_that_provides_it():
     """`type: kanban` is not a core Bases view type — it comes from the **Base Board**
