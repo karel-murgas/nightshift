@@ -333,6 +333,25 @@ Everything that earns its place is one of these, and each is a line or two, not 
 If you cannot state a finding without a table, ask whether the table is the finding or
 whether the property it demonstrates is. It is almost always the property.
 
+### Cutting a bloated findings section: write the other thing
+
+The repair is never "write less", it is **"write the other thing"** — the same length spent
+on what the worker cannot recover. A section listing every test a change will break is the
+usual offender, and nearly all of it goes: the worker runs the suite, gets the failures, and
+gets them correctly and for today's tree rather than for the tree you read. What survives is
+only the entries that are traps, and two shapes recur often enough to look for by name:
+
+- **A test that reads as broken but is the specification of the old behaviour.** The worker's
+  instinct is to delete it. Say so: *"re-point it at the new behaviour, do not delete it."*
+- **A test whose docstring is now wrong while its assertion is still right.** The worker reads
+  the stale docstring, sees a result that contradicts it, and "fixes" the assertion — turning
+  a passing test into a wrong one. This is the more dangerous of the two, because the edit
+  looks like a repair and leaves the suite green.
+
+Both are traps by the definition above: they are defined by the worker getting it wrong, and
+neither is recoverable from the code, because in each case the code reads as though the
+opposite were true.
+
 ## What the gates and the charters already prove — this section outranks the thoroughness ones
 
 `card_schema` checks required fields, `id`/filename agreement, `state`/lane agreement,
@@ -340,13 +359,16 @@ tier validity, unknown fields, that `worker:` and `recipe:` resolve to real file
 `tasks/` has no live open question, and that a parked card has a `## Question`.
 `nightshift/reconcile.py` handles the file move.
 
-**This section outranks the thoroughness ones.** The sections above demand thoroughness — be
-no worse than a chat, anchor a magnitude in its neighbours, batch every decision. They govern
-**what the card decides**. This one governs **what the card writes down**, and the two stop
-pulling against each other once the split is visible: *be exhaustive about the judgment,
-silent about the mechanics.*
+**This is a rule, not advice, and it beats every other section in this charter when they
+pull against each other.** The sections above demand thoroughness — be no worse than a chat,
+run the second-order lens, anchor a magnitude in its neighbours, batch every decision. They
+govern **what the card decides**. This one governs **what the card writes down**, and the two
+stop pulling against each other once the split is visible: *be exhaustive about the judgment,
+silent about the mechanics.* Every word spent restating a mechanical fact is a word the
+maintainer and a worker both read for nothing — and it is a failure mode this charter has
+actually exhibited, not a hypothetical one.
 
-Two things you therefore do not write:
+Three things you therefore do not write, in order of how often the mistake is made:
 
 **1. Do not hand-check what a gate proves.** If a card names a gate, that naming is the whole
 of it; bullets restating the gate's own criteria underneath are a second, hand-copied
@@ -360,9 +382,14 @@ close-out, and a copy on the card is a copy that goes stale.
 
 **The test is one question: would this criterion read identically on the next card of the
 same kind?** If yes, it is not this card's criterion. Delete it and let the charter carry it.
-What the card owes is the part no charter could know.
+What the card owes is the part no charter could know — what this deliverable depicts, which
+number this change has to produce, which footprint has to hold.
 
-Spend your attention on whether the card is *right*, not on whether it is *well-formed*.
+**3. Do not enumerate what a grep answers.** See the findings bar above: name the files, do
+not transcribe them.
+
+Spend your attention on whether the card is *right*, not on whether it is *well-formed*, and
+not on re-specifying what a script or a charter already holds.
 
 ## Your checker boundary
 
