@@ -1,0 +1,829 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nightshift</title>
+<meta name="description" content="AI tým pro jeden Python projekt. Proč, co to drží, jak vypadá cesta nápadu a jak funguje Command Center.">
+<style>
+/* ─────────────────────────────────────────────────────────────
+   nightshift — MLUVENÁ prezentace (srpen 2026).
+   Málo slov na snímek; argument nese řečník.
+
+   Paleta jsou přímo tokeny
+   Command Center (nightshift/panel_static/app.html): fosfor #4FE88A
+   na zeleně laděné černi #070A08, jantar pro „čeká to na člověka“,
+   uhlík pro „spadlo to“. Prezentace o nástroji má vypadat jako ten
+   nástroj, a barva tady nese význam, ne dekoraci.
+
+   Jeden vizuální svět, záměrně — je to obrazovka terminálu, ne
+   dokument. Žádné light/dark přepínání; všechny barvy jsou
+   vypsané explicitně, takže stránka drží na jakémkoli podkladu.
+
+   Písmo: neproporcionální na štítky, čísla a názvy složek
+   (slovník toho nástroje), bezpatkové na věty — publikum není
+   technické.
+
+   Posun: SKOK na další snímek, ne plynulé rolování. Snímky jsou
+   position:fixed a přepínají se; kolečko má zámek, aby setrvačnost
+   touchpadu nepřeskočila pět snímků najednou.
+   ───────────────────────────────────────────────────────────── */
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+
+:root {
+  /* tokeny Command Center, 1:1 */
+  --ground:    #070A08;
+  --panel:     #0D120F;
+  --panel-2:   #111814;
+  --line:      #1D2721;
+  --line-soft: #151D18;
+  --ink:       #C4D2C6;
+  --ink-dim:   #7C8C80;
+  --ink-faint: #55645A;
+  --phosphor:  #4FE88A;
+  --phosphor-d:#2E9459;
+  --amber:     #E8B54F;
+  --ember:     #E0614F;
+
+  --mono: ui-monospace,"Cascadia Mono","JetBrains Mono","SF Mono",Consolas,"Liberation Mono",monospace;
+  --sans: -apple-system,"Segoe UI Variable Text","Segoe UI",system-ui,"Helvetica Neue",Arial,sans-serif;
+}
+
+body {
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:var(--sans); -webkit-font-smoothing:antialiased;
+  height:100vh; overflow:hidden;
+}
+
+/* Rastr řádků z Command Center. Jediná ozdoba na celé stránce a je
+   půjčená z produktu, ne vymyšlená k němu. */
+body::before {
+  content:""; position:fixed; inset:0; pointer-events:none; z-index:100;
+  background:repeating-linear-gradient(to bottom,
+    rgba(79,232,138,.022) 0 1px, transparent 1px 3px);
+}
+
+/* ── kostra snímku ────────────────────────────────────────── */
+.slide {
+  position:fixed; inset:0; overflow-y:auto; overscroll-behavior:contain;
+  display:flex; flex-direction:column; justify-content:center;
+  padding:clamp(2.2rem,6vh,4.5rem) clamp(1.4rem,6vw,5.5rem) clamp(3.6rem,7vh,5rem);
+  opacity:0; visibility:hidden;
+}
+.slide.on { opacity:1; visibility:visible; }
+@media (prefers-reduced-motion:no-preference) {
+  .slide.on > .inner { animation:rise .26s ease-out both; }
+  @keyframes rise { from{opacity:0; transform:translateY(7px);} to{opacity:1; transform:none;} }
+}
+.inner { width:100%; max-width:64rem; margin:0 auto;
+         display:flex; flex-direction:column; gap:clamp(1rem,2.6vh,2rem); }
+
+.kicker { font-family:var(--mono); font-size:clamp(.6rem,1.05vw,.7rem); font-weight:700;
+          letter-spacing:.22em; text-transform:uppercase; color:var(--phosphor); margin:0; }
+.kicker .new { color:var(--ground); background:var(--phosphor); border-radius:2px;
+               padding:.1em .45em; margin-left:.7em; letter-spacing:.14em; }
+h1 { font-family:var(--mono); font-weight:600; margin:0; line-height:1;
+     letter-spacing:.02em; font-size:clamp(2.6rem,9.5vw,6.2rem); text-transform:lowercase; }
+h2 { font-weight:800; margin:0; line-height:1.12;
+     letter-spacing:-.025em; font-size:clamp(1.5rem,4vw,2.8rem); text-wrap:balance; }
+h2.sm { font-size:clamp(1.25rem,2.9vw,1.95rem); }
+.say { font-size:clamp(.92rem,1.7vw,1.18rem); line-height:1.5; color:var(--ink-dim);
+       margin:0; max-width:52ch; text-wrap:pretty; }
+.say b { color:var(--ink); font-weight:650; }
+.say em { font-style:normal; color:var(--phosphor); font-weight:650; }
+.foot { font-size:clamp(.72rem,1.2vw,.84rem); color:var(--ink-faint); margin:0;
+        max-width:80ch; line-height:1.55; }
+.foot b { color:var(--ink-dim); font-weight:650; }
+code { font-family:var(--mono); font-size:.88em; background:var(--panel-2);
+       border:1px solid var(--line); border-radius:3px; padding:.06em .34em; white-space:nowrap; }
+
+/* ── navigace ─────────────────────────────────────────────── */
+.bar { position:fixed; top:0; left:0; height:2px; background:var(--phosphor);
+       z-index:60; transition:width .18s ease-out; }
+.rail { position:fixed; right:clamp(.6rem,1.8vw,1.4rem); top:50%; transform:translateY(-50%);
+        display:flex; flex-direction:column; gap:.5rem; z-index:60; }
+.rail button { width:8px; height:8px; padding:0; border-radius:50%; cursor:pointer;
+        border:1px solid var(--ink-faint); background:transparent;
+        transition:background .16s, border-color .16s, transform .16s; }
+.rail button[aria-current="true"] { background:var(--phosphor); border-color:var(--phosphor);
+        transform:scale(1.35); }
+.rail button:hover { border-color:var(--phosphor); }
+.num { position:fixed; left:clamp(1.4rem,6vw,5.5rem); bottom:clamp(1.2rem,3.5vh,2.2rem);
+       font-family:var(--mono); font-size:.68rem; letter-spacing:.16em; color:var(--ink-faint); z-index:60; }
+.num b { color:var(--phosphor); font-weight:600; }
+.hint { position:fixed; right:clamp(2.2rem,5vw,3.6rem); bottom:clamp(1.1rem,3vh,1.9rem);
+        font-family:var(--mono); font-size:.64rem; letter-spacing:.12em; color:var(--ink-faint);
+        z-index:60; transition:opacity .6s; }
+:focus-visible { outline:2px solid var(--phosphor); outline-offset:3px; border-radius:2px; }
+
+/* ── titulní ──────────────────────────────────────────────── */
+.lamp { width:12px; height:12px; border-radius:50%; background:var(--phosphor);
+        box-shadow:0 0 0 4px rgba(79,232,138,.16); flex:none; }
+@media (prefers-reduced-motion:no-preference){
+  .lamp { animation:pulse 4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{box-shadow:0 0 0 4px rgba(79,232,138,.16);}
+                     50%{box-shadow:0 0 0 10px rgba(79,232,138,.05);} }
+}
+.title-row { display:flex; align-items:center; gap:1rem; }
+.byline { font-family:var(--mono); font-size:.72rem; letter-spacing:.14em; color:var(--ink-faint); margin:0; }
+.ver { font-family:var(--mono); font-size:clamp(.7rem,1.3vw,.85rem); letter-spacing:.2em;
+       color:var(--phosphor-d); border:1px solid var(--line); border-radius:3px;
+       padding:.25rem .6rem; align-self:flex-start; margin:0; }
+
+/* ── dvojpanel ────────────────────────────────────────────── */
+.duo { display:grid; grid-template-columns:repeat(auto-fit,minmax(17rem,1fr)); gap:clamp(1rem,2.5vw,2.2rem); }
+.panel { border-left:3px solid var(--phosphor); padding:.2rem 0 .2rem 1.2rem;
+         display:flex; flex-direction:column; gap:.5rem; }
+.panel.no { border-left-color:var(--ember); }
+.panel .big { font-weight:800; letter-spacing:-.02em;
+              font-size:clamp(1rem,2vw,1.3rem); line-height:1.3; }
+.panel p { margin:0; font-size:clamp(.82rem,1.4vw,.95rem); color:var(--ink-dim); line-height:1.5; }
+.panel ul { margin:0; padding-left:1rem; display:flex; flex-direction:column; gap:.4rem; }
+.panel li { font-size:clamp(.8rem,1.35vw,.93rem); color:var(--ink-dim); line-height:1.45; }
+.panel li b { color:var(--ink); font-weight:650; }
+
+/* ── číslované cíle ───────────────────────────────────────── */
+.goals { margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:.75rem; }
+.goals li { display:grid; grid-template-columns:1.7rem 1fr; align-items:baseline; gap:.4rem;
+            font-size:clamp(.88rem,1.5vw,1.06rem); color:var(--ink-dim); line-height:1.45; max-width:58ch; }
+.goals li b { color:var(--ink); font-weight:700; }
+.goals .n { font-family:var(--mono); font-size:.76em; color:var(--phosphor); font-weight:700; }
+
+/* ── mřížka mechanismů ────────────────────────────────────── */
+.mechs { display:grid; grid-template-columns:repeat(auto-fit,minmax(14rem,1fr)); gap:1px;
+         background:var(--line-soft); border:1px solid var(--line-soft); border-radius:5px; overflow:hidden; }
+.mech { background:var(--panel); padding:clamp(.85rem,1.9vw,1.2rem); display:flex; flex-direction:column; gap:.35rem; }
+.mech .h { font-weight:700; font-size:clamp(.92rem,1.6vw,1.06rem); color:var(--phosphor); }
+.mech .h small { display:block; font-family:var(--mono); font-weight:600; font-size:.6rem;
+                 letter-spacing:.16em; text-transform:uppercase; color:var(--ink-faint); margin-top:.2rem; }
+.mech p { margin:0; font-size:clamp(.78rem,1.3vw,.9rem); color:var(--ink-dim); line-height:1.5; }
+.mech p b { color:var(--ink); font-weight:650; }
+
+/* ── složky na nástěnce ───────────────────────────────────── */
+.lanes { display:grid; grid-template-columns:repeat(4,1fr); gap:.45rem; }
+@media (max-width:780px){ .lanes { grid-template-columns:repeat(2,1fr); } }
+.lane { background:var(--panel); border:1px solid var(--line); border-top:3px solid var(--line);
+        border-radius:4px; padding:.65rem .7rem; display:flex; flex-direction:column; gap:.2rem; }
+.lane b { font-family:var(--mono); font-size:.76rem; color:var(--ink); }
+.lane span.d { font-size:.72rem; color:var(--ink-dim); line-height:1.4; }
+.lane .who { font-family:var(--mono); font-size:.55rem; letter-spacing:.14em;
+             text-transform:uppercase; color:var(--ink-faint); }
+.lane .cnt { font-family:var(--mono); font-size:.68rem; color:var(--ink-faint); margin-top:.15rem;
+             font-variant-numeric:tabular-nums; }
+.lane.you { border-top-color:var(--amber); }
+.lane.you .who { color:var(--amber); }
+.lane.bot { border-top-color:var(--phosphor); }
+.lane.bot .who { color:var(--phosphor-d); }
+.lane.dead { border-top-color:var(--ember); }
+.lane.dead .who { color:var(--ember); }
+
+/* ── diagramy ─────────────────────────────────────────────── */
+.flowwrap { width:100%; overflow-x:auto; }
+.flow { width:100%; min-width:34rem; max-width:60rem; height:auto; display:block; }
+.d-box  { fill:#0D120F; stroke:#1D2721; stroke-width:1.5; }
+.d-box.me { stroke:#E8B54F; stroke-width:2; }
+.d-box.ok { stroke:#4FE88A; stroke-width:2; }
+.d-t { font-family:var(--sans); font-weight:700; font-size:13px; fill:#C4D2C6; }
+.d-t.am { fill:#E8B54F; } .d-t.ph { fill:#4FE88A; }
+.d-s { font-family:var(--sans); font-weight:400; font-size:11px; fill:#7C8C80; }
+.d-m { font-family:var(--mono); font-weight:700; font-size:9.5px; letter-spacing:.16em; fill:#55645A; }
+.d-flow { fill:none; stroke:#55645A; stroke-width:1.5; }
+.d-flow.ph { stroke:#2E9459; }
+.d-flow.am { stroke:#E8B54F; stroke-dasharray:5 4; }
+.legend { display:flex; flex-wrap:wrap; gap:.4rem 1.3rem;
+          font-size:clamp(.74rem,1.25vw,.86rem); color:var(--ink-dim); }
+.legend span { display:flex; align-items:center; gap:.45rem; }
+.legend i { width:13px; height:3px; border-radius:2px; background:var(--phosphor); flex:none; }
+.legend i.am { background:var(--amber); }
+
+/* ── mřížka čísel ─────────────────────────────────────────── */
+.grid { display:grid; grid-template-columns:repeat(4,1fr); gap:1px;
+        background:var(--line-soft); border:1px solid var(--line-soft); border-radius:5px; overflow:hidden; }
+@media (max-width:780px){ .grid { grid-template-columns:repeat(2,1fr); } }
+.cell { background:var(--panel); padding:clamp(.8rem,1.9vw,1.15rem); display:flex; flex-direction:column; gap:.15rem; }
+.cell .n { font-family:var(--mono); font-weight:600; letter-spacing:-.02em; line-height:1;
+           font-size:clamp(1.35rem,3.1vw,2.1rem); font-variant-numeric:tabular-nums; color:var(--ink); word-spacing:-.3em; white-space:nowrap; }
+.cell .n.hot { color:var(--phosphor); }
+.cell .n.warm { color:var(--amber); }
+.cell .l { font-size:clamp(.68rem,1.15vw,.78rem); color:var(--ink-dim); line-height:1.4; }
+.cell .l b { color:var(--ink); font-weight:650; }
+
+/* ── třídy chyb ───────────────────────────────────────────── */
+.classes { display:flex; flex-direction:column; gap:clamp(.85rem,2.1vh,1.4rem); }
+.cls { display:flex; flex-direction:column; gap:.4rem; max-width:56rem; }
+.cls .top { display:flex; align-items:baseline; gap:.8rem; }
+.cls .pct { font-family:var(--mono); font-weight:600; font-size:clamp(1rem,2vw,1.35rem);
+            color:var(--phosphor); font-variant-numeric:tabular-nums; min-width:3.2rem; word-spacing:-.3em; white-space:nowrap; }
+.cls .nm { font-weight:700; font-size:clamp(.88rem,1.5vw,1.04rem); }
+.cls p { margin:0; font-size:clamp(.78rem,1.3vw,.92rem); color:var(--ink-dim); line-height:1.5; max-width:64ch; }
+.cls .track { height:5px; border-radius:3px; background:var(--line-soft); overflow:hidden; }
+.cls .track i { display:block; height:100%; background:var(--phosphor); border-radius:3px; }
+
+/* ── prostý seznam ────────────────────────────────────────── */
+.plain { margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:.7rem; }
+.plain li { display:flex; gap:.75rem; align-items:baseline;
+            font-size:clamp(.84rem,1.4vw,1rem); color:var(--ink-dim); line-height:1.5; max-width:62ch; }
+.plain li b { color:var(--ink); font-weight:700; }
+.plain li em { font-style:normal; color:var(--phosphor); font-weight:650; }
+.plain .mark { font-family:var(--mono); color:var(--ember); flex:none; }
+.plain .mark.ok { color:var(--phosphor); }
+.plain .mark.am { color:var(--amber); }
+
+/* ── verdikty revize ──────────────────────────────────────── */
+.verdicts { display:grid; grid-template-columns:repeat(auto-fit,minmax(13rem,1fr)); gap:.6rem; }
+.vd { background:var(--panel); border:1px solid var(--line); border-radius:4px;
+      padding:.85rem .9rem; display:flex; flex-direction:column; gap:.35rem; }
+.vd b { font-family:var(--mono); font-size:.82rem; letter-spacing:.04em; }
+.vd .to { font-family:var(--mono); font-size:.62rem; letter-spacing:.14em;
+          text-transform:uppercase; color:var(--ink-faint); }
+.vd p { margin:0; font-size:.8rem; color:var(--ink-dim); line-height:1.45; }
+.vd.ok { border-left:3px solid var(--phosphor); } .vd.ok b { color:var(--phosphor); }
+.vd.fix { border-left:3px solid var(--phosphor-d); } .vd.fix b { color:var(--phosphor-d); }
+.vd.dec { border-left:3px solid var(--amber); } .vd.dec b { color:var(--amber); }
+
+/* ── maketa Command Center ────────────────────────────────── */
+.cc { display:grid; grid-template-columns:11rem minmax(0,1fr); border:1px solid var(--line);
+      border-radius:5px; overflow:hidden; background:var(--panel); }
+@media (max-width:780px){ .cc { grid-template-columns:1fr; } }
+.cc-rail { border-right:1px solid var(--line); padding:.9rem 0; display:flex;
+           flex-direction:column; gap:.15rem; background:var(--ground); }
+@media (max-width:780px){ .cc-rail { border-right:0; border-bottom:1px solid var(--line); } }
+.cc-mark { padding:0 .9rem .7rem; font-family:var(--mono); font-size:.72rem;
+           letter-spacing:.14em; text-transform:uppercase; color:var(--ink); font-weight:600; }
+.cc-mark span { display:block; font-size:.56rem; letter-spacing:.1em; color:var(--ink-faint);
+                text-transform:none; font-weight:400; margin-top:.1rem; }
+.cc-item { padding:.3rem .9rem; font-family:var(--mono); font-size:.74rem; color:var(--ink-dim);
+           display:flex; justify-content:space-between; gap:.5rem; }
+.cc-item.act { color:var(--phosphor); border-left:2px solid var(--phosphor); padding-left:calc(.9rem - 2px); }
+.cc-item i { font-style:normal; color:var(--ink-faint); font-size:.68rem;
+             font-variant-numeric:tabular-nums; }
+.cc-body { padding:.9rem 1rem; display:flex; flex-direction:column; gap:.5rem; }
+.cc-h { font-family:var(--mono); font-size:.62rem; letter-spacing:.16em; text-transform:uppercase;
+        color:var(--ink-faint); }
+.cc-row { display:flex; align-items:center; gap:.6rem; padding:.45rem .55rem;
+          border:1px solid var(--line-soft); border-radius:3px; background:var(--panel-2);
+          font-size:.78rem; color:var(--ink-dim); }
+.cc-row .k { font-family:var(--mono); color:var(--ink); flex:1; min-width:0; }
+.cc-row .btn { font-family:var(--mono); font-size:.64rem; letter-spacing:.08em; padding:.16rem .5rem;
+               border:1px solid var(--line); border-radius:2px; color:var(--ink-dim); flex:none; }
+.cc-row .btn.go { border-color:var(--phosphor-d); color:var(--phosphor); }
+.cc-row .btn.ask { border-color:var(--amber); color:var(--amber); }
+.cc-meters { display:flex; gap:1rem; flex-wrap:wrap; font-family:var(--mono);
+             font-size:.66rem; color:var(--ink-faint); padding-top:.15rem; }
+.cc-meters b { color:var(--phosphor); font-weight:600; word-spacing:-.3em; white-space:nowrap; }
+.cc-meters b.warm { color:var(--amber); }
+
+pre { font-family:var(--mono); background:var(--panel); border:1px solid var(--line);
+      border-radius:5px; padding:clamp(.85rem,1.9vw,1.15rem); margin:0; overflow-x:auto;
+      font-size:clamp(.7rem,1.25vw,.85rem); line-height:1.8; color:var(--ink); }
+pre .c { color:var(--ink-faint); }
+pre .p { color:var(--phosphor); }
+.warnbox { border:1px solid var(--ember); border-left-width:3px; border-radius:4px;
+           background:rgba(224,97,79,.07); padding:clamp(.8rem,1.9vw,1.05rem); }
+.warnbox p { margin:0; font-size:clamp(.8rem,1.3vw,.93rem); color:var(--ink); line-height:1.5; max-width:62ch; }
+.link { font-family:var(--mono); font-size:clamp(.9rem,2.2vw,1.5rem); color:var(--phosphor);
+        word-break:break-all; font-weight:600; letter-spacing:-.01em; margin:0; }
+</style>
+</head>
+<body>
+
+<div class="bar" id="bar"></div>
+<nav class="rail" id="rail" aria-label="snímky"></nav>
+<div class="num" id="num"></div>
+<div class="hint" id="hint">kolečko / ← → · další snímek</div>
+
+<!-- 1 ── titulní ─────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <div class="title-row"><span class="lamp" aria-hidden="true"></span><p class="kicker">AI tým pro jeden Python projekt</p></div>
+    <h1>nightshift</h1>
+    <p class="say" style="max-width:44ch">Jedna sada pravidel. <b>Dvě rychlosti práce</b> — u klávesnice, nebo přes noc. A jedno místo, odkud se obojí pouští.</p>
+    <p class="ver">ČTYŘI TÝDNY PROVOZU</p>
+    <p class="byline">KAREL MURGAŠ · 20. SRPNA 2026</p>
+  </div>
+</section>
+
+<!-- 2 ── proč ───────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">I · proč vůbec</p>
+    <h2>Pravidel přibývá.<br>Paměti ne.</h2>
+    <p class="say">Tenhle projekt má dneska <b>77 sepsaných pravidel.</b> Asistent si je má vybavit znovu v každém sezení — a začíná pokaždé s prázdnou hlavou.</p>
+    <p class="say">Stejný problém má i člověk. Rozdíl je, že u asistenta je to <em>měřitelné</em> — a proto se s tím dá něco dělat.</p>
+    <p class="foot">Před čtyřmi týdny jich bylo 68 a nikdo nevěděl ani to. <b>Ten seznam je sám o sobě půlka výsledku.</b></p>
+  </div>
+</section>
+
+<!-- 3 ── cíle ───────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">I · co jsme chtěli</p>
+    <h2>Pět cílů.</h2>
+    <ul class="goals">
+      <li><span class="n">01</span><span><b>Práce přes noc.</b> Zadám večer, ráno čtu, co se stalo.</span></li>
+      <li><span class="n">02</span><span><b>Práce u klávesnice.</b> V běžném sezení platí přesně stejná pravidla.</span></li>
+      <li><span class="n">03</span><span><b>Spolehlivost.</b> Chyba se má zastavit sama a nahlas — ne až u mě, o týden později.</span></li>
+      <li><span class="n">04</span><span><b>Čistý kód a dokumentace.</b> Ne jen „ono to nějak funguje“.</span></li>
+      <li><span class="n">05</span><span><b>Rozhodnutí zůstávají na mně.</b> AI nesmí rozhodnutí hádat.</span></li>
+    </ul>
+    <p class="foot">Cíle se za čtyři týdny nezměnily. Změnilo se skoro všechno ostatní.</p>
+  </div>
+</section>
+
+<!-- 4 ── dvě rychlosti ──────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">II · jak se pracuje</p>
+    <h2 class="sm">Ne každá práce má čekat na noc.</h2>
+    <div class="duo">
+      <div class="panel">
+        <div class="big">U klávesnice — inline</div>
+        <ul>
+          <li>Sedím u toho, vidím každý krok, můžu do toho mluvit.</li>
+          <li>Práce, kde <b>zadání vzniká až během ní</b> — návrh, ladění čísel, „ukaž mi, jak to vypadá“.</li>
+          <li>Platí <b>stejné kontroly a stejná pravidla</b> jako v noci. Žádný měkčí režim.</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <div class="big">Bez dozoru — unattended</div>
+        <ul>
+          <li>Zadání je hotové <b>před</b> spuštěním a je v něm napsáno, kdy je práce hotová.</li>
+          <li>Stroj musí umět <b>sám poznat, že se to povedlo</b> — jinak tam nepatří.</li>
+          <li>Když narazí na rozhodnutí, <b>zeptá se a zastaví.</b> Nehádá.</li>
+        </ul>
+      </div>
+    </div>
+    <p class="say">Na kartě je to jedno pole: <code>unattended: true/false</code>. <em>Není to o obtížnosti</em> — je to o tom, jestli existuje způsob, jak výsledek zkontrolovat beze mě.</p>
+  </div>
+</section>
+
+<!-- 5 ── cesta nápadu ───────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">II · cesta nápadu</p>
+    <h2 class="sm">Od věty v mobilu k hotové kartě.</h2>
+    <div class="flowwrap">
+      <svg class="flow" viewBox="0 0 700 214" role="img"
+           aria-label="Cesta nápadu. Vlevo ideas — moje soukromé nápady, ze kterých promotnutím vzniká poznámka v inbox. Poznámku přečte třídič a přiřadí jí jednu ze čtyř cest: chore, scribe, inline nebo triage. Chore, scribe a triage vedou do tasks, kde karta čeká na moje schválení. Inline drží člověk a dělá se u klávesnice.">
+        <defs>
+          <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#55645A"/>
+          </marker>
+          <marker id="aa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#E8B54F"/>
+          </marker>
+          <marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#2E9459"/>
+          </marker>
+        </defs>
+
+        <!-- ideas -->
+        <rect class="d-box me" x="8" y="16" width="132" height="52" rx="4"/>
+        <text class="d-m" x="22" y="36" fill="#E8B54F">IDEAS/</text>
+        <text class="d-s" x="22" y="53">soukromé — sem</text>
+        <text class="d-s" x="22" y="65">nesmí ani skript</text>
+
+        <!-- inbox -->
+        <rect class="d-box me" x="8" y="106" width="132" height="52" rx="4"/>
+        <text class="d-m" x="22" y="126" fill="#E8B54F">INBOX/</text>
+        <text class="d-s" x="22" y="143">jedna věta, bez formy,</text>
+        <text class="d-s" x="22" y="155">klidně z mobilu</text>
+
+        <path class="d-flow am" d="M74 68 V104" marker-end="url(#aa)"/>
+        <text class="d-s" x="82" y="91">„promote“</text>
+
+        <!-- třídič -->
+        <path class="d-flow" d="M140 132 H184" marker-end="url(#a)"/>
+        <rect class="d-box ok" x="186" y="98" width="128" height="68" rx="4"/>
+        <text class="d-t ph" x="200" y="120">Třídič</text>
+        <text class="d-s" x="200" y="137">přečte poznámky</text>
+        <text class="d-s" x="200" y="149">a nic jiného</text>
+        <text class="d-m" x="200" y="162">NEČTE KÓD</text>
+
+        <!-- rozvětvení na čtyři cesty -->
+        <path class="d-flow ph" d="M314 132 H344" marker-end="url(#a)"/>
+        <path class="d-flow ph" d="M344 132 V26 H390" marker-end="url(#ap)"/>
+        <path class="d-flow ph" d="M344 132 V78 H390" marker-end="url(#ap)"/>
+        <path class="d-flow am" d="M344 132 H390" marker-end="url(#aa)"/>
+        <path class="d-flow ph" d="M344 132 V186 H390" marker-end="url(#ap)"/>
+
+        <rect class="d-box" x="392" y="4" width="130" height="44" rx="4"/>
+        <text class="d-t" x="404" y="24">chore</text>
+        <text class="d-s" x="404" y="39">tenká karta, do dávky</text>
+
+        <rect class="d-box" x="392" y="56" width="130" height="44" rx="4"/>
+        <text class="d-t" x="404" y="76">scribe</text>
+        <text class="d-s" x="404" y="91">jen obálka, bez pátrání</text>
+
+        <rect class="d-box me" x="392" y="110" width="130" height="44" rx="4"/>
+        <text class="d-t am" x="404" y="130">inline</text>
+        <text class="d-s" x="404" y="145">já, u klávesnice</text>
+
+        <rect class="d-box" x="392" y="164" width="130" height="44" rx="4"/>
+        <text class="d-t" x="404" y="184">triage</text>
+        <text class="d-s" x="404" y="199">drahá cesta: čte kód</text>
+
+        <!-- Tři strojové cesty se slévají na jednu páteř a vcházejí do tasks/
+             jedním hrotem; inline si drží vlastní jantarový vstup, protože je
+             to jediná z nich, kterou dělá člověk. -->
+        <path class="d-flow ph" d="M522 26 H544 V114"/>
+        <path class="d-flow ph" d="M522 78 H544 V114"/>
+        <path class="d-flow ph" d="M522 186 H544 V122"/>
+        <path class="d-flow ph" d="M544 118 H556" marker-end="url(#ap)"/>
+        <path class="d-flow am" d="M522 132 H556" marker-end="url(#aa)"/>
+
+        <rect class="d-box me" x="558" y="104" width="134" height="56" rx="4"/>
+        <text class="d-m" x="572" y="124" fill="#E8B54F">TASKS/</text>
+        <text class="d-s" x="572" y="141">hotová karta —</text>
+        <text class="d-s" x="572" y="153">čeká na můj souhlas</text>
+
+        <text class="d-m" x="558" y="190">BEZ MÉHO SOUHLASU</text>
+        <text class="d-m" x="558" y="204">SE NESPUSTÍ NIC</text>
+      </svg>
+    </div>
+    <div class="legend">
+      <span><i class="am"></i>drží člověk</span>
+      <span><i></i>dělá stroj</span>
+      <span>Třídič nečte kód. To je celý trik.</span>
+    </div>
+  </div>
+</section>
+
+<!-- 6 ── čtyři cesty, cena ──────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">II · proč třídič vůbec je</p>
+    <h2 class="sm">Dvě poznámky stály hodinu.<br>Protože jeden agent dělal dvě práce.</h2>
+    <p class="say">Zjistit, <b>co ta práce je</b>, vyžaduje číst kód. <b>Napsat kartu</b>, která to popisuje, ne. Dřív to dělal jeden agent najednou — takže <em>každá</em> poznámka platila cenu té drahé půlky.</p>
+    <div class="mechs">
+      <div class="mech">
+        <div class="h">chore<small>dávkou přes noc</small></div>
+        <p>Poznámka už řekla, co změnit a jak má vypadat výsledek. Jedna zjevná změna, špatný výsledek je vidět. <b>Ověřuje se po dávce, ne po kusu</b> — osm chore je jeden běh testů, ne osm.</p>
+      </div>
+      <div class="mech">
+        <div class="h">inline<small>já, hned</small></div>
+        <p>Není co dopisovat, tak se z ní stane karta rovnou. Ne kvůli evidenci — aby <b>i moje vlastní práce byla na nástěnce vidět</b> a počítala se.</p>
+      </div>
+      <div class="mech">
+        <div class="h">scribe<small>levný agent</small></div>
+        <p>Poznámka je rozmyšlená a chybí jí jen forma. Nečte kód. Když na to nestačí, <b>vrátí to na triage</b> — místo aby si kritéria vymyslel.</p>
+      </div>
+      <div class="mech">
+        <div class="h">triage<small>drahý agent</small></div>
+        <p>Ve hře je rozvětvení, které nejde ani položit bez čtení kódu. <b>Jediná cesta, která to čtení platí</b> — a spouští se vědomě, ne automaticky.</p>
+      </div>
+    </div>
+    <p class="foot"><b>Rozhodnutí se zapíše do poznámky</b> jako <code>route:</code>. Takže se netřídí pokaždé znovu — druhý průchod stojí nulu, a poznámku poslanou na triage nikdo omylem nespustí přes noc.</p>
+  </div>
+</section>
+
+<!-- 7 ── nástěnka ───────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">II · nástěnka — složky s poznámkami</p>
+    <h2 class="sm">Jeden úkol = jeden soubor.<br>Stav = složka, ve které leží.</h2>
+    <div class="lanes">
+      <div class="lane you"><span class="who">moje</span><b>ideas/</b><span class="d">soukromé nápady, sem nesmí žádný skript</span><span class="cnt">33</span></div>
+      <div class="lane you"><span class="who">moje</span><b>inbox/</b><span class="d">rychlá poznámka, bez formy</span><span class="cnt">6</span></div>
+      <div class="lane you"><span class="who">schvaluji</span><b>tasks/</b><span class="d">hotová karta, čeká na můj souhlas</span><span class="cnt">16</span></div>
+      <div class="lane you"><span class="who">odpovídám</span><b>needs-decision/</b><span class="d">otázka, kterou musím rozhodnout já</span><span class="cnt">1</span></div>
+      <div class="lane bot"><span class="who">stroj</span><b>review/</b><span class="d">zelené kontroly, revize ještě neuzavřela</span><span class="cnt">0</span></div>
+      <div class="lane you"><span class="who">hraju</span><b>testing/</b><span class="d">sloučeno, čeká, až si to vyzkouším</span><span class="cnt">12</span></div>
+      <div class="lane bot"><span class="who">archiv</span><b>done/</b><span class="d">hotovo, karta zůstává jako doklad</span><span class="cnt">82</span></div>
+      <div class="lane dead"><span class="who">archiv</span><b>failed/</b><span class="d">neúspěch — nemaže se taky</span><span class="cnt">0</span></div>
+    </div>
+    <p class="say">Žádná databáze, žádná služba na pozadí. Když ve tři ráno spadne proud, <b>stav práce je pořád na disku.</b></p>
+    <p class="foot">Čísla jsou skutečný stav nástěnky k 20. 8. 2026. <b><code>failed/</code> je prázdná</b> — za čtyři týdny do ní spadly dvě karty a obě se po přepsání zadání vrátily do hry. Neúspěšný pokus kartu vrací zpátky do <code>tasks/</code>; do <code>failed/</code> jde až to, co vzdalo úplně.</p>
+  </div>
+</section>
+
+<!-- 8 ── Command Center ─────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">III · command center</p>
+    <h2 class="sm">Šest stránek. Jedna otázka na každou.</h2>
+    <div class="cc">
+      <div class="cc-rail">
+        <div class="cc-mark">nightshift<span>dungeoneer · test</span></div>
+        <div class="cc-item act">now <i>1</i></div>
+        <div class="cc-item">verify <i>12</i></div>
+        <div class="cc-item">inbox <i>6</i></div>
+        <div class="cc-item">ideas <i>33</i></div>
+        <div class="cc-item">run</div>
+        <div class="cc-item">system</div>
+      </div>
+      <div class="cc-body">
+        <div class="cc-h">čeká na tebe</div>
+        <div class="cc-row"><span class="k">stun-grenade</span><span class="btn">Číst</span><span class="btn ask">Odpovědět</span></div>
+        <div class="cc-h" style="margin-top:.35rem">připraveno k odeslání</div>
+        <div class="cc-row"><span class="k">taser-cyberware</span><span class="btn">Karta</span><span class="btn go">Poslat</span></div>
+        <div class="cc-row"><span class="k">perks-tinkering</span><span class="btn">Karta</span><span class="btn go">Poslat</span></div>
+        <div class="cc-meters">
+          <span>5H <b>43&nbsp;%</b></span><span>7D <b class="warm">78&nbsp;%</b></span><span>ÚČET karel@…</span><span>TIER worker=sonnet</span>
+        </div>
+      </div>
+    </div>
+    <p class="say"><b>Now</b> — co čeká na mě. <b>Verify</b> — co si mám zahrát. <b>Inbox</b> — poznámky a jejich cesty. <b>Ideas</b> — soukromá hromádka. <b>Run</b> — co právě běží a jak dopadla noc. <b>System</b> — instalace a údržba.</p>
+    <p class="foot">Je to <b>lokální stránka nad jedním repozitářem</b> — pustí se dvojklikem, běží u mě na počítači, nic neposílá ven. A funguje <b>ještě před instalací</b>: první, co se v ní dá udělat, je nainstalovat nightshift.</p>
+  </div>
+</section>
+
+<!-- 9 ── čím Command Center není ────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">III · a čím není</p>
+    <h2 class="sm">Server, který sám neumí nic.</h2>
+    <ul class="plain">
+      <li><span class="mark ok">→</span><span><b>Každé tlačítko je příkaz, který bych napsal i ručně.</b> Panel nedrží žádnou vlastní logiku — jen spustí <code>python -m nightshift.&lt;něco&gt;</code>. Kdyby zítra shořel, workflow běží dál z příkazové řádky.</span></li>
+      <li><span class="mark ok">→</span><span><b>Žádný chat.</b> Je to spouštěč, evidence a výpis. Když je potřeba si promluvit, otevře terminál s běžnou session — a sám do ní nenapíše ani řádek.</span></li>
+      <li><span class="mark ok">→</span><span><b>Žádný jazykový model uvnitř.</b> Číst stav nástěnky je aritmetika nad soubory. Všechno, co potřebuje model, je podproces, který panel odpálí a nečeká na něj.</span></li>
+      <li><span class="mark am">!</span><span><b>A tohle jsme se naučili až provozem.</b> Tlačítko „roztřiď vše“ zafungovalo dokonale a vypadalo, že nedělá nic — výstup šel do koše. Úspěch a okamžitá smrt byly z prohlížeče <b>k nerozeznání.</b> Dneska každý spuštěný proces nechá záznam <em>dřív, než vůbec vznikne.</em></span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- 10 ── co to drží ────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">IV · co to drží pohromadě</p>
+    <h2 class="sm">Čtyři věci. Žádná z nich není model.</h2>
+    <div class="mechs">
+      <div class="mech">
+        <div class="h">Testy<small>síť pod celou hrou</small></div>
+        <p><b>1 939</b> automatických testů hry a <b>1 936</b> testů samotného nástroje. Když se v noci něco rozbije, ví se to za pár minut — a beze mě.</p>
+      </div>
+      <div class="mech">
+        <div class="h">Kontroly<small>hlídač na každé pravidlo</small></div>
+        <p><b>43</b> malých skriptů, každý hlídá jedno pravidlo. Běží po každé úpravě souboru, celé za ~18 s. <b>Co umí ohlídat skript, nemá zůstat v próze.</b></p>
+      </div>
+      <div class="mech">
+        <div class="h">Log oprav<small>motor celé věci</small></div>
+        <p><b>167</b> zapsaných chyb — mých i strojových. Není to archiv: je to <b>seznam, ze kterého vznikají nové kontroly.</b> Bez něj by nebylo co hlídat.</p>
+      </div>
+      <div class="mech">
+        <div class="h">Revize<small>čtvrtý pár očí</small></div>
+        <p>Hotový diff čte agent, který <b>neviděl zadání ani úvahy</b> toho, kdo ho psal — jen kritéria a repozitář. Vrací jeden ze tří verdiktů.</p>
+      </div>
+    </div>
+    <p class="say">Vlastní kopie projektu na disku pro každý úkol (<code>worktree</code>) je pátá, ale nudná: dva úkoly si nepřepíšou soubory a hlavní větev zůstane nedotčená až do konce.</p>
+  </div>
+</section>
+
+<!-- 11 ── log oprav ─────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">IV · log oprav — 167 zápisů, 15 tříd</p>
+    <h2 class="sm">Nejčastější chyba nebyl špatný kód.</h2>
+    <div class="classes">
+      <div class="cls">
+        <div class="top"><span class="pct">35&nbsp;%</span><span class="nm">„Odvozeno, neověřeno“</span></div>
+        <div class="track"><i style="width:35%"></i></div>
+        <p>Tvrzení o kódu, které vzniklo úvahou místo pohledu do souboru. Zdaleka nejčastější třída — a dělá ji stroj i člověk. Za čtyři týdny povyrostla, ne zmenšila.</p>
+      </div>
+      <div class="cls">
+        <div class="top"><span class="pct">14&nbsp;%</span><span class="nm">„Kontrola přestala kontrolovat“</span></div>
+        <div class="track"><i style="width:14%"></i></div>
+        <p>Hlídač zůstal zelený, ale mezitím hlídal složku, která se přejmenovala. Zelená bez obsahu.</p>
+      </div>
+      <div class="cls">
+        <div class="top"><span class="pct">11&nbsp;%</span><span class="nm">„Tiché nic“</span></div>
+        <div class="track"><i style="width:11%"></i></div>
+        <p>Kód se zavolal, neudělal nic a nikomu to nedošlo — protože se nic nerozbilo.</p>
+      </div>
+    </div>
+    <p class="foot"><b>Ale tohle je to číslo, na kterém záleží: u 37&nbsp;% zápisů dnes existuje kontrola, která tu chybu chytí.</b>
+       Dalších 32&nbsp;% je mechanicky chytatelných a hlídač na ně zatím není — to je backlog, ne výmluva. 17&nbsp;% potřebuje úsudek a hlídač mít nikdy nebude.
+       <b>Kdo chybu našel:</b> Claude 45&nbsp;%, já 24&nbsp;%, stroj (test, audit, kontrola) 27&nbsp;%.</p>
+  </div>
+</section>
+
+<!-- 12 ── tři verdikty ──────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">IV · revize<span class="new">tento týden</span></p>
+    <h2 class="sm">Dva verdikty nestačily.</h2>
+    <p class="say">Revize uměla říct jen <b>„v pořádku“</b> nebo <b>„na tohle potřebuju Karla“</b>. Jenže spousta nálezů je <em>vada s jedinou správnou odpovědí</em> — a ta budila člověka úplně zbytečně.</p>
+    <div class="verdicts">
+      <div class="vd ok">
+        <span class="to">→ testing/</span>
+        <b>ok</b>
+        <p>Nic, co by potřebovalo můj úsudek, než se to sloučí.</p>
+      </div>
+      <div class="vd fix">
+        <span class="to">→ zpět na další pokus</span>
+        <b>needs_fix</b>
+        <p>Konkrétní ověřitelná vada s jednou správnou opravou. Vrací se stroji — <b>člověk se o tom vůbec nedozví.</b></p>
+      </div>
+      <div class="vd dec">
+        <span class="to">→ needs-decision/</span>
+        <b>needs_decision</b>
+        <p>Volba, kterou můžu udělat jen já. Karta se zastaví a počká.</p>
+      </div>
+    </div>
+    <p class="foot">A jedna díra, kterou jsme našli až provozem: složka <code>review/</code> <b>neměla východ.</b> Revize běžela jen cestou skrz — karta, která v té složce zůstala ležet, se už nikdy nezkontrolovala a nikdo to neřekl. Dneska ji vybírá samostatný průchod.</p>
+  </div>
+</section>
+
+<!-- 13 ── limit ─────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">IV · noc, která se nevejde do jednoho okna</p>
+    <h2>Limit není konec.<br>Je to pauza.</h2>
+    <p class="say">Nejedeme přes API, ale <b>na limitech předplatného.</b> Po naražení do limitu příští session naváže.</p>
+    <ul class="plain">
+      <li><span class="mark ok">→</span><span>Uloží se <b>rozjetá session i pracovní kopie</b> projektu.</span></li>
+      <li><span class="mark ok">→</span><span>Runner počká na reset limitu a <b>pokračuje tam, kde skončil.</b></span></li>
+      <li><span class="mark ok">→</span><span>Úkol větší než jedno okno se dodělá <b>napříč několika sessions.</b></span></li>
+      <li><span class="mark am">!</span><span>Zeď se dřív <b>nedala odlišit od vady karty</b> — CLI skončí nenulově, runner z toho udělal „selhalo“, a jedna zeď ve dvě ráno pohřbila zbytek noci. Dneska je to vlastní stav, ne obviněná karta.</span></li>
+    </ul>
+    <p class="say">A když <b>dva pokusy po sobě</b> nepohnou ani řádkem, karta se odloží — místo aby dostávala pokusy donekonečna.</p>
+  </div>
+</section>
+
+<!-- 14 ── čísla ─────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">V · čísla — změřeno 20. 8. 2026</p>
+    <h2 class="sm">Hra se staví od března.<br>Nightshift na ní jede čtyři týdny.</h2>
+    <div class="grid">
+      <div class="cell"><span class="n hot">82</span><span class="l">hotových karet — <b>22 z nich za posledních deset dní</b></span></div>
+      <div class="cell"><span class="n">3&nbsp;875</span><span class="l">testů celkem — 1 939 hra, 1 936 nástroj</span></div>
+      <div class="cell"><span class="n hot">43</span><span class="l">kontrol, ~18 s, po každé úpravě souboru</span></div>
+      <div class="cell"><span class="n">167</span><span class="l">zapsaných oprav, 15 tříd chyb</span></div>
+      <div class="cell"><span class="n hot">37&nbsp;%</span><span class="l">oprav už hlídá kontrola, která je chytí</span></div>
+      <div class="cell"><span class="n warm">57&nbsp;%</span><span class="l">ze 77 pravidel něco hlídá — <b>43&nbsp;% je pouhá próza</b></span></div>
+      <div class="cell"><span class="n">9</span><span class="l">rolí agentů — třídič, triage, scribe, worker, revize…</span></div>
+      <div class="cell"><span class="n warm">1</span><span class="l">karta čeká na moje rozhodnutí</span></div>
+    </div>
+    <p class="foot"><b>Hra se staví od 15. 3. 2026</b> — 44,5 tis. řádků a 34 tis. řádků jejích testů je práce půl roku, ne čtyř týdnů.
+       <b>Všechno ostatní je za čtyři týdny</b>, co na ní jede nightshift (21. 7. – 20. 8. 2026): karty, kontroly, log oprav, 34 tis. řádků nástroje.
+       Jeden vývojář, jeden projekt. <b>Orientační měřidla, ne studie</b> — nemám s čím to porovnat, protože stejný projekt bez toho neběžel.</p>
+  </div>
+</section>
+
+<!-- 15 ── zelená ────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">VI · nejméně lichotivý důkaz</p>
+    <h2>Zelená, která nic<br>neznamenala.</h2>
+    <ul class="plain">
+      <li><span class="mark">✕</span><span>Hlídač četl soubor, který se mezitím přestěhoval jinam. <b>Byl zelený a nečetl nic</b> — tři týdny.</span></li>
+      <li><span class="mark">✕</span><span>Nástroj, kterým jsem ty chyby počítal, viděl jen polovinu archivu. Na největší třídu chyb hlásil <b>„0“</b>.</span></li>
+      <li><span class="mark">✕</span><span>Karta měla značku v zápisu, který parser neuměl přečíst. <b>35 kontrol zelených</b> — a karta přitom vůbec neměla jít do noci.</span></li>
+      <li><span class="mark">✕</span><span>Stránka panelu psala u <b>každé</b> poznámky „nezařazeno“. Zařazení proběhlo správně, jen se do souboru nikdo nepodíval. <b>Dokonalá práce k nerozeznání od žádné.</b></span></li>
+    </ul>
+    <p class="say">Všechny našel až člověk. <em>Zelená není důkaz</em> — je to jen absence nálezu.</p>
+  </div>
+</section>
+
+<!-- 16 ── co pořád bolí ─────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">VI · otevřené problémy</p>
+    <h2 class="sm">Kam jsem se za čtyři týdny nedostal.</h2>
+    <ul class="plain">
+      <li><span class="mark">!</span><span><b>Žádné pískoviště.</b> Aby noční běh mohl pracovat, dostane práva na celý počítač. Není to kontejner. Otevřený problém, ne vyřešený — a instalátor se na to ptá právě proto.</span></li>
+      <li><span class="mark">!</span><span><b>43&nbsp;% pravidel hlídá jen próza.</b> Platí, dokud si na ně AI vzpomene. Z toho je asi tři čtvrtiny mechanicky chytatelných — hlídač na ně jen ještě nikdo nenapsal.</span></li>
+      <li><span class="mark">!</span><span><b>Velká karta = špatné zadání.</b> Čím víc toho karta chce, tím hůř to dopadne. Kontrola na to upozorní, ale hranice je odhad, ne měření.</span></li>
+      <li><span class="mark">!</span><span><b>Změna přes dva repozitáře.</b> Půlka v projektu, půlka v nástroji — testy pak byly zelené nebo červené podle toho, co měl vedle sebe ten druhý. <b>39 spadlých testů</b>, než mi to došlo.</span></li>
+      <li><span class="mark">!</span><span><b>Platí se z týdenního limitu.</b> Kdy noc pustíš, si ohlídáš. Co ale utrpí, je <b>týdenní strop</b>: co spotřebuje noc, nemáš ve čtvrtek.</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- 17 ── pro koho ──────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">VII · pro koho to je</p>
+    <div class="duo">
+      <div class="panel">
+        <div class="big">Dává to smysl</div>
+        <ul>
+          <li><b>Python projekt střední velikosti.</b> Desítky tisíc řádků.</li>
+          <li><b>Který už má testy</b> a bude žít roky, ne týdny.</li>
+          <li><b>Jeden až pár lidí</b> — a pravidla, která se pořád opakují.</li>
+          <li><b>Kde je nudná práce</b>, co se dá popsat jednou větou.</li>
+        </ul>
+      </div>
+      <div class="panel no">
+        <div class="big">Nedává to smysl</div>
+        <ul>
+          <li><b>Malý projekt nebo prototyp.</b> Režie převáží užitek.</li>
+          <li><b>JavaScript, TypeScript, cokoli jiného.</b> Část kontrol čte přímo Python — ty by se musely napsat znovu.</li>
+          <li><b>Tým, kde tuhle roli plní code review a CI.</b> Pak je to duplikát.</li>
+          <li><b>Prostředí, kde agent nesmí na stroj.</b> Viz předchozí snímek.</li>
+        </ul>
+      </div>
+    </div>
+    <p class="say">Nedostaneš hotovou sadu kontrol. Dostaneš <em>nářadí, kterým si je vyrobíš z vlastních chyb.</em></p>
+  </div>
+</section>
+
+<!-- 18 ── odkaz ─────────────────────────────────────────── -->
+<section class="slide">
+  <div class="inner">
+    <p class="kicker">VII · vyzkoušet</p>
+    <p class="link">github.com/karel-murgas/nightshift</p>
+    <pre>git clone https://github.com/karel-murgas/nightshift.git
+cd nazev-projektu &amp;&amp; pip install -e ../nightshift
+nightshift bootstrap
+
+<span class="c"># a pak už jen tohle — instalace se dělá odsud:</span>
+<span class="p">command-center.bat</span>   <span class="c">/   ./command-center.sh</span></pre>
+    <div class="warnbox">
+      <p><b>Než to pustíš přes noc:</b> aby worker mohl sám psát kód, potřebuje práva na celý počítač — není to kontejner ani pískoviště. Instalátor se na to zeptá a <b>nikdy to nenastaví za tebe.</b></p>
+    </div>
+    <p class="byline">KAREL MURGAŠ · 20. SRPNA 2026</p>
+  </div>
+</section>
+
+<script>
+(function () {
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  const rail = document.getElementById('rail');
+  const hint = document.getElementById('hint');
+  const num  = document.getElementById('num');
+  const bar  = document.getElementById('bar');
+  const last = slides.length - 1;
+
+  slides.forEach((s, i) => {
+    s.id = 's' + (i + 1);
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.setAttribute('aria-label', 'Snímek ' + (i + 1));
+    b.addEventListener('click', () => go(i));
+    rail.appendChild(b);
+  });
+  const dots = Array.from(rail.children);
+
+  let current = -1;
+
+  function go(i) {
+    const n = Math.max(0, Math.min(last, i));
+    if (n === current) return;
+    if (current >= 0) slides[current].classList.remove('on');
+    slides[n].classList.add('on');
+    slides[n].scrollTop = 0;
+    current = n;
+    dots.forEach((d, j) => d.setAttribute('aria-current', String(j === n)));
+    // Číslo snímku plní JS. Ručně psaná čísla se rozešla s pořadím, jakmile
+    // někde uprostřed přibyl snímek.
+    num.innerHTML = '<b>' + String(n + 1).padStart(2, '0') + '</b> / ' + String(last + 1).padStart(2, '0');
+    bar.style.width = ((n / last) * 100) + '%';
+    if (location.hash !== '#' + slides[n].id) {
+      history.replaceState(null, '', '#' + slides[n].id);
+    }
+  }
+
+  // ── skok, ne rolování ────────────────────────────────────
+  // Zámek je tam kvůli setrvačnosti touchpadu: jedno máchnutí pošle
+  // desítky wheel událostí a bez něj by přeskočilo půl prezentace.
+  let lock = false;
+  function step(d) {
+    if (lock) return;
+    lock = true;
+    setTimeout(() => { lock = false; }, 430);
+    go(current + d);
+  }
+
+  addEventListener('wheel', e => {
+    // Snímek, který se nevejde na obrazovku, se smí nejdřív dorolovat
+    // sám v sobě; teprve na jeho okraji se skáče dál.
+    const s = slides[current];
+    if (s && s.scrollHeight > s.clientHeight + 2) {
+      const top = s.scrollTop <= 0;
+      const bottom = s.scrollTop + s.clientHeight >= s.scrollHeight - 2;
+      if ((e.deltaY > 0 && !bottom) || (e.deltaY < 0 && !top)) return;
+    }
+    e.preventDefault();
+    if (Math.abs(e.deltaY) < 6) return;
+    step(e.deltaY > 0 ? 1 : -1);
+  }, { passive: false });
+
+  addEventListener('keydown', e => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const k = e.key;
+    if (k === 'ArrowRight' || k === 'ArrowDown' || k === 'PageDown' || k === ' ') { e.preventDefault(); go(current + 1); }
+    else if (k === 'ArrowLeft' || k === 'ArrowUp' || k === 'PageUp') { e.preventDefault(); go(current - 1); }
+    else if (k === 'Home') { e.preventDefault(); go(0); }
+    else if (k === 'End') { e.preventDefault(); go(last); }
+  });
+
+  let ty = null;
+  addEventListener('touchstart', e => { ty = e.changedTouches[0].clientY; }, { passive: true });
+  addEventListener('touchend', e => {
+    if (ty === null) return;
+    const dy = ty - e.changedTouches[0].clientY;
+    ty = null;
+    if (Math.abs(dy) > 45) step(dy > 0 ? 1 : -1);
+  }, { passive: true });
+
+  const from = slides.findIndex(s => '#' + s.id === location.hash);
+  go(from >= 0 ? from : 0);
+  setTimeout(() => { hint.style.opacity = '0'; }, 5000);
+})();
+</script>
+</body>
+</html>
