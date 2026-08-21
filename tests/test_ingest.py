@@ -1219,3 +1219,180 @@ def test_a_refusal_does_not_assert_a_cause_it_cannot_know(capsys):
     named = ingest.denials(_Envelope([{"tool_name": "Read",
                                        "message": "Board/ideas/ is private"}]))
     assert named == ["Read: Board/ideas/ is private"]
+
+# --------------------------------------------------------------------------
+# Publishing what the pass committed. A real bare origin and a real push --
+# the whole subject here is what git does with the branch, and a fake remote
+# would be a test of the fake. Only the preflight is stubbed: it is a separate
+# command with its own suite, and paying for it per test would buy nothing this
+# file is asking about.
+# --------------------------------------------------------------------------
+
+
+def _clone_with_origin(tmp_path: Path) -> Path:
+    """A checkout of a real bare remote, on `main`, with a board and a manifest."""
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _fixtures.git_init(seed, email="t@t")
+    (seed / ".ai").mkdir()
+    (seed / ".ai" / "manifest.toml").write_text(_PUBLISH_MANIFEST, encoding="utf-8")
+    for lane in ("inbox", "tasks"):
+        (seed / "Board" / lane).mkdir(parents=True)
+        (seed / "Board" / lane / ".keep").write_text("", encoding="utf-8")
+    (seed / "myapp").mkdir()
+    (seed / "myapp" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    _run_git(seed, "add", "-A")
+    _run_git(seed, "commit", "-qm", "seed")
+    _run_git(seed, "branch", "-M", "main")
+
+    origin = tmp_path / "origin.git"
+    _run_git(tmp_path, "clone", "-q", "--bare", str(seed), str(origin))
+    work = tmp_path / "work"
+    _run_git(tmp_path, "clone", "-q", str(origin), str(work))
+    _run_git(work, "config", "user.email", "t@t")
+    _run_git(work, "config", "user.name", "t")
+    return work
+
+
+_PUBLISH_MANIFEST = """
+[project]
+name = "myapp"
+source_dirs = ["myapp"]
+
+[tests]
+dir = "tests"
+
+[board]
+root = "Board"
+
+[branches]
+integration = "main"
+stable = "main"
+"""
+
+
+def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", check=False)
+
+
+def _remote_head(work: Path) -> str:
+    return _run_git(work.parent / "origin.git", "rev-parse", "HEAD").stdout.strip()
+
+
+def _stub_preflight(monkeypatch, code: int = 0) -> dict:
+    """Let git through, answer for the preflight. Returns what it was asked."""
+    real = subprocess.run
+    seen: dict = {}
+
+    def run(argv, **kwargs):
+        if any("nightshift.preflight" in str(a) for a in argv):
+            seen["argv"] = [str(a) for a in argv]
+            return subprocess.CompletedProcess(argv, code)
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(ingest.subprocess, "run", run)
+    return seen
+
+
+def test_a_board_commit_is_pushed_at_the_end_of_the_pass(tmp_path, monkeypatch):
+    """Karel, 2026-08-21: "This should push automatically as part of the ingest."
+    A routing pass that lands its decisions locally and stops leaves the other
+    machine reading a board that no longer exists."""
+    work = _clone_with_origin(tmp_path)
+    (work / "Board" / "tasks" / "carded.md").write_text("---\nid: carded\n---\n",
+                                                        encoding="utf-8")
+    _run_git(work, "add", "-A")
+    _run_git(work, "commit", "-qm", "board: routed 1 note")
+    before = _remote_head(work)
+    seen = _stub_preflight(monkeypatch)
+
+    assert ingest.publish(work) is True
+
+    assert _remote_head(work) != before, "the remote did not move"
+    assert "--no-corrections" in seen["argv"], "the preflight was not taken"
+    assert ingest.NO_LESSON in seen["argv"]
+
+
+def test_a_branch_carrying_code_is_not_pushed_by_a_routing_pass(tmp_path, monkeypatch):
+    """The push is of a BRANCH, not of this run's commits, so whatever else was
+    committed here and never published would ride out with it. The argument for
+    automating it was that a routing pass touches no code -- so that claim is
+    checked rather than assumed."""
+    work = _clone_with_origin(tmp_path)
+    (work / "Board" / "tasks" / "carded.md").write_text("---\nid: carded\n---\n",
+                                                        encoding="utf-8")
+    (work / "myapp" / "app.py").write_text("x = 2\n", encoding="utf-8")
+    _run_git(work, "add", "-A")
+    _run_git(work, "commit", "-qm", "board: routed 1 note, and someone's edit")
+    before = _remote_head(work)
+    seen = _stub_preflight(monkeypatch)
+
+    assert ingest.publish(work) is False
+
+    assert _remote_head(work) == before
+    assert not seen, "a refusal must not even pay for the preflight"
+
+
+def test_a_refused_preflight_stops_the_push(tmp_path, monkeypatch):
+    """The one thing between a malformed card and the branch every other machine
+    pulls -- this pass has just written cards, and `card_schema` is a gate."""
+    work = _clone_with_origin(tmp_path)
+    (work / "Board" / "tasks" / "carded.md").write_text("---\nid: carded\n---\n",
+                                                        encoding="utf-8")
+    _run_git(work, "add", "-A")
+    _run_git(work, "commit", "-qm", "board: routed 1 note")
+    before = _remote_head(work)
+    _stub_preflight(monkeypatch, code=1)
+
+    assert ingest.publish(work) is False
+    assert _remote_head(work) == before
+
+
+def test_a_branch_with_no_upstream_keeps_its_commits(tmp_path, monkeypatch):
+    """Nothing to push to is not a failure, and inventing a remote for it would be
+    this module deciding where somebody's work should be published."""
+    work = _clone_with_origin(tmp_path)
+    _run_git(work, "checkout", "-qb", "elsewhere")
+    (work / "Board" / "tasks" / "carded.md").write_text("---\nid: carded\n---\n",
+                                                        encoding="utf-8")
+    _run_git(work, "add", "-A")
+    _run_git(work, "commit", "-qm", "board: routed 1 note")
+    seen = _stub_preflight(monkeypatch)
+
+    assert ingest.publish(work) is False
+    assert not seen
+
+
+def test_a_branch_level_with_its_remote_publishes_nothing(tmp_path, monkeypatch, capsys):
+    work = _clone_with_origin(tmp_path)
+    seen = _stub_preflight(monkeypatch)
+
+    assert ingest.publish(work) is False
+
+    assert not seen
+    assert capsys.readouterr().out == "", "silence is the right report for nothing to do"
+
+
+def test_a_note_named_like_prose_is_one_path_not_two(tmp_path):
+    """`Board/inbox/Stale README.md` splits on whitespace into two paths, one of
+    them a file nobody has touched -- and a fabricated `README.md` would make a
+    perfectly ordinary board push look like it carried something else."""
+    work = _clone_with_origin(tmp_path)
+    (work / "Board" / "inbox" / "Stale README.md").write_text("a note\n",
+                                                              encoding="utf-8")
+    _run_git(work, "add", "-A")
+    _run_git(work, "commit", "-qm", "board: a note with a space in its name")
+
+    assert ingest.unpushed(work) == ["Board/inbox/Stale README.md"]
+    assert ingest.not_board(work, ingest.unpushed(work)) == ""
+
+
+def test_what_a_board_write_produces_and_what_it_never_does(tmp_path):
+    work = _clone_with_origin(tmp_path)
+
+    assert ingest.not_board(work, ["Board/tasks/one.md", "Board/inbox/two.md",
+                                   board.ROUTING_VIEW, board.DIGEST_VIEW]) == ""
+    assert ingest.not_board(work, ["Board/tasks/one.md",
+                                   "myapp/app.py"]) == "myapp/app.py"
+    assert ingest.not_board(work, [".ai/manifest.toml"]) == ".ai/manifest.toml"
