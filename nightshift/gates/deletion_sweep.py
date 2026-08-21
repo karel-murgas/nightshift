@@ -25,7 +25,7 @@ import subprocess
 from pathlib import Path
 
 from nightshift.gates import doc_scan
-from nightshift import branches
+from nightshift import branches, gitpaths
 from nightshift.gates.base import Violation
 
 NAME = "deletion_sweep"
@@ -114,8 +114,7 @@ def removed_names(repo_root: Path) -> dict[str, str]:
             note(name, reason)
 
     # 1. Working-tree deletions (what a pre-commit hook sees).
-    for line in _git(repo_root, ["status", "--porcelain"]).splitlines():
-        code, _, path = line[:2], line[2:3], line[3:].strip().strip('"')
+    for code, path in gitpaths.status(repo_root):
         if "D" not in code or not path.startswith(watched):
             continue
         old = _git(repo_root, ["show", f"HEAD:{path}"])
@@ -125,11 +124,7 @@ def removed_names(repo_root: Path) -> dict[str, str]:
         return dead
 
     # 2. Committed deletions and per-file symbol removals since the merge-base.
-    for line in _git(repo_root, ["diff", "--name-status", f"{base}..HEAD"]).splitlines():
-        parts = line.split("\t")
-        if len(parts) < 2:
-            continue
-        status, path = parts[0], parts[-1]
+    for status, path in gitpaths.name_status(repo_root, f"{base}..HEAD"):
         if not path.startswith(watched) or not path.endswith(".py"):
             continue
         if status.startswith("D"):

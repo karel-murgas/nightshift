@@ -142,21 +142,29 @@ def _worktree_path(root: Path, card_id: str) -> Path:
 def test_conflicted_paths_all_seven_unmerged_codes():
     """UU AA DD AU UA DU UD — every two-letter unmerged code → file reported."""
     codes = ["UU", "AA", "DD", "AU", "UA", "DU", "UD"]
-    porcelain = "\n".join(f"{c} file_{c}.txt" for c in codes)
-    assert set(_conflicted_paths(porcelain)) == {f"file_{c}.txt" for c in codes}
+    entries = [(c, f"file_{c}.txt") for c in codes]
+    assert set(_conflicted_paths(entries)) == {f"file_{c}.txt" for c in codes}
 
 
 def test_conflicted_paths_no_conflicts():
-    assert _conflicted_paths("M  modified.txt\n?? untracked.txt\n") == []
+    assert _conflicted_paths([("M ", "modified.txt"), ("??", "untracked.txt")]) == []
 
 
 def test_conflicted_paths_modified_not_conflicted():
     """A modified-but-not-conflicted entry must not be reported."""
-    assert _conflicted_paths("M  some_file.py\n") == []
+    assert _conflicted_paths([("M ", "some_file.py")]) == []
 
 
 def test_conflicted_paths_empty():
-    assert _conflicted_paths("") == []
+    assert _conflicted_paths([]) == []
+
+
+def test_a_conflict_in_a_file_named_like_prose_is_reported_whole():
+    """The reason this function stopped taking raw porcelain text. A conflict
+    report that names half a filename is a report nobody can act on -- and
+    `Board/inbox/Stale README.md` is a real name in a real inbox."""
+    entries = [("UU", "Board/inbox/Stale README.md")]
+    assert _conflicted_paths(entries) == ["Board/inbox/Stale README.md"]
 
 
 # ---------------------------------------------------------------------------

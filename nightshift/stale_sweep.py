@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from nightshift import gitpaths
 from nightshift import textio  # `stale_status.json` is committed; write_text would CRLF it
 from nightshift.gates import doc_scan  # the reference extractor and doc scope live here
 from nightshift.manifest import AI_DIR
@@ -127,13 +128,7 @@ def named_source_files(doc: Path, repo_root: Path) -> set[str]:
 
 def _changed_files(repo_root: Path, since_sha: str) -> set[str]:
     """Source relpaths changed between `since_sha` and HEAD (posix)."""
-    # `encoding=` is required — see the note in `.ai/gates/deletion_sweep.py`.
-    out = subprocess.run(["git", "diff", "--name-only", f"{since_sha}..HEAD"],
-                         cwd=repo_root, capture_output=True, text=True,
-                         encoding="utf-8", errors="replace")
-    if out.returncode != 0:
-        return set()
-    return {line.strip() for line in out.stdout.splitlines() if line.strip()}
+    return set(gitpaths.changed(repo_root, f"{since_sha}..HEAD"))
 
 
 @dataclass(frozen=True)
