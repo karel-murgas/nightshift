@@ -252,17 +252,34 @@ def _expired(creds: dict, now: dt.datetime) -> bool:
     return bool(parsed and parsed <= now)
 
 
+#: Blocks that are not plan usage windows even though they may carry a
+#: `utilization` field of their own. `extra_usage` and `spend` describe the
+#: paid-overage state (`_paid()` already reads them for that) rather than a
+#: window that resets and can be "spent" — the live endpoint was observed on
+#: 2026-08-21 reporting `extra_usage.utilization: 100.0` while overage was
+#: *disabled*, which `_buckets()` swept in as an exhausted plan window and
+#: caused a false-positive refusal (`extra_usage` at 100% with `five_hour` at
+#: 23%). Named narrowly, not by shape, because a real window is also "a dict
+#: with a utilization field" and must keep being caught sight unseen.
+_NON_WINDOW_KEYS = {"extra_usage", "spend"}
+
+
 def _buckets(payload: dict) -> tuple[Bucket, ...]:
     """Every metered window in the payload, whatever they are called.
 
-    **The key list is never hardcoded.** The live response carries a dozen-odd
-    windows beyond the familiar ones, most of them null and several with internal
-    codenames that mean nothing outside the vendor. A parser expecting three fixed
-    names renders a blank panel the day those names shift, so this walks whatever
-    came back and keeps the entries that look like a meter.
+    **The key list is never hardcoded** for the windows themselves. The live
+    response carries a dozen-odd windows beyond the familiar ones, most of them
+    null and several with internal codenames that mean nothing outside the
+    vendor. A parser expecting three fixed names renders a blank panel the day
+    those names shift, so this walks whatever came back and keeps the entries
+    that look like a meter — except the known non-window blocks in
+    `_NON_WINDOW_KEYS`, which are excluded by name because they can carry a
+    `utilization`-shaped field without being one.
     """
     found: list[Bucket] = []
     for name, value in payload.items():
+        if name in _NON_WINDOW_KEYS:
+            continue
         if not isinstance(value, dict):
             continue
         util = value.get("utilization")

@@ -67,8 +67,11 @@ def _raise(monkeypatch: pytest.MonkeyPatch, exc: BaseException) -> None:
     monkeypatch.setattr(usage.urllib.request, "urlopen", boom)
 
 
-#: Shaped like the live 2026-08-14 response: two live windows, a pile of nulls, and
+#: Shaped like the live 2026-08-21 response: two live windows, a pile of nulls, and
 #: internal codenames that must neither crash the parser nor be depended upon.
+#: `extra_usage` carries its own `utilization` here, as observed live that day —
+#: a field the 2026-08-14 shape did not have — which is why `_buckets()` must
+#: exclude it by name rather than by "no utilization field" (`gh_extra_usage_bucket_leak`).
 _LIVE = {
     "five_hour": {"utilization": 20.0, "resets_at": "2026-08-14T11:39:59+00:00",
                   "limit_dollars": None, "used_dollars": None},
@@ -79,7 +82,7 @@ _LIVE = {
     "iguana_necktie": None,
     "nimbus_quill": {"utilization": 0.0, "resets_at": None},
     "amber_ladder": None,
-    "extra_usage": {"is_enabled": True, "monthly_limit": None},
+    "extra_usage": {"is_enabled": True, "monthly_limit": None, "utilization": 100.0},
     "spend": {"used": {"amount_minor": 7212, "currency": "EUR", "exponent": 2},
               "limit": None, "enabled": True, "can_purchase_credits": False},
     "member_dashboard_available": False,
@@ -241,6 +244,21 @@ def test_buckets_come_from_the_payload_not_a_fixed_list(tmp_path: Path,
     assert "seven_day_sonnet" not in names and "tangelo" not in names
     assert "member_dashboard_available" not in names
     assert "spend" not in names and "extra_usage" not in names
+
+
+def test_extra_usage_utilization_does_not_leak_into_the_windows(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Karel, 2026-08-21: `python -m nightshift.ingest` refused with 'plan allowance
+    spent (extra_usage)' while `five_hour` was at 23% and `seven_day` at 60% — the
+    live endpoint reports `extra_usage.utilization: 100.0` even while overage is
+    disabled, and `_buckets()` was sweeping it in as an exhausted plan window."""
+    _serve(monkeypatch, {"five_hour": {"utilization": 23.0, "resets_at": None},
+                         "seven_day": {"utilization": 60.0, "resets_at": None},
+                         "extra_usage": {"is_enabled": False, "utilization": 100.0}})
+    snapshot = usage.read(_creds(tmp_path))
+    names = [b.name for b in snapshot.buckets]
+    assert "extra_usage" not in names
+    assert usage.check(snapshot).allow is True
 
 
 def test_a_renamed_window_still_meters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
