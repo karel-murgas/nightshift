@@ -48,11 +48,12 @@ import argparse
 import datetime as dt
 import json
 import re
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import board, manifest, textio, usage
+from nightshift import board, manifest, suite, textio, usage
 from nightshift.manifest import AI_DIR
 # The one place the CLI is executed lives in `runner`; see the alias's comment there
 # on why this imports it rather than growing a second copy of the deadlock fix.
@@ -1138,6 +1139,136 @@ def recorded(root: Path, found: list[Note]) -> list[Decision]:
     return out
 
 
+# --------------------------------------------------------------------------
+# Publishing what the pass committed. The board is a shared artefact: a routing
+# decision that exists only on the machine that made it is a decision the other
+# machine — and the panel on it — cannot see.
+# --------------------------------------------------------------------------
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
+    """git, captured. `encoding=` is not optional on Windows — these three lines
+    are `runner._git`'s, copied rather than imported: reaching into another
+    module's privates to save three lines is the worse of the two smells."""
+    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+
+
+#: The explicit zero `publish` hands the preflight's corrections check.
+#:
+#: That check exists to make a *lesson* mandatory when a branch taught one, and to
+#: refuse a silent zero — `--no-corrections REASON` is the honest alternative it
+#: ships with. This is the rare caller that can state its reason once and have it
+#: be true every time: a routing pass moves card content and touches no code, so
+#: there is nothing for it to have learned. A pass carrying code never reaches
+#: here — `not_board` stops it first.
+NO_LESSON = "routing pass: board content only, nothing to log"
+
+
+def not_board(root: Path, paths: list[str]) -> str:
+    """The first path a board write could not have produced, or `""`.
+
+    **The whole safety of the automatic push rests here**, because what is pushed
+    is a *branch*, not this run's own commits: whatever else was committed in this
+    checkout and never published goes out with it. The argument for automating the
+    push at all was that the commit carries no code (Karel, 2026-08-21: *"preflight
+    only testing the cards as it does not touch the code"*), so that has to be a
+    checked claim rather than an assumption about who else has been working here.
+
+    `suite.classify` is the judge, so this and the test slice can never disagree
+    about what a path is. BOARD and NOTE are what a board write produces; a
+    generated view sits at the repo root and classifies as `other`, so the three
+    are named — they are exactly what `commit_board` stages beside `Board/`.
+    """
+    for path in paths:
+        if path in board.GENERATED_VIEWS:
+            continue
+        if suite.classify(path, root) not in (suite.BOARD, suite.NOTE):
+            return path
+    return ""
+
+
+def unpushed(root: Path) -> list[str]:
+    """Every path this branch has committed that its upstream does not carry.
+
+    `-z`, never `.split()`: a note is named the way a person names a thought, and
+    `Board/inbox/Stale README.md` splits on whitespace into two paths — one of them
+    a file nobody has touched. (`preflight._changed_paths` and the runner's diff
+    readers still split. It costs them nothing today, because a fabricated token
+    classifies as `other` and `other` selects no tests; here it would refuse a
+    perfectly good push.)
+    """
+    out = _git(root, "diff", "--name-only", "-z", "@{u}..HEAD")
+    if out.returncode != 0:
+        return []
+    return [path for path in out.stdout.split("\0") if path]
+
+
+def publish(root: Path) -> bool:
+    """Push the branch when everything unpushed on it is board content. Never fatal.
+
+    **Why a routing pass pushes at all.** Karel, 2026-08-21: *"This should push
+    automatically as part of the ingest."* It is the request that put
+    `publish_remote` into the runner a fortnight earlier — *"Pushing to test after
+    card success should be automatic"* — arriving at the other verb that writes the
+    board. A pass that lands eight decisions locally and stops leaves the other
+    machine reading a board that no longer exists, and leaves the work one disk
+    failure from gone.
+
+    **Why not `publish_remote` itself.** That switch guards publishing *code*: the
+    integration branch after a night, and the card branches with it. It is declared
+    per machine, and the desktop has not declared it — so keying the board on it
+    would mean the board goes on being kept to itself on the box this was asked
+    for. What makes this safe is not a per-machine opinion but `not_board`: nothing
+    unpushed is code. The branch's own upstream says where to push, so there is no
+    second remote to configure and none to guess.
+
+    **Why a preflight, when the runner's own `publish()` takes none.** On a
+    board-only diff it costs seconds rather than minutes: `suite.select` resolves
+    to the board bucket, so it runs the gates and the card tests and nothing else —
+    measured in the origin project the day this was written, 14 s for 44 gates and
+    27 tests. And it is the only thing standing between a malformed card and the
+    branch every other machine pulls, which matters more here than anywhere else:
+    this pass has just *written* cards, and `card_schema` is one of those gates.
+
+    Every failure is reported and swallowed, and the push is never forced. A
+    rejected push means somebody else moved the branch, which is a reconciliation
+    for a human — and a pass that has already routed the lane must not report
+    failure over the last hop.
+    """
+    branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if not branch or branch == "HEAD":
+        print("  publish: detached HEAD - nothing to push from")
+        return False
+    if _git(root, "rev-parse", "--abbrev-ref", "@{u}").returncode != 0:
+        print(f"  publish: `{branch}` tracks no remote branch - the commits stay here")
+        return False
+    ahead = _git(root, "rev-list", "--count", "@{u}..HEAD").stdout.strip()
+    if ahead in ("", "0"):
+        return False                       # level with the remote: nothing worth a line
+    if stray := not_board(root, unpushed(root)):
+        print(f"  ! publish: not pushing - `{branch}` also carries `{stray}`, which is "
+              f"not board content. Preflight it and push it yourself.")
+        return False
+    remote = _git(root, "config", "--get", f"branch.{branch}.remote").stdout.strip()
+    print(f"  publishing {ahead} board commit(s) to {remote}/{branch} - preflight first")
+    # Uncaptured on purpose: the preflight's own report is the record, and it lands
+    # in this run's log, which is what the panel is already showing.
+    check = subprocess.run([sys.executable, "-m", "nightshift.preflight",
+                            "--no-corrections", NO_LESSON], cwd=root, check=False)
+    if check.returncode != 0:
+        print("  ! publish: the preflight refused, above - not pushing")
+        return False
+    pushed = _git(root, "push", remote, branch)
+    if pushed.returncode != 0:
+        said = (pushed.stderr or pushed.stdout or "").strip().splitlines()
+        print(f"  ! publish: `{branch}` was not pushed to {remote} - "
+              f"{said[-1][:150] if said else 'see git output'}")
+        return False
+    print(f"  pushed {ahead} commit(s) to {remote}/{branch}")
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Route every note in Board/inbox/, cheaply, and report before spending.")
@@ -1159,6 +1290,10 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"model for the classifier (default {CLASSIFIER_MODEL})")
     parser.add_argument("--dry-run", action="store_true",
                         help="list the notes and the meters; dispatch nothing")
+    parser.add_argument("--no-push", action="store_true",
+                        help="leave the board commits this pass makes unpublished. It "
+                             "otherwise ends by pushing them, after a preflight, when "
+                             "everything unpushed on the branch is board content")
     args = parser.parse_args(argv)
 
     root = args.root or (repo_root() if args.root is None else args.root)
@@ -1168,11 +1303,32 @@ def main(argv: list[str] | None = None) -> int:
         pass                                  # a repo without a manifest still has a lane
 
     if args.only:
-        return _write_one(root, args.only, allow_paid=args.allow_paid)
+        code = _write_one(root, args.only, allow_paid=args.allow_paid)
+    elif args.write_cards:
+        code = _write_recorded(root, allow_paid=args.allow_paid)
+    else:
+        code = _classify_pass(root, args)
 
-    if args.write_cards:
-        return _write_recorded(root, allow_paid=args.allow_paid)
+    # **The last step of a pass, not the tail of one branch of it.** Every exit
+    # above can have committed: the classify path commits its routing, `--only`
+    # and `--write-cards` commit a card each, and a pass that ends non-zero has
+    # usually committed the most -- so the push is asked once, here, and about
+    # the branch rather than about this run's own commits. That also carries out
+    # a previous pass's commit that never made it, which is the case that
+    # prompted this (Karel, 2026-08-21: "This should push automatically as part
+    # of the ingest"). A dry run publishes nothing, because it touches nothing.
+    if not (args.no_push or args.dry_run):
+        publish(root)
+    return code
 
+
+def _classify_pass(root: Path, args: argparse.Namespace) -> int:
+    """One pass over the unrouted notes: report, spend, apply the routing, write the view.
+
+    Lifted out of `main` when the pass grew a step *after* it. It has nine exits,
+    several of them refusals, and repeating the same tail at each one is how one of
+    them silently comes to lack it.
+    """
     found = notes(root)
     pending = unrouted(found)
     print(f"ingest: {len(found)} note(s) in {board.board_rel(root)}/inbox, "
