@@ -36,7 +36,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import board, preflight, runner, textio, tiers
+from nightshift import board, gitpaths, preflight, runner, textio, tiers
 from nightshift.manifest import AI_DIR, ManifestError, find_root
 
 for _stream in (sys.stdout, sys.stderr):
@@ -117,10 +117,14 @@ class Diagnosis:
 
 
 def _dirty(root: Path) -> str:
-    done = subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
-                          capture_output=True, text=True, encoding="utf-8",
-                          errors="replace")
-    return done.stdout if done.returncode == 0 else ""
+    """The working tree as one comparable string — a fingerprint, not a path list.
+
+    Still `-z`, because the fingerprint is compared between passes and a quoted
+    path is a spelling git can change under it: the same file, edited so its name
+    stops being printable ASCII, would read as a different tree for the wrong
+    reason."""
+    out = gitpaths.git(root, "status", "--porcelain", "-z")
+    return out.stdout if out.returncode == 0 else ""
 
 
 def _gate_violations(root: Path, limit: int = 30) -> str:

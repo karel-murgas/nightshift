@@ -57,6 +57,7 @@ from nightshift import board          # the card model
 from nightshift import branches       # branch roles
 from nightshift import digest
 from nightshift import gitmerge       # merge strategy + failure reporting, one home
+from nightshift import gitpaths       # git's path lists, read NUL-separated
 from nightshift import limits
 from nightshift import manifest as _manifest
 from nightshift import reconcile
@@ -533,10 +534,8 @@ def dirty_outside_board(root: Path) -> list[str]:
     outright, because each shipped a new view and joined neither this list nor
     `commit_board`'s.
     """
-    out = _git(root, "status", "--porcelain")
     dirty = []
-    for line in out.stdout.splitlines():
-        path = line[3:].strip().strip('"')
+    for _, path in gitpaths.status(root):
         if path.startswith("Board/") or path in board.GENERATED_VIEWS:
             continue
         if path.startswith(".obsidian/"):
@@ -1165,7 +1164,7 @@ def clear_handover(root: Path, card_id: str) -> None:
 
 
 def _worktree_dirty(root: Path, tree: Path) -> bool:
-    return bool(_git(tree, "status", "--porcelain").stdout.strip())
+    return gitpaths.dirty(tree)
 
 
 def _worktree_state_hash(tree: Path) -> str:
@@ -1179,12 +1178,16 @@ def _worktree_state_hash(tree: Path) -> str:
     """
     # `-uall` expands untracked directories to individual files, so their content
     # is hashed rather than just the directory name.
-    status = _git(tree, "status", "--porcelain", "-uall").stdout
-    entries = sorted(status.splitlines())
+    #
+    # Read through `gitpaths`, which is not cosmetic here: git quotes a path whose
+    # bytes are not printable ASCII, so a card touching `Animation – attack.md`
+    # used to hash the *escaped* spelling and then fail `is_file()` on it — the
+    # file's content dropped out of the hash entirely, and the progress gate stopped
+    # being able to see changes to exactly the files most likely to be board content.
+    entries = sorted(gitpaths.status(tree, "-uall"))
     digest = hashlib.sha256()
-    digest.update("\n".join(entries).encode("utf-8"))
-    for line in entries:
-        rel = line[3:].strip().strip('"')
+    digest.update("\n".join(f"{code} {path}" for code, path in entries).encode("utf-8"))
+    for _, rel in entries:
         blob = tree / rel
         if blob.is_file():
             digest.update(b"\0")
@@ -3599,7 +3602,7 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
     # computed once here rather than only inside the `ok` branch below: the
     # repo-drift classifier needs the same set for the *violation* case, and it
     # is cheap to compute regardless of which way the gates went.
-    changed = set(_git(root, "diff", "--name-only", f"{base}...{branch}").stdout.split())
+    changed = set(gitpaths.changed(root, f"{base}...{branch}"))
     evidence = ""
     if status == GATE_VIOLATION:
         evidence = "\n".join(f"    {part}" for part in why.split("; ")[:suite.EXCERPT_TESTS])
@@ -3697,7 +3700,7 @@ def merge_branch(root: Path, branch: str, base: str,
 
 def _unmerged_paths(tree: Path) -> list[str]:
     """Paths git marks as unmerged (a rebase/merge conflict), for the review note."""
-    return _git(tree, "diff", "--name-only", "--diff-filter=U").stdout.split()
+    return gitpaths.changed(tree, "--diff-filter=U")
 
 
 def _delete_remote_branch(root: Path, remote: str, branch: str, *,
@@ -3843,7 +3846,7 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
         status, why = _run_gates(root, tree, out_dir / "rebase-gates.txt")
         if status != GATE_PASS:
             return False, f"after rebasing onto {base}, {why}"
-        changed = set(_git(tree, "diff", "--name-only", f"{base}...HEAD").stdout.split())
+        changed = set(gitpaths.changed(tree, f"{base}...HEAD"))
         selection = suite.select(changed, tree)
         try:
             # The excerpt is dropped here on purpose: this path's reason lands in

@@ -108,7 +108,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import branches, manifest, suite, textio  # textio: LF-pinned writes (gate write_newline)
+from nightshift import branches, corrections, gitpaths, manifest, suite, textio  # textio: LF-pinned writes (gate write_newline)
 from nightshift.manifest import ManifestError, find_root
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -262,6 +262,13 @@ def _diff_base(root: Path, base: str) -> str | None:
     return None
 
 
+#: The one file the corrections check is about, as git spells it. Named rather
+#: than repeated because the check now asks for *membership in a path list*
+#: instead of a substring of a blob of text — an exact answer that a path
+#: merely containing this one can no longer satisfy by accident.
+CORRECTIONS_LOG = corrections.LOG.as_posix()
+
+
 def _corrections_touched(root: Path, base: str) -> tuple[bool, str]:
     """Did this branch's diff against the integration base touch the log?"""
     ref = _diff_base(root, base)
@@ -271,11 +278,11 @@ def _corrections_touched(root: Path, base: str) -> tuple[bool, str]:
         # integration branch). Fall back to "was the log touched in HEAD's
         # commit at all" rather than silently passing — the failure direction
         # that hurts is a green light on unreviewed work.
-        names = _git(root, "show", "--name-only", "--format=", "HEAD").stdout
-        return (".ai/corrections.log" in names, "no merge-base; checked HEAD only")
+        touched = gitpaths.committed(root)
+        return (CORRECTIONS_LOG in touched, "no merge-base; checked HEAD only")
     mb = merge_base.stdout.strip()
-    names = _git(root, "diff", "--name-only", f"{mb}..HEAD").stdout
-    return (".ai/corrections.log" in names, f"diff against {ref} ({mb[:8]})")
+    touched = gitpaths.changed(root, f"{mb}..HEAD")
+    return (CORRECTIONS_LOG in touched, f"diff against {ref} ({mb[:8]})")
 
 
 def _changed_paths(root: Path, base: str) -> tuple[set[str] | None, str, str]:
@@ -324,17 +331,16 @@ def _changed_paths(root: Path, base: str) -> tuple[set[str] | None, str, str]:
     merge_base = _git(root, "merge-base", "HEAD", ref) if ref else None
     mb = merge_base.stdout.strip() if merge_base is not None and merge_base.returncode == 0 else ""
     if mb:
-        changed.update(_git(root, "diff", "--name-only", f"{mb}..HEAD").stdout.split())
+        changed.update(gitpaths.changed(root, f"{mb}..HEAD"))
         how = f"vs {ref} ({mb[:8]})"
     else:
         how = f"no merge-base with {ref or base}"
 
-    for line in _git(root, "status", "--porcelain").stdout.splitlines():
-        path = line[3:].strip().strip('"')
-        if " -> " in path:  # a rename reports "old -> new"; the new path is what is on disk
-            path = path.split(" -> ")[-1].strip()
-        if path:
-            changed.add(path)
+    # `gitpaths` reads both of these NUL-separated, which is the whole of what a
+    # rename needs here too: git emits the surviving path first and the one it came
+    # from second, so resolving one is dropping a record rather than splitting on a
+    # ` -> ` that a filename is free to contain.
+    changed.update(path for _, path in gitpaths.status(root))
 
     if not mb:
         return None, how, mb  # cannot tell what changed — not the same as nothing changed

@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from nightshift import discover
+from nightshift import gitpaths
 from nightshift import textio
 from nightshift import tiers
 from nightshift.gates import line_endings
@@ -465,10 +466,10 @@ def _plan_obsidian(plan: Plan, root: Path) -> None:
     # gate-ok(source_reference_liveness): both paths are queried against `root`, the
     # project being initialised, at check time — not this framework's own checkout,
     # which carries no .obsidian/workspace-mobile.json of its own.
-    tracked = _git_out(root, "ls-files", "--", ".obsidian/workspace.json",
-                       ".obsidian/workspace-mobile.json")
+    tracked = gitpaths.tracked(root, "--", ".obsidian/workspace.json",
+                               ".obsidian/workspace-mobile.json")
     if tracked:
-        names = " ".join(tracked.split())
+        names = " ".join(tracked)
         plan.notes.append(
             f"{names} is tracked by git. Obsidian rewrites it whenever you open a "
             f"pane or scroll, so it will show as modified in every diff from now on. "

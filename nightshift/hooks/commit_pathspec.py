@@ -68,6 +68,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from nightshift import gitpaths
+
 NAME = "commit_pathspec"
 
 _SEPARATORS = re.compile(r"&&|\|\||[;&|\n]")
@@ -144,10 +146,10 @@ def _sequencer_busy(repo: Path) -> bool:
 
 
 def _staged(repo: Path) -> list[str] | None:
-    out = _git(["diff", "--cached", "--name-only"], repo)
-    if out is None:
+    out = gitpaths.git(repo, "diff", "--cached", "--name-only", "-z")
+    if out.returncode != 0:
         return None
-    return [line.strip() for line in out.splitlines() if line.strip()]
+    return gitpaths.split(out.stdout)
 
 
 def _has_untrack_in_index(repo: Path) -> bool:
@@ -165,10 +167,8 @@ def _has_untrack_in_index(repo: Path) -> bool:
     Narrow on purpose. A staged deletion whose file is *also* gone from disk still needs a
     pathspec, because `git commit -- <path>` records that deletion correctly.
     """
-    out = _git(["diff", "--cached", "--name-only", "--diff-filter=D"], repo)
-    if not out:
-        return False
-    return any((repo / line.strip()).exists() for line in out.splitlines() if line.strip())
+    return any((repo / path).exists()
+               for path in gitpaths.changed(repo, "--cached", "--diff-filter=D"))
 
 
 def _flags(tokens: list[str]) -> tuple[bool, bool, bool]:

@@ -47,6 +47,7 @@ import sys
 from pathlib import Path
 
 from nightshift import board  # GENERATED_VIEWS — the one home for the report names
+from nightshift import gitpaths
 
 _MESSAGE = (
     "[correction-capture] There is work in the tree newer than the last "
@@ -81,20 +82,8 @@ def _repo_root() -> Path:
 
 def _changed_files(repo_root: Path) -> list[Path]:
     """Working-tree paths git considers modified or untracked."""
-    out = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=repo_root, capture_output=True, text=True, timeout=10,
-        encoding="utf-8", errors="replace",
-    )
-    if out.returncode != 0:
-        return []
     paths: list[Path] = []
-    for line in out.stdout.splitlines():
-        # Porcelain v1: two status chars, a space, then the path. A rename
-        # carries "old -> new"; the new name is the one that exists on disk.
-        rel = line[3:].strip().strip('"')
-        if " -> " in rel:
-            rel = rel.split(" -> ", 1)[1]
+    for _, rel in gitpaths.status(repo_root):
         if any(part in rel for part in _IGNORED):
             continue
         path = repo_root / rel

@@ -52,6 +52,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import nightshift
+from nightshift import gitpaths
 from nightshift.manifest import ManifestError, find_root
 
 #: Seconds a fetch may take before it is abandoned. A freshness reading is a
@@ -156,8 +157,9 @@ def read(checkout: Path | None = None, *, fetch: bool = True) -> Freshness:
     branch = head.stdout.strip()
     default = default_branch(checkout)
 
-    status = _git(checkout, "status", "--porcelain")
-    dirty = len([l for l in (status.stdout if status else "").splitlines() if l.strip()])
+    # Safe to ask through `gitpaths`, which does not have this module's "never
+    # raise" contract: `rev-parse` above has already answered, so git is present.
+    dirty = len(gitpaths.status(checkout))
 
     if fetch:
         fetched = _git(checkout, "fetch", "--quiet", timeout=FETCH_TIMEOUT_S)

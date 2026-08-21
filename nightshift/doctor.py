@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 import nightshift
-from nightshift import freshness, preflight, runner
+from nightshift import freshness, gitpaths, preflight, runner
 from nightshift.gates import line_endings
 from nightshift.manifest import AI_DIR, ManifestError
 from nightshift.preflight import Check
@@ -213,9 +213,7 @@ def worst_relative(root: Path) -> tuple[int, str]:
     Returns `(length, path)` so a report can name what is binding, not just
     how long it is.
     """
-    result = _git(root, "ls-files")
-    tracked = ([p for p in result.stdout.splitlines() if p.strip()]
-              if result is not None and result.returncode == 0 else [])
+    tracked = gitpaths.tracked(root)
     if not tracked:
         return 0, "(no tracked files)"
 
@@ -407,8 +405,7 @@ def framework_version(root: Path, checkout: Path | None = None) -> Check:
                      f"v{nightshift.__version__} at {checkout} — not a git checkout, "
                      f"so no commit to report (installed non-editable?)")
     sha = head.stdout.strip()[:8]
-    status = _git(checkout, "status", "--porcelain")
-    dirty = [line for line in (status.stdout if status else "").splitlines() if line.strip()]
+    dirty = gitpaths.status(checkout)
     state = f"{len(dirty)} uncommitted change(s)" if dirty else "clean"
     return Check("nightshift", True, f"{sha} ({state}) at {checkout}")
 

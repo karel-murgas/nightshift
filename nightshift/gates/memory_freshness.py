@@ -40,7 +40,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from nightshift import branches
+from nightshift import branches, gitpaths
 from nightshift.gates.base import Violation
 from nightshift.manifest import ManifestError
 from nightshift.manifest import load as load_manifest
@@ -63,15 +63,7 @@ def _git_output(repo_root: Path, args: list[str]) -> str:
 
 def _status_paths(repo_root: Path) -> list[tuple[str, str]]:
     """`(porcelain code, path)` for every working-tree change, renames resolved."""
-    out: list[tuple[str, str]] = []
-    for line in _git_output(repo_root, ["status", "--porcelain"]).splitlines():
-        if not line.strip():
-            continue
-        code, path = line[:2], line[3:].strip()
-        if " -> " in path:
-            path = path.split(" -> ")[-1].strip()
-        out.append((code, path.strip('"')))
-    return out
+    return gitpaths.status(repo_root)
 
 
 def changed_files(repo_root: Path) -> set[str]:
@@ -80,8 +72,7 @@ def changed_files(repo_root: Path) -> set[str]:
     for base in branches.merge_base_candidates(repo_root):
         merge_base = _git_output(repo_root, ["merge-base", "HEAD", base]).strip()
         if merge_base:
-            diff = _git_output(repo_root, ["diff", "--name-only", f"{merge_base}..HEAD"])
-            files.update(line.strip() for line in diff.splitlines() if line.strip())
+            files.update(gitpaths.changed(repo_root, f"{merge_base}..HEAD"))
             break
     return files
 
