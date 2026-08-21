@@ -71,7 +71,8 @@ def _raise(monkeypatch: pytest.MonkeyPatch, exc: BaseException) -> None:
 #: internal codenames that must neither crash the parser nor be depended upon.
 #: `extra_usage` carries its own `utilization` here, as observed live that day —
 #: a field the 2026-08-14 shape did not have — which is why `_buckets()` must
-#: exclude it by name rather than by "no utilization field" (`gh_extra_usage_bucket_leak`).
+#: exclude it by name rather than by "no utilization field" (`extra-usage-bucket-leak`
+#: in `.ai/corrections.log`).
 _LIVE = {
     "five_hour": {"utilization": 20.0, "resets_at": "2026-08-14T11:39:59+00:00",
                   "limit_dollars": None, "used_dollars": None},
