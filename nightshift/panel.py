@@ -72,7 +72,7 @@ import webbrowser
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import urlopen
 
 from nightshift import (board, branches, chores, decide, drain, freshness, ingest,
@@ -366,7 +366,7 @@ def spawn_background(module: str, args: list[str], root: Path) -> int:
     return spawn_job(root, module, _module_argv(module, *args))
 
 
-def spawn_sequence(card_ids: list[str], root: Path) -> int:
+def spawn_sequence(card_ids: list[str], root: Path, *, sessions: int = 0) -> int:
     """Dispatch each card in turn, in the order given, detached from this process.
 
     This is what "run the ticked cards" means, and it deliberately owns **no
@@ -378,8 +378,16 @@ def spawn_sequence(card_ids: list[str], root: Path) -> int:
 
     Its own module is the sequencer for the same reason the verbs are commands:
     the thing the button does can be typed into a terminal and watched.
+
+    `sessions` is handed to each of those per-card runs rather than shared across
+    them, because that is the only thing it *can* mean here: `--sessions` is a
+    budget one runner process spends by sleeping through a reset, and these are N
+    processes, one per card. So it says "a card in this sequence may wait out this
+    many windows", which is what the panel's control promises — see `SESSIONS_MAX`.
     """
     argv = [sys.executable, "-m", "nightshift.panel", "--dispatch-cards", *card_ids]
+    if sessions:
+        argv += ["--sessions", str(sessions)]
     return spawn_job(root, "run", argv)
 
 
@@ -421,17 +429,19 @@ def _detached() -> dict[str, object]:
     return {"start_new_session": True}
 
 
-def dispatch_cards(card_ids: list[str], root: Path) -> int:
+def dispatch_cards(card_ids: list[str], root: Path, *, sessions: int = 0) -> int:
     """`--dispatch-cards`: run `runner --card <id>` for each id, in order.
 
     Stops at the first card whose run exits non-zero — a night that could not
     finish card 2 has no business starting card 3 on the same assumption, and the
     runner's own exit code is the only judgment consulted. Nothing here reads a
-    board, moves a card or decides an outcome.
+    board, moves a card or decides an outcome — `sessions`, when given, is passed
+    through to each run untouched for the same reason.
     """
+    extra = ["--sessions", str(sessions)] if sessions else []
     for card_id in card_ids:
         print(f"panel: dispatching {card_id}", flush=True)
-        result = subprocess.run(_module_argv("runner", "--card", card_id), cwd=root,
+        result = subprocess.run(_module_argv("runner", "--card", card_id, *extra), cwd=root,
                                 check=False)
         if result.returncode != 0:
             print(f"panel: {card_id} exited {result.returncode} — stopping the sequence",
@@ -1268,6 +1278,36 @@ def run_is_live(status: dict, record: dict) -> bool:
         return False
 
 
+#: The largest window budget the panel will offer. `runner --sessions` takes any
+#: integer, and this control deliberately does not: the difference between 1 and 2
+#: is "stop at the wall" against "sleep through one reset and carry on", which is
+#: a decision about tonight. Anything past a few is a decision about the *week*,
+#: and a week-long run started by a slider nobody meant to drag past 4 is not a
+#: thing this panel should be able to do. The command line still can.
+SESSIONS_MAX = 4
+
+
+def read_sessions(body: dict) -> int:
+    """The window budget a run button asked for: 1..`SESSIONS_MAX`, or 0 for none.
+
+    0 means *say nothing to the runner*, which is not the same as 1 — it leaves
+    `DEFAULT_SESSIONS` in force, so a browser that sends no such field (an older
+    tab left open across an update) starts exactly the run it used to. Out-of-range
+    values are refused rather than clamped: a clamp turns a typo into a spend, and
+    this is the one control on the bar that can make a run last until morning.
+    """
+    raw = body.get("sessions")
+    if raw in (None, "", 0):
+        return 0
+    try:
+        sessions = int(raw)
+    except (TypeError, ValueError):
+        raise PanelError(f"sessions must be a whole number, not {raw!r}") from None
+    if not 1 <= sessions <= SESSIONS_MAX:
+        raise PanelError(f"sessions must be between 1 and {SESSIONS_MAX}, not {sessions}")
+    return sessions
+
+
 def _runbox_html(ctx: Context) -> str:
     status = ctx.rail.run_status
     record = _latest_record(ctx.root)
@@ -1323,8 +1363,10 @@ def _runbox_html(ctx: Context) -> str:
 #: history lives.
 JOB_SHOWN_FOR = dt.timedelta(hours=2)
 
-#: Most rows the rail will carry. A night is one job, but a click-happy minute
-#: can be five, and the rail is a status line rather than a list.
+#: Most rows the rail will carry — counted in *verbs*, since `shown_jobs` gives
+#: each label one row however many times it was pressed. Four is more distinct
+#: things than are ever usefully in flight at once, and the rail is a status line
+#: rather than a list.
 JOB_ROWS = 4
 
 _JOB_MARK = {jobs.RUNNING: ("", "running"), jobs.DONE: ("ok", "finished"),
@@ -1347,16 +1389,33 @@ def shown_jobs(all_jobs: list[jobs.Job], *,
     rail is on every page, and a red line that outlives the moment it described
     becomes the thing you learn to scroll past. The log is kept either way, and
     the job's own page is where an old failure is read on purpose.
+
+    **One row per flow, not one per press.** Pressing Classify three times in a
+    coffee break left three `classify` lines stacked in the rail — done, failed,
+    failed — which reads as three different things having happened and buries the
+    only one that is still true. Karel, 2026-08-21: *"The upper overview panel
+    added new runs instead of overwriting one row."* A verb is a *place* in the
+    rail now: the newest press of it owns that row and the earlier ones are
+    history, which is what `/run` is for. A row is only ever *replaced* by a
+    running job, never by a finished one — a second press that was refused in
+    under a second must not hide the first one, which is still going.
     """
     now = now or dt.datetime.now()
-    keep = []
+    keep: list[tuple[jobs.Job, str]] = []
+    at_row: dict[str, int] = {}
     for job in all_jobs:
-        if len(keep) == JOB_ROWS:
-            break
         status = jobs.state(job, now=now)
         finished = job.finished_at
-        if status == jobs.RUNNING or (finished and now - finished < JOB_SHOWN_FOR):
+        if not (status == jobs.RUNNING or (finished and now - finished < JOB_SHOWN_FOR)):
+            continue
+        row = at_row.get(job.label)
+        if row is None:
+            if len(keep) == JOB_ROWS:
+                continue        # the rail is full, but an earlier label may still be live
+            at_row[job.label] = len(keep)
             keep.append((job, status))
+        elif status == jobs.RUNNING and keep[row][1] != jobs.RUNNING:
+            keep[row] = (job, status)
     return keep
 
 
@@ -1728,13 +1787,29 @@ def _render_now(ctx: Context) -> str:
     if elsewhere_rows:
         body += _group(f"Dispatchable, but not here — {len(ctx.elsewhere)}") + elsewhere_rows
 
+    # **Two numbers, and they are the two halves of "how much of a night is this".**
+    # `Take first` says how much work goes in; `Sessions` says how long the run may
+    # keep at it — 1 stops at the usage wall, 2 sleeps through one reset and carries
+    # on. The second existed only as `runner --sessions` and therefore only for
+    # whoever was in a terminal, which is the gap this closes; the tooltip says what
+    # a window is, because the word means nothing until someone tells you once.
+    sessions = (
+        f'<label class="runopt" title="How many usage-limit windows a dispatch may '
+        f'spend. 1 stops when the session allowance runs out; more than that sleeps '
+        f'until the allowance resets and carries on, which is how a run reaches past '
+        f'tonight into the small hours. Each dispatch gets this budget — the queue '
+        f'run as a whole, or each card of a ticked sequence in turn. The chore batch '
+        f'ignores it: it never waits out a window.">Sessions'
+        f'<input type="range" id="sessions" min="1" max="{SESSIONS_MAX}" value="1">'
+        f'<output for="sessions" id="sessionsout">1</output></label>')
     bar = (
         '<div class="barbox">'
         '<p>Order is saved to each card as you drag. <span id="picked">0 of 0</span> ticked.</p>'
-        '<label class="takefirst">Take first'
+        '<label class="runopt">Take first'
         f'<input type="range" id="takefirst" min="0" max="{len(tonight)}" value="{len(tonight)}">'
         '<output for="takefirst" id="takefirstout">0</output></label>'
-        '<div class="acts">'
+        + sessions
+        + '<div class="acts">'
         + _act("Run chores", onclick="runChores()")
         + _act("Run the whole queue", onclick="runNight()")
         + _act("Run the ticked", onclick="runTicked()", primary=True)
@@ -1763,7 +1838,7 @@ def _render_now(ctx: Context) -> str:
                    + _meta([_chip("triage", "warn"), f"{note.size} B"]
                            + ([_chip(f"confidence {decision.confidence}", "warn")]
                               if decision and decision.confidence != "high" else []))),
-             acts=_act("Open note", href=f"/body/{_rel(ctx.root, note.path)}")
+             acts=_act("Open note", href=_body_href(_rel(ctx.root, note.path)))
                   + _act("Triage this",
                          onclick=f"post('/api/triage',{{note:'{_attr(note.name)}'}})",
                          primary=True))
@@ -1915,18 +1990,12 @@ def _render_inbox(ctx: Context) -> str:
             (note, decision if decision and decision.route == route else None))
 
     rows = []
-    position = 0
     for route, heading, kind in _ROUTE_GROUPS:
         bucket = ordered.get(route) or []
         if not bucket:
             continue
         rows.append(_group(f"{heading} — {len(bucket)}"))
         for note, decision in bucket:
-            position += 1
-            # Positional, not the filename — real note names carry spaces and capitals
-            # ("Regenerate soundtrack.md"), and whitespace is not allowed in an HTML id.
-            # Same reason the Ideas page numbers its editors.
-            slug = f"note-{position}"
             rel = _rel(ctx.root, note.path)
             meta = [f"{note.size} B", _e(_stamp_of(note.path))]
             if decision:
@@ -1940,12 +2009,13 @@ def _render_inbox(ctx: Context) -> str:
             body = f'<span class="id">{_e(note.name)}</span>'
             if decision and decision.why:
                 body += f'<p class="why">{_e(decision.why)}</p>'
+            # Both buttons open the same page in its two modes (`render_body`),
+            # which is why Edit is a link and no longer opens a box on this row.
             rows.append(_row(
                 marker="&rsaquo;", body=body + _meta(meta),
-                acts=_act("Edit", onclick=f"editBody('{slug}','{_attr(rel)}')")
-                     + _act("Open note", href=f"/body/{rel}")
+                acts=_act("Edit", href=_body_href(rel, edit=True))
+                     + _act("Open note", href=_body_href(rel))
                      + _route_act(note.name, route)))
-            rows.append(_editor(slug, save=f"saveBody('{slug}','{_attr(rel)}')"))
     rows = "".join(rows)
 
     # **Two steps, and they are two buttons because the ordering is the rule.**
@@ -2115,6 +2185,20 @@ def _rel(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
+def _body_href(rel: str, *, edit: bool = False) -> str:
+    """The address of one board file's page, in the mode asked for.
+
+    **Percent-encoded, because board files are named the way people name
+    thoughts** — "Regenerate soundtrack.md", "Animation – attack.md". A browser
+    will encode a space in an `href` for you; nothing guarantees it for an em
+    dash, and an address that only works because the client was forgiving is one
+    that breaks the first time something else reads it. `safe="/"` keeps the path
+    separators as separators. The handler `unquote`s this back before it looks for
+    the file.
+    """
+    return f"/body/{quote(rel, safe='/')}" + ("?edit=1" if edit else "")
+
+
 def _editor(slug: str, *, save: str, named: bool = False, placeholder: str = "") -> str:
     name_field = ('<input type="text" placeholder="filename.md">' if named else "")
     return (f'<div class="editor" id="ed-{_e(slug)}">{name_field}'
@@ -2126,18 +2210,17 @@ def _editor(slug: str, *, save: str, named: bool = False, placeholder: str = "")
 def _render_ideas(ctx: Context) -> str:
     rows = []
     for position, name in enumerate(ctx.ideas, start=1):
-        # The editor's id is positional, never the filename: real idea names carry
-        # spaces, en dashes and diacritics ("Animation – attack.md"), none of which
-        # may appear in an HTML id, and one apostrophe would end the JS string the
-        # button hands it to. The *path* still travels verbatim, url-encoded.
-        slug = f"idea-{position}"
+        # The path travels verbatim and url-encoded, which is the whole reason this
+        # can be a link: real idea names carry spaces, en dashes and diacritics
+        # ("Animation – attack.md"), none of which may appear in an HTML id, and one
+        # apostrophe would have ended the JS string the old inline editor was handed.
         path = f"{board.board_rel(ctx.root).as_posix()}/{board.PRIVATE_LANE}/{name}"
-        acts = (_act("Edit", onclick=f"editBody('{slug}','{_attr(path)}')")
+        acts = (_act("Read", href=_body_href(path))
+                + _act("Edit", href=_body_href(path, edit=True))
                 + _act("Promote", onclick=f"post('/api/promote',{{name:'{_attr(name)}'}})",
                        primary=True))
         rows.append(_row(marker=str(position), acts=acts,
                          body=f'<span class="id">{_e(name)}</span>'))
-        rows.append(_editor(slug, save=f"saveBody('{slug}','{_attr(path)}')"))
 
     bar = ('<div class="barbox">'
            '<p>A new idea is one line and a filename. It costs nothing and commits you '
@@ -2283,13 +2366,21 @@ def _job_detail(ctx: Context, job: jobs.Job) -> str:
 
 
 def _ingest_roster(progress: ingest.Progress) -> str:
-    """One line per note, with what became of it.
+    """One line per note, with what became of it — for both passes.
 
-    A classify pass has no per-note lines to show and that is not a gap: it is one
-    dispatch over the whole lane, which is the entire economy of the step. So it
-    reports its phase while it runs and its per-route counts when it lands, and the
-    routing itself is on the Inbox page — inventing per-note progress for it would
-    be reporting something nobody measured.
+    **The middle column is the answer to a different question in each.** A
+    carding run reports what happened to the note (done, bounced, stranded); a
+    classify run reports the route it decided. Both are "what became of it", and
+    both belong in the same column, so a reader who has watched one roster can
+    read the other without being told which pass they are looking at.
+
+    A classify pass still has nothing per-note *while it runs* — it is one
+    dispatch over the whole lane, which is the entire economy of the step — so
+    mid-flight it says its phase and nothing finer. The four route counts are
+    kept for a log written before `ingest` printed its per-note lines, where they
+    are the only account of the pass there is; once the lines are there the rows
+    say the same thing and say it per note, and a summary row repeating them
+    under eight rows that already carry them is the tally this replaced.
     """
     rows = []
     for item in progress.items:
@@ -2298,10 +2389,11 @@ def _ingest_roster(progress: ingest.Progress) -> str:
                 "stranded": "stranded —"}.get(item.state, "")
         rows.append(f'<tr><td class="mark {css}">{glyph}</td>'
                     f'<td class="card">{_e(item.name)}</td>'
-                    f'<td class="lane">{_e(item.state)}</td>'
+                    f'<td class="lane">{_e(item.route or item.state)}</td>'
                     f'<td class="said">{_e(said)} {_e(item.detail)}</td>'
                     f'<td class="num"></td></tr>')
-    if progress.routes:
+    routed = any(item.route for item in progress.items)
+    if progress.routes and not routed:
         counts = " · ".join(f"{n} {route}" for route, n in progress.routes.items())
         rows.append(f'<tr><td class="mark m-ok">&check;</td>'
                     f'<td class="card">routed</td>'
@@ -2316,7 +2408,12 @@ def _ingest_roster(progress: ingest.Progress) -> str:
                     f'<td class="said">one dispatch over the whole lane; there is no '
                     f'per-note progress until it lands</td>'
                     f'<td class="num"></td></tr>')
-    elif progress.total:
+    elif progress.total and not routed and not progress.routes:
+        # The carding fan-out's own progress line, and only ever that. A classify
+        # pass has no use for it: its notes are decided together, so the count is
+        # either none of them or all of them, and `0/8 routed` under a landed pass
+        # is a contradiction rather than progress — `progress.total` counts the
+        # lane, and the pass only ever ran over the unrouted part of it.
         rows.append(f'<tr class="pend"><td></td><td class="card"></td>'
                     f'<td class="lane">{progress.finished}/{progress.total}</td>'
                     f'<td class="said">{_e(progress.phase)}</td>'
@@ -3166,8 +3263,50 @@ def render_decide(root: Path, card_id: str) -> str:
                            body=body, acts=acts)
 
 
+def render_body(root: Path, target: str, text: str, *, editing: bool) -> str:
+    """One board file, rendered — and editable without leaving the page.
+
+    **The editor used to be a two-line box on the row it belonged to.** Karel,
+    2026-08-21: *"When editing an inbox card, it opens a small edit box, which is
+    hard to work with. It needs to be either a new page or a popup. It should also
+    probably be intertwined with open note, so I can switch between edit and
+    display easily."* A note is a paragraph or three of prose that a person is
+    thinking about — the reason the whole board is markdown files — and a 5.5rem
+    textarea wedged between two rows is a place to fix a typo, not a place to
+    write. So the note's own page *is* the editor: same page, same URL, two modes.
+
+    **Both modes are always in the document**, with one hidden — not fetched when
+    you press Edit. The text is already here (this page rendered from it), a second
+    read would be a second answer to a question already answered, and switching
+    modes has to be instant and lossless: half-typed text survives a toggle to the
+    rendered view and back, because nothing is thrown away to make the switch.
+
+    `?edit=1` is the mode in the address, so the Inbox's Edit button lands straight
+    in the editor, and a reload — or a bookmark, or the back button — keeps you
+    where you were rather than dropping you into the reader.
+    """
+    name = Path(target).name
+    editor = (
+        f'<div class="pageedit{"" if editing else " hidden"}" id="bodyedit">'
+        f'<textarea id="bodytext" spellcheck="false" '
+        f'data-path="{_e(target)}">{_e(text)}</textarea>'
+        f'</div>')
+    # `Save` stays visible in both modes and is disabled in the reader, rather than
+    # appearing when you switch: a button that materialises under the cursor is how
+    # you press the one that was not there a moment ago.
+    acts = (_act("Edit", onclick="setBodyMode(true)", primary=not editing,
+                 extra='id="bodyedit-btn"')
+            + _act("Read", onclick="setBodyMode(false)", primary=editing,
+                   extra='id="bodyread-btn"')
+            + _act("Save", onclick=f"saveBodyPage('{_attr(target)}')", primary=True,
+                   disabled=not editing, extra='id="bodysave-btn"'))
+    return render_document(root, title=name, subtitle=target,
+                           body=markdown(text), acts=acts,
+                           editor=editor, editing=editing)
+
+
 def render_document(root: Path, *, title: str, subtitle: str, body: str,
-                    acts: str = "") -> str:
+                    acts: str = "", editor: str = "", editing: bool = False) -> str:
     """A card or a diff, framed. `body` is already-safe HTML.
 
     **Back returns to wherever this page was opened from, not always to `/now`.**
@@ -3187,7 +3326,10 @@ def render_document(root: Path, *, title: str, subtitle: str, body: str,
             f'<p class="note">{_e(subtitle)}</p></div>')
     back = _act("Back",
                onclick="history.length>1?history.back():location.assign('/now')")
-    content = (f'<section>{head}<div class="doc">{body}</div>'
+    # `editor` is the second mode a document may have (see `render_body`); a page
+    # with none renders exactly as it always did, which is every page but a note.
+    doc = f'<div class="doc{" hidden" if editing else ""}" id="bodyview">{body}</div>'
+    content = (f'<section>{head}{doc}{editor}'
                f'<div class="barbox"><p></p><div class="acts">{acts}'
                f'{back}</div></div></section>')
     return render_shell(ctx, title=title, active="", content=content)
@@ -3279,15 +3421,21 @@ class Handler(BaseHTTPRequestHandler):
                 acts=_act("Diff", href=f"/diff/{card.id}")).encode("utf-8"))
             return
         if path.startswith("body/"):
-            target = path[len("body/"):]
+            # **Unquoted, because a note name is prose.** Board files are named the
+            # way a person names a thought — "Regenerate soundtrack.md", "Animation
+            # – attack.md" — so the browser sends `%20` and `%E2%80%93`, and a
+            # handler that slices the raw path looks for a file spelt with a percent
+            # sign in it. `read_body` confines the result to the board either way,
+            # so decoding here cannot widen what is reachable.
+            target = unquote(path[len("body/"):])
             try:
                 text = read_body(self.root, target)
             except PanelError as exc:
                 self._send_text(400, str(exc))
                 return
-            self._send(200, render_document(
-                self.root, title=Path(target).name, subtitle=target,
-                body=markdown(text)).encode("utf-8"))
+            editing = parse_qs(parsed.query).get("edit", [""])[0] not in ("", "0")
+            self._send(200, render_body(
+                self.root, target, text, editing=editing).encode("utf-8"))
             return
         if path.startswith("log/"):
             self._send(200, render_job(self.root, path[len("log/"):]).encode("utf-8"))
@@ -3387,10 +3535,21 @@ class Handler(BaseHTTPRequestHandler):
         if path == "api/night":
             _guard_dispatch_account(waived)
             ids = [str(i) for i in body.get("card_ids", []) if str(i).strip()]
+            # The one run setting the panel could not express until 2026-08-21.
+            # Karel: *"I would like to have an option to choose the number of
+            # sessions the process can take. We have this option in the runner
+            # call, but nowhere in the command center."* It is read here rather
+            # than folded into the argv above, because a refusal has to reach the
+            # browser as a refusal — see `read_sessions`.
+            sessions = read_sessions(body)
+            windows = f", up to {sessions} session window(s)" if sessions else ""
             if ids:
-                pid = spawn_sequence(ids, root)
-                return f"running {len(ids)} card(s) in order (pid {pid}): {', '.join(ids)}"
-            return f"tonight's run started (pid {spawn_background('runner', [], root)})"
+                pid = spawn_sequence(ids, root, sessions=sessions)
+                return (f"running {len(ids)} card(s) in order{windows} "
+                        f"(pid {pid}): {', '.join(ids)}")
+            args = ["--sessions", str(sessions)] if sessions else []
+            return (f"tonight's run started{windows} "
+                    f"(pid {spawn_background('runner', args, root)})")
 
         if path == "api/chores/run":
             _guard_dispatch_account(waived)
@@ -3841,6 +4000,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="run `runner --card <id>` for each id, in order, and exit. "
                              "This is what the panel's 'run the ticked' button spawns; it "
                              "owns no dispatch logic of its own")
+    parser.add_argument("--sessions", type=int, default=0, metavar="N",
+                        help="with --dispatch-cards: how many usage-limit windows each "
+                             "card's run may spend, passed straight to `runner --sessions`. "
+                             "0 (default) passes nothing and leaves the runner's own default")
     args = parser.parse_args(argv)
 
     for stream in (sys.stdout, sys.stderr):
@@ -3849,7 +4012,7 @@ def main(argv: list[str] | None = None) -> int:
 
     root = (args.root or find_root()).resolve()
     if args.dispatch_cards:
-        return dispatch_cards(list(args.dispatch_cards), root)
+        return dispatch_cards(list(args.dispatch_cards), root, sessions=args.sessions)
     serve(root, args.port, open_browser=not args.no_browser)
     return 0
 

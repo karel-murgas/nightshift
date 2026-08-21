@@ -905,6 +905,7 @@ def parse_report(text: str) -> RoutingView:
 #: What one note's card-writing attempt came to, and how to draw it.
 ITEM_STATES = {
     "done": ("m-ok", "&check;"),
+    "routed": ("m-ok", "&check;"),
     "bounced": ("m-now", "?"),
     "stranded": ("m-bad", "&times;"),
     "running": ("m-wait", "&middot;"),
@@ -913,11 +914,19 @@ ITEM_STATES = {
 
 @dataclass
 class Item:
-    """One note in a card-writing fan-out, as its own line of the run."""
+    """One note the run acted on, as its own line of it.
+
+    Two passes produce these and they differ only in what the middle column
+    says: the carding fan-out reports a `state` per note (done, bounced,
+    stranded), and a classify pass reports the `route` it decided. `route` is
+    therefore empty for everything but a classify pass, and a reader that finds
+    it set is looking at a routing line.
+    """
 
     name: str
     state: str = "running"
     detail: str = ""
+    route: str = ""
 
 
 @dataclass
@@ -931,12 +940,15 @@ class Progress:
     is its reader, sitting in the same module for the same reason `parse_report`
     does. The tests drive real logs from real runs through it.
 
-    **What a classify pass cannot offer.** It is *one* dispatch over the whole
-    lane — that is the entire economy of the thing (`classify`: "One dispatch over
-    the whole lane. Cheap by construction"). So there is no per-note progress to
-    report while it runs, and pretending otherwise would mean inventing it. What
-    it has is a phase while running and the per-route counts once it lands, and
-    the routing itself is on the Inbox page. Only the card-writing phase has items.
+    **What a classify pass cannot offer, and what it can.** It is *one* dispatch
+    over the whole lane — that is the entire economy of the thing (`classify`:
+    "One dispatch over the whole lane. Cheap by construction"). So there is no
+    per-note progress to report *while it runs*: it has a phase, and nothing
+    finer, and inventing more would be reporting something nobody measured.
+    What it does have, the moment it lands, is a decision per note — and since
+    2026-08-21 it prints them, so the pass reads back as one row per note with
+    the route it was given rather than as four counts. The counts are still
+    parsed: an older log has only those, and a mid-flight pass has neither.
     """
 
     phase: str = ""
@@ -955,6 +967,11 @@ _P_DONE = re.compile(r"^    -> (?P<cards>.+?)\s*$")
 _P_BOUNCED = re.compile(r"^    bounced to triage - (?P<why>.+?)\s*$")
 _P_STRANDED = re.compile(r"^    ! (?P<why>.+?)\s*$")
 _P_ROUTE = re.compile(r"^    (?P<route>\w[\w-]*)\s+(?P<n>\d+)\s*$")
+#: `  routed: some-note.md -> triage - why it went there`. The note name is
+#: non-greedy so the *first* arrow separates it from the route, and the detail is
+#: whatever is left — the classifier's own sentence, which can hold anything.
+_P_ROUTED = re.compile(r"^  routed: (?P<note>.+?) -> (?P<route>[\w-]+)"
+                       r"(?: - (?P<detail>.*))?\s*$")
 _P_SUMMARY = re.compile(r"^  scribe: \d+ card")
 
 
@@ -974,6 +991,16 @@ def parse_progress(text: str) -> Progress:
             out.phase = "classifying"
         elif line.startswith("  wrote "):
             out.phase = "routed"
+        elif found := _P_ROUTED.match(line):
+            # A routing line, not a card-writing one: the note is decided, so the
+            # row is finished either way, and `!` is this module's failure prefix
+            # wherever it appears.
+            detail = (found.group("detail") or "").strip()
+            state = "routed"
+            if detail.startswith("!"):
+                state, detail = "stranded", detail[1:].strip()
+            out.items.append(Item(name=found.group("note"), state=state,
+                                  detail=detail, route=found.group("route")))
         elif _P_SUMMARY.match(line):
             # The fan-out's own tally — `scribe: 1 card(s), 3 bounced, ...` — which
             # shares its prefix with a per-note line and would otherwise be read as
@@ -1194,6 +1221,33 @@ def main(argv: list[str] | None = None) -> int:
               f"{', '.join(applied.carded)}")
     if applied.stamped:
         print(f"  stamped {len(applied.stamped)} note(s) with their route")
+
+    # **One line per note, because a tally is not a roster.** The pass used to
+    # print only its per-route counts, so the panel could say "8 note(s) — 2
+    # chore · 2 inline · 0 scribe · 4 triage" and nothing at all about *which*
+    # note went where; the answer existed only on the Inbox page, one navigation
+    # away from the run you were watching. Karel, 2026-08-21: *"I would prefer
+    # one row for each card, stating the status, the name of the card and how it
+    # was classified."* These lines are that roster's source — `parse_progress`
+    # reads them back and the panel draws them, the same way the carding fan-out's
+    # per-note lines have always worked. The counts still follow: they are the
+    # summary of these, not a substitute for them.
+    decided = {d.note: d for d in routing.decisions}
+    could_not = set(applied.failed)
+    for note in pending:
+        decision = decided.get(note.name)
+        if decision is None:
+            continue          # the classifier said nothing about it; nothing to report
+        if note.name in could_not:
+            detail = "! could not be applied"
+        else:
+            why = " ".join((decision.why or "").split())
+            detail = "carded into tasks/" if decision.route == "inline" else ""
+            if why:
+                detail = f"{detail}; {why}" if detail else why
+        print(f"  routed: {note.name} -> {decision.route}"
+              + (f" - {detail[:120]}" if detail else ""))
+
     found = notes(root)
     routing = Routing(decisions=recorded(root, found), error=routing.error)
 
