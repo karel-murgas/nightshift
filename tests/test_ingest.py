@@ -1014,6 +1014,51 @@ def test_a_real_classify_run_reads_back_as_its_route_counts():
     assert progress.routes == {"chore": 3, "inline": 6, "scribe": 2, "triage": 2}
 
 
+def test_a_landed_classify_run_reads_back_as_one_row_per_note():
+    """The counts were all a classify pass reported, so the panel could say
+    "8 note(s), 2 chore, 4 triage" and nothing about *which* note went where. The
+    per-note lines are the roster's source; the counts are their summary."""
+    progress = ingest.parse_progress("""ingest: 8 note(s) in Board/inbox, 8 unrouted
+  classifying with sonnet ...
+  carded 1 inline note(s) into tasks/: stale-readme
+  routed: stale-readme.md -> inline - carded into tasks/; a one-line README fix
+  routed: Regenerate soundtrack.md -> triage - needs scoping against the audio stack
+  wrote Routing.md
+    chore    0
+    inline   1
+    scribe   0
+    triage   1
+""")
+
+    assert [(i.name, i.route, i.state) for i in progress.items] == [
+        ("stale-readme.md", "inline", "routed"),
+        ("Regenerate soundtrack.md", "triage", "routed")]
+    assert progress.items[0].detail.startswith("carded into tasks/")
+    assert progress.routes == {"chore": 0, "inline": 1, "scribe": 0, "triage": 1}, (
+        "the tally is still read: an older log has only that")
+
+
+def test_a_note_the_pass_could_not_move_reads_back_as_stranded():
+    """`!` is this module's failure prefix wherever it appears, so a note whose
+    route was decided but could not be applied is not ticked off as routed."""
+    progress = ingest.parse_progress(
+        "ingest: 1 note(s) in Board/inbox, 1 unrouted" + chr(10) +
+        "  routed: stuck.md -> inline - ! could not be applied" + chr(10))
+
+    assert [(i.name, i.state, i.detail) for i in progress.items] == [
+        ("stuck.md", "stranded", "could not be applied")]
+
+
+def test_a_carding_line_and_a_routing_line_are_not_confused_for_each_other():
+    """Two passes write into the same log format and only one of them has routes."""
+    progress = ingest.parse_progress(
+        "ingest: 1 note(s) to card" + chr(10) +
+        "  [1/1] scribe: n.md" + chr(10) + "    -> n-card" + chr(10))
+
+    assert [(i.name, i.state, i.route) for i in progress.items] == [
+        ("n.md", "done", "")]
+
+
 def test_a_note_in_flight_is_on_the_roster_as_running():
     progress = ingest.parse_progress(
         "ingest: 3 note(s) to card\n"

@@ -437,7 +437,10 @@
   .barbox p { margin: 0; color: var(--ink-dim); max-width: 44ch; }
   .barbox .acts { margin-left: auto; }
 
-  .takefirst {
+  /* A run setting on a bar: a label, a slider and the number it is on. `.takefirst`
+     until a second one existed (Sessions), which is when the name stopped being
+     about what it is and started being about which one it was. */
+  .runopt {
     display: flex;
     align-items: center;
     gap: 0.55rem;
@@ -447,8 +450,11 @@
     text-transform: uppercase;
     color: var(--ink-dim);
   }
-  .takefirst input[type="range"] { width: 7rem; accent-color: var(--phosphor); }
-  .takefirst output { color: var(--phosphor); font-variant-numeric: tabular-nums; min-width: 1.1rem; }
+  .runopt input[type="range"] { width: 7rem; accent-color: var(--phosphor); }
+  .runopt output { color: var(--phosphor); font-variant-numeric: tabular-nums; min-width: 1.1rem; }
+  /* The sessions budget is a small number, so its track is short — a 7rem slider
+     with four stops reads as more precision than it has. */
+  .runopt input#sessions { width: 4rem; }
 
   .override {
     display: inline-flex;
@@ -613,6 +619,25 @@
     resize: vertical;
   }
   .decide-q textarea:focus-visible { outline: 1px solid var(--phosphor); outline-offset: -1px; }
+
+  /* A note's page in edit mode: the textarea *is* the page, so it is given the
+     height of one rather than the 5.5rem of a row-level box, and the same
+     measure as the rendered view so a paragraph wraps where it will read. */
+  .pageedit { padding: 0.4rem 1.5rem 1.4rem; max-width: 78ch; }
+  .pageedit textarea {
+    width: 100%;
+    min-height: 60vh;
+    background: var(--ground);
+    color: var(--ink);
+    border: 1px solid var(--line);
+    padding: 0.8rem 0.9rem;
+    font-family: var(--mono);
+    font-size: var(--step-0);
+    line-height: 1.7;
+    resize: vertical;
+  }
+  .pageedit textarea:focus-visible { outline: 1px solid var(--phosphor); outline-offset: -1px; }
+  .hidden { display: none !important; }
 
   .editor { padding: 0 1.5rem 1.1rem; display: none; }
   .editor.open { display: block; }
@@ -967,7 +992,13 @@ document.addEventListener("change", function (e) {
 });
 
 document.addEventListener("input", function (e) {
-  if (!e.target || e.target.id !== "takefirst") { return; }
+  if (!e.target) { return; }
+  if (e.target.id === "sessions") {
+    var out = document.getElementById("sessionsout");
+    if (out) { out.textContent = String(e.target.value); }
+    return;
+  }
+  if (e.target.id !== "takefirst") { return; }
   var picks = pickBoxes();
   var sliderOut = document.getElementById("takefirstout");
   var pickedOut = document.getElementById("picked");
@@ -979,14 +1010,24 @@ document.addEventListener("input", function (e) {
 
 countPicked();
 
+/* How many usage windows the run being started may spend. Read at click time
+   rather than remembered: the setting belongs to the run you are starting, the
+   same way the paid override belongs to the moment rather than to a button. A
+   page with no such control — an older tab, or a Tonight section with nothing in
+   it — sends nothing, and the server leaves the runner's own default alone. */
+function sessionsWanted() {
+  var slider = document.getElementById("sessions");
+  return slider ? Number(slider.value) : 0;
+}
+
 /* `post` attaches the override itself, so these say only what they are. */
 function runTicked() {
   var ids = pickedIds();
   if (!ids.length) { toast("nothing ticked — tick a card, or drag the slider", true); return; }
-  post("/api/night", { card_ids: ids });
+  post("/api/night", { card_ids: ids, sessions: sessionsWanted() });
 }
 
-function runNight() { post("/api/night", {}); }
+function runNight() { post("/api/night", { sessions: sessionsWanted() }); }
 function runChores() { post("/api/chores/run", {}); }
 
 /* ---- verify: mark one OK now, or tick several and save ---- */
@@ -1043,30 +1084,61 @@ function closeEditor(id) {
   if (panel) { panel.classList.remove("open"); }
 }
 
-/* The body is fetched on demand rather than inlined into every row, so a page
-   that lists thirty notes does not carry thirty bodies it will never show. */
-function editBody(slug, path) {
-  var panel = document.getElementById("ed-" + slug);
-  if (!panel) { return; }
-  var field = panel.querySelector("textarea");
-  panel.classList.add("open");
-  if (field) {
-    field.value = "loading…";
-    fetch("/api/body?path=" + encodeURIComponent(path))
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        field.value = data.body || "";
-        field.focus();
-      })
-      .catch(function (err) { field.value = ""; toast(String(err), true); });
-  }
+/* ---- a note's own page, in its two modes ----
+
+   Reading it and editing it are the same page (`render_body`), so switching is a
+   class on two divs and never a navigation: nothing is fetched, nothing is
+   thrown away, and text typed but not saved is still there when you switch back.
+   The address is kept in step with `replaceState` so a reload — or a link copied
+   out of the bar — lands in the mode you were in, without stacking a history
+   entry per toggle and making Back mean "un-toggle". */
+function setBodyMode(editing) {
+  var view = document.getElementById("bodyview");
+  var editor = document.getElementById("bodyedit");
+  if (!view || !editor) { return; }
+  view.classList.toggle("hidden", editing);
+  editor.classList.toggle("hidden", !editing);
+  var edit = document.getElementById("bodyedit-btn");
+  var read = document.getElementById("bodyread-btn");
+  if (edit) { edit.classList.toggle("primary", !editing); }
+  if (read) { read.classList.toggle("primary", editing); }
+  var save = document.getElementById("bodysave-btn");
+  if (save) { save.disabled = !editing; }
+  var field = document.getElementById("bodytext");
+  if (editing && field) { field.focus(); }
+  try {
+    var url = location.pathname + (editing ? "?edit=1" : "");
+    history.replaceState(null, "", url);
+  } catch (err) { /* a file:// preview, or a browser that refuses: the mode still switched */ }
 }
 
-function saveBody(slug, path) {
-  var panel = document.getElementById("ed-" + slug);
-  var field = panel ? panel.querySelector("textarea") : null;
+/* Ctrl/Cmd-S, because this is now a page you write in rather than a box you
+   correct a word in, and every other place that is true of takes that key. The
+   browser's own "save this page" is not a thing anyone wants here. */
+document.addEventListener("keydown", function (e) {
+  if (!(e.ctrlKey || e.metaKey) || e.key !== "s") { return; }
+  var field = document.getElementById("bodytext");
+  if (!field || field.closest(".hidden")) { return; }
+  e.preventDefault();
+  saveBodyPage(field.dataset.path);
+});
+
+/* Saved, then re-read from disk: the rendered half of this page was built from
+   the old text, and re-rendering markdown in the browser would be a second
+   renderer to keep in step with `panel.markdown`. So the server draws it again,
+   and the message it answered with is carried across the navigation. */
+function saveBodyPage(path) {
+  var field = document.getElementById("bodytext");
   if (!field) { return; }
-  post("/api/edit", { path: path, body: field.value });
+  post("/api/edit", { path: path, body: field.value }, { reload: false })
+    .then(function (result) {
+      if (!result || !result.ok) { return; }
+      toastAfterReload(result.data.message || "saved");
+      /* `search` and not just `pathname`: saving from the editor comes back to the
+         editor, because Ctrl-S in the middle of writing is a checkpoint, not a
+         request to be put back in the reader. */
+      location.assign(location.pathname + location.search);
+    });
 }
 
 function saveNew(slug, lane) {
@@ -1162,6 +1234,17 @@ function carryState(oldRegion, newRegion) {
         'input[type=checkbox][data-id="' + CSS.escape(was.dataset.id) + '"]');
     }
     if (now) { now.checked = was.checked; }
+  });
+  /* A slider is set once and then left alone while you decide, so a refresh that
+     put `Sessions` back to 1 under the cursor would quietly start a different run
+     from the one that was chosen. Carried by id like a tick, and its `output` with
+     it — the number beside the track is the only place the value is legible. */
+  oldRegion.querySelectorAll("input[type=range][id]:not([data-server])").forEach(function (was) {
+    var now = newRegion.querySelector("#" + CSS.escape(was.id));
+    if (!now) { return; }
+    now.value = was.value;
+    var shown = newRegion.querySelector('output[for="' + CSS.escape(was.id) + '"]');
+    if (shown) { shown.textContent = String(was.value); }
   });
   /* An editor the user has opened, and whatever they have typed into it. */
   oldRegion.querySelectorAll("textarea, input[type=text]").forEach(function (was) {

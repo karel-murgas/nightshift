@@ -710,7 +710,7 @@ def test_night_with_card_ids_spawns_the_sequencer_not_the_whole_queue(server, mo
     base, root = server
     seen = {}
     monkeypatch.setattr(panel, "spawn_sequence",
-                        lambda ids, r: seen.setdefault("ids", list(ids)) or 4242)
+                        lambda ids, r, **kw: seen.setdefault("ids", list(ids)) or 4242)
     monkeypatch.setattr(panel, "spawn_background",
                         lambda *a, **k: pytest.fail("a subset must not start the whole queue"))
     monkeypatch.setattr(panel.usage, "read_identity",
@@ -737,6 +737,135 @@ def test_night_with_no_ids_still_runs_the_whole_queue(server, monkeypatch):
 
     assert status == 200, data
     assert seen["call"] == ("runner", [])
+
+
+# ------------------------------------------- how many windows a run may spend
+
+
+def _no_veto(monkeypatch):
+    monkeypatch.setattr(panel.usage, "read_identity",
+                        lambda path: panel.usage.Identity(fetched=True,
+                                                          has_extra_usage_enabled=False))
+
+
+def test_the_queue_run_can_be_given_more_than_one_session_window(server, monkeypatch):
+    """`--sessions` existed on the runner and nowhere on the panel, so the choice
+    between "stop at the wall" and "sleep through the reset and carry on" was
+    available only to whoever was in a terminal."""
+    base, _ = server
+    seen = {}
+    monkeypatch.setattr(panel, "spawn_background",
+                        lambda module, args, r: seen.setdefault("call", (module, list(args)))
+                        or 7)
+    _no_veto(monkeypatch)
+
+    status, data = _post(base, "api/night", {"sessions": 2})
+
+    assert status == 200, data
+    assert seen["call"] == ("runner", ["--sessions", "2"])
+    assert "2 session window(s)" in data["message"]
+
+
+def test_a_ticked_sequence_carries_the_budget_to_each_card_it_runs(server, monkeypatch):
+    base, _ = server
+    seen = {}
+    monkeypatch.setattr(panel, "spawn_sequence",
+                        lambda ids, r, **kw: seen.setdefault("kw", kw) or 11)
+    _no_veto(monkeypatch)
+
+    status, data = _post(base, "api/night", {"card_ids": ["a"], "sessions": 3})
+
+    assert status == 200, data
+    assert seen["kw"] == {"sessions": 3}
+
+
+def test_a_sequence_passes_the_budget_through_to_the_runner_itself(tmp_path, monkeypatch):
+    """The panel sequences and the runner spends: `--sessions` is handed on
+    verbatim, never re-interpreted here."""
+    root = _repo(tmp_path)
+    calls = []
+    monkeypatch.setattr(subprocess, "run",
+                        lambda argv, **kw: calls.append(argv)
+                        or subprocess.CompletedProcess(argv, 0))
+
+    assert panel.dispatch_cards(["first"], root, sessions=2) == 0
+    assert calls[0][-3:] == ["first", "--sessions", "2"]
+
+
+def test_a_run_started_with_no_budget_says_nothing_to_the_runner(server, monkeypatch):
+    """0 is not 1: a browser that sends no such field — an old tab left open across
+    an update — must start exactly the run it used to, on the runner's own default."""
+    base, _ = server
+    seen = {}
+    monkeypatch.setattr(panel, "spawn_background",
+                        lambda module, args, r: seen.setdefault("call", (module, list(args)))
+                        or 7)
+    _no_veto(monkeypatch)
+
+    _post(base, "api/night", {"sessions": 0})
+
+    assert seen["call"] == ("runner", [])
+
+
+def test_an_impossible_session_count_is_refused_rather_than_clamped(server, monkeypatch):
+    """A clamp turns a typo into a spend, and this is the one control on the bar
+    that can make a run last until morning."""
+    base, _ = server
+    monkeypatch.setattr(panel, "spawn_background",
+                        lambda *a, **k: pytest.fail("a refused budget must start nothing"))
+    _no_veto(monkeypatch)
+
+    status, data = _post(base, "api/night", {"sessions": 99})
+
+    assert status == 400
+    assert f"between 1 and {panel.SESSIONS_MAX}" in data["message"]
+
+
+def test_a_session_count_that_is_not_a_number_is_refused_too(server, monkeypatch):
+    base, _ = server
+    monkeypatch.setattr(panel, "spawn_background",
+                        lambda *a, **k: pytest.fail("a refused budget must start nothing"))
+    _no_veto(monkeypatch)
+
+    status, data = _post(base, "api/night", {"sessions": "lots"})
+
+    assert status == 400 and "whole number" in data["message"]
+
+
+def test_the_live_refresh_carries_a_slider_it_did_not_set(server):
+    """The refresh swaps whole sections, and a `Sessions` put back to 1 under the
+    cursor would quietly start a different run from the one that was chosen. The
+    carry is in `carryState`, beside the ticks it already keeps."""
+    carry = (Path(panel.__file__).parent / "panel_static" / "app.html").read_text(
+        encoding="utf-8")
+    carry = carry.split("function carryState", 1)[1].split("function regionBusy", 1)[0]
+    assert "input[type=range][id]" in carry
+    assert "output[for=" in carry, "the number beside the track is the value"
+
+
+def test_the_tonight_bar_offers_the_choice_where_the_other_one_is(server):
+    """Karel asked for it "next to the how many slider", which is where the two
+    halves of "how much of a night is this" belong. The bar only exists when the
+    queue does, so the card here is a schema-complete one the night would take."""
+    base, root = server
+    path = _card(root, "tasks", "one")
+    text = path.read_text(encoding="utf-8").replace("## Acceptance", """## Approach
+
+One paragraph about how.
+
+## Acceptance""")
+    path.write_text(text + """
+## Open Questions
+
+none
+""", encoding="utf-8", newline="")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "a card the night would take")
+
+    _, page = _get(base, "now")
+
+    bar = page.split("Tonight", 1)[1]
+    assert 'id="takefirst"' in bar and 'id="sessions"' in bar
 
 
 def test_dispatch_cards_runs_the_runners_own_per_card_path_in_order(tmp_path, monkeypatch):
@@ -819,6 +948,71 @@ def test_an_idea_can_be_read_back_too_because_the_editor_is_the_persons_own(tmp_
     idea.write_text("pomeranian-carburettor\n", encoding="utf-8")
     assert panel.read_body(root, f"Board/{board.PRIVATE_LANE}/spark.md") == \
         "pomeranian-carburettor\n"
+
+
+def test_a_notes_page_carries_both_modes_so_switching_never_reloads(server):
+    """The editor used to be a two-line box on the row. A note is prose a person is
+    thinking about, so the note's own page *is* the editor — and both modes are in
+    the document at once, so switching cannot lose half-typed text or cost a read."""
+    base, root = server
+    (root / "Board" / "inbox" / "thought.md").write_text("half a thought",
+                                                         encoding="utf-8")
+
+    status, text = _get(base, "body/Board/inbox/thought.md")
+
+    assert status == 200
+    assert "half a thought" in text, "the rendered note"
+    assert 'id="bodytext"' in text, "and the editor for it, in the same document"
+    assert 'class="pageedit hidden"' in text, "reader first, until Edit is pressed"
+
+
+def test_a_notes_page_opens_in_the_editor_when_the_address_says_so(server):
+    """`?edit=1` is the mode in the address, so the Inbox's Edit button lands in the
+    editor and a reload keeps you there rather than dropping you into the reader."""
+    base, root = server
+    (root / "Board" / "inbox" / "thought.md").write_text("half a thought",
+                                                         encoding="utf-8")
+
+    _, text = _get(base, "body/Board/inbox/thought.md?edit=1")
+
+    assert 'class="doc hidden"' in text
+    assert 'class="pageedit"' in text
+
+
+def test_a_note_named_the_way_a_person_names_a_thought_can_still_be_opened(server):
+    """Board files carry spaces and diacritics, so the browser sends `%20`, and a
+    handler that slices the raw path looks for a file spelt with a percent sign."""
+    base, root = server
+    (root / "Board" / "inbox" / "Regenerate soundtrack.md").write_text(
+        "sixteen bars", encoding="utf-8")
+
+    status, text = _get(base, "body/Board/inbox/Regenerate%20soundtrack.md")
+
+    assert status == 200
+    assert "sixteen bars" in text
+
+
+def test_the_inbox_edits_a_note_on_its_own_page_not_in_a_box_on_the_row(server):
+    base, root = server
+    (root / "Board" / "inbox" / "thought.md").write_text("half a thought",
+                                                         encoding="utf-8")
+
+    _, text = _get(base, "inbox")
+
+    assert "/body/Board/inbox/thought.md?edit=1" in text
+    assert "editBody(" not in text, "the row-level editor is gone, not merely hidden"
+
+
+def test_the_link_to_a_note_is_encoded_rather_than_left_to_the_browser(server):
+    """An address that only works because the client was forgiving is one that
+    breaks the first time something else reads it."""
+    base, root = server
+    (root / "Board" / "inbox" / "Regenerate soundtrack.md").write_text(
+        "sixteen bars", encoding="utf-8")
+
+    _, text = _get(base, "inbox")
+
+    assert "/body/Board/inbox/Regenerate%20soundtrack.md" in text
 
 
 def test_reading_a_body_outside_the_board_is_refused(tmp_path):
@@ -1838,6 +2032,41 @@ def test_a_finished_job_leaves_the_rail_once_it_stops_being_news():
     assert [j.ident for j, _ in panel.shown_jobs([fresh, old], now=now)] == ["a"]
 
 
+def _press(label: str, ident: str, *, minutes: float, code: int | None = 0):
+    """One press of a panel button, `minutes` ago, that ran for twenty seconds.
+    `code=None` leaves it unfinished, which is what running looks like on disk."""
+    now = dt.datetime.now()
+    started = now - dt.timedelta(minutes=minutes)
+    job = jobs.Job(ident=ident, label=label, started=started.isoformat())
+    if code is not None:
+        job.finished = (started + dt.timedelta(seconds=20)).isoformat()
+        job.exit_code = code
+    return job
+
+
+def test_pressing_a_verb_again_replaces_its_row_rather_than_stacking_a_new_one():
+    """Karel ran classify three times in a coffee break and the rail grew three
+    rows — done, failed, failed — which reads as three separate things having
+    happened, none of them obviously the current one. A verb owns one row."""
+    now = dt.datetime.now()
+    shown = panel.shown_jobs([_press("ingest", "third", minutes=2, code=3),
+                              _press("ingest", "second", minutes=20, code=3),
+                              _press("ingest", "first", minutes=40, code=0),
+                              _press("chores", "batch", minutes=30, code=0)], now=now)
+    assert [j.ident for j, _ in shown] == ["third", "batch"], (
+        "one row per verb, newest press, and a different verb is a different row")
+
+
+def test_a_running_job_keeps_the_row_a_later_refusal_would_have_taken():
+    """The refusal is the *newest* press and the live pass is the one still true:
+    a rail that showed `failed` over a classify that is still running would have
+    inverted the bug it was meant to fix."""
+    now = dt.datetime.now()
+    shown = panel.shown_jobs([_press("ingest", "refused", minutes=1, code=3),
+                              _press("ingest", "live", minutes=6, code=None)], now=now)
+    assert [(j.ident, state) for j, state in shown] == [("live", jobs.RUNNING)]
+
+
 def test_a_jobs_output_is_readable_from_the_browser(server):
     base, root = server
     job = _finished_job(root, "ingest")
@@ -2582,6 +2811,44 @@ ingest: 13 note(s) in Board/inbox
     _, text = _get(base, "run")
     assert "3 chore" in text and "6 inline" in text
     assert "the Inbox page has each one" in text
+
+
+def test_a_classify_pass_puts_each_note_on_its_own_row_with_the_route_it_got(server):
+    """Karel, 2026-08-21: *"I would prefer one row for each card, stating the
+    status, the name of the card and how it was classified."* The counts were all
+    the page had; which note went where lived on the Inbox page, one navigation
+    away from the run you were watching."""
+    base, root = server
+    job = jobs.record(root, "ingest", ["python", "-m", "nightshift.ingest"])
+    jobs.log_path(root, job.ident).write_text("""ingest: 8 note(s) in Board/inbox, 8 unrouted
+  classifying with sonnet ...
+  routed: stun-grenade.md -> chore - a small tuning change
+  routed: remove-obsidian.md -> triage - needs scoping against the vault
+  wrote Routing.md
+    chore    1
+    triage   1
+""", encoding="utf-8")
+
+    _, text = _get(base, "run")
+    roster = text.split("Last ingest", 1)[1].split("</section>", 1)[0]
+    assert "stun-grenade.md" in roster and "chore" in roster
+    assert "remove-obsidian.md" in roster and "needs scoping" in roster
+    assert "the Inbox page has each one" not in roster, (
+        "the tally is what the rows replaced, not something to repeat under them")
+    assert "0/8" not in roster, (
+        "a classify pass decides its notes together; there is no 0-of-8 to report")
+
+
+def test_a_note_the_pass_could_not_move_is_marked_rather_than_ticked(server):
+    base, root = server
+    job = jobs.record(root, "ingest", ["python", "-m", "nightshift.ingest"])
+    jobs.log_path(root, job.ident).write_text("""ingest: 1 note(s) in Board/inbox, 1 unrouted
+  routed: stuck.md -> inline - ! could not be applied
+""", encoding="utf-8")
+
+    _, text = _get(base, "run")
+    roster = text.split("Last ingest", 1)[1].split("</section>", 1)[0]
+    assert "m-bad" in roster and "stuck.md" in roster
 
 
 def test_a_job_with_no_output_yet_gets_no_empty_box(server):
