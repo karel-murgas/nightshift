@@ -2617,6 +2617,48 @@ def test_triage_with_no_note_still_opens_the_charter(server, monkeypatch):
     assert argv[-2] == "--add-dir"
 
 
+def test_retriage_is_launched_on_the_card_you_answered(server, monkeypatch):
+    """The decide page's "Re-triage this" button posts `{card: ...}`, a different
+    payload shape than the inbox row's `{note: ...}` on the same endpoint. Before
+    this, the handler only ever read `body.get("note", "")`, so the card id was
+    silently dropped, no prompt was built, and the session opened on an empty input
+    line — the tab titled bare "triage" with nothing typed into it."""
+    base, root = server
+    _park(root, "which-way")
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal",
+                        lambda r, *command: opened.append(command))
+
+    status, data = _post(base, "api/triage", {"card": "which-way"})
+
+    assert status == 200, data
+    argv = list(opened[0])
+    assert argv[argv.index("--name") + 1] == "triage which-way"
+    assert argv[argv.index("--agent") + 1] == "triage"
+    prompt = argv[-1]
+    assert "which-way.md" in prompt
+    assert "which-way" in data["message"]
+
+
+def test_retriage_refuses_an_unknown_card(server):
+    base, _ = server
+    status, data = _post(base, "api/triage", {"card": "no-such-card"})
+    assert status == 400
+    assert "no-such-card" in data["message"]
+
+
+def test_triage_refuses_both_a_note_and_a_card(server, monkeypatch):
+    base, root = server
+    _park(root, "which-way")
+    (root / "Board" / "inbox" / "taser.md").write_text("x\n", encoding="utf-8", newline="")
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *command: None)
+
+    status, data = _post(base, "api/triage", {"card": "which-way", "note": "taser.md"})
+
+    assert status == 400
+    assert "not both" in data["message"]
+
+
 def test_the_triage_section_lists_the_notes_not_the_report_file(server):
     """It used to be one row for `Routing.md` and one button that named no note."""
     base, root = server

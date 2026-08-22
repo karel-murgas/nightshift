@@ -23,7 +23,7 @@ of good practice, so guidance that has to be found first is the weaker of the tw
 from __future__ import annotations
 
 __all__ = ["TOOL_ECONOMY", "INTERACTIVE_CARD", "INTERACTIVE_NOTE", "HOW_TO_TEST_STEP",
-           "INTERACTIVE_TRIAGE"]
+           "INTERACTIVE_TRIAGE", "INTERACTIVE_RETRIAGE"]
 
 TOOL_ECONOMY = """\
 **Tool calls cost wall time, not just tokens.** Each one is a round-trip, and any \
@@ -148,6 +148,23 @@ asking anything — frontmatter, acceptance criteria, scope — and the note its
 from `inbox/`. If the note cannot be scoped that far without an answer only the maintainer \
 can give, ask them: they are at the keyboard for this whole session, which is the reason \
 triage is interactive and never dispatched.
+
+Do not start building what the card describes. The deliverable is the card.
+"""
+
+INTERACTIVE_RETRIAGE = """\
+Re-triage `{card_path}`. Follow your charter.
+
+**The maintainer just answered this card's open question — see its `## Thread`.** The \
+answer may have changed the work's shape enough to need re-scoping: rewrite `## Acceptance` \
+and the rest of the card to match what was decided, split it, or park a fresh `## Question` \
+if it still needs another decision. Treat the existing acceptance criteria as a draft, not \
+as settled, if the answer contradicts them.
+
+**Your goal is one well-formed card in `{lane}/tasks/`, or the card staying in \
+`{lane}/needs-decision/` with a fresh well-formed question.** Re-triage is finished when the \
+card is worker-ready or clearly still blocked on a named decision — never left in the shape \
+that prompted this re-triage.
 
 Do not start building what the card describes. The deliverable is the card.
 """

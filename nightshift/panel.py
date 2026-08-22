@@ -3975,19 +3975,40 @@ class Handler(BaseHTTPRequestHandler):
             return f"resuming {session} for a conversation — ask it something"
 
         if path == "api/triage":
-            # **With the note named, when one is given.** The button used to open
-            # `claude --agent triage` and stop there, leaving you to remember which
-            # of five notes you had meant and type it — for the one route whose
-            # whole discipline is "one note at a time, deliberately". The charter
-            # takes exactly one note per call, so the launcher may as well say
-            # which. Interactive on purpose (§3.4): triage is investigative work a
-            # person drives, never a `-p` dispatch.
+            # **With the note or the card named, when one is given.** The button
+            # used to open `claude --agent triage` and stop there, leaving you to
+            # remember which of five notes you had meant and type it — for the one
+            # route whose whole discipline is "one item at a time, deliberately".
+            # The charter takes exactly one note per call, so the launcher may as
+            # well say which. Interactive on purpose (§3.4): triage is investigative
+            # work a person drives, never a `-p` dispatch.
             note = str(body.get("note", ""))
+            card_id = str(body.get("card", ""))
+            if note and card_id:
+                raise PanelError("give a note or a card, not both")
+            lane = board.board_rel(root)
+            if card_id:
+                # "Re-triage this" on the decide page (§3419): the card already
+                # exists, in `needs-decision/`, and the maintainer just answered its
+                # question — this re-scopes it rather than turning an inbox note
+                # into a first card. `INTERACTIVE_TRIAGE` cannot serve this: it is
+                # note-shaped (`note_path` inside `inbox/`), and the charter itself
+                # only accepts "exactly one file from Board/inbox/" as input, so a
+                # card here needs its own prompt rather than a different `.format()`
+                # of the note one.
+                card = board.find(root, card_id)
+                if card is None:
+                    raise PanelError(f"no card named {card_id!r} on the board")
+                open_terminal(root, *session_argv(
+                    root, name=f"triage {card.id}", agent="triage",
+                    tier=effective_tier(),
+                    prompt=worker_prompt.INTERACTIVE_RETRIAGE.format(
+                        card_path=card.path.resolve().as_posix(), lane=lane.as_posix())))
+                return f"opened a terminal running triage on {card.id}"
             # The prompt goes *through* `session_argv`, never appended to what it
             # returns: it is the function that knows the argv ends with a variadic
             # `--add-dir` and puts the `--` in. Appending here is how this line
             # silently dropped the note for one commit.
-            lane = board.board_rel(root)
             open_terminal(root, *session_argv(
                 root, name=f"triage {note}".strip(), agent="triage",
                 tier=effective_tier(),
