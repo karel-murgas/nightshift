@@ -1372,6 +1372,67 @@ def test_a_run_this_panel_did_not_start_still_shows_as_running(server, monkeypat
     assert "Nothing automated is running" not in text
 
 
+def _lane_cell(text: str, card_id: str) -> str:
+    """The roster's own `lane` cell for `card_id`, scoped to the "This run"
+    section — `_running_section` above it renders its own row for the active
+    card with a `<td class="card">` of the same id, but a `lane` cell holding
+    elapsed time rather than a phase, and a naive first-match search finds
+    that one instead."""
+    roster = text.split('id="sec-lastrun"', 1)[1]
+    row = roster.split(f'<td class="card">{card_id}</td>', 1)[1]
+    return row.split('<td class="lane">', 1)[1].split("</td>", 1)[0]
+
+
+def _dispatchable_card(root: Path, card_id: str) -> None:
+    """A `tasks/` card that clears `card_schema` outright and lands in
+    `ctx.tonight` — unlike `_card()`'s bare template, which is fine for the many
+    tests that never ask whether a card is dispatchable, but reads as an
+    unfinished card (no `## Approach`, no `## Open Questions`) and so never
+    reaches `select()`'s dispatchable branch. `kind: chore` would clear the
+    schema too, but chore cards are filed under `ctx.chores`, not `ctx.tonight`
+    — not what this test is driving."""
+    text = CARD.format(id=card_id, state="tasks", unattended="true").replace(
+        "## Acceptance", "## Approach\n\nDo the one thing.\n\n"
+                         "## Open Questions\n\nnone.\n\n## Acceptance")
+    path = root / "Board" / "tasks" / f"{card_id}.md"
+    path.write_text(text, encoding="utf-8", newline="")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", f"card {card_id}")
+
+
+def test_the_active_cards_row_advances_with_the_heartbeat_not_a_flat_queued(server):
+    """`details-on-run`: a card already in a run record's `dispatched` list gets a
+    final mark and lane, but the one card the run is *currently* on had no entry
+    there yet — it fell into the pending loop below and rendered as a static,
+    never-changing "queued", even while `status.json` said it was mid-`gates` on
+    a retry. A card still waiting its turn, behind the active one, should keep
+    reading "queued" throughout."""
+    base, root = server
+    _dispatchable_card(root, "in-flight-card")
+    _dispatchable_card(root, "later-card")
+    _record(root, "20260822-100000", started="2026-08-22T10:00:00", kind="run",
+            complete=False, dispatched=[])
+    status = root / ".ai" / "runs" / "status.json"
+    status.parent.mkdir(parents=True, exist_ok=True)
+
+    status.write_text(json.dumps({**_beat(minutes_ago=1.0, pid=os.getpid()),
+                                   "card": "in-flight-card", "phase": "worker",
+                                   "attempt": 1}), encoding="utf-8")
+    _, text = _get(base, "run")
+    assert _lane_cell(text, "in-flight-card") == "dispatch (attempt 1)"
+    assert _lane_cell(text, "later-card") == "queued"
+
+    status.write_text(json.dumps({**_beat(minutes_ago=0.5, pid=os.getpid()),
+                                   "card": "in-flight-card", "phase": "gates",
+                                   "attempt": 2}), encoding="utf-8")
+    _, text = _get(base, "run")
+    lane = _lane_cell(text, "in-flight-card")
+    assert lane == "gates (attempt 2)"
+    assert lane != "dispatch"
+    assert _lane_cell(text, "later-card") == "queued", \
+        "a card that is not the active one must not advance"
+
+
 def test_not_taken_reads_the_board_not_a_stale_skip_list(server):
     """The record's `skipped` belongs to whichever run wrote it — two weeks ago
     here — so it confidently listed cards that had since been finished."""

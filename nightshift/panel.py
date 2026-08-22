@@ -1321,6 +1321,24 @@ def _phases_html(phase: str) -> str:
     return f'<div class="phases">{"".join(out)}</div>'
 
 
+def _active_row_lane(status: dict) -> str:
+    """What the roster's own `lane` cell should say for the one `tasks/` row
+    that is currently dispatching, in place of a flat, unchanging "queued".
+
+    The sidebar rail already turns this same `status.json` heartbeat into the
+    phase pills (`_phases_html`) — this reuses `PHASE_STEPS`'s labels so the
+    two never drift apart, then appends the attempt number when there is one,
+    since a retry is exactly the other transition `details-on-run` asked for.
+    An unrecognised phase (e.g. "sleeping") is shown as-is rather than folded
+    back to "queued", which would hide that something is actually happening.
+    """
+    phase = str(status.get("phase") or "")
+    resolved = _PHASE_ALIASES.get(phase, phase)
+    label = dict(PHASE_STEPS).get(resolved, phase or "queued")
+    attempt = status.get("attempt")
+    return f"{label} (attempt {attempt})" if attempt else label
+
+
 #: How old a heartbeat may be and still be believed. The runner rewrites
 #: `status.json` at every phase change and its longest legitimate phase is the
 #: worker, bounded by a wall-clock timeout of an hour — so two hours is past
@@ -2759,12 +2777,23 @@ def _render_run(ctx: Context) -> str:
         )
     live = run_is_live(ctx.rail.run_status, record)
     if live:
+        status = ctx.rail.run_status
+        active_id = str(status.get("card") or "")
         for candidate in ctx.tonight:
             if any(d.get("card") == candidate.card.id for d in dispatched):
                 continue
-            body.append(f'<tr class="pend"><td class="mark m-wait">&middot;</td>'
+            # `details-on-run`: a card already in `dispatched` gets a final mark
+            # above; the card the run is *currently* on has no entry there either,
+            # so without this branch it fell into this same "queued" row as every
+            # other card still waiting its turn — even while the heartbeat said it
+            # was mid-`gates` on a retry. The data was already sitting in `status`
+            # a few lines up; it just was not being read here.
+            active = candidate.card.id == active_id
+            lane = _active_row_lane(status) if active else "queued"
+            mark = "m-now" if active else "m-wait"
+            body.append(f'<tr class="pend"><td class="mark {mark}">&middot;</td>'
                         f'<td class="card">{_e(candidate.card.id)}</td>'
-                        f'<td class="lane">queued</td><td class="num"></td>'
+                        f'<td class="lane">{_e(lane)}</td><td class="num"></td>'
                         f'<td class="num"></td><td class="said"></td>'
                         f'<td class="num"></td></tr>')
 
