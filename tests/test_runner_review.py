@@ -1262,9 +1262,25 @@ def test_the_kill_switch_trips_in_either_root(tmp_path, monkeypatch):
     assert not runner._stop_requested()
     (work / runner.STOP_FILE).write_text("", encoding="utf-8")
     assert runner._stop_requested()             # in the dedicated checkout
-    (work / runner.STOP_FILE).unlink()
     (ctrl / runner.STOP_FILE).write_text("", encoding="utf-8")
     assert runner._stop_requested()             # in the vault
+
+
+def test_the_kill_switch_consumes_itself_once_honoured(tmp_path, monkeypatch):
+    """Single-use: seeing the switch trip is the same moment it gets deleted, in
+    every root that carried it — Karel should not have to `rm` it by hand after a
+    mid-run stop, and neither should the next start."""
+    ctrl, work = tmp_path / "ctrl", tmp_path / "work"
+    (ctrl / ".ai").mkdir(parents=True)
+    (work / ".ai").mkdir(parents=True)
+    monkeypatch.setattr(runner, "_CTRL_ROOT", ctrl)
+    monkeypatch.setattr(runner, "_WORK_ROOT", work)
+    (ctrl / runner.STOP_FILE).write_text("stop", encoding="utf-8")
+    (work / runner.STOP_FILE).write_text("stop", encoding="utf-8")
+    assert runner._stop_requested()
+    assert not (ctrl / runner.STOP_FILE).exists()
+    assert not (work / runner.STOP_FILE).exists()
+    assert not runner._stop_requested()          # nothing left to consume
 
 
 def test_the_status_heartbeat_lands_in_the_control_root(tmp_path, monkeypatch):

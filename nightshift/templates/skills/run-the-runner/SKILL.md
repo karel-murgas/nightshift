@@ -114,7 +114,7 @@ Five checks, each exiting 1 before anything is dispatched:
 
 | Refusal | Fix |
 |---|---|
-| kill switch: `.ai/STOP` exists | Delete the file. It is gitignored — a local, per-machine off switch |
+| kill switch: `.ai/STOP` exists | Only refuses for `--dry-run` (no writes, ever) or a named `--card` (explicit enough that it must not silently swallow a switch someone just dropped). A plain start deletes it and proceeds — see *Stopping a run* |
 | base branch is forbidden / missing | You passed `--base`. Don't; stable branches are refused by design |
 | working tree is dirty outside `Board/` (only when on `{{integration}}`, the in-place case) | Commit or stash first — or switch to your own branch, where a dirty launch checkout no longer blocks. `--dry-run` only warns |
 | the dedicated `{{integration}}` checkout is dirty | It is runner-owned; commit or discard changes in `../.{{package}}-integration` and re-run |
@@ -129,9 +129,17 @@ the loop and while sleeping out a usage window — it never dies mid-worker, so 
 current card to finish first. Killing the process instead is safe but leaves `started:` with
 no `finished:`; the next run recovers that card and the attempt still counts.
 
+**Single-use — the switch deletes itself the moment it is seen.** A run in progress that
+notices it exits and removes it right then, in whichever root carried it; no `rm` needed
+afterward. A plain start (no `--card`) that finds one left over from an earlier stop clears
+it and proceeds, the same way — it exists to interrupt a run, not to permanently block the
+next one. `--dry-run` and a named `--card` are the two exceptions: neither ever deletes it,
+so it is still there to `rm` yourself if you dropped it and want it gone before anything
+reads it.
+
 ```bash
-echo "stopped by hand" > .ai/STOP      # stop
-rm .ai/STOP                            # re-enable
+echo "stopped by hand" > .ai/STOP      # stop — or block a plain start until it's cleared
+rm .ai/STOP                            # cancel it yourself, before anything sees it
 ```
 
 ## Reading the result

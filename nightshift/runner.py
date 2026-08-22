@@ -365,11 +365,21 @@ def _stop_requested() -> bool:
     the runner uses a dedicated checkout, and a switch that only watched one of
     them would be a promise the runner could quietly break. Returns False before
     `run()` has set the roots, which is correct: nothing is dispatching yet.
+
+    Single-use: the file is deleted the moment it is seen, in whichever root(s)
+    carry it. Every call site checks this once and then ends the loop — by the
+    time `True` comes back the stop has already been honoured, so there is
+    nothing left for a human, or the next start, to clean up.
     """
+    found = False
     for r in (_CTRL_ROOT, _WORK_ROOT):
         if r is not None and (r / STOP_FILE).is_file():
-            return True
-    return False
+            found = True
+            try:
+                (r / STOP_FILE).unlink()
+            except OSError:
+                pass
+    return found
 
 
 def _status(root: Path, **fields: object) -> None:
@@ -635,12 +645,30 @@ class Preflight:
     reasons: list[str] = field(default_factory=list)
 
 
-def preflight(root: Path, base: str, dry_run: bool) -> Preflight:
+def preflight(root: Path, base: str, dry_run: bool, *, named_card: bool = False) -> Preflight:
     reasons: list[str] = []
 
     if (root / STOP_FILE).is_file():
         note = (root / STOP_FILE).read_text(encoding="utf-8").strip()
-        reasons.append(f"kill switch: {STOP_FILE.as_posix()} exists" + (f" — {note}" if note else ""))
+        # The switch's job is to interrupt a run in progress (`_stop_requested`
+        # consumes it there too, immediately, the moment it does that job) — not
+        # to permanently block the next one from starting. A plain start clears a
+        # stale one and proceeds rather than making Karel `rm` it by hand every
+        # time (Karel, 2026-08-22: "runner should clear at the start of the
+        # run"). `--dry-run` still only reports it (no writes, ever), and a named
+        # `--card` still refuses and leaves it — naming a card is explicit enough
+        # that it must not silently swallow a switch someone may have dropped
+        # moments ago for a still-relevant reason ("card start should not delete
+        # STOP").
+        if dry_run or named_card:
+            reasons.append(f"kill switch: {STOP_FILE.as_posix()} exists" + (f" — {note}" if note else ""))
+        else:
+            try:
+                (root / STOP_FILE).unlink()
+            except OSError:
+                pass
+            _log("clearing stale kill switch at start: " + STOP_FILE.as_posix()
+                 + (f" — {note}" if note else ""))
 
     forbidden = forbidden_bases(root)
     if base in forbidden:
@@ -4730,10 +4758,15 @@ def run(root: Path, args: argparse.Namespace) -> int:
     # did not see why" is the same invisible-failure shape as a silent night.
     if not args.dry_run:
         _open_run_log(ctrl)
-    check = preflight(ctrl, base, args.dry_run)
+    check = preflight(ctrl, base, args.dry_run, named_card=bool(args.card))
     if not check.ok:
         for reason in check.reasons:
-            _log(f"refusing to run — {reason}")
+            # A kill-switch refusal is Karel's own stop, not a defect — it reads
+            # as "stopped", the same word `jobs.state()` already shows for it via
+            # `EXIT_STOPPED`, rather than "refusing to run", which reads like
+            # every other genuine preflight failure below it.
+            prefix = "stopped" if reason.startswith("kill switch:") else "refusing to run"
+            _log(f"{prefix} — {reason}")
         return EXIT_STOPPED if (ctrl / STOP_FILE).is_file() else 1
 
     if not args.dry_run and not acquire_lock(ctrl):

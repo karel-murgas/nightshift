@@ -686,6 +686,42 @@ def test_the_kill_switch_stops_the_runner(tmp_path):
     assert any("Karel is testing tonight" in r for r in check.reasons)
 
 
+def test_dry_run_only_reports_the_kill_switch_never_deletes_it(tmp_path):
+    """`--dry-run` promises no writes, full stop — a stale switch is information
+    to show, not something even this path may clear away."""
+    root = _repo(tmp_path)
+    (root / ".ai").mkdir(exist_ok=True)
+    (root / runner.STOP_FILE).write_text("note\n", encoding="utf-8")
+    assert not runner.preflight(root, "development_team", dry_run=True).ok
+    assert (root / runner.STOP_FILE).is_file()
+
+
+def test_a_named_card_still_refuses_on_a_stale_kill_switch(tmp_path):
+    """Naming a card is explicit enough that it must not silently swallow a
+    switch someone may have dropped moments ago for a still-relevant reason —
+    only a plain start clears it (Karel, 2026-08-22: "card start should not
+    delete STOP")."""
+    root = _repo(tmp_path)
+    (root / ".ai").mkdir(exist_ok=True)
+    (root / runner.STOP_FILE).write_text("note\n", encoding="utf-8")
+    check = runner.preflight(root, "development_team", dry_run=False, named_card=True)
+    assert not check.ok
+    assert any("kill switch" in r for r in check.reasons)
+    assert (root / runner.STOP_FILE).is_file()
+
+
+def test_a_plain_start_clears_a_stale_kill_switch_and_proceeds(tmp_path):
+    """A real, un-named start's job is to run — a leftover switch from a run
+    that already stopped must not force a manual `rm` every time (Karel,
+    2026-08-22: "runner should clear at the start of the run")."""
+    root = _repo(tmp_path)
+    (root / ".ai").mkdir(exist_ok=True)
+    (root / runner.STOP_FILE).write_text("note\n", encoding="utf-8")
+    check = runner.preflight(root, "development_team", dry_run=False)
+    assert not any("kill switch" in r for r in check.reasons)
+    assert not (root / runner.STOP_FILE).is_file()
+
+
 # The fixture repo's own forbidden set, not this repo's. They differed the moment
 # the integration role moved to `test` (2026-08-06): `development_team` became
 # forbidden here while the fixture's manifest still declared it as *its*
