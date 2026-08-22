@@ -396,6 +396,30 @@ def test_the_money_rule_is_checked_before_every_dispatch_not_once(tmp_path,
     assert calls["n"] >= 2, "the guard was consulted once for the whole fan-out"
 
 
+def test_the_kill_switch_stops_the_batch_and_is_cleared_for_the_next_call(
+        tmp_path, monkeypatch):
+    """Left on disk, `.ai/STOP` used to stop every later `chores`/`drain` call
+    too, with nothing on screen saying why (Karel, 2026-08-22, found via
+    `nightshift.drain`). Single-use, the same as `runner._stop_requested()`."""
+    root = _repo(tmp_path, ("a", "review", "x"), ("b", "review", "x"))
+    worker = _Worker(edits={"a": _touch("a"), "b": _touch("b")}).install(monkeypatch)
+
+    real_run_one = chores.run_one
+
+    def then_stop(work, card, *args, **kwargs):
+        out = real_run_one(work, card, *args, **kwargs)
+        (root / runner.STOP_FILE).parent.mkdir(parents=True, exist_ok=True)
+        (root / runner.STOP_FILE).write_text("stop\n", encoding="utf-8")
+        return out
+
+    monkeypatch.setattr(chores, "run_one", then_stop)
+    _, batch = chores.execute(root)
+
+    assert worker.dispatched == ["a"]
+    assert {o.card_id for o in batch.by_state("blocked")} == {"b"}
+    assert not (root / runner.STOP_FILE).exists()
+
+
 def test_a_green_chore_lands_however_many_turns_it_took(tmp_path, monkeypatch):
     """A turn count cannot fail a chore, and this is the case that used to.
 

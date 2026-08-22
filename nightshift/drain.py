@@ -218,7 +218,17 @@ def drain(root: Path, base: str, *, card_id: str = "", limit: int = 0,
         cards = cards[:limit]
 
     for index, card in enumerate(cards):
-        if (root / runner.STOP_FILE).is_file():
+        stop = root / runner.STOP_FILE
+        if stop.is_file():
+            # Single-use, same as `runner._stop_requested()`: consumed the moment
+            # it is seen, so it stops this pass without also blocking the very
+            # next `drain` (or run) from starting. Left unconsumed, 2026-08-22 —
+            # a `--allow-paid` invocation exited `stopped` on cards it had not
+            # touched, and the switch was still sitting there for the next call.
+            try:
+                stop.unlink()
+            except OSError:
+                pass
             result.stopped = "the kill switch appeared"
             result.outcomes += [Outcome(c.id, NOT_REACHED, result.stopped)
                                 for c in cards[index:]]

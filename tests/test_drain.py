@@ -472,6 +472,9 @@ def test_the_kill_switch_stops_the_pass_before_the_next_card(tmp_path, monkeypat
 
     assert reviewer.reviewed == ["first"]
     assert result.outcomes[-1].state == drain.NOT_REACHED
+    # Single-use, like `runner._stop_requested()`: left on disk, it would stop
+    # the very next `drain` call too, with nothing telling you why.
+    assert not (root / runner.STOP_FILE).exists()
 
 
 # ------------------------------------------------------------------ selection

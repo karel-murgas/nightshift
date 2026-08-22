@@ -765,7 +765,15 @@ def execute(root: Path, *, limit: int = DEFAULT_BATCH, allow_paid: bool = False,
         cards: dict[str, board.Card] = {}
         stopped = ""
         for index, card in enumerate(chosen):
-            if (work / runner.STOP_FILE).is_file():
+            stop = work / runner.STOP_FILE
+            if stop.is_file():
+                # Single-use, same as `runner._stop_requested()`: consumed the
+                # moment it is seen, so this stop does not also block the very
+                # next chore batch (or run) from starting.
+                try:
+                    stop.unlink()
+                except OSError:
+                    pass
                 stopped = "the kill switch appeared"
             elif not _guard(allow_paid, f"dispatching {card.id}").allow:
                 stopped = "the usage window closed"
