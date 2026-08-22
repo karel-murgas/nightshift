@@ -896,6 +896,78 @@ def test_dispatch_cards_stops_at_the_first_failure(tmp_path, monkeypatch):
     assert len(calls) == 1, "the second card ran after the first had failed"
 
 
+def _set_attempts(root: Path, card_id: str, attempts: int) -> None:
+    path = root / "Board" / "tasks" / f"{card_id}.md"
+    text = path.read_text(encoding="utf-8")
+    if re.search(r"^attempts:.*$", text, re.MULTILINE):
+        text = re.sub(r"^attempts:.*$", f"attempts: {attempts}", text, flags=re.MULTILINE)
+    else:
+        text = text.replace("\n---\n", f"\nattempts: {attempts}\n---\n", 1)
+    path.write_text(text, encoding="utf-8", newline="")
+
+
+def test_a_needs_fix_verdict_is_retried_before_the_next_card_in_the_queue(tmp_path, monkeypatch):
+    """A queue is a fixed list of ids given once — without an immediate retry, a
+    card that needed a fix was never tried again this sequence at all (only
+    ever a candidate the *next* sequence might happen to name again)."""
+    root = _repo(tmp_path)
+    _card(root, "tasks", "first")
+    _card(root, "tasks", "second")
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        card_id = argv[argv.index("--card") + 1]
+        attempt = sum(1 for c in calls if c[c.index("--card") + 1] == card_id)
+        outcome = "needs_fix" if (card_id == "first" and attempt == 1) else "review"
+        _set_attempts(root, card_id, attempt)
+        rec = panel.run_record.start(root, kind="card", label=f"card {card_id}")
+        rec.dispatched(card_id, worker="code-thread", model="sonnet",
+                       attempt=attempt, outcome=outcome)
+        rec.finish(cost_usd=0.1, walls=0, dispatched=1)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert panel.dispatch_cards(["first", "second"], root) == 0
+    dispatched_ids = [c[c.index("--card") + 1] for c in calls]
+    assert dispatched_ids == ["first", "first", "second"], \
+        "first's needs_fix must be retried immediately, before second ever runs"
+
+
+def test_a_needs_fix_verdict_stops_retrying_once_the_card_leaves_tasks(tmp_path, monkeypatch):
+    """The rarer case `run_record`'s own docstring calls out: `settle` can spend a
+    card's last attempt and escalate it to `needs-decision/`, still recording the
+    outcome as the bare string `needs_fix`. A card no longer in `tasks/` must not
+    be dispatched again — the next `--card` call would simply refuse."""
+    root = _repo(tmp_path)
+    _card(root, "tasks", "first")
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        card_id = argv[argv.index("--card") + 1]
+        _set_attempts(root, card_id, 3)
+        # Escalated past its attempt limit: moved out of tasks/, same as
+        # `settle` would leave it, but the recorded outcome stays `needs_fix`.
+        # Plain file moves, deliberately not `_card`/`_git`: those shell out to
+        # real git, which would recurse into this very monkeypatch of
+        # `subprocess.run`.
+        src = root / "Board" / "tasks" / f"{card_id}.md"
+        dst = root / "Board" / "needs-decision" / f"{card_id}.md"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8", newline="")
+        src.unlink()
+        rec = panel.run_record.start(root, kind="card", label=f"card {card_id}")
+        rec.dispatched(card_id, worker="code-thread", model="sonnet",
+                       attempt=3, outcome="needs_fix")
+        rec.finish(cost_usd=0.1, walls=0, dispatched=1)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert panel.dispatch_cards(["first"], root) == 0
+    assert len(calls) == 1, "a card no longer in tasks/ must not be dispatched again"
+
+
 # ------------------------------------------------------------------ drag persistence
 
 

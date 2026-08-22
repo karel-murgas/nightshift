@@ -1454,17 +1454,21 @@ def _classify_pass(root: Path, args: argparse.Namespace) -> int:
 def _write_recorded(root: Path, *, allow_paid: bool = False) -> int:
     """`--write-cards`: card every writable note the last pass routed, no reclassify.
 
-    **The second step of the two the module's own ordering asks for**, separated so
-    that it *is* a second step. `--scribe` does both halves in one command, and it
-    has to for the unattended case — but as the shape of a button it quietly
-    inverts the rule this module was built on: *"It reports before it spends.
-    Classification is one cheap dispatch over the whole lane; everything after it
-    is opt-in."* A combined button cannot be opt-in about the second half, and it
-    pays for a fresh classify pass every time it is pressed to re-learn what the
-    report on disk already says.
+    The panel's "Classify all" button runs `--scribe` (2026-08-22): classify,
+    then write every chore/scribe card the pass found, in one command — the
+    "opt-in" step this module's docstring describes was ever protecting
+    *triage*, the expensive route, which neither this nor `--scribe` ever
+    dispatches; a chore or scribe card is cheap by definition, and separating
+    it into a second click that Karel had to remember to come back and press
+    just left chore-routed notes sitting in `inbox/`, unwritten (`.claude`'s
+    `note-is-always-md.md`, `remove-obsidian.md`).
 
-    So: classify to look, then write when the look was fine. `--only` is the same
-    act on one note; this is the same act on all of them.
+    This command still exists standalone for a route decided *outside*
+    `--scribe`'s own classify pass — hand-set frontmatter on a brand new note,
+    or a per-row override via `_route_act` — where there is nothing left to
+    reclassify and re-running `--scribe` would pay for a classify pass to
+    re-learn what the routing already on disk already says. `--only` is the
+    same act on one note; this is the same act on all of them.
     """
     view = read_view(root)
     found = notes(root)

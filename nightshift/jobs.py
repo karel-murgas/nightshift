@@ -51,7 +51,7 @@ from nightshift import textio
 # Same import, same reason as `panel`: "is this pid still alive" carries a
 # Windows-specific subtlety (`tasklist`, not a signal) that `runner` already got
 # right, and a second copy would be the same question answered twice.
-from nightshift.runner import _pid_alive
+from nightshift.runner import EXIT_STOPPED, _pid_alive
 
 #: Under `.ai/runs/` on purpose — see the module docstring. The leading underscore
 #: keeps it out of the way of the per-card attempt directories that are its
@@ -71,7 +71,7 @@ TRUSTED_FOR = dt.timedelta(hours=12)
 #: directory that eventually holds a year of them.
 KEEP = 80
 
-RUNNING, DONE, FAILED, LOST = "running", "done", "failed", "lost"
+RUNNING, DONE, FAILED, LOST, STOPPED = "running", "done", "failed", "lost", "stopped"
 
 
 @dataclass
@@ -113,16 +113,25 @@ class Job:
 
 
 def state(job: Job, *, now: dt.datetime | None = None) -> str:
-    """`running`, `done`, `failed` or `lost`.
+    """`running`, `done`, `stopped`, `failed` or `lost`.
 
     `lost` is the one worth spelling out: the record was written, no finish was
     ever recorded, and either the pid is gone or the record is older than
     `TRUSTED_FOR`. It means the panel cannot say how it ended — which is a
     different statement from "it failed", and both are different from the silence
     this module replaced.
+
+    `stopped` is `runner.EXIT_STOPPED` (from `nightshift.panel --dispatch-cards`,
+    the "run several queued cards in sequence" job): the kill switch was already
+    down when the sequence tried to start its next card, so that card's own
+    runner process refused before doing anything. Nonzero, so `dispatch_cards`
+    still stops the sequence there — but it is Karel's own `.ai/STOP`, not a
+    defect, and reporting it as `failed` said the wrong one of those two things.
     """
     if job.finished:
-        return DONE if job.exit_code == 0 else FAILED
+        if job.exit_code == 0:
+            return DONE
+        return STOPPED if job.exit_code == EXIT_STOPPED else FAILED
     started = job.started_at
     now = now or dt.datetime.now()
     if started is None or now - started > TRUSTED_FOR:

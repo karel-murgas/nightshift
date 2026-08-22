@@ -84,6 +84,7 @@ from nightshift.runner import (
     STATUS_FILE,
     STOP_FILE,
     Candidate,
+    attempt_limit,
     branch_has_commits,
     claude_binary,
     current_branch,
@@ -379,11 +380,10 @@ def spawn_sequence(card_ids: list[str], root: Path, *, sessions: int = 0) -> int
     Its own module is the sequencer for the same reason the verbs are commands:
     the thing the button does can be typed into a terminal and watched.
 
-    `sessions` is handed to each of those per-card runs rather than shared across
-    them, because that is the only thing it *can* mean here: `--sessions` is a
-    budget one runner process spends by sleeping through a reset, and these are N
-    processes, one per card. So it says "a card in this sequence may wait out this
-    many windows", which is what the panel's control promises — see `SESSIONS_MAX`.
+    `sessions` is a budget for the sequence as a whole, spent across however
+    many of these N per-card processes actually meet a wall — see
+    `dispatch_cards` for how that is tracked across processes that each only
+    know their own share of it.
     """
     argv = [sys.executable, "-m", "nightshift.panel", "--dispatch-cards", *card_ids]
     if sessions:
@@ -434,20 +434,112 @@ def dispatch_cards(card_ids: list[str], root: Path, *, sessions: int = 0) -> int
 
     Stops at the first card whose run exits non-zero — a night that could not
     finish card 2 has no business starting card 3 on the same assumption, and the
-    runner's own exit code is the only judgment consulted. Nothing here reads a
-    board, moves a card or decides an outcome — `sessions`, when given, is passed
-    through to each run untouched for the same reason.
+    runner's own exit code is the only judgment consulted.
+
+    **A `needs_fix` verdict redispatches the same card immediately**, before
+    moving on to the next id in the queue, instead of waiting for it to come
+    up again on its own (`retry-needs-fix-immediately`) — the queue is a fixed
+    list of ids given once, so without this a card that needed a fix was
+    never tried again this sequence at all, and 2026-08-22 shipped a morning
+    with three of them still sitting exactly where the reviewer left them.
+    Backoff and the attempt limit are already waived for a named `--card`
+    dispatch (`select`'s own doc), so nothing here has to reimplement either —
+    it only has to ask the board, after each attempt, whether the card is
+    still in `tasks/` under its attempt limit. That question is what tells
+    "will retry" apart from the rarer case where the card's last attempt just
+    escalated it to `needs-decision/`, which the outcome string alone cannot:
+    `run_record` records that case as the bare string `needs_fix` too.
+
+    **`sessions` is a budget for the sequence, not for each card in it**
+    (`sequence-sessions-reset-per-card`, 2026-08-22: a ten-card queue with
+    `--sessions 2` slept through a usage-limit reset *per card that hit one*,
+    twice, burning most of a 9.5-hour night on two five-hour sleeps a real
+    per-night cap would have stopped after the first). Each card gets only
+    what is left of the budget — its own record says how many windows *it*
+    actually slept through, which comes out of what the next card is handed —
+    and once the budget is spent the sequence stops there rather than letting
+    the next card start a fresh one.
+
+    **Every card's dispatch is folded into one record for the sequence**
+    (`sequence-cards-vanish-into-their-own-record`), because each `runner
+    --card` invocation is its own process that opens and closes its own
+    record — ten cards otherwise leave nine of them visible only as a
+    one-line "N dispatched" in `/run`'s "Earlier runs" list, with no outcome,
+    no matter how many needed a fix. The sequence's own record is written
+    last, so it is the one `_latest_record` (and therefore `/run` and the
+    digest) actually shows — with a row for every card the sequence ran, in
+    order, need-a-fix included.
     """
-    extra = ["--sessions", str(sessions)] if sessions else []
+    remaining = sessions
+    accumulated: list[dict] = []
+    total_cost = 0.0
+    total_walls = 0
+    started_at = dt.datetime.now().replace(microsecond=0).isoformat()
+    code = 0
+    stop_reason = ""
+    halt = False
     for card_id in card_ids:
-        print(f"panel: dispatching {card_id}", flush=True)
-        result = subprocess.run(_module_argv("runner", "--card", card_id, *extra), cwd=root,
-                                check=False)
-        if result.returncode != 0:
-            print(f"panel: {card_id} exited {result.returncode} — stopping the sequence",
-                  flush=True)
-            return result.returncode
-    return 0
+        retry = 0
+        while True:
+            extra = ["--sessions", str(remaining)] if sessions else []
+            label = f"panel: dispatching {card_id}"
+            if retry:
+                label += f" (retry {retry}, right after its own needs_fix)"
+            if sessions:
+                label += f" (sessions budget: {remaining} left)"
+            print(label, flush=True)
+            result = subprocess.run(_module_argv("runner", "--card", card_id, *extra),
+                                    cwd=root, check=False)
+            # The card's own process already closed its own record by the time its
+            # `subprocess.run` returns, and nothing else here writes one — so this
+            # is unambiguously that card's record, not a stale one from earlier in
+            # the sequence or a race with whatever comes next.
+            card_record = _latest_record(root)
+            entries = card_record.get("dispatched") or []
+            accumulated.extend(entries)
+            total_cost += float(card_record.get("cost_usd") or 0.0)
+            total_walls += int(card_record.get("walls") or 0)
+            if sessions:
+                remaining = max(0, remaining - int(card_record.get("walls") or 0))
+            if result.returncode != 0:
+                stop_reason = f"{card_id} exited {result.returncode}"
+                print(f"panel: {stop_reason} — stopping the sequence", flush=True)
+                code = result.returncode
+                halt = True
+                break
+            # `needs_fix` sends the card back to `tasks/` for exactly this reason
+            # (`retry-needs-fix-immediately`, Karel 2026-08-22: "it should be
+            # dispatched again right after the review... so it is actually
+            # finished in the morning") — waiting for the queue meant it only got
+            # a second look if the sequence happened to name it again later, or
+            # never. Re-checking the board rather than trusting the outcome string
+            # alone is what tells "will retry" apart from the rarer case where
+            # `settle` has already spent the card's last attempt and moved it to
+            # `needs-decision/` — the outcome is recorded as `needs_fix` there too
+            # (`run_record`'s own note on why), and a card no longer in `tasks/`
+            # would refuse the next `--card` dispatch outright.
+            outcome = str((entries[-1] if entries else {}).get("outcome") or "")
+            fresh = board.find(root, card_id)
+            still_retriable = (outcome == "needs_fix" and fresh is not None
+                              and fresh.lane == "tasks"
+                              and fresh.attempts < attempt_limit(fresh))
+            if not still_retriable:
+                break
+            if sessions and remaining <= 0:
+                stop_reason = f"sessions budget ({sessions}) spent, mid-retry on {card_id}"
+                print(f"panel: {stop_reason} — stopping the sequence for tonight", flush=True)
+                halt = True
+                break
+            retry += 1
+        if halt:
+            break
+    seq = run_record.start(root, kind="run", label="sequence", host=socket.gethostname())
+    seq.data["started"] = started_at
+    seq.set_dispatched(accumulated)
+    if stop_reason:
+        seq.stop(stop_reason)
+    seq.finish(cost_usd=total_cost, walls=total_walls, dispatched=len(accumulated))
+    return code
 
 
 def open_terminal(root: Path, *command: str) -> None:
@@ -1267,6 +1359,18 @@ def run_is_live(status: dict, record: dict) -> bool:
     updated = str(status.get("updated") or "")
     if record.get("complete") and str(record.get("finished") or "") >= updated:
         return False
+    # A wall's sleep is a known future wake time, not an unattended heartbeat —
+    # `_window_closed` writes it once and then goes quiet for up to `--sessions`
+    # windows, which routinely outlasts `HEARTBEAT_TRUSTED_FOR`. Trusting
+    # `resume_at` instead of the heartbeat's age is what tells "sleeping through
+    # a five-hour reset" apart from "died five hours ago" — the two used to look
+    # identical to this function and the panel reported the former as no run at
+    # all.
+    if status.get("phase") == "sleeping":
+        try:
+            return dt.datetime.now() < dt.datetime.fromisoformat(str(status.get("resume_at") or ""))
+        except (TypeError, ValueError):
+            return False
     try:
         if dt.datetime.now() - dt.datetime.fromisoformat(updated) > HEARTBEAT_TRUSTED_FOR:
             return False
@@ -1334,6 +1438,27 @@ def _runbox_html(ctx: Context) -> str:
         eyebrow = ("No card dispatching" if live_jobs else "No run in progress")
         head = (f'<p class="eyebrow">{_e(eyebrow)}</p>'
                 f'<div class="runline"><span class="dim">{_e(tail)}</span></div>')
+    elif status.get("phase") == "sleeping":
+        # The runner met a usage-limit wall and is sleeping out the reset
+        # (`_window_closed`) rather than doing anything a heartbeat would move
+        # for — `run_is_live` trusts `resume_at` here instead of the heartbeat's
+        # age, which is exactly why this needs its own head: rendering it as
+        # "Running now" over a process that has not touched a phase in hours
+        # would be its own, opposite lie.
+        try:
+            resume_label = dt.datetime.fromisoformat(
+                str(status.get("resume_at") or "")).strftime("%H:%M")
+        except (TypeError, ValueError):
+            resume_label = "an unknown time"
+        head = (
+            '<p class="eyebrow"><span class="live-dot"></span> Waiting for usage limit to reset</p>'
+            f'<div class="runline"><span class="card-id">{_e(card_id)}</span>'
+            f'<span class="dim">resumes at {_e(resume_label)}</span></div>'
+            + _act("Stop run", onclick="post('/api/stop',{})",
+                   extra='title="Drops .ai/STOP. The runner gives up the wait and stops '
+                         'at the top of the loop instead of resuming when the window '
+                         'reopens."')
+        )
     else:
         attempt = status.get("attempt")
         telemetry = read_telemetry(attempt_dir(ctx.root, card_id, int(attempt or 1)))
@@ -1350,6 +1475,9 @@ def _runbox_html(ctx: Context) -> str:
             f'<div class="runline"><span class="card-id">{_e(card_id)}</span>'
             f'<dl>{pairs}</dl></div>'
             + _phases_html(str(status.get("phase") or ""))
+            + _act("Stop run", onclick="post('/api/stop',{})",
+                   extra='title="Drops .ai/STOP. The runner finishes this card, then '
+                         'stops at the top of the loop rather than dispatching another."')
         )
     tally = (f'<p class="tallyline"><b>{landed}</b> landed &middot; '
              f'<b>{failed}</b> back in tasks &middot; <b>{queued}</b> queued'
@@ -1370,6 +1498,7 @@ JOB_SHOWN_FOR = dt.timedelta(hours=2)
 JOB_ROWS = 4
 
 _JOB_MARK = {jobs.RUNNING: ("", "running"), jobs.DONE: ("ok", "finished"),
+             jobs.STOPPED: ("warn", "stopped"),
              jobs.FAILED: ("bad", "failed"), jobs.LOST: ("warn", "ended without saying how")}
 
 
@@ -2018,29 +2147,40 @@ def _render_inbox(ctx: Context) -> str:
                      + _route_act(note.name, route)))
     rows = "".join(rows)
 
-    # **Two steps, and they are two buttons because the ordering is the rule.**
-    # `ingest`: *"It reports before it spends. Classification is one cheap
-    # dispatch over the whole lane; everything after it is opt-in."* The old pair was
-    # "Classify all" and "Classify + write cards" — the same first half twice, with
-    # the second one unable to be opt-in about the second half and paying for a
-    # fresh classify pass to re-learn what the report on disk already said. So the
-    # second button now acts on the routing that exists: look, then write.
+    # **Classify writes the cards it can, in the same pass, because triage is
+    # the only route the "opt-in" step was ever protecting.** The
+    # look-before-you-spend caution in `ingest`'s own docstring is about
+    # *triage* — the expensive route, never dispatched from here whatever this
+    # button does — not about a chore or scribe card, which is cheap by
+    # definition (a thin card, an envelope over an already-elaborated note).
+    # Splitting those two into a second manual click bought no real safety and
+    # cost a step Karel asked to have back (2026-08-22: chore-routed notes
+    # from a still-earlier classify pass were still sitting in `inbox/`,
+    # unwritten, because nobody had come back to press the second button).
+    # `--scribe` already did both halves in one command for exactly this
+    # reason; the button just did not use it. "Write the N card(s)" stays, for
+    # the case that pass is *for*: a route decided outside this button
+    # entirely — hand-set frontmatter (`route: chore` on a brand new note) or
+    # a per-row override via `_route_act` — with nothing left to reclassify.
     writable = sum(1 for note in ctx.notes if note.route in ingest.WRITABLE_ROUTES)
     write_label = f"Write the {writable} card(s)" if writable else "Write the cards"
     bar = ('<div class="barbox">'
-           '<p>One cheap dispatch reads every note and sorts it, and spends nothing '
-           'else. Writing the cards is the second step, on what it found.</p>'
+           '<p>Classify sorts every note and writes the card for each chore or scribe '
+           'route on the spot — triage is the only route left for you to spend '
+           'deliberately, one note at a time.</p>'
            '<div class="acts">'
            + _act("New note", onclick="openEditor('new-note')")
            + _act(write_label, onclick="post('/api/ingest',{write:true})",
                   disabled=not writable,
-                  extra='title="One scribe dispatch per chore- or scribe-routed note. '
-                        'Each note becomes its card and leaves the lane; nothing is '
-                        'reclassified."')
-           + _act("Classify all", onclick="post('/api/ingest',{})", primary=True,
-                  extra='title="One classifier dispatch over the whole lane. Writes '
-                        'Routing.md and no cards — this is the look-before-you-spend '
-                        'step."')
+                  extra='title="One scribe dispatch per chore- or scribe-routed note, on '
+                        'the routing already on disk — for a route set by hand rather than '
+                        'by Classify. Each note becomes its card and leaves the lane; '
+                        'nothing is reclassified."')
+           + _act("Classify all", onclick="post('/api/ingest',{scribe:true})", primary=True,
+                  extra='title="One classifier dispatch over the whole lane, then one scribe '
+                        'dispatch per chore- or scribe-routed note it found. Writes '
+                        'Routing.md and every card that route can write on its own — a note '
+                        'routed triage is left for you to dispatch by hand."')
            + '</div></div>'
            + _editor("new-note", save="saveNew('new-note','inbox')", named=True,
                      placeholder="One or two sentences is enough."))

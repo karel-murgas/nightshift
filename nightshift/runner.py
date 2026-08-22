@@ -91,6 +91,21 @@ def _project_name(root: Path) -> str:
 
 
 STOP_FILE = Path(".ai/STOP")
+
+#: Returned by `main()` when the run never started because the kill switch was
+#: already there — the one refusal that means "this went exactly as asked",
+#: never "something is wrong". Distinct from the generic `1` every other
+#: preflight refusal returns, because `panel.dispatch_cards` runs one runner
+#: process per queued card: after a wall-sleep lands a card and the sequence
+#: moves on to the next one, a `.ai/STOP` dropped during that sleep refuses the
+#: *next* card's preflight — and without this, that refusal's plain `1` read
+#: exactly like a crash, so `jobs.state()` reported a deliberate stop as
+#: `failed`. Deliberately not `2` or `3` — both are already in use in tests
+#: (and `2` in `jobs.main`) as generic "some other nonzero" placeholders, and
+#: reusing one would make `jobs.state()` mistake an unrelated failure for a
+#: deliberate stop.
+EXIT_STOPPED = 42
+
 LOCK_FILE = Path(".ai/runs/.lock")
 RUNS = Path(".ai/runs")
 # The heartbeat. One small JSON file, overwritten at every phase transition, so
@@ -4719,7 +4734,7 @@ def run(root: Path, args: argparse.Namespace) -> int:
     if not check.ok:
         for reason in check.reasons:
             _log(f"refusing to run — {reason}")
-        return 1
+        return EXIT_STOPPED if (ctrl / STOP_FILE).is_file() else 1
 
     if not args.dry_run and not acquire_lock(ctrl):
         return 1
@@ -4979,6 +4994,14 @@ def run(root: Path, args: argparse.Namespace) -> int:
                  f"{resume:%H:%M}, {then}")
             record.note(f"usage limit reached ({counted}) — slept until "
                         f"{resume:%H:%M}, {then}")
+            # Otherwise `status.json` freezes on whatever phase the wall was met
+            # in, its heartbeat ages past `HEARTBEAT_TRUSTED_FOR` a couple of
+            # hours into a sleep that can run five, and the panel reports "no run
+            # in progress" for a process that is very much still here, just
+            # waiting on a clock it already knows. `resume_at` is the fact the
+            # panel cannot derive from a stale heartbeat alone.
+            _status(work, phase="sleeping", card=card_id,
+                    resume_at=resume.isoformat(timespec="minutes"), since=_now())
             if not _sleep_until(resume):
                 _stop("kill switch appeared while waiting for the window")
                 return False
