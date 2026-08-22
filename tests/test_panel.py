@@ -496,6 +496,67 @@ def test_dispatch_spawns_the_runner_for_an_ordinary_account(server, monkeypatch)
     assert "999" in data["message"]
 
 
+def _branch_with_a_commit(root: Path, card_id: str) -> None:
+    """Cut `ai/<id>` off the current commit with one real change on it — the
+    shape `drain.skip_reason` needs to call a card reviewable rather than
+    left alone (mirrors `test_drain.py`'s own `_branch_with_a_commit`)."""
+    _git(root, "branch", f"ai/{card_id}", "HEAD")
+    tree = root.parent / f"wt-{card_id}"
+    _git(root, "worktree", "add", "-q", str(tree), f"ai/{card_id}")
+    (tree / f"{card_id}.txt").write_text("work\n", encoding="utf-8")
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-qm", f"worker: {card_id}")
+    _git(root, "worktree", "remove", "--force", str(tree))
+
+
+def test_review_lane_card_appears_on_now_not_only_on_verify(server):
+    """A card at rest in `review/` used to be invisible unless Verify was the
+    page open at the time. Same section, same data, on both now."""
+    base, root = server
+    _git(root, "branch", "-M", "main")
+    _card(root, "review", "r-card")
+    _branch_with_a_commit(root, "r-card")
+
+    for page in ("now", "verify"):
+        status, text = _get(base, page)
+        assert status == 200, text
+        assert "r-card" in text
+        assert "Review all" in text
+        assert "reviewAll()" in text
+
+
+def test_review_all_spawns_drain_over_the_whole_lane(server, monkeypatch):
+    base, root = server
+    captured = {}
+
+    def fake_spawn(module, args, root_arg):
+        captured["module"], captured["args"] = module, args
+        return 555
+
+    monkeypatch.setattr(panel, "spawn_background", fake_spawn)
+    monkeypatch.setattr(panel.usage, "read_identity",
+                        lambda path: panel.usage.Identity(fetched=True, has_extra_usage_enabled=False))
+    status, data = _post(base, "api/review-all", {})
+    assert status == 200, data
+    assert captured["module"] == "drain"
+    assert captured["args"] == []  # no --card: the whole lane, not one row
+    assert "555" in data["message"]
+
+
+def test_review_all_is_refused_server_side_for_a_never_account(server, monkeypatch):
+    base, root = server
+    panel.select_account(root, "spendy")
+
+    def _fail(*a, **k):
+        raise AssertionError("spawn_background must not run for a dispatch: never account")
+
+    monkeypatch.setattr(panel, "spawn_background", _fail)
+    status, data = _post(base, "api/review-all", {})
+    assert status == 400
+    assert data["ok"] is False
+    assert "never" in data["message"]
+
+
 def test_unknown_action_is_a_404(server):
     base, _ = server
     status, data = _post(base, "api/nonexistent", {})

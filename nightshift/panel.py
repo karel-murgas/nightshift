@@ -1880,6 +1880,12 @@ def _render_now(ctx: Context) -> str:
                         empty="Nothing is waiting on a decision.",
                         sec_id="decide"))
 
+    # `review/` used to be invisible unless you opened Verify — a card could sit
+    # there for weeks with nothing on the page you actually land on saying so.
+    # Same section, same data, shown here too, so it cannot be missed just
+    # because Verify was not the page open at the time. See `_review_section`.
+    out.append(_review_section(ctx))
+
     do_now = ctx.do_now
     inline_rows = []
     for candidate in do_now:
@@ -2027,6 +2033,53 @@ def _stamp_of(path: Path) -> str:
         return ""
 
 
+def _review_section(ctx: Context) -> str:
+    """The `review/` lane, shared by `/now` and `/verify`.
+
+    Karel, 2026-08-22: a card at rest here used to be visible only if you opened
+    Verify — `review-lane-has-no-drain` gave the lane a way out, but nothing said
+    a card had *taken* it unless you went looking. Showing the same section on
+    `/now` means a card sitting unreviewed shows up on the page you actually land
+    on, and **Review all** is the bulk form of the per-row **Review it** button:
+    both spawn `nightshift.drain`, `--card <id>` for one, no argument for the
+    whole lane — the same sweep `drain`'s own module docstring describes.
+    """
+    stuck = []
+    review_rows = []
+    for card in ctx.review:
+        reason = drain.skip_reason(ctx.root, ctx.base, card)
+        branch = card.fields.get("branch") or f"ai/{card.id}"
+        meta = [_e(stat) for stat in [diff_stat(ctx.root, ctx.base, branch)] if stat]
+        if reason:
+            meta.append(_chip("left alone", "mute"))
+        else:
+            stuck.append(card.id)
+        acts = _act("Diff", href=f"/diff/{card.id}")
+        if not reason:
+            acts += _act("Review it", onclick=f"post('/api/review',{{card_id:'{_attr(card.id)}'}})",
+                         primary=True)
+        review_rows.append(_row(marker="!", acts=acts,
+                                body=_card_body(card, meta=meta, why=reason)))
+
+    flag = ""
+    bar = ""
+    if stuck:
+        flag = ('<div class="flag"><h3>No reviewer is scheduled for '
+                f'{"this one" if len(stuck) == 1 else "these"}</h3>'
+                '<p>The night takes its queue from <code>tasks/</code>, so nothing picks this '
+                'lane up on its own — that is deliberate, and it is why the buttons are here. '
+                '<b>Review it</b> runs the drain over one card; <b>Review all</b> runs it over '
+                'every reviewable card in the lane.</p></div>')
+        bar = ('<div class="barbox"><div class="acts">'
+               + _act(f"Review all ({len(stuck)})", onclick="reviewAll()", primary=True)
+               + '</div></div>')
+    return _section("Under review", len(ctx.review), flag + "".join(review_rows),
+                    note="The reviewer's lane, not yours.",
+                    empty="Nothing is at rest in review/.",
+                    bar=bar,
+                    sec_id="underreview")
+
+
 def _render_verify(ctx: Context) -> str:
     out = []
     by_surface: dict[str, list[board.Card]] = {}
@@ -2075,34 +2128,7 @@ def _render_verify(ctx: Context) -> str:
                         empty="Nothing is waiting to be played.",
                         sec_id="playthrough"))
 
-    stuck = []
-    review_rows = []
-    for card in ctx.review:
-        reason = drain.skip_reason(ctx.root, ctx.base, card)
-        branch = card.fields.get("branch") or f"ai/{card.id}"
-        meta = [_e(stat) for stat in [diff_stat(ctx.root, ctx.base, branch)] if stat]
-        if reason:
-            meta.append(_chip("left alone", "mute"))
-        else:
-            stuck.append(card.id)
-        acts = _act("Diff", href=f"/diff/{card.id}")
-        if not reason:
-            acts += _act("Review it", onclick=f"post('/api/review',{{card_id:'{_attr(card.id)}'}})",
-                         primary=True)
-        review_rows.append(_row(marker="!", acts=acts,
-                                body=_card_body(card, meta=meta, why=reason)))
-
-    flag = ""
-    if stuck:
-        flag = ('<div class="flag"><h3>No reviewer is scheduled for '
-                f'{"this one" if len(stuck) == 1 else "these"}</h3>'
-                '<p>The night takes its queue from <code>tasks/</code>, so nothing picks this '
-                'lane up on its own — that is deliberate, and it is why the button is here. '
-                '<b>Review it</b> runs the drain over this one card.</p></div>')
-    out.append(_section("Under review", len(ctx.review), flag + "".join(review_rows),
-                        note="The reviewer's lane, not yours.",
-                        empty="Nothing is at rest in review/.",
-                        sec_id="underreview"))
+    out.append(_review_section(ctx))
 
     out.append(f'<footer>{len(ctx.testing)} card(s) on {_e(ctx.base)} awaiting a '
                f'play-through</footer>')
@@ -3799,6 +3825,12 @@ class Handler(BaseHTTPRequestHandler):
             card_id = str(body.get("card_id", ""))
             args = ["--card", card_id] + paid
             return f"reviewing {card_id} (pid {spawn_background('drain', args, root)})"
+
+        if path == "api/review-all":
+            # No `--card`: `drain` sweeps every reviewable card in `review/` in one
+            # pass — the bulk form of the row above, both spawning the same module.
+            _guard_dispatch_account(waived)
+            return f"reviewing the review/ lane (pid {spawn_background('drain', paid, root)})"
 
         if path == "api/answer":
             # No dispatch guard and no `paid`: this spends nothing, starts nothing and

@@ -1029,6 +1029,7 @@ function runTicked() {
 
 function runNight() { post("/api/night", { sessions: sessionsWanted() }); }
 function runChores() { post("/api/chores/run", {}); }
+function reviewAll() { post("/api/review-all", {}); }
 
 /* ---- verify: mark one OK now, or tick several and save ---- */
 
