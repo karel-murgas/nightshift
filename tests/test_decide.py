@@ -264,3 +264,60 @@ def test_a_card_with_a_live_open_question_is_not_promotable(tmp_path):
     root = _repo(tmp_path, "- A\n- B\n",
                  open_questions="- what happens to the old saves?")
     assert not decide.open_questions_settled(_text(root))
+
+
+# --------------------------------------------------------- closing as done
+
+def test_closing_records_the_answer_and_sets_state_done(tmp_path):
+    """`close_parked` writes the answer and the `state:` flip; the panel's endpoint
+    runs `reconcile --apply` afterwards to actually move the file, same as `api/tasks`
+    does for `write_answer` — this function does not touch the filesystem layout."""
+    root = _repo(tmp_path, "- Close as not-applicable\n- Re-file against the other repo\n")
+    message = decide.close_parked(root, "parked", ["Close as not-applicable"], "",
+                                  today=dt.date(2026, 8, 22))
+    text = _text(root)
+    assert "### 2026-08-22 · karel" in text
+    assert "> Close as not-applicable" in text
+    assert "state: done" in text
+    assert (root / "Board" / "needs-decision" / "parked.md").is_file()
+    assert "parked" in message and "done/" in message
+
+
+def test_closing_with_only_a_note_still_records_it(tmp_path):
+    root = _repo(tmp_path, "- A\n- B\n")
+    decide.close_parked(root, "parked", [""], "Not applicable here.",
+                        today=dt.date(2026, 8, 22))
+    assert "> Not applicable here." in _text(root)
+
+
+def test_closing_with_nothing_ticked_or_typed_still_sets_state_done(tmp_path):
+    """Unlike `write_answer`, an empty pick/note is not refused here — the card may
+    already carry its answer from an earlier `Record the answer` click, and Close is
+    then just the move half of the job."""
+    root = _repo(tmp_path, "- A\n- B\n", tail="\n## Thread\n\n> already answered earlier\n")
+    decide.close_parked(root, "parked", ["", ""], "", today=dt.date(2026, 8, 22))
+    text = _text(root)
+    assert "> already answered earlier" in text
+    assert "state: done" in text
+
+
+def test_closing_a_card_not_in_needs_decision_is_refused(tmp_path):
+    root = _repo(tmp_path, "- A\n- B\n")
+    text = _text(root).replace("state: needs-decision", "state: tasks")
+    (root / "Board" / "tasks").mkdir(parents=True, exist_ok=True)
+    (root / "Board" / "needs-decision" / "parked.md").unlink()
+    (root / "Board" / "tasks" / "parked.md").write_text(text, encoding="utf-8")
+    with pytest.raises(decide.DecideError, match="needs-decision"):
+        decide.close_parked(root, "parked", ["A"], "")
+
+
+def test_closing_an_unknown_card_is_refused(tmp_path):
+    root = _repo(tmp_path, "- A\n- B\n")
+    with pytest.raises(decide.DecideError, match="no card"):
+        decide.close_parked(root, "ghost", ["A"], "")
+
+
+def test_closing_keeps_lf_endings(tmp_path):
+    root = _repo(tmp_path, "- A\n- B\n")
+    decide.close_parked(root, "parked", ["A"], "", today=dt.date(2026, 8, 22))
+    assert b"\r\n" not in (root / "Board" / "needs-decision" / "parked.md").read_bytes()

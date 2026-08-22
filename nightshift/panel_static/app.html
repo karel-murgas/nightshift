@@ -1179,6 +1179,22 @@ function sendToTasks(cardId) {
   post("/api/tasks", { card_id: cardId });
 }
 
+/* Same pick-reading as answerCard, but posted to the endpoint that records the
+   answer (if any) and moves the card to done/ in one step — for the answer that
+   ends a card rather than opening more work. See decide.close_parked. */
+function closeCard(cardId) {
+  var groups = {};
+  document.querySelectorAll('.decide-q input[type=radio]').forEach(function (r) {
+    if (!(r.name in groups)) { groups[r.name] = ""; }
+    if (r.checked) { groups[r.name] = r.value; }
+  });
+  var picks = Object.keys(groups).sort(function (a, b) {
+    return Number(a.slice(1)) - Number(b.slice(1));
+  }).map(function (k) { return groups[k]; });
+  var note = document.getElementById("answernote");
+  post("/api/decide-close", { card_id: cardId, picks: picks, note: note ? note.value : "" });
+}
+
 /* ---- the live refresh ----------------------------------------------------
 
    The panel reports on things that take minutes — a night, a chore batch, a
@@ -1364,14 +1380,23 @@ function currentPage() {
   return page || "now";
 }
 
-/* Only the five rendered pages can refresh: a card, a diff or a log is a document
-   that does not change while you read it, and asking the server to re-render one
-   would be work nobody asked for. */
+/* Only the rendered pages can refresh: a diff or a log is a document that does not
+   change while you read it, and asking the server to re-render one would be work
+   nobody asked for. `decide/` is a prefix rather than a name because the page's URL
+   carries the card id (`decide/<id>`) — without this a decide page never refreshed
+   at all, so a recorded answer or a Close click left the page looking untouched
+   until you navigated away and back (Karel, 2026-08-22). */
 var REFRESHABLE = ["now", "verify", "inbox", "ideas", "run", "system"];
+var REFRESHABLE_PREFIXES = ["decide/"];
+
+function isRefreshable(page) {
+  return REFRESHABLE.indexOf(page) !== -1
+    || REFRESHABLE_PREFIXES.some(function (p) { return page.indexOf(p) === 0; });
+}
 
 function softRefresh() {
   var page = currentPage();
-  if (REFRESHABLE.indexOf(page) === -1) { return Promise.resolve(); }
+  if (!isRefreshable(page)) { return Promise.resolve(); }
   /* Rescheduled from *here*, not from the timer that called it — an action's own
      `post` refresh 400 ms after a click is a real read of the board, and leaving
      the clock alone would have run another one 400 ms later. The countdown is the
@@ -1416,7 +1441,7 @@ function scheduleRefresh(delay) {
 function drawTicker() {
   var el = document.getElementById("ticker");
   if (!el) { return; }
-  if (REFRESHABLE.indexOf(currentPage()) === -1) { el.hidden = true; return; }
+  if (!isRefreshable(currentPage())) { el.hidden = true; return; }
   el.hidden = false;
   if (document.visibilityState !== "visible") {
     el.className = "";

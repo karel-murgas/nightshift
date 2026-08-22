@@ -3363,6 +3363,16 @@ def render_decide(root: Path, card_id: str) -> str:
     if question:
         blocks.append(f'<div class="doc">{markdown(question)}</div>')
 
+    # Shown before the picker, not after: this page used to be the one place on the
+    # board where you could not see your own answer once you had given it — the
+    # Thread lives only in the raw card body, and this form never read it. Karel
+    # answered the same card four times because nothing on screen ever confirmed the
+    # first click had landed (2026-08-22).
+    thread = board.section(card.text, "Thread")
+    if thread.strip():
+        blocks.append(f'<div class="doc"><h3>Already on record</h3>'
+                      f'{markdown(thread)}</div>')
+
     for index, sub in enumerate(subquestions):
         options = []
         for choice, option in enumerate(sub.options):
@@ -3391,14 +3401,21 @@ def render_decide(root: Path, card_id: str) -> str:
                   'something."></textarea></div>')
 
     settled = decide.open_questions_settled(card.text)
-    # Deliberately three separate buttons rather than one that decides for you. An
-    # answer is not a ticket to `tasks/` — see `decide.write_answer` on
-    # park-over-promote — so recording one and advancing the card are two clicks.
+    # Deliberately separate buttons rather than one that decides for you. An answer
+    # is not a ticket to `tasks/` — see `decide.write_answer` on park-over-promote —
+    # so recording one and advancing the card are different clicks for anything that
+    # opens more work. Closing as not-applicable/already-satisfied is the one
+    # exception: see `decide.close_parked` on why that answer gets its own button
+    # that both records and moves.
     acts = (
         _act("Record the answer",
              onclick=f"answerCard('{_attr(card.id)}')", primary=True,
              extra='title="Writes what you ticked into the card\'s ## Thread, dated and '
                    'signed. The card does not move."')
+        + _act("Close — no further work needed", onclick=f"closeCard('{_attr(card.id)}')",
+               extra='title="Records the pick/note (if any) and moves the card straight '
+                     'to done/ — for an answer like \'not applicable\' or \'already '
+                     'satisfied\' that ends the card rather than opening more work."')
         + _act("Re-triage this",
                onclick=f"post('/api/triage',{{card:'{_attr(card.id)}'}})",
                extra='title="Opens triage on the card, for when the answer changed its '
@@ -3553,10 +3570,18 @@ class Handler(BaseHTTPRequestHandler):
             # added, and the first time it fell behind the panel would quietly stop
             # updating the part nobody remembered to add to it.
             wanted = parse_qs(parsed.query).get("page", [""])[0]
-            if wanted not in _RENDER:
-                self._send_json(400, {"ok": False, "message": f"no page {wanted!r}"})
+            if wanted in _RENDER:
+                self._send(200, render_page(wanted, self.root).encode("utf-8"))
                 return
-            self._send(200, render_page(wanted, self.root).encode("utf-8"))
+            # `decide/<id>` is not in `_RENDER` — it takes a card id, not a bare page
+            # name, and renders standalone rather than inside the shell's nav — but it
+            # still needs the same live refresh: the answer-then-nothing-changes gap
+            # this closes (2026-08-22) is exactly what this endpoint exists to prevent.
+            if wanted.startswith("decide/"):
+                self._send(200, render_decide(self.root, wanted[len("decide/"):])
+                          .encode("utf-8"))
+                return
+            self._send_json(400, {"ok": False, "message": f"no page {wanted!r}"})
             return
         if path == "api/body":
             wanted = parse_qs(parsed.query).get("path", [""])[0]
@@ -3757,6 +3782,20 @@ class Handler(BaseHTTPRequestHandler):
                 return decide.write_answer(root, card_id, picks, note)
             except decide.DecideError as exc:
                 raise PanelError(str(exc)) from exc
+
+        if path == "api/decide-close":
+            # `decide.close_parked` does the write and the move together — see its
+            # docstring for why that answer, unlike a promotion to tasks/, gets one
+            # click instead of two.
+            card_id = str(body.get("card_id", ""))
+            picks = [str(p) for p in body.get("picks", [])]
+            note = str(body.get("note", ""))
+            try:
+                message = decide.close_parked(root, card_id, picks, note)
+            except decide.DecideError as exc:
+                raise PanelError(str(exc)) from exc
+            moved = run_command("reconcile", ["--apply"], root)
+            return f"{message} · {_verb(moved)}"
 
         if path == "api/tasks":
             # The deliberate second click after an answer. Guarded on the same

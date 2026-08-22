@@ -323,6 +323,44 @@ def write_answer(root: Path, card_id: str, picks: list[str], note: str,
             f"{card.lane}/")
 
 
+def close_parked(root: Path, card_id: str, picks: list[str], note: str,
+                 *, today: dt.date | None = None) -> str:
+    """Record an answer, if there is one, and flip `state:` to `done`.
+
+    **Sets the field, does not move the file.** Same split as `api/tasks`'s handling
+    of `write_answer`: this function is a pure text edit, and the caller runs
+    `reconcile --apply` to make the folder catch up — reconcile is the one thing that
+    moves a card, everywhere on the board, and duplicating that here would be a second
+    place a move could go wrong.
+
+    **Why this doesn't inherit `write_answer`'s park-over-promote policy.** That
+    policy is about `tasks/`: promoting there hands the answer to a worker who will
+    write code from it, so a wrong promotion produces confident wrong work that costs
+    more to undo than the card waiting one more cycle. Closing a card as
+    not-applicable / already-satisfied carries no such risk — there is no code to get
+    wrong, only a card to stop tracking, and a wrong close is undone by moving the
+    file back. So the two steps `write_answer` deliberately keeps separate (record,
+    then a further click to move) are one click here, because the answer *is* "this
+    is finished."
+
+    Restricted to `needs-decision/`: a card anywhere else has its own move path
+    already (`tasks/` dispatch, the runner, `Send to tasks`), and this button only
+    ever appears on the decide page.
+    """
+    card = board.find(root, card_id)
+    if card is None:
+        raise DecideError(f"no card `{card_id}` on the board")
+    if card.lane != "needs-decision":
+        raise DecideError(f"`{card_id}` is in {card.lane}/, not needs-decision/ — "
+                          f"nothing for this button to close")
+    if any(picks) or note.strip():
+        write_answer(root, card_id, picks, note, today=today)
+        card = board.find(root, card_id)
+    text = re.sub(r"^state:.*$", "state: done", card.text, count=1, flags=re.MULTILINE)
+    textio.write_text_lf(card.path, text)
+    return f"{card_id} closed → done/"
+
+
 def _append_to_thread(text: str, entry: str) -> str:
     """Put `entry` at the end of `## Thread`, creating the section if it is absent.
 
