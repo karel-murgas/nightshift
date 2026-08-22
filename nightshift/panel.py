@@ -1528,24 +1528,44 @@ def shown_jobs(all_jobs: list[jobs.Job], *,
     history, which is what `/run` is for. A row is only ever *replaced* by a
     running job, never by a finished one — a second press that was refused in
     under a second must not hide the first one, which is still going.
+
+    **Across verbs, only the single most-recently-started one still counts as
+    current.** Karel, 2026-08-22: *"Only the latest (running or finished) should
+    show. [If] run [finished, then] ingest [started], run should disappear."*
+    The per-verb collapse above answers "what is this verb's row", but nothing
+    stopped an *older* verb's finished row from sitting beside a newer verb's —
+    a `run` that landed an hour ago is exactly the history this box was never
+    meant to be, once `ingest` has since started. A row that is still `RUNNING`
+    always stays, whichever verb it is — it is happening *right now*, and no
+    later start date changes that — but a finished row is dropped the moment any
+    job (running or not) started after it. Ties on `started` (second
+    resolution) are not split further; both stay, which favours showing more
+    over guessing which press actually came first.
     """
     now = now or dt.datetime.now()
-    keep: list[tuple[jobs.Job, str]] = []
-    at_row: dict[str, int] = {}
+    per_label: dict[str, tuple[jobs.Job, str]] = {}
+    order: list[str] = []
     for job in all_jobs:
         status = jobs.state(job, now=now)
         finished = job.finished_at
         if not (status == jobs.RUNNING or (finished and now - finished < JOB_SHOWN_FOR)):
             continue
-        row = at_row.get(job.label)
-        if row is None:
-            if len(keep) == JOB_ROWS:
-                continue        # the rail is full, but an earlier label may still be live
-            at_row[job.label] = len(keep)
-            keep.append((job, status))
-        elif status == jobs.RUNNING and keep[row][1] != jobs.RUNNING:
-            keep[row] = (job, status)
-    return keep
+        existing = per_label.get(job.label)
+        if existing is None:
+            per_label[job.label] = (job, status)
+            order.append(job.label)
+        elif status == jobs.RUNNING and existing[1] != jobs.RUNNING:
+            per_label[job.label] = (job, status)
+        # else: `all_jobs` is newest-first, so whatever is already kept for this
+        # label is either the newer press or a still-running older one — both
+        # outrank this one.
+
+    rows = [per_label[label] for label in order]
+    newest_started = max((j.started_at or dt.datetime.min) for j, _ in rows) \
+        if rows else None
+    current = [(j, s) for j, s in rows
+              if s == jobs.RUNNING or j.started_at == newest_started]
+    return current[:JOB_ROWS]
 
 
 def _jobs_html(shown: list[tuple[jobs.Job, str]]) -> str:

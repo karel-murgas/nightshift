@@ -2125,8 +2125,31 @@ def test_pressing_a_verb_again_replaces_its_row_rather_than_stacking_a_new_one()
                               _press("ingest", "second", minutes=20, code=3),
                               _press("ingest", "first", minutes=40, code=0),
                               _press("chores", "batch", minutes=30, code=0)], now=now)
-    assert [j.ident for j, _ in shown] == ["third", "batch"], (
-        "one row per verb, newest press, and a different verb is a different row")
+    assert [j.ident for j, _ in shown] == ["third"], (
+        "one row per verb, newest press — and across verbs, only the most "
+        "recently started finished row is still current; chores' older batch "
+        "is superseded the moment ingest's later press exists")
+
+
+def test_an_older_verbs_finished_row_disappears_once_a_newer_verb_starts():
+    """Karel, 2026-08-22: run finished, then ingest started — the box kept
+    showing 'run finished 1 h 17 min ago' beside 'ingest running', which is the
+    history this box was never meant to carry. Only the latest (running or
+    finished) verb should show."""
+    now = dt.datetime.now()
+    shown = panel.shown_jobs([_press("ingest", "live", minutes=3, code=None),
+                              _press("run", "earlier", minutes=77, code=0)], now=now)
+    assert [j.ident for j, _ in shown] == ["live"]
+
+
+def test_a_still_running_older_job_is_not_hidden_by_a_newer_finished_one():
+    """The reverse of the case above: a verb that is still going must never be
+    hidden just because some other verb was pressed more recently and already
+    finished — it is happening right now, which outranks any start date."""
+    now = dt.datetime.now()
+    shown = panel.shown_jobs([_press("ingest", "quick", minutes=2, code=0),
+                              _press("chores", "slow", minutes=10, code=None)], now=now)
+    assert {j.ident for j, _ in shown} == {"quick", "slow"}
 
 
 def test_a_running_job_keeps_the_row_a_later_refusal_would_have_taken():
