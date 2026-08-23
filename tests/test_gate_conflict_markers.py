@@ -28,6 +28,12 @@ import conflict_markers  # noqa: E402
 
 import _fixtures  # noqa: E402
 
+# gate-ok(conflict_markers): this file has to contain real column-0 conflict markers,
+# because column-0 markers are exactly the defect the gate pins; a fixture that dodged
+# them by indenting or by string concatenation would be testing something else. The
+# appeal is file-scope because the markers live inside string literals, where a
+# per-line comment cannot go without editing the bytes under test.
+
 CONFLICTED = """\
 intro line
 <<<<<<< HEAD
@@ -131,6 +137,35 @@ def test_gate_skips_a_binary_blob(tmp_path: Path):
     subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True,
                    capture_output=True, encoding="utf-8", errors="replace")
     assert conflict_markers.check(repo) == []
+
+
+def test_a_file_scope_appeal_exempts_the_whole_file(tmp_path: Path):
+    """Earned within the hour of shipping. The gate first claimed no legitimate
+    instance could exist; the first file written against it was one — this very
+    module, which must carry column-0 markers to pin them. The appeal is file-scope
+    because the markers sit inside string literals, where a per-line comment cannot
+    be placed without editing the bytes under test."""
+    reason = "the fixtures must carry real markers to pin the defect"
+    repo = _repo(tmp_path, {
+        "docs/about.md": f"<!-- gate-ok(conflict_markers): {reason} -->\n" + CONFLICTED,
+    })
+    assert conflict_markers.check(repo) == []
+
+
+def test_a_bare_appeal_with_no_reason_does_not_exempt(tmp_path: Path):
+    """The reason is the whole cost of an appeal. Without one it is a mute button,
+    which is what `gate_appeals` exists to prevent elsewhere and what this mirrors."""
+    repo = _repo(tmp_path, {"docs/about.md": "gate-ok(conflict_markers):\n" + CONFLICTED})
+    assert conflict_markers.check(repo) != []
+
+
+def test_an_appeal_naming_another_gate_does_not_exempt(tmp_path: Path):
+    """An appeal is per-gate. Waiving `line_endings` must not quietly waive this."""
+    repo = _repo(tmp_path, {
+        "docs/about.md": "gate-ok(line_endings): a fixture pins CRLF on purpose\n"
+                         + CONFLICTED,
+    })
+    assert conflict_markers.check(repo) != []
 
 
 def test_nightshift_own_tree_is_marker_free():
