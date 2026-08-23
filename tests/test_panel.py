@@ -150,11 +150,9 @@ def _reset_account():
     same shape of state for the same reason."""
     panel._ACCOUNT = panel.AccountState()
     panel._TIER = panel.TierChoice()
-    panel._METERS = None
     yield
     panel._ACCOUNT = panel.AccountState()
     panel._TIER = panel.TierChoice()
-    panel._METERS = None
 
 
 # ------------------------------------------------------ no logic in the server
@@ -597,39 +595,47 @@ def test_read_rail_fetches_only_when_explicitly_asked(tmp_path, monkeypatch):
 # ----------------------------------------------------- the meters are not re-fetched
 
 
-def test_the_meter_reading_is_reused_rather_than_refetched_on_every_page(monkeypatch):
-    """The meters are ambient, so without a cache every click is another HTTP
-    call — which is how the endpoint started answering 429 while this was being
-    looked at, and the rail went from numbers to an error line."""
+def test_read_rail_goes_through_the_shared_cache_not_the_raw_endpoint(tmp_path, monkeypatch):
+    """The caching itself is `usage.read_cached`'s job now (tested there, and
+    shared with every other reader of this account's meters) — what the rail
+    must get right is calling that instead of the bare, uncached `usage.read`,
+    which is how it and the editor's own usage indicator jointly kept a
+    "per-page" cache from ever mattering."""
+    root = _repo(tmp_path)
     calls = []
-    monkeypatch.setattr(panel.usage, "read",
-                        lambda creds=None, **k: calls.append(1) or panel.usage.Snapshot())
-    panel.read_meters(None)
-    panel.read_meters(None)
-    panel.read_meters(None)
+    monkeypatch.setattr(panel.usage, "read_cached",
+                        lambda creds=None, **k: calls.append(creds) or panel.usage.Snapshot())
+    panel.read_rail(root)
     assert len(calls) == 1
 
 
-def test_the_meter_reading_can_be_forced(monkeypatch):
-    calls = []
-    monkeypatch.setattr(panel.usage, "read",
-                        lambda creds=None, **k: calls.append(1) or panel.usage.Snapshot())
-    panel.read_meters(None)
-    panel.read_meters(None, force=True)
-    assert len(calls) == 2
+def test_switching_account_invalidates_that_accounts_cache(server, monkeypatch):
+    """A fresh `claude auth login` swaps the identity under the *same* config
+    directory, so the credential path never changes — the cache has to be told
+    explicitly rather than inferring the switch from a new key."""
+    base, root = server
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: None)
+    seen = []
+    monkeypatch.setattr(panel.usage, "invalidate_cache", lambda creds=None: seen.append(creds))
+    _post(base, "api/switch-account", {})
+    assert len(seen) == 1
 
 
-def test_switching_account_throws_the_cached_meters_away(tmp_path, monkeypatch):
-    """A cached reading belongs to the account it was taken for; carrying it
-    across a switch would show one account's headroom under another's name."""
-    root = _repo(tmp_path)
-    calls = []
-    monkeypatch.setattr(panel.usage, "read",
-                        lambda creds=None, **k: calls.append(1) or panel.usage.Snapshot())
-    panel.read_meters(None)
-    panel.select_account(root, "main")
-    panel.read_meters(None)
-    assert len(calls) == 2
+def test_a_stale_reading_says_so_instead_of_looking_fresh(server, monkeypatch):
+    """A failed live call falls back to the last good reading (`usage.read_cached`)
+    rather than a raw error line — but showing a stale number as though it were
+    current would be its own kind of wrong."""
+    base, root = server
+    checked_at = dt.datetime.now() - dt.timedelta(minutes=4)
+    stale = panel.usage.Snapshot(
+        buckets=(panel.usage.Bucket(name="five_hour", utilization=42.0, resets_at=None),),
+        fetched=True, stale=True, checked_at=checked_at)
+    monkeypatch.setattr(panel.usage, "read_cached", lambda creds=None, **k: stale)
+
+    _, text = _get(base, "now")
+
+    assert "endpoint asked again too soon" in text
+    assert f"as of {checked_at:%H:%M}" in text
 
 
 def test_the_identity_read_is_never_cached(tmp_path, monkeypatch):
@@ -1572,20 +1578,6 @@ def test_the_override_reaches_the_commands_that_check_the_money_rule(server, mon
 # ------------------------------------------- switching by signing in, not by config
 
 
-def test_meters_are_cached_per_account_not_just_per_minute(monkeypatch):
-    """`claude auth login` swaps the identity under the *same* config directory,
-    so the credential path never changes. A cache keyed on time alone would serve
-    the previous account's headroom under the new account's name."""
-    calls = []
-    monkeypatch.setattr(panel.usage, "read",
-                        lambda creds=None, **k: calls.append(1) or panel.usage.Snapshot())
-    panel.read_meters(None, account_key="account-a")
-    panel.read_meters(None, account_key="account-a")
-    assert len(calls) == 1
-    panel.read_meters(None, account_key="account-b")
-    assert len(calls) == 2, "the reading for one account was reused for another"
-
-
 def test_switching_account_launches_the_sign_in_and_does_not_perform_it(server, monkeypatch):
     """The panel is a launcher. A browser sign-in is not something it can carry
     out, and it must not pretend to."""
@@ -1599,14 +1591,6 @@ def test_switching_account_launches_the_sign_in_and_does_not_perform_it(server, 
     assert status == 200, data
     assert opened["cmd"] == ["claude", "auth", "login"]
     assert "reload" in data["message"]
-
-
-def test_switching_account_drops_the_cached_meters(server, monkeypatch):
-    base, root = server
-    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: None)
-    panel._METERS = (dt.datetime.now(), "old-account", panel.usage.Snapshot())
-    _post(base, "api/switch-account", {})
-    assert panel._METERS is None
 
 
 def test_the_rail_offers_the_switch_even_with_no_accounts_configured(server):

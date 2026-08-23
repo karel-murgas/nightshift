@@ -155,10 +155,9 @@ def select_account(root: Path, label: str) -> AccountState:
     server process itself inherited, or `~/.claude` if unset) — not a fourth
     hardcoded default, just "stop overriding".
     """
-    global _ACCOUNT, _METERS
-    # A different account has different meters, so the cached reading is not just
-    # stale, it is about someone else.
-    _METERS = None
+    global _ACCOUNT
+    # A different account has a different credentials path, so `usage.read_cached`
+    # already keys its cache on that and needs no help invalidating here.
     if not label:
         _ACCOUNT = AccountState()
         return _ACCOUNT
@@ -784,46 +783,16 @@ class Rail:
     run_status: dict = field(default_factory=dict)
 
 
-#: How long a meter reading is reused before the endpoint is asked again.
-#: The meters are ambient — they are on every page — so without this every click
-#: in the rail is another HTTP call, and the endpoint starts answering 429, which
-#: is exactly what it did after a few minutes of paging around. A minute is far
-#: shorter than the windows being metered (five hours, seven days) and long
-#: enough that browsing costs nothing.
-METERS_CACHED_FOR = dt.timedelta(seconds=60)
-#: `(taken at, whose, reading)`.
-_METERS: tuple[dt.datetime, str, usage.Snapshot] | None = None
-
-
-def read_meters(credentials: Path | None, *, account_key: str = "",
-                force: bool = False) -> usage.Snapshot:
-    """The usage snapshot, reused for `METERS_CACHED_FOR` — per account.
-
-    Only the *network* read is cached. `usage.read_identity` is a local file and
-    is never cached anywhere — it is what `_guard_dispatch_account` vetoes on, and
-    a safety check answering from a minute-old copy is not a safety check.
-
-    **`account_key` is not decoration.** The ordinary way to change accounts here
-    is `claude auth login` against the *same* config directory, so the credential
-    path never changes and a cache keyed on time alone would keep serving the
-    previous account's headroom under the new account's name for up to a minute
-    after a switch.
-    """
-    global _METERS
-    now = dt.datetime.now()
-    if (not force and _METERS is not None and _METERS[1] == account_key
-            and now - _METERS[0] < METERS_CACHED_FOR):
-        return _METERS[2]
-    snapshot = usage.read(credentials)
-    _METERS = (now, account_key, snapshot)
-    return snapshot
-
-
 def read_rail(root: Path, *, fetch_freshness: bool = False) -> Rail:
     credentials, identity_path = _account_paths(_ACCOUNT)
     identity = usage.read_identity(identity_path)
-    snapshot = read_meters(credentials,
-                           account_key=identity.account_uuid or identity.email)
+    # `usage.read_identity` is a local file and is never cached anywhere — it is
+    # what `_guard_dispatch_account` vetoes on, and a safety check answering
+    # from a stale copy is not a safety check. The meters are different: they
+    # are ambient (on every page) and shared cross-process by `read_cached`
+    # itself, keyed on `credentials` — see that function's own docstring for
+    # why a per-process cache here stopped being enough.
+    snapshot = usage.read_cached(credentials)
     verdict = usage.check(snapshot)
     fresh = freshness.read(fetch=fetch_freshness)
     return Rail(
@@ -1655,6 +1624,12 @@ def _meters_html(ctx: Context) -> str:
     out = ['<p class="eyebrow">Allowance</p>']
     if not snapshot.fetched:
         out.append(f'<p class="resets">{_e(snapshot.reason or "no reading")}</p>')
+    elif snapshot.stale and snapshot.checked_at:
+        # A failed live call kept the last good reading rather than blanking to
+        # the raw error — see `usage.read_cached`. Said plainly here rather than
+        # silently, since a stale number should not read as a fresh one.
+        out.append(f'<p class="resets">as of {snapshot.checked_at:%H:%M} '
+                   f'(endpoint asked again too soon)</p>')
     for bucket in shown_buckets(snapshot):
         fill = min(100.0, max(0.0, bucket.utilization))
         kind = "bad" if bucket.exhausted else ("warn" if bucket.headroom_pct <= 15 else "")
@@ -3992,11 +3967,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "api/switch-account":
             # A browser sign-in against the one config directory. The panel is a
-            # launcher: it opens the terminal and stops there. The cached meters go
-            # with the old account, so they are dropped rather than left to be
-            # served under the new one's name.
-            global _METERS
-            _METERS = None
+            # launcher: it opens the terminal and stops there. Re-authenticating
+            # keeps the same credentials path but can swap which account it
+            # describes, which a path-keyed cache cannot see on its own — drop
+            # it explicitly rather than serving the old account's headroom
+            # under the new one's name.
+            usage.invalidate_cache(_account_paths(_ACCOUNT)[0])
             open_terminal(root, "claude", "auth", "login")
             return ("opened a terminal running `claude auth login` — sign in, then "
                     "reload this page to see which account is in force")

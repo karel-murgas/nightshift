@@ -20,6 +20,7 @@ three known keys alone.
 """
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import json
 from pathlib import Path
@@ -321,6 +322,127 @@ def test_earliest_reset_ignores_windows_that_are_not_spent():
 
 def test_headroom_never_goes_negative():
     assert _bucket("over", 143.0).headroom_pct == 0.0
+
+
+# --------------------------------------------------------------- the shared cache
+#
+# `read()` itself stays a bare, uncached call (every test above relies on that);
+# `read_cached()` is the wrapper every ambient reader (the panel's rail today)
+# should use instead — see its docstring for why a per-process cache stopped
+# being enough (`usage-api-quota`).
+
+def test_read_cached_reuses_a_recent_reading_across_calls(tmp_path: Path,
+                                                          monkeypatch: pytest.MonkeyPatch):
+    creds = _creds(tmp_path)
+    _serve(monkeypatch, _LIVE)
+    first = usage.read_cached(creds)
+    assert first.fetched is True and first.stale is False
+
+    _raise(monkeypatch, AssertionError("must not ask again inside the cache window"))
+    second = usage.read_cached(creds)
+    assert second.stale is True
+    assert second.buckets == first.buckets
+
+
+def test_read_cached_can_be_forced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    creds = _creds(tmp_path)
+    _serve(monkeypatch, {"five_hour": {"utilization": 10.0}})
+    usage.read_cached(creds)
+
+    _serve(monkeypatch, {"five_hour": {"utilization": 90.0}})
+    forced = usage.read_cached(creds, force=True)
+    assert forced.buckets[0].utilization == 90.0
+
+
+def test_read_cached_is_keyed_by_credentials_path(tmp_path: Path,
+                                                  monkeypatch: pytest.MonkeyPatch):
+    """Two accounts never share one cache — each has its own credentials path,
+    which is the cache key, so there is nothing to key on top of it."""
+    dir_a, dir_b = tmp_path / "a", tmp_path / "b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    creds_a, creds_b = _creds(dir_a), _creds(dir_b)
+
+    _serve(monkeypatch, {"five_hour": {"utilization": 10.0}})
+    usage.read_cached(creds_a)
+
+    _serve(monkeypatch, {"five_hour": {"utilization": 90.0}})
+    reading_b = usage.read_cached(creds_b)
+    assert reading_b.buckets[0].utilization == 90.0
+
+
+def test_a_429_falls_back_to_the_last_good_reading_marked_stale(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    creds = _creds(tmp_path)
+    _serve(monkeypatch, {"five_hour": {"utilization": 33.0}})
+    good = usage.read_cached(creds, force=True)
+    assert good.fetched is True
+
+    _raise(monkeypatch, usage.urllib.error.HTTPError(
+        usage.USAGE_URL, 429, "Too Many Requests", {}, None))  # type: ignore[arg-type]
+    served = usage.read_cached(creds, force=True)
+    assert served.fetched is True and served.stale is True
+    assert served.buckets[0].utilization == 33.0
+    assert served.checked_at is not None
+
+
+def test_a_429_with_nothing_cached_yet_fails_open_as_usual(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    creds = _creds(tmp_path)
+    _raise(monkeypatch, usage.urllib.error.HTTPError(
+        usage.USAGE_URL, 429, "Too Many Requests", {}, None))  # type: ignore[arg-type]
+    served = usage.read_cached(creds, force=True)
+    assert served.fetched is False
+    assert usage.check(served).allow is True
+
+
+def test_invalidate_cache_drops_it_for_a_fresh_login(tmp_path: Path,
+                                                     monkeypatch: pytest.MonkeyPatch):
+    """`claude auth login` against the same config directory swaps the account
+    without changing the credentials path, so the cache must be told rather
+    than left to infer a switch that never shows up as a new key."""
+    creds = _creds(tmp_path)
+    _serve(monkeypatch, {"five_hour": {"utilization": 20.0}})
+    usage.read_cached(creds)
+
+    usage.invalidate_cache(creds)
+
+    _serve(monkeypatch, {"five_hour": {"utilization": 70.0}})
+    fresh = usage.read_cached(creds)
+    assert fresh.buckets[0].utilization == 70.0
+
+
+def test_retry_after_seconds_form_is_honoured():
+    exc = usage.urllib.error.HTTPError(
+        usage.USAGE_URL, 429, "", {"Retry-After": "120"}, None)  # type: ignore[arg-type]
+    now = dt.datetime(2026, 1, 1, 12, 0, 0)
+    assert usage._parse_retry_after(exc, now) == dt.timedelta(seconds=120)
+
+
+def test_retry_after_http_date_form_is_honoured():
+    """The header is a GMT wall-clock date; `now` here is naive local time, the
+    same mismatch `_parse_iso` already normalises for — both sides have to be
+    the real current moment for the conversion between them to cancel out."""
+    now = dt.datetime.now()
+    future_utc = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=3)
+    header = future_utc.strftime("%a, %d %b %Y %H:%M:%S GMT")
+    exc = usage.urllib.error.HTTPError(
+        usage.USAGE_URL, 429, "", {"Retry-After": header}, None)  # type: ignore[arg-type]
+    delta = usage._parse_retry_after(exc, now)
+    assert delta is not None and abs(delta.total_seconds() - 180) < 5
+
+
+def test_retry_after_absent_is_none():
+    exc = usage.urllib.error.HTTPError(
+        usage.USAGE_URL, 429, "", {}, None)  # type: ignore[arg-type]
+    assert usage._parse_retry_after(exc, dt.datetime.now()) is None
+
+
+def test_describe_marks_a_stale_reading():
+    fresh = _snap(_bucket("five_hour", 10.0), paid=False)
+    stale = dataclasses.replace(fresh, stale=True, checked_at=dt.datetime(2026, 1, 1, 9, 30))
+    assert "as of 09:30" in usage.describe(stale)[0]
+    assert not any("as of" in line for line in usage.describe(fresh))
 
 
 # -------------------------------------------------------------------------- identity
