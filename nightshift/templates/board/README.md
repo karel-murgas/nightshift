@@ -91,7 +91,11 @@ Kanban, not by dragging the file in the sidebar. A manual file move leaves the o
 
 - **`needs-decision/`** — parked on a human answer. This is a **success state**, not a
   failure. A card here must carry a `## Question` section stating what was attempted,
-  what is ambiguous, the candidate answers and what each implies.
+  what is ambiguous, the candidate answers and what each implies — and an
+  `after_answer:` saying how it resumes: `triage` when the answer is an input to
+  scoping and the card must be rewritten around it, `tasks` when the card is already
+  scoped and the answer settles one point inside it. Two different things end up in
+  this lane and they leave it by opposite routes; the field is which.
 - **`review/`** — gates green, awaiting Claude review, or waiting on a sibling card.
 - **`blocked/`** — reviewed `ok`, work finished, and the branch will not land without a
   person. Almost always a rebase conflict the `merge-resolver` agent tried and declined; the

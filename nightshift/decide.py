@@ -385,11 +385,118 @@ def _append_to_thread(text: str, entry: str) -> str:
 
 
 def open_questions_settled(card_text: str) -> bool:
-    """Whether `## Open questions` says `none`.
+    """Whether `## Open questions` says `none` — `board`'s rule, not a second one.
 
     The precondition on offering "Send to tasks": `card_schema` refuses any card in
     `tasks/` whose open questions are not `none`, so a button that moved the card
-    without this would simply turn the board red on the next gate run.
+    without this would simply turn the board red on the next gate run. Kept as a
+    name here because the panel and the digest both reach for it through this
+    module, but the rule itself is `board.open_questions_settled` — see its
+    docstring for the drift this delegation ended.
     """
-    body = board.section(card_text, "Open questions")
-    return body.strip().lower().rstrip(".") in ("none", "- none", "* none")
+    return board.open_questions_settled(card_text)
+
+
+#: A dated maintainer answer's heading, in the shape `compose` writes it above:
+#: `### <ISO date> · <attributor>`, optionally with a ` — note` tail. Concatenated
+#: with the escaped token rather than `.format()`ed — the `{3,6}` and `{4}` here are
+#: format placeholders and `str.format` raises `KeyError: '3,6'` on them.
+_ATTRIBUTED_ANSWER_PREFIX = r"^#{3,6}[ \t]+\d{4}-\d{2}-\d{2}[ \t]*·[ \t]*"
+
+
+def answer_pattern(attributor: str) -> re.Pattern[str] | None:
+    """The regex that recognises `attributor`'s own answer, or `None` for no token.
+
+    `None` disables every check built on it rather than falling back to a guess: a
+    project that never declared `[board].decision_attributor` has no token to match,
+    and inventing one would report a check that cannot fire.
+
+    Matched narrowly beyond the date shape: the token must end on a word boundary,
+    so a discussion-style entry like `### <date> · interactive session (Karel +
+    Claude)` does not trip it — that is a conversation, not a recorded decision, and
+    everything reading this is advisory, so it under-flags by design. Nor can the
+    token be replaced by a shape rule: over the origin project's 62 `· <token>`
+    headings the bare single-word attributors are `karel` (24), `triage` (10),
+    `code-thread` and `claude`, so "a single bare word" would read three agents'
+    notes as a human decision. The name is doing the work.
+    """
+    if not attributor.strip():
+        return None
+    return re.compile(_ATTRIBUTED_ANSWER_PREFIX + re.escape(attributor.strip()) + r"\b",
+                      re.IGNORECASE | re.MULTILINE)
+
+
+def has_maintainer_answer(card_text: str, attributor: str) -> bool:
+    """Whether `## Thread` already carries a dated answer signed by `attributor`.
+
+    Scoped to `## Thread` only, never the whole card: the `### Decision N — DECIDED
+    (…)` headers a picker uses live in `## Question`, and those are the card
+    *asking*, not the maintainer having answered in the recorded shape.
+
+    Two readers use it, for the same fact at different distances. The digest flags an
+    answered-but-never-moved card in tomorrow's report (the 2026-07-24
+    `needs-decision-card-not-moved-after-answer` correction). The panel's decide page
+    says it on the page itself, so an answer that already landed is visible while you
+    are looking at the card rather than a day later. It lives here, beside `compose`,
+    because the writer of a shape should own recognising it — the digest had the only
+    copy until 2026-08-23 and the panel could not reach it without importing the
+    reporting layer.
+    """
+    pattern = answer_pattern(attributor)
+    if pattern is None:
+        return False
+    return bool(pattern.search(board.section(card_text, "Thread")))
+
+
+def promote_to_tasks(root: Path, card_id: str, *, today: dt.date | None = None) -> str:
+    """Send a parked card to `tasks/`, settling its questions if that is its route.
+
+    The `state:` flip only — the caller runs `reconcile --apply` to move the file,
+    same split as `close_parked`, because reconcile is the one thing on the board that
+    moves a card.
+
+    **Three ways in, and the middle one is the point of `after_answer:`.**
+
+    * `## Open questions` already reads `none`: nothing to settle, flip and go. This
+      is every card parked by a worker on a report rather than a question.
+    * `after_answer: tasks` with the answer on record: the card declared that an
+      answer makes it dispatchable, and the answer is there — so the promotion settles
+      `## Open questions` (`board.settle_open_questions`, which keeps the old text as
+      history) and flips. Without this the card is stuck saying "dispatch me" at a
+      button that refuses, and clearing the section is a manual step nothing owns.
+    * anything else: refused, with the reason naming the route the card declared.
+
+    **A route is not a lock.** `after_answer: triage` with the questions already
+    settled is *allowed* through — the field records what the parker expected, and the
+    maintainer looking at the answer may reasonably conclude the card is dispatchable
+    after all. What the field must never do is refuse a move a person deliberately
+    chose while looking at more information than the parker had.
+    """
+    card = board.find(root, card_id)
+    if card is None:
+        raise DecideError(f"no card `{card_id}` on the board")
+
+    text = card.text
+    if not board.open_questions_settled(text):
+        if card.after_answer != board.AFTER_ANSWER_TASKS:
+            route = (f"it declares `after_answer: {card.after_answer}`, so the next step "
+                     f"is re-triage — which rescopes the card around your answer and "
+                     f"clears that section"
+                     if card.after_answer == board.AFTER_ANSWER_TRIAGE else
+                     "it does not declare an `after_answer:` route, so nothing here can "
+                     "tell whether the answer scopes the card or settles a point inside "
+                     "it — re-triage it, or declare the route on the card")
+            raise DecideError(
+                f"`{card_id}`'s `## Open questions` does not read `none`, and "
+                f"`card_schema` refuses a card in tasks/ with a live question. {route}")
+        if not has_maintainer_answer(text, attributor(root)):
+            raise DecideError(
+                f"`{card_id}` says `after_answer: tasks`, so answering it is what makes "
+                f"it dispatchable — but no answer of yours is on record in `## Thread` "
+                f"yet. Record one and this will settle `## Open questions` for you")
+        text = board.settle_open_questions(
+            text, on=(today or dt.date.today()).isoformat())
+
+    text = re.sub(r"^state:.*$", "state: tasks", text, count=1, flags=re.MULTILINE)
+    textio.write_text_lf(card.path, text)
+    return f"{card_id} → tasks/"

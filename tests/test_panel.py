@@ -2483,6 +2483,7 @@ worker: code-thread
 recipe: none
 unattended: true
 verify: play
+after_answer: {route}
 created: 2026-08-18
 ---
 
@@ -2506,7 +2507,7 @@ Something is undecided.
 
 
 def _parked(root: Path, card_id: str, *, attributor: str = "karel",
-            open_questions: str = "none") -> Path:
+            open_questions: str = "none", route: str = "tasks") -> Path:
     if attributor:
         manifest_path = root / ".ai" / "manifest.toml"
         manifest_path.write_text(
@@ -2515,7 +2516,7 @@ def _parked(root: Path, card_id: str, *, attributor: str = "karel",
             encoding="utf-8", newline="")
     path = root / "Board" / "needs-decision" / f"{card_id}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_PARKED.format(id=card_id, open=open_questions),
+    path.write_text(_PARKED.format(id=card_id, open=open_questions, route=route),
                     encoding="utf-8", newline="")
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", f"parked {card_id}")
@@ -2575,13 +2576,123 @@ def test_answering_without_a_declared_attributor_is_refused(server):
 
 def test_sending_a_card_with_open_questions_to_tasks_is_refused(server):
     """`card_schema` refuses a card in `tasks/` with open questions, so a button that
-    moved it anyway would simply turn the board red on the next gate run."""
+    moved it anyway would simply turn the board red on the next gate run. A card routed
+    back to triage can never take this path: it has no `## Approach` yet."""
     base, root = server
-    _parked(root, "forky", open_questions="- what about old saves?")
+    _parked(root, "forky", open_questions="- what about old saves?", route="triage")
 
     status, data = _post(base, "api/tasks", {"card_id": "forky"})
     assert status >= 400
-    assert "open questions" in data.get("message", "")
+    assert "open questions" in data.get("message", "").lower()
+    assert "re-triage" in data.get("message", "").lower()
+    assert (root / "Board" / "needs-decision" / "forky.md").is_file()
+
+
+def test_none_with_the_reason_attached_can_still_be_sent_to_tasks(server):
+    """The bug this pair of tests brackets. `card_schema` accepts any `## Open
+    questions` body beginning with `none`, and the corpus writes the reason after it —
+    but the button demanded the body be *exactly* `none`, so a card whose questions
+    were resolved and written up could not be moved and the refusal claimed its open
+    questions were "not none" (`grid-distance-ranged-and-ai-sites`, 2026-08-23).
+    """
+    base, root = server
+    _parked(root, "forky",
+            open_questions="none — both questions were resolved on 2026-08-14, and "
+                           "both resolved to \"no behaviour change\".")
+
+    status, data = _post(base, "api/tasks", {"card_id": "forky"})
+    assert status == 200, data
+    assert (root / "Board" / "tasks" / "forky.md").is_file()
+
+
+def test_the_page_says_a_settled_card_is_ready_to_be_worked_on(server):
+    """`needs-decision/` holds cards that are asking and cards a worker parked to
+    report something, and they rendered identically — so the page never said whether
+    an answer was wanted (Karel, 2026-08-23: *"The card should hint if it is expected
+    to be triaged or worked on"*)."""
+    base, root = server
+    _parked(root, "forky", open_questions="none — resolved on 2026-08-14.")
+
+    status, text = _get(base, "decide/forky")
+    assert status == 200
+    assert "decide-state ok" in text
+    assert "reporting, not asking" in text
+    # The enabled button's own tooltip — the disabled one carries a different string.
+    assert "Sets state: tasks and reconciles." in text
+
+
+def test_the_page_says_an_answered_card_is_ready_to_move(server):
+    base, root = server
+    _parked(root, "forky", open_questions="none")
+    _post(base, "api/answer", {"card_id": "forky", "picks": ["**A** — do it now"],
+                               "note": ""})
+
+    status, text = _get(base, "decide/forky")
+    assert status == 200
+    assert "answered" in text and "ready to move" in text
+
+
+def test_a_triage_routed_card_leads_with_re_triage_not_send_to_tasks(server):
+    """Karel, 2026-08-23: *"When needing an info for triage to continue. Or when the
+    triage is done and it needs just some small clarification … Based on that it should
+    return to triage or to tasks."* The card declares which; the page leads with it."""
+    base, root = server
+    _parked(root, "forky", open_questions="- which of the two engines?", route="triage")
+
+    status, text = _get(base, "decide/forky")
+    assert status == 200
+    assert "decide-state warn" in text
+    assert "not scoped yet" in text
+    assert "which of the two engines?" in text        # the blocking text, quoted back
+    # Re-triage is the primary control, and the tasks button says why it is unavailable.
+    assert 'class="act primary" onclick="post(\'/api/triage\'' in text or \
+           "Re-triage this" in text
+    assert "after_answer: triage" in text
+
+
+def test_a_tasks_routed_card_says_answering_is_all_that_is_needed(server):
+    """The second scenario, which the old page could not express at all: a scoped card
+    with one live question is headed for `tasks/`, not back through triage."""
+    base, root = server
+    _parked(root, "forky", open_questions="- 3-6 or 4-7 damage?", route="tasks")
+
+    status, text = _get(base, "decide/forky")
+    assert status == 200
+    assert "decide-state warn" in text
+    assert "scoped and waiting on exactly this question" in text
+    assert "3-6 or 4-7 damage?" in text
+
+
+def test_answering_a_tasks_routed_card_unlocks_the_move_and_settles_the_section(server):
+    """End to end through the endpoints: the answer makes the card dispatchable, and
+    the promotion settles `## Open questions` rather than leaving a manual step nobody
+    owns. The question survives as history."""
+    base, root = server
+    _parked(root, "forky", open_questions="- 3-6 or 4-7 damage?", route="tasks")
+    _post(base, "api/answer", {"card_id": "forky", "picks": ["**A** — do it now"],
+                               "note": ""})
+
+    status, text = _get(base, "decide/forky")
+    assert status == 200
+    assert "ready to dispatch" in text
+
+    status, data = _post(base, "api/tasks", {"card_id": "forky"})
+    assert status == 200, data
+    moved = (root / "Board" / "tasks" / "forky.md")
+    assert moved.is_file()
+    body = moved.read_text(encoding="utf-8")
+    assert "none — answered on" in body
+    assert "> - 3-6 or 4-7 damage?" in body, "the question is kept, not deleted"
+
+
+def test_a_tasks_routed_card_is_not_moved_before_it_is_answered(server):
+    """Otherwise the settling would erase a question nobody had answered."""
+    base, root = server
+    _parked(root, "forky", open_questions="- 3-6 or 4-7 damage?", route="tasks")
+
+    status, data = _post(base, "api/tasks", {"card_id": "forky"})
+    assert status >= 400
+    assert "no answer of yours is on record" in data.get("message", "")
     assert (root / "Board" / "needs-decision" / "forky.md").is_file()
 
 

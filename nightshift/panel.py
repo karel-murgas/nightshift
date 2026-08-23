@@ -3415,6 +3415,132 @@ def render_job(root: Path, ident: str) -> str:
         acts=_act("Reload", href=f"/log/{job.ident}"))
 
 
+@dataclass(frozen=True)
+class DecideState:
+    """What one parked card is waiting for, and which button says so.
+
+    `next_act` is `"tasks"`, `"triage"` or `"answer"` — the one control this page
+    should lead with. `send_enabled` is the `tasks/` guard, kept identical to
+    `decide.promote_to_tasks` so the button and the endpoint cannot disagree.
+    """
+
+    send_enabled: bool
+    next_act: str
+    banner: str
+
+
+def _decide_state(card: board.Card, who: str) -> DecideState:
+    """What this parked card is waiting for, said on the page rather than inferred.
+
+    **`needs-decision/` holds two different things that looked identical here.** A
+    card parked because triage could not scope it without an answer, and a card parked
+    mid-implementation because a scoped card hit one ambiguity — Karel, 2026-08-23:
+    *"When needing an info for triage to continue. Or when the triage is done and it
+    needs just some small clarification / it run into decision during implementation.
+    Based on that it should return to triage or to tasks."* They resume by opposite
+    routes and rendered the same picker with the same four buttons, so the page never
+    said which one you were looking at.
+
+    **The route is read, not guessed** — `after_answer:` on the card, written by
+    whoever parked it (`board.AFTER_ANSWER`). This page did briefly guess it from
+    whether `## Open questions` read `none`, which conflates "nothing to answer" with
+    "answer it and dispatch" and cannot express the second scenario at all: a scoped
+    card with one live question *is* headed for `tasks/`, and the inference always
+    called that a re-triage. A card written before the field existed has no route, and
+    that case falls back to the old inference while saying that is what it is doing.
+    """
+    settled = decide.open_questions_settled(card.text)
+    answered = decide.has_maintainer_answer(card.text, who)
+    route = card.after_answer
+
+    def banner(kind: str, chip: str, *paras: str) -> str:
+        return (f'<div class="decide-state {kind}">{_chip(chip, kind)}'
+                + "".join(f"<p>{p}</p>" for p in paras) + "</div>")
+
+    def blocking() -> str:
+        """The first line of what is still open, quoted back."""
+        first = next((line.strip() for line in
+                      board.section(card.text, "Open questions").splitlines()
+                      if line.strip()), "")
+        return _md_inline(_e(first[:160] + ("…" if len(first) > 160 else "")))
+
+    if route == board.AFTER_ANSWER_TASKS and not settled:
+        # The scenario the field was added for: scoped card, one live question, and the
+        # answer is the whole of what it is waiting for.
+        if answered:
+            return DecideState(True, "tasks", banner(
+                "ok", "answered · ready to dispatch",
+                "<b>This card is scoped, and you have answered it.</b> It declares "
+                "<code>after_answer: tasks</code>, so the answer was the only thing "
+                "between it and a worker: <b>Send to tasks</b> is the next click.",
+                "That click also settles <code>## Open questions</code> &mdash; it has "
+                "to, because <code>card_schema</code> refuses a live question in "
+                "<code>tasks/</code> &mdash; rewriting it to <code>none</code> and "
+                "keeping what it said underneath as history."))
+        return DecideState(False, "answer", banner(
+            "warn", "waiting on your answer",
+            "<b>This card is scoped and waiting on exactly this question.</b> It "
+            "declares <code>after_answer: tasks</code>, so answering it is all that is "
+            f"needed: <span class=\"dim\">{blocking()}</span>",
+            "Record the answer and <b>Send to tasks</b> becomes available &mdash; it "
+            "will settle <code>## Open questions</code> for you on the way through, "
+            "keeping the question as history."))
+
+    if route == board.AFTER_ANSWER_TRIAGE and not settled:
+        return DecideState(False, "triage" if answered else "answer", banner(
+            "warn", "answered · returns to triage" if answered
+            else "waiting on your answer",
+            "<b>This card is not scoped yet, and your answer is what scoping needs.</b> "
+            "It declares <code>after_answer: triage</code>: "
+            f"<span class=\"dim\">{blocking()}</span>",
+            ("<b>Re-triage this</b> is the next click &mdash; it rewrites the card "
+             "around your answer and clears <code>## Open questions</code>. "
+             if answered else
+             "Record the answer, then <b>Re-triage this</b> &mdash; which rewrites the "
+             "card around it and clears <code>## Open questions</code>. ")
+            + "<b>Send to tasks</b> stays disabled: there is no "
+              "<code>## Approach</code> for a worker to follow yet, which is the whole "
+              "reason the card was parked here."))
+
+    if not settled:
+        # No declared route and a live question — a card written before the field
+        # existed. Say what is missing rather than picking a route on its behalf.
+        return DecideState(False, "answer", banner(
+            "warn", "waiting on your answer",
+            "<b>This card has a live question and does not say how it resumes.</b> It "
+            "carries no <code>after_answer:</code> route, so nothing here can tell "
+            "whether your answer scopes the card or settles one point inside an "
+            f"already-scoped one: <span class=\"dim\">{blocking()}</span>",
+            "Recording an answer puts it in <code>## Thread</code> and does <em>not</em> "
+            "rewrite <code>## Open questions</code>, so <b>Send to tasks</b> stays "
+            "disabled. <b>Re-triage this</b> is the safe next click &mdash; it rescopes "
+            "the card against your answer and clears that section."))
+
+    if answered:
+        return DecideState(True, route or "tasks", banner(
+            "ok", "answered · ready to move",
+            "<b>Nothing here is waiting on you.</b> Your answer is on record below and "
+            "<code>## Open questions</code> reads <code>none</code>, so this card can "
+            "move as it stands."
+            + (" It declares <code>after_answer: triage</code>, so <b>Re-triage this</b> "
+               "is what its parker expected next &mdash; though <b>Send to tasks</b> is "
+               "available if the answer left the card dispatchable after all."
+               if route == board.AFTER_ANSWER_TRIAGE else
+               " <b>Send to tasks</b> is the next click."),
+            "<b>Close</b> instead if the answer ended the card."))
+
+    return DecideState(True, route or "tasks", banner(
+        "ok", "no open question",
+        "<b>This card is reporting, not asking.</b> <code>## Open questions</code> "
+        "reads <code>none</code>, so it is parked on what a worker ran into rather "
+        "than on a decision of yours &mdash; read the report below, and if it is dealt "
+        "with, <b>Send to tasks</b> re-dispatches the card as written."
+        + (" (It declares <code>after_answer: triage</code>, so its parker expected "
+           "a rescope first.)" if route == board.AFTER_ANSWER_TRIAGE else ""),
+        "Answer below only to put something on the record for the next worker; "
+        "<b>Re-triage this</b> if the report means the card itself needs rescoping."))
+
+
 def render_decide(root: Path, card_id: str) -> str:
     """The answering form for one parked card.
 
@@ -3438,7 +3564,12 @@ def render_decide(root: Path, card_id: str) -> str:
     subquestions = decide.parse(card.text)
     who = decide.attributor(root)
 
-    blocks = []
+    # First on the page, above the question itself: which of the two kinds of parked
+    # card this is, and what the next click is. See `_decide_state`.
+    state = _decide_state(card, who)
+    settled = decide.open_questions_settled(card.text)
+    blocks = [state.banner]
+
     question = board.section(card.text, "Question")
     if question:
         blocks.append(f'<div class="doc">{markdown(question)}</div>')
@@ -3480,16 +3611,28 @@ def render_decide(root: Path, card_id: str) -> str:
                   'as a quote, under your name. Optional when you have ticked '
                   'something."></textarea></div>')
 
-    settled = decide.open_questions_settled(card.text)
     # Deliberately separate buttons rather than one that decides for you. An answer
     # is not a ticket to `tasks/` — see `decide.write_answer` on park-over-promote —
     # so recording one and advancing the card are different clicks for anything that
     # opens more work. Closing as not-applicable/already-satisfied is the one
     # exception: see `decide.close_parked` on why that answer gets its own button
     # that both records and moves.
+    #
+    # Which of them is *primary* is the card's own `after_answer:` route, so the page
+    # leads with the step the parker said comes next instead of always leading with
+    # "Record the answer" — including on a card where recording one is already done.
+    send_title = ("Sets state: tasks and reconciles."
+                  if state.send_enabled and settled else
+                  "Settles ## Open questions to `none` — keeping the question as "
+                  "history — then sets state: tasks and reconciles."
+                  if state.send_enabled else
+                  "Its ## Open questions does not read `none`, and card_schema refuses "
+                  "a card in tasks/ with a live question. This card declares "
+                  f"after_answer: {card.after_answer or '(none)'}.")
     acts = (
         _act("Record the answer",
-             onclick=f"answerCard('{_attr(card.id)}')", primary=True,
+             onclick=f"answerCard('{_attr(card.id)}')",
+             primary=state.next_act == "answer",
              extra='title="Writes what you ticked into the card\'s ## Thread, dated and '
                    'signed. The card does not move."')
         + _act("Close — no further work needed", onclick=f"closeCard('{_attr(card.id)}')",
@@ -3498,15 +3641,13 @@ def render_decide(root: Path, card_id: str) -> str:
                      'satisfied\' that ends the card rather than opening more work."')
         + _act("Re-triage this",
                onclick=f"post('/api/triage',{{card:'{_attr(card.id)}'}})",
-               extra='title="Opens triage on the card, for when the answer changed its '
-                     'shape enough to need re-scoping."')
+               primary=state.next_act == "triage",
+               extra='title="Opens triage on the card, for when the answer scopes it or '
+                     'changed its shape enough to need re-scoping."')
         + _act("Send to tasks", onclick=f"sendToTasks('{_attr(card.id)}')",
-               disabled=not settled,
-               extra='title="' + ("Sets state: tasks and reconciles."
-                                  if settled else
-                                  "Its ## Open questions is not `none` yet, and "
-                                  "card_schema refuses a card in tasks/ with open "
-                                  "questions — answer them on the card first.") + '"')
+               disabled=not state.send_enabled,
+               primary=state.next_act == "tasks" and state.send_enabled,
+               extra=f'title="{send_title}"')
         + _work_act(card=card.id, tier=card.tier, worker=card.worker, primary=False)
     )
     signed = (f"Signed <code>{_e(who)}</code>, today." if who else
@@ -3884,22 +4025,18 @@ class Handler(BaseHTTPRequestHandler):
             return f"{message} · {_verb(moved)}"
 
         if path == "api/tasks":
-            # The deliberate second click after an answer. Guarded on the same
-            # condition `card_schema` enforces, so the button cannot turn the board red:
-            # a card whose `## Open questions` is not `none` may not sit in `tasks/`.
+            # The deliberate second click after an answer. The policy — including when
+            # an answered `after_answer: tasks` card may settle its own questions on the
+            # way through — is `decide.promote_to_tasks`; this endpoint is the flip plus
+            # the reconcile, and the guard lives with the rest of the decide flow so the
+            # button cannot turn the board red.
             card_id = str(body.get("card_id", ""))
-            card = board.find(root, card_id)
-            if card is None:
-                raise PanelError(f"no card `{card_id}`")
-            if not decide.open_questions_settled(card.text):
-                raise PanelError(
-                    f"`{card_id}` still has open questions — `card_schema` refuses a "
-                    f"card in tasks/ with any, so answer them on the card first")
-            text = re.sub(r"^state:.*$", "state: tasks", card.text, count=1,
-                          flags=re.MULTILINE)
-            textio.write_text_lf(card.path, text)
+            try:
+                message = decide.promote_to_tasks(root, card_id)
+            except decide.DecideError as exc:
+                raise PanelError(str(exc)) from exc
             moved = run_command("reconcile", ["--apply"], root)
-            return f"{card_id} → tasks/ · {_verb(moved)}"
+            return f"{message} · {_verb(moved)}"
 
         if path == "api/reorder":
             return _verb(run_command("boardcmd", ["reorder", str(body.get("card_id", "")),

@@ -166,6 +166,10 @@ as settled, if the answer contradicts them.
 card is worker-ready or clearly still blocked on a named decision — never left in the shape \
 that prompted this re-triage.
 
+If it stays parked, its `after_answer:` must describe the *new* question, not the old one: \
+`triage` if the fresh question is again an input to scoping, `tasks` if the card is now \
+scoped and only that one point is open. `card_schema` requires the field on a parked card.
+
 Do not start building what the card describes. The deliverable is the card.
 """
 

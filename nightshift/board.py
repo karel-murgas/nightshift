@@ -95,6 +95,31 @@ LANES: tuple[str, ...] = (
 #: happens only after `_resolve_conflict` has tried and could not.
 BLOCKED_LANE = "blocked"
 
+#: Where a parked card goes once its question has an answer — `after_answer:`.
+#:
+#: **There are two ways a card reaches `needs-decision/`, and they resume
+#: differently** (Karel, 2026-08-23): *"When needing an info for triage to continue.
+#: Or when the triage is done and it needs just some small clarification / it run
+#: into decision during implementation. Based on that it should return to triage or
+#: to tasks."*
+#:
+#:   `triage`  the card is not scoped yet — the answer is an *input to scoping*, and
+#:             `## Approach` / `## Acceptance` cannot be written without it. The next
+#:             step is re-triage, which rewrites the card against the answer.
+#:
+#:   `tasks`   the card is already scoped and the answer settles one point inside it.
+#:             The next step is dispatch: the work is described, and a worker can now
+#:             finish it.
+#:
+#: Written by whoever parks the card — triage when it parks for want of an input, the
+#: runner when a worker or reviewer parks a card that was already dispatchable. It is
+#: the parker's *declaration of intent*, deliberately not a lock: an answer can
+#: reshape a `tasks` card enough to need re-triage after all, so the panel makes the
+#: declared route the primary button and leaves the other one available.
+AFTER_ANSWER_TRIAGE = "triage"
+AFTER_ANSWER_TASKS = "tasks"
+AFTER_ANSWER: tuple[str, ...] = (AFTER_ANSWER_TRIAGE, AFTER_ANSWER_TASKS)
+
 # The private lane's name, owned here because the board's vocabulary is owned here —
 # `reconcile` and `card_schema` each used to carry their own copy of the string.
 #
@@ -381,6 +406,16 @@ class Card:
         return self.fields.get("requires", "")
 
     @property
+    def after_answer(self) -> str:
+        """Where this card goes once answered — `AFTER_ANSWER`, or `""` if unstated.
+
+        Empty on every card written before 2026-08-23 and on any parked by something
+        that has not been taught to declare it, so every reader must have a sensible
+        answer for `""` rather than assuming one of the two routes.
+        """
+        return self.fields.get("after_answer", "")
+
+    @property
     def attempts(self) -> int:
         try:
             return int(self.fields.get("attempts", "0"))
@@ -409,6 +444,70 @@ def section(text: str, heading: str) -> str:
         text, re.MULTILINE | re.DOTALL | re.IGNORECASE,
     )
     return found.group(1).strip() if found else ""
+
+
+#: `none` at the head of a body, under the markers it may be wearing: a list
+#: bullet, a blockquote, or emphasis — `- none`, `**none**` and `> none` all say the
+#: same thing as `none`, and the corpus writes all of them. The trailing `\b` is not
+#: decoration: without it `nonetheless, the spawn band still needs a number` reads as
+#: an answer of "none".
+_SETTLED = re.compile(r"^[-*>\s]*(?:\*\*|__|\*|_)?\s*none\b", re.IGNORECASE)
+
+
+def open_questions_settled(card_text: str) -> bool:
+    """Whether `## Open questions` says `none` — the one rule, for everyone.
+
+    A card with a live question belongs in `needs-decision/`, not `tasks/`, and two
+    places decide that: `card_schema` refuses the misfiled card, and the panel's
+    `Send to tasks` button is disabled so it cannot create one. **They used to
+    decide it separately and disagreed** — the gate accepted any body *beginning*
+    with `none`, the button demanded the body be *exactly* `none`. So the corpus's
+    normal shape, `none — both questions were resolved on 2026-08-14`, passed every
+    gate while the button that acts on it stayed greyed out, reporting "open
+    questions are not none" about a section that reads `none`
+    (`grid-distance-ranged-and-ai-sites`, 2026-08-23). A predicate two modules
+    implement twice is a predicate that will drift again, so it lives here, in the
+    module that already owns reading a card's sections, and both call it.
+
+    The trailing prose is deliberately free: `none — ready to execute` is what
+    `.ai/recipes/add-a-perk.md` teaches, and the explanation of *why* nothing is
+    open is worth having on the card. What matters is that the body opens by
+    saying there is nothing left to answer.
+    """
+    return bool(_SETTLED.match(section(card_text, "Open questions").strip()))
+
+
+def settle_open_questions(card_text: str, *, on: str) -> str:
+    """Mark `## Open questions` answered, keeping what it said as history.
+
+    **The step that had no owner.** Recording an answer writes `## Thread` and
+    deliberately leaves this section alone (`decide.write_answer`, park-over-promote),
+    but `card_schema` refuses a card in `tasks/` whose questions are live — so an
+    `after_answer: tasks` card was answered, still listed its question, and could not
+    move. The card said "dispatch me next" while the button refused, which is the same
+    dead end that `open_questions_settled` used to produce for a different reason.
+    Nothing edited the section, because nothing had been told to.
+
+    So the promotion does it, as part of the move the maintainer asked for. **Nothing
+    is deleted**: the body becomes `none — answered on <date>` with the previous text
+    kept underneath as a quote. That is worth the two extra lines — the section is
+    sometimes the only place a question was written in full, and a promotion that
+    silently dropped it would lose the very thing the answer answers.
+    `open_questions_settled` matches only the head of the body, which is what makes
+    "settled, with its history under it" expressible at all.
+
+    A body that is already settled is returned untouched, so this is idempotent and a
+    second promotion cannot stack two headers.
+    """
+    if open_questions_settled(card_text):
+        return card_text
+    was = section(card_text, "Open questions").strip()
+    body = f"none — answered on {on}; the answer is in `## Thread`."
+    if was:
+        quoted = "\n".join(f"> {line}" if line.strip() else ">"
+                           for line in was.splitlines())
+        body += f"\n\n*What was open, kept for the record:*\n\n{quoted}"
+    return append_section(card_text, "Open questions", body)
 
 
 def dispatch_order(card: Card) -> tuple[int, str, str]:

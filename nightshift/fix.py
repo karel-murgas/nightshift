@@ -318,6 +318,11 @@ def file_cards(root: Path, items: list[str], *, round_no: int) -> list[Path]:
             "worker: none",
             "recipe: none",
             "unattended: false",
+            # Nobody has scoped this — `## Approach` below is deliberately empty — so
+            # the answer is an input to scoping, not a point inside it. That is
+            # `after_answer: triage` (`board.AFTER_ANSWER`), and it matches the
+            # `## Steps` this card already carries.
+            f"after_answer: {board.AFTER_ANSWER_TRIAGE}",
             f"created: {today}",
             "---",
             "",

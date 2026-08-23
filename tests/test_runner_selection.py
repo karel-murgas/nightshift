@@ -556,6 +556,18 @@ def test_a_parked_card_goes_to_needs_decision_with_its_question(tmp_path):
     assert "## Question" in card.text
 
 
+def test_a_card_parked_mid_dispatch_declares_that_it_resumes_in_tasks(tmp_path):
+    """The second of the two ways into `needs-decision/` (`board.AFTER_ANSWER`). This
+    card was dispatchable when the night took it, so its `## Approach` still describes
+    the work and the answer settles one point inside it — it resumes at `tasks/`, not
+    back through triage. Without the field the panel had to guess between the two, and
+    the guess was wrong for exactly this case."""
+    root = _repo(tmp_path)
+    _card(root, "tasks", "unclear", attempts="1", started="2026-07-23T03:00:00")
+    runner.settle(root, "unclear", runner.Dispatch("parked", "Damage in HP or heat?"))
+    assert board.find(root, "unclear").after_answer == board.AFTER_ANSWER_TASKS
+
+
 def test_settle_does_not_clobber_a_question_the_worker_already_wrote(tmp_path):
     """The worker prompt (§13) tells it to write `## Question` onto the card
     itself. `Dispatch.detail` for a parked outcome is only the verdict's

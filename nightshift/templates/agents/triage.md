@@ -35,7 +35,7 @@ workers and by gates. Keep {{maintainer}}'s Czech verbatim in `## Thread` if you
 | Outcome | Where it lands | When |
 |---|---|---|
 | an actionable card | `tasks/` | you can state acceptance criteria a worker could satisfy without asking anything |
-| a **polished plan with the open calls as pickers** | `needs-decision/` | the idea is real but needs one or more of {{maintainer}}'s decisions first. **This is a success** (§13), and it is most of your output |
+| a **polished plan with the open calls as pickers** | `needs-decision/` | the idea is real but needs one or more of {{maintainer}}'s decisions first. **This is a success** (§13), and it is most of your output. Declares `after_answer:` — see below |
 | a refined note | stays in `inbox/` | rare — a one-word fragment with nothing yet to ask, or a note {{maintainer}} flagged to sit on themselves |
 
 ### The rule that governs all three: never be worse than a chat
@@ -51,7 +51,33 @@ So when a note needs decisions, you do the legwork and **park a plan, not a shru
 - state the approach you would take,
 - lay out each open call as a picker (below) **with a recommended default**,
 - say in one line what happens after they answer (e.g. "splits into an `art` card per
-  illustration + one `code-thread` layout card").
+  illustration + one `code-thread` layout card"),
+- and **declare `after_answer:` in the frontmatter** — the machine-readable half of that
+  same line. See below; the gate requires it on every parked card.
+
+### `after_answer:` — where the card goes once it is answered
+
+A parked card resumes in one of exactly two ways, and only its author knows which:
+
+| value | means | next click on the decide page |
+|---|---|---|
+| `after_answer: triage` | the answer is an **input to scoping**. You could not write `## Approach` / `## Acceptance` without it, so the card must be rewritten around the answer. | `Re-triage this` |
+| `after_answer: tasks` | the card is **already scoped** and the answer settles one point inside it. A worker can finish it as written the moment the answer exists. | `Send to tasks` |
+
+{{maintainer}}, 2026-08-23: *"When needing an info for triage to continue. Or when the
+triage is done and it needs just some small clarification / it run into decision during
+implementation. Based on that it should return to triage or to tasks."*
+
+**Do not reach for `triage` as the safe default.** A card you scoped fully and parked on one
+narrow call is `tasks` — writing `triage` there sends a finished plan back through scoping it
+does not need, and the panel will make re-triage the primary button. Conversely, do not write
+`tasks` on a card whose `## Approach` you could not write: a worker would be handed a plan
+with a hole in it. The test is mechanical — **could a worker execute this card the minute the
+answer arrives, without anything being rewritten?** If yes, `tasks`; if no, `triage`.
+
+`tasks` is also a promise about the rest of the card: `## Approach` and `## Acceptance` must
+already be complete, because nothing will revisit them. `## Open questions` still carries the
+live question, and the promotion settles it for {{maintainer}} when they send the card on.
 
 A design brief is not unaskable — it is *several* decisions, and you batch them (below).
 The passive `inbox/` park is the rare exception, not the home for anything hard.
@@ -260,7 +286,9 @@ card. If the reason is "someone should look at it", that is not a reason — it 
 Body: `## Intent` always — including what the card is explicitly *not* for, which is the
 half that stops scope creep. From `tasks/` onward also `## Acceptance` (split
 machine-checkable from judgment) and `## Open questions`, which must read `none` in
-`tasks/`.
+`tasks/` — the body may say *why* nothing is open after that word (`none — resolved on
+2026-08-14`), and the gate reads only the first word. A `needs-decision/` card also carries
+`after_answer:` (above) and a `## Question`.
 
 ### `## Approach` — the one-paragraph principle a human reads first
 
@@ -356,7 +384,8 @@ opposite were true.
 
 `card_schema` checks required fields, `id`/filename agreement, `state`/lane agreement,
 tier validity, unknown fields, that `worker:` and `recipe:` resolve to real files, that
-`tasks/` has no live open question, and that a parked card has a `## Question`.
+`tasks/` has no live open question, and that a parked card has a `## Question` and an
+`after_answer:`.
 `nightshift/reconcile.py` handles the file move.
 
 **This is a rule, not advice, and it beats every other section in this charter when they

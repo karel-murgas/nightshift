@@ -127,12 +127,21 @@ bookkeeping can quietly corrupt the board, so:
    default. Add the key to switch it on.
 3. **Re-triage the card — do not mechanically promote it.** An answer is not automatically
    a ticket to `tasks/`. Getting the answer can *open* a question that could not be asked
-   until now, or reshape the card. So after recording it, judge the card as triage would:
+   until now, or reshape the card. So after recording it, judge the card as triage would.
+
+   **Start from the card's own `after_answer:`** — the parker's declaration of how it
+   resumes, `triage` (the answer scopes the card, so it must be rewritten around it) or
+   `tasks` (the card is scoped and the answer settles one point inside it). It is a
+   starting point, not a verdict: you are looking at the answer, which the parker was not,
+   so a `tasks` card whose answer reshaped the work still goes back through triage. What it
+   removes is the guessing when nothing reshaped anything.
 
    - **Fully actionable now** — every acceptance criterion is statable and no question
-     remains: restate `## Acceptance`/`## Steps` for the chosen branch, set `## Open
-     questions` to `none`, re-evaluate `tier:` if the answer changed it, `state: tasks`,
-     move (below).
+     remains, which is the normal outcome for `after_answer: tasks`: restate `##
+     Acceptance`/`## Steps` for the chosen branch, set `## Open questions` to `none`
+     (keeping the question as a quote under it, so nothing is lost), re-evaluate `tier:` if
+     the answer changed it, `state: tasks`, move (below). The panel's `Send to tasks` does
+     exactly this for you on an answered `after_answer: tasks` card.
    - **The answer opened a new question, or settled only part of a batched one:** keep it in
      `needs-decision/`, add the new question (batched, picker-shaped), and tell {{maintainer}} what is
      still open. Do **not** advance it.

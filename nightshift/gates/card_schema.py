@@ -87,7 +87,8 @@ _AUTHOR_FIELDS: tuple[str, ...] = (
     "unattended",
     "created",
 )
-_OPTIONAL_FIELDS = frozenset({"requires", "checker", "verify", "kind", "surface", "route"})
+_OPTIONAL_FIELDS = frozenset({"requires", "checker", "verify", "kind", "surface", "route",
+                              "after_answer"})
 
 # Where in the running application this change shows up — free text, deliberately not
 # a vocabulary this package invents, because "hub" and "combat" are one project's
@@ -266,16 +267,6 @@ def _sections(text: str) -> set[str]:
     return {m.group(1).lower() for m in _SECTION.finditer(text)}
 
 
-def _section_body(text: str, heading: str) -> str:
-    """Text between `## <heading>` and the next `##`, lowercased and stripped."""
-    pattern = re.compile(
-        rf"^##\s+{re.escape(heading)}\s*$(.*?)(?=^##\s|\Z)",
-        re.MULTILINE | re.DOTALL | re.IGNORECASE,
-    )
-    match = pattern.search(text)
-    return match.group(1).strip().lower() if match else ""
-
-
 def _has_section(sections: set[str], *prefixes: str) -> bool:
     return any(s.startswith(p) for s in sections for p in prefixes)
 
@@ -366,6 +357,23 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
         bad("verify", "missing `verify:` — a dispatchable card must declare whether it "
                       "ends on your desk (`play`) or the reviewer's `ok` is the acceptance "
                       "(`review`). When unsure, `play`")
+    if "after_answer" in fields and fields["after_answer"] not in _board.AFTER_ANSWER:
+        bad("after_answer",
+            f"`after_answer: {fields['after_answer']}` — must be one of "
+            f"{sorted(_board.AFTER_ANSWER)}; it says where the card goes once the "
+            f"question is answered, and the panel routes on it")
+    # Required in `needs-decision/` only, on the same reasoning as `verify:` above: it
+    # is the lane where the field means something, and requiring it everywhere would
+    # redden every archived card for a field that did not exist when it was written.
+    # A parked card that does not say how it resumes is the defect this catches — the
+    # panel then has to guess between "re-scope this" and "dispatch this", and guessed
+    # wrong often enough that the two were indistinguishable on the page (§13).
+    if lane == "needs-decision" and "after_answer" not in fields:
+        bad("after_answer",
+            "missing `after_answer:` — a parked card must say where an answer sends it: "
+            "`triage` when the answer is an input to scoping and the card must be "
+            "rewritten around it, `tasks` when the card is already scoped and the answer "
+            "settles one point inside it")
     tags = _tags(fields)
     for tag in tags:
         if not _TAG.match(tag):
@@ -483,8 +491,11 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
     # input. A live open question means it is misfiled, not that the card is bad
     # -- needs-decision/ is a success state (§13).
     if lane == "tasks" and _has_section(sections, "open questions"):
-        body = _section_body(text, "Open questions")
-        if not body.startswith("none"):
+        # `board`'s predicate, not a local re-reading of the same section: the panel
+        # disables `Send to tasks` on exactly this condition, and when the two were
+        # written separately they disagreed about `none — <why>` — see
+        # `board.open_questions_settled`.
+        if not _board.open_questions_settled(text):
             out.append(
                 Violation(
                     rel,

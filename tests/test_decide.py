@@ -32,6 +32,7 @@ worker: code-thread
 recipe: none
 unattended: true
 verify: review
+after_answer: {route}
 created: 2026-08-18
 ---
 
@@ -55,21 +56,23 @@ Something is undecided.
 
 def _repo(tmp_path: Path, question: str, *, card_id: str = "parked",
           attributor: str = "karel", open_questions: str = "none",
-          tail: str = "") -> Path:
+          tail: str = "", route: str = "tasks") -> Path:
     (tmp_path / ".ai").mkdir(parents=True, exist_ok=True)
     (tmp_path / ".ai" / "manifest.toml").write_text(
         '[project]\nname = "probe"\n\n[board]\n'
         f'decision_attributor = "{attributor}"\n', encoding="utf-8")
     lane = tmp_path / "Board" / "needs-decision"
     lane.mkdir(parents=True, exist_ok=True)
-    (lane / f"{card_id}.md").write_text(
-        _CARD.format(id=card_id, question=question, open=open_questions, tail=tail),
-        encoding="utf-8")
+    text = _CARD.format(id=card_id, question=question, open=open_questions, tail=tail,
+                        route=route)
+    if not route:                                  # a card written before the field
+        text = text.replace("after_answer: \n", "")
+    (lane / f"{card_id}.md").write_text(text, encoding="utf-8")
     return tmp_path
 
 
 def _question(text: str) -> str:
-    return _CARD.format(id="x", open="none", tail="", question=text)
+    return _CARD.format(id="x", open="none", tail="", question=text, route="tasks")
 
 
 def _text(root: Path, card_id: str = "parked") -> str:
@@ -264,6 +267,124 @@ def test_a_card_with_a_live_open_question_is_not_promotable(tmp_path):
     root = _repo(tmp_path, "- A\n- B\n",
                  open_questions="- what happens to the old saves?")
     assert not decide.open_questions_settled(_text(root))
+
+
+@pytest.mark.parametrize("body", [
+    "none",
+    "none.",
+    "- none",
+    "* none",
+    "**none**",
+    "none — both questions were resolved on 2026-08-14 (see `## Decisions`), and "
+    "both resolved to \"no behaviour change\".",
+    "None — ready to execute.",
+    "- none, this sequences after [[grid-distance-metric]]",
+])
+def test_none_with_the_reason_attached_is_still_none(tmp_path, body):
+    """`card_schema` has always accepted any body *beginning* with `none`, and the
+    corpus writes it that way — `.ai/recipes/add-a-perk.md` teaches `none — ready to
+    execute`. This predicate demanded the body be *exactly* `none`, so
+    `grid-distance-ranged-and-ai-sites` passed every gate while `Send to tasks` stayed
+    greyed out, reporting "open questions are not none" about a section reading `none`
+    (2026-08-23). One rule now, in `board`, for the gate and the button both.
+    """
+    root = _repo(tmp_path, "- A\n- B\n", open_questions=body)
+    assert decide.open_questions_settled(_text(root))
+
+
+@pytest.mark.parametrize("body", [
+    "- what happens to the old saves?",
+    "**1.** whether the range numbers stay — none of the options is obviously right",
+    "nonetheless, the spawn band still needs a number",   # not the word `none`
+])
+def test_a_body_that_does_not_open_with_none_is_not_settled(tmp_path, body):
+    root = _repo(tmp_path, "- A\n- B\n", open_questions=body)
+    assert not decide.open_questions_settled(_text(root))
+
+
+def test_the_gate_and_the_button_cannot_disagree_about_none():
+    """The two callers of the rule are `card_schema` (which refuses the misfiled card)
+    and the panel (which refuses to create one). They are only safe as a pair while
+    they are the same predicate, so this asserts the delegation itself.
+    """
+    from nightshift import board as board_mod
+    from nightshift.gates import card_schema
+
+    assert decide.open_questions_settled.__module__ == "nightshift.decide"
+    text = "## Open questions\n\nnone — resolved on 2026-08-14.\n"
+    assert board_mod.open_questions_settled(text)
+    assert decide.open_questions_settled(text)
+    assert not hasattr(card_schema, "_section_body"), (
+        "card_schema must read the section through board, not its own copy")
+
+
+# ------------------------------------------- after_answer: the resume route
+#
+# Karel, 2026-08-23: two ways a card reaches needs-decision/ — triage cannot scope it
+# without an answer, or a scoped card hit one ambiguity — and they resume by opposite
+# routes. The field says which; these pin what each route does at the promotion.
+
+def test_a_settled_card_is_promoted_whatever_its_route_says(tmp_path):
+    """`Open questions: none` is the gate `card_schema` actually enforces, so a card
+    that satisfies it moves. The route is the parker's expectation, not a lock."""
+    root = _repo(tmp_path, "- A\n- B\n", open_questions="none", route="triage")
+    decide.promote_to_tasks(root, "parked")
+    assert "state: tasks" in _text(root)
+
+
+def test_an_answered_tasks_card_settles_its_own_questions_on_the_way(tmp_path):
+    """The step that had no owner. `after_answer: tasks` says an answer makes the card
+    dispatchable — but recording one leaves `## Open questions` alone, and `card_schema`
+    refuses a live question in `tasks/`. So the promotion settles it, keeping the
+    question as history rather than deleting it."""
+    root = _repo(tmp_path, "- A\n- B\n", route="tasks",
+                 open_questions="- should the damage be 3-6 or 4-7?")
+    decide.write_answer(root, "parked", ["A"], "", today=dt.date(2026, 8, 23))
+    decide.promote_to_tasks(root, "parked", today=dt.date(2026, 8, 23))
+
+    text = _text(root)
+    assert "state: tasks" in text
+    assert board.open_questions_settled(text)
+    assert "none — answered on 2026-08-23" in text
+    assert "> - should the damage be 3-6 or 4-7?" in text, "the question is kept"
+
+
+def test_a_tasks_card_is_not_promoted_before_it_is_answered(tmp_path):
+    """Otherwise the settling would erase a live question nobody answered."""
+    root = _repo(tmp_path, "- A\n- B\n", route="tasks",
+                 open_questions="- should the damage be 3-6 or 4-7?")
+    with pytest.raises(decide.DecideError, match="no answer of yours is on record"):
+        decide.promote_to_tasks(root, "parked")
+    assert "state: needs-decision" in _text(root)
+
+
+def test_a_triage_card_with_a_live_question_is_refused_with_its_route(tmp_path):
+    """It has no `## Approach` for a worker to follow — that is why it was parked."""
+    root = _repo(tmp_path, "- A\n- B\n", route="triage",
+                 open_questions="- which of the two engines?")
+    decide.write_answer(root, "parked", ["A"], "", today=dt.date(2026, 8, 23))
+    with pytest.raises(decide.DecideError, match="re-triage"):
+        decide.promote_to_tasks(root, "parked")
+    assert "state: needs-decision" in _text(root)
+
+
+def test_a_card_with_no_route_and_a_live_question_says_so(tmp_path):
+    """Written before the field existed: refuse, and say the route is what is missing
+    rather than picking one on the card's behalf."""
+    root = _repo(tmp_path, "- A\n- B\n", route="",
+                 open_questions="- which of the two engines?")
+    with pytest.raises(decide.DecideError, match="does not declare an `after_answer:`"):
+        decide.promote_to_tasks(root, "parked")
+
+
+def test_settling_twice_does_not_stack_two_headers(tmp_path):
+    """`board.settle_open_questions` is idempotent — a card promoted, moved back and
+    promoted again must not grow a second `none — answered on …` line."""
+    once = board.settle_open_questions(
+        "## Open questions\n\n- one thing\n", on="2026-08-23")
+    twice = board.settle_open_questions(once, on="2026-08-24")
+    assert once == twice
+    assert twice.count("none — answered on") == 1
 
 
 # --------------------------------------------------------- closing as done

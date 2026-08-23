@@ -101,32 +101,21 @@ _BOLD = re.compile(r"\*\*(.+?)\*\*")
 _INLINE_CODE = re.compile(r"`([^`]*)`")
 _LIST_ITEM = re.compile(r"^[ \t]*[-*][ \t]+(\S.*)$")
 
-# A dated maintainer answer inside a card's `## Thread`, in the exact attributor
-# shape `manage-board` mandates for recording one: `### <ISO date> · <attributor>`,
-# optionally with a ` — note` tail. The whole point of that convention is that an
-# answer is written into the Thread and *then* the card is re-triaged and moved out
-# of needs-decision/; a parked card that already carries one is a half-done
-# transition — the answer landed but the move never happened (the 2026-07-24
-# `needs-decision-card-not-moved-after-answer` correction).
+# A dated maintainer answer inside a card's `## Thread` — the exact attributor shape
+# `manage-board` mandates for recording one, and the shape `decide.compose` writes.
+# The whole point of that convention is that an answer is written into the Thread and
+# *then* the card is re-triaged and moved out of needs-decision/; a parked card that
+# already carries one is a half-done transition — the answer landed but the move never
+# happened (the 2026-07-24 `needs-decision-card-not-moved-after-answer` correction).
 #
 # **The token is `[board].decision_attributor`, not a literal.** It was the literal
 # `karel` until 2026-08-04, which made this a permanent silent no-op in every repo
 # but the origin's: the advisory ran, matched nothing, and reported a clean board.
 #
-# It cannot be replaced by a shape rule. Counted over the origin project's 62
-# `· <token>` headings: the bare single-word attributors are `karel` (24),
-# `triage` (10), `code-thread` and `claude` — so "a single bare word" reads three
-# agents' own notes as a human decision. The name is doing the work.
-#
-# Matched narrowly on purpose beyond that: the token must be followed by a word
-# boundary, so a discussion-style entry like
-# `### <date> · interactive session (Karel + Claude)` does NOT trip it — that is a
-# conversation, not a recorded decision, and this is advisory, so the guidance is
-# to under-flag rather than over-flag. `·` is U+00B7, the separator the real
-# corpus and the skill both use.
-# Concatenated, never `.format()`ed: the pattern's own `{3,6}` and `{4}` are
-# format placeholders to `str.format` and it raises `KeyError: '3,6'`.
-_ATTRIBUTED_ANSWER_PREFIX = r"^#{3,6}[ \t]+\d{4}-\d{2}-\d{2}[ \t]*·[ \t]*"
+# The pattern itself moved to `decide.answer_pattern` on 2026-08-23, when the panel's
+# decide page needed the same fact and could not import this module to get it. Its
+# docstring carries why the token cannot be replaced by a shape rule and why the match
+# is deliberately narrow; `_answer_pattern` below is a memoising delegate.
 
 
 def _plain(s: str) -> str:
@@ -276,6 +265,18 @@ def _candidates(card: Card) -> list[str]:
             for sub in decide.parse(card.text) for option in sub.options]
 
 
+def _resume_note(card: Card) -> str:
+    """` · answered → tasks` — how this parked card resumes, from `after_answer:`.
+
+    On the line rather than under it, because it changes what the answer *is for*: a
+    `triage` card's answer is an input to scoping, a `tasks` card's answer is the last
+    thing between it and a worker. Empty for a card that does not declare a route —
+    every card written before 2026-08-23 — so the digest never invents one.
+    """
+    route = card.after_answer
+    return f" · answered → `{route}/`" if route in board.AFTER_ANSWER else ""
+
+
 def _decision_lines(card: Card, indent: str = "    ") -> list[str]:
     """The indented markdown lines to list under a parked card.
 
@@ -321,32 +322,21 @@ def _decision_attributor(root: Path) -> str:
 
 @functools.lru_cache(maxsize=8)
 def _answer_pattern(attributor: str) -> re.Pattern[str] | None:
-    """The compiled `### <date> · <attributor>` matcher, or `None` if undeclared.
-
-    `None` disables the advisory rather than falling back to a guess: a project
-    that never adopted the convention has no token to match, and inventing one
-    would report a check that cannot fire (see `[board].decision_attributor`).
-    """
-    if not attributor.strip():
-        return None
-    return re.compile(_ATTRIBUTED_ANSWER_PREFIX + re.escape(attributor.strip()) + r"\b",
-                      re.IGNORECASE | re.MULTILINE)
+    """`decide.answer_pattern`, memoised for the render loop. See it for the rule."""
+    return decide.answer_pattern(attributor)
 
 
 def _has_maintainer_answer(card: Card, attributor: str) -> bool:
     """True when the card's `## Thread` already carries a dated maintainer answer.
 
-    Scoped to the `## Thread` section only, never the whole card: the
-    `### Decision N — DECIDED (…)` headers a picker uses live in `## Question`,
-    and those are the card *asking*, not the maintainer having answered in the
-    recorded shape. A hit here means the close-out flow stalled after the answer
-    went in — re-triage, `Open questions: none`, and the move never happened — so
-    the Decide entry is flagged rather than silently listed as still-open.
+    A hit here means the close-out flow stalled after the answer went in —
+    re-triage, `Open questions: none`, and the move never happened — so the Decide
+    entry is flagged rather than silently listed as still-open.
+
+    The rule itself is `decide.has_maintainer_answer`: the panel's decide page needs
+    the same fact on the page, and it cannot import the reporting layer to get it.
     """
-    pattern = _answer_pattern(attributor)
-    if pattern is None:
-        return False
-    return bool(pattern.search(_section(card.text, "Thread")))
+    return decide.has_maintainer_answer(card.text, attributor)
 
 
 def _last_error(card: Card) -> str:
@@ -718,7 +708,8 @@ def _run_block(root: Path, record: dict, index: dict[str, tuple[Card, str]],
         for d in decisions:
             entry = index.get(d["card"])
             L.append(f"- {_named(d['card'], index)}"
-                     + (f" — {_first_question_line(entry[0])}" if entry else ""))
+                     + (f" — {_first_question_line(entry[0])}{_resume_note(entry[0])}"
+                        if entry else ""))
             if entry:
                 L.extend(_decision_lines(entry[0]))
     L.append("")
@@ -1010,7 +1001,7 @@ def render(root: Path) -> str:
     if older_decide:
         L.append("")
         for c in older_decide:
-            L.append(f"- {c.link()} — {_first_question_line(c)}")
+            L.append(f"- {c.link()} — {_first_question_line(c)}{_resume_note(c)}")
             # Advisory nudge: a parked card that already carries a dated Karel
             # answer in its `## Thread` is a stalled close-out — the answer
             # landed but the card never moved out of needs-decision/.

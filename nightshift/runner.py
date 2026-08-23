@@ -4766,6 +4766,12 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
             card.write_section("Question", result.detail or
                                "The worker parked this card but recorded no question — "
                                "that is itself a defect; see `.ai/runs/` for the attempt.")
+        # This card was dispatchable when the night picked it up, so its `## Approach`
+        # and `## Acceptance` still describe the work — the answer settles one point
+        # inside a scoped card rather than scoping it. That is `after_answer: tasks`,
+        # and declaring it is what lets the panel offer the resume as one click
+        # (`board.AFTER_ANSWER`).
+        card.write({"after_answer": board.AFTER_ANSWER_TASKS})
         board.move(root, card, "needs-decision")
         return f"{card_id}: → needs-decision/ (parked)"
 
@@ -4788,6 +4794,9 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
                 f"attempts this card gets, and it kept recurring rather than getting fixed "
                 f"— something about it is not as mechanical as it looked, or a later attempt "
                 f"reintroduced it. Most recent finding:\n\n{finding}")
+            # Same reasoning as the parked path: a card that has been dispatched this
+            # many times is scoped, and what it needs is a decision inside that scope.
+            card.write({"after_answer": board.AFTER_ANSWER_TASKS})
             board.move(root, card, "needs-decision")
             return (f"{card_id}: → needs-decision/ (a reviewer-flagged fix recurred across "
                     f"{card.attempts} attempts)")
@@ -4813,6 +4822,9 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
         card.write_section("Question", result.detail or
                            "The reviewer flagged this for your decision but recorded no "
                            "question — see `.ai/runs/` for the diff and the review.")
+        # There is a reviewed branch behind this card, so it is as scoped as a card
+        # gets: the answer decides one point about work that already exists.
+        card.write({"after_answer": board.AFTER_ANSWER_TASKS})
         board.move(root, card, "needs-decision")
         return f"{card_id}: → needs-decision/ (reviewer flagged a decision)"
 

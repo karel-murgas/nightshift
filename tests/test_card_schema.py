@@ -128,18 +128,55 @@ def test_a_live_open_question_may_not_sit_in_tasks(tmp_path):
     assert "belongs in needs-decision/" in _rules(card_schema.check(_board(tmp_path, "tasks", body)))
 
 
-def test_the_same_open_question_is_fine_in_needs_decision(tmp_path):
+def _parked(lane_body: str = "Should the damage be 3-6 or 4-7?",
+            *, route: str | None = "tasks") -> str:
+    """A well-formed parked card: a live open question, a `## Question`, and a route."""
     body = _GOOD.format(id="probe", lane="needs-decision").replace(
-        "None. Card is ready to execute.", "Should the damage be 3-6 or 4-7?"
-    ).replace("## Open questions", "## Question\n\nAttempted X; ambiguous Y; either A or B.\n\n## Open questions")
-    assert card_schema.check(_board(tmp_path, "needs-decision", body)) == []
+        "None. Card is ready to execute.", lane_body
+    ).replace("## Open questions",
+              "## Question\n\nAttempted X; ambiguous Y; either A or B.\n\n## Open questions")
+    if route is not None:
+        body = body.replace("verify: review", f"verify: review\nafter_answer: {route}")
+    return body
+
+
+def test_the_same_open_question_is_fine_in_needs_decision(tmp_path):
+    assert card_schema.check(_board(tmp_path, "needs-decision", _parked())) == []
 
 
 def test_parked_card_without_a_question_section_is_caught(tmp_path):
-    body = _GOOD.format(id="probe", lane="needs-decision")
+    body = _GOOD.format(id="probe", lane="needs-decision").replace(
+        "verify: review", "verify: review\nafter_answer: triage")
     assert "parked card needs a `## Question`" in _rules(
         card_schema.check(_board(tmp_path, "needs-decision", body))
     )
+
+
+# --- card_schema: `after_answer:`, the parked card's resume route ----------
+# Two ways a card reaches this lane and they resume by opposite routes, so the lane
+# is where the field is required — same reasoning as `verify:` in `tasks/`, and the
+# same reason it is not required everywhere: an archived card never declared it.
+
+@pytest.mark.parametrize("route", ["triage", "tasks"])
+def test_either_route_is_accepted_on_a_parked_card(tmp_path, route):
+    assert card_schema.check(_board(tmp_path, "needs-decision", _parked(route=route))) == []
+
+
+def test_a_parked_card_must_say_where_an_answer_sends_it(tmp_path):
+    rules = _rules(card_schema.check(_board(tmp_path, "needs-decision", _parked(route=None))))
+    assert "missing `after_answer:`" in rules
+
+
+def test_an_unknown_route_is_rejected(tmp_path):
+    rules = _rules(card_schema.check(
+        _board(tmp_path, "needs-decision", _parked(route="done"))))
+    assert "`after_answer: done`" in rules
+
+
+@pytest.mark.parametrize("lane", ["tasks", "review", "testing", "done", "failed"])
+def test_no_other_lane_is_asked_for_a_route(tmp_path, lane):
+    """Requiring it everywhere would redden every card written before it existed."""
+    assert card_schema.check(_board(tmp_path, lane, _GOOD.format(id="probe", lane=lane))) == []
 
 
 # --- card_schema: the conditional Steps rule ------------------------------

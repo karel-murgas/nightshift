@@ -582,6 +582,24 @@
   }
   .doc th { font-family: var(--mono); color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.08em; }
 
+  /* What this parked card is actually waiting for, above everything else on the
+     page. `needs-decision/` holds a card that is *asking* and a card a worker parked
+     to *report* something, and they rendered identically — so the page never said
+     whether an answer was wanted or whether the card was ready to be worked on.
+     A left rule rather than a filled panel: it has to read as the page's own status
+     line, not as another card of content. */
+  .decide-state {
+    margin: 0.6rem 1.5rem 1.2rem;
+    padding: 0.7rem 0 0.7rem 0.9rem;
+    max-width: 78ch;
+    border-left: 2px solid var(--line);
+  }
+  .decide-state.ok   { border-left-color: var(--phosphor-d); }
+  .decide-state.warn { border-left-color: var(--amber); }
+  .decide-state p { margin: 0.45rem 0 0; color: var(--ink-dim); line-height: 1.6; }
+  .decide-state p b { color: var(--ink); }
+  .decide-state .dim { color: var(--ink-faint); }
+
   /* The answering form. One block per sub-question, options stacked rather than
      inline: a real option is a whole sentence with its consequence attached, so a
      row of radio buttons would truncate exactly the part you are choosing between. */
