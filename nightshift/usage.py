@@ -43,14 +43,16 @@ No LLM: an HTTP GET and arithmetic over the JSON it returns.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime as dt
+import email.utils
 import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from nightshift import manifest
+from nightshift import manifest, textio
 
 # The credential the interactive clients write. Read-only here; refreshing it is
 # the CLI's job, and a token this module finds expired is reported as such rather
@@ -112,6 +114,13 @@ class Snapshot:
     subscription: str = ""
     fetched: bool = False
     reason: str = ""                 # why not fetched; "" when it was
+    http_status: int | None = None   # the status behind `reason`, when there was one
+    retry_after: dt.timedelta | None = None  # the endpoint's own back-off hint, on a 429
+    #: Set only by `read_cached()`, when this reading is a cached one served in
+    #: place of a live call that failed or was skipped to avoid asking again too
+    #: soon. `read()` never sets it — it only ever reports what it just fetched.
+    stale: bool = False
+    checked_at: dt.datetime | None = None  # when this reading was actually fetched
 
     @property
     def worst(self) -> Bucket | None:
@@ -195,6 +204,28 @@ def _parse_iso(value: object) -> dt.datetime | None:
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone().replace(tzinfo=None)
     return parsed
+
+
+def _parse_retry_after(exc: urllib.error.HTTPError, now: dt.datetime) -> dt.timedelta | None:
+    """The endpoint's own back-off hint (RFC 7231 `Retry-After`), in whichever of
+    the two forms it allows — a delay in seconds, or a fixed date. It is the only
+    officially given signal for how long to wait on an otherwise-undocumented
+    endpoint, so reading it beats guessing a constant.
+    """
+    value = exc.headers.get("Retry-After") if exc.headers else None
+    if not value:
+        return None
+    try:
+        return dt.timedelta(seconds=max(0, int(value)))
+    except ValueError:
+        pass
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if when.tzinfo is not None:
+        when = when.astimezone().replace(tzinfo=None)
+    return max(dt.timedelta(0), when - now)
 
 
 def _token(creds: dict) -> tuple[str, str]:
@@ -360,7 +391,9 @@ def read(credentials: Path | None = None, *,
     except urllib.error.HTTPError as exc:
         hint = {401: " - re-authenticate", 403: " - not a subscription account",
                 404: " - endpoint moved; re-grep the editor bundle"}.get(exc.code, "")
-        return Snapshot(subscription=subscription,
+        retry_after = _parse_retry_after(exc, now) if exc.code == 429 else None
+        return Snapshot(subscription=subscription, http_status=exc.code,
+                        retry_after=retry_after,
                         reason=f"usage endpoint returned HTTP {exc.code}{hint}")
     except Exception as exc:                      # network, DNS, TLS, malformed JSON
         return Snapshot(subscription=subscription,
@@ -374,6 +407,173 @@ def read(credentials: Path | None = None, *,
     return Snapshot(buckets=_buckets(payload), paid_enabled=enabled,
                     paid_used_minor=used, paid_currency=currency,
                     paid_exponent=exponent, subscription=subscription, fetched=True)
+
+
+#: Where the cross-process cache lives, beside the credential file it was read
+#: from — so an account override (`--config-dir`) gets a cache of its own
+#: rather than one keyed on nothing.
+#:
+#: **Why this exists at all.** `read()` above is deliberately a bare, uncached
+#: network call — every test in this file relies on that, and the money-rule
+#: guard in `chores.py`/`drain.py`/`ingest.py` calls it straight, on purpose,
+#: because a check gating whether to spend money must not answer from a stale
+#: copy. But the panel's rail is not that: it is ambient (on every page, in a
+#: browser tab that may sit open for hours), and it used to ask fresh on every
+#: poll — first every page load, then (after 2026-08-16's in-memory 60s cache)
+#: still once a minute, forever, from one more process than just the panel:
+#: the editor's own usage indicator reads the same endpoint for the same
+#: account, on its own clock this module has no visibility into. Two readers
+#: sharing a budget the panel alone appeared to respect is how it still kept
+#: answering 429 (`usage-api-quota`, 2026-08-22). `read_cached()` is the fix:
+#: one reading per account, on disk, so every process that asks — the panel
+#: today, anything else later — shares it instead of each keeping its own
+#: clock.
+def _cache_path(credentials: Path) -> Path:
+    return credentials.with_name(credentials.name + ".usage-cache.json")
+
+
+@dataclass(frozen=True)
+class _Cached:
+    snapshot: Snapshot
+    checked_at: dt.datetime
+    next_allowed_at: dt.datetime
+
+
+def _snapshot_to_json(snap: Snapshot) -> dict:
+    return {
+        "buckets": [{"name": b.name, "utilization": b.utilization,
+                     "resets_at": b.resets_at.isoformat() if b.resets_at else None}
+                    for b in snap.buckets],
+        "paid_enabled": snap.paid_enabled,
+        "paid_used_minor": snap.paid_used_minor,
+        "paid_currency": snap.paid_currency,
+        "paid_exponent": snap.paid_exponent,
+        "subscription": snap.subscription,
+        "fetched": snap.fetched,
+        "reason": snap.reason,
+        "http_status": snap.http_status,
+    }
+
+
+def _snapshot_from_json(data: dict) -> Snapshot:
+    buckets = tuple(
+        Bucket(name=str(b["name"]), utilization=float(b["utilization"]),
+               resets_at=_parse_iso(b.get("resets_at")))
+        for b in data.get("buckets", []) or []
+        if isinstance(b, dict) and "name" in b
+        and isinstance(b.get("utilization"), (int, float)))
+    return Snapshot(buckets=buckets, paid_enabled=bool(data.get("paid_enabled")),
+                    paid_used_minor=data.get("paid_used_minor"),
+                    paid_currency=str(data.get("paid_currency") or ""),
+                    paid_exponent=int(data.get("paid_exponent", 2)),
+                    subscription=str(data.get("subscription") or ""),
+                    fetched=bool(data.get("fetched")),
+                    reason=str(data.get("reason") or ""),
+                    http_status=data.get("http_status"))
+
+
+def _load_cache(path: Path) -> _Cached | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    checked_at = _parse_iso(data.get("checked_at"))
+    next_allowed_at = _parse_iso(data.get("next_allowed_at"))
+    snapshot = data.get("snapshot")
+    if checked_at is None or next_allowed_at is None or not isinstance(snapshot, dict):
+        return None
+    return _Cached(snapshot=_snapshot_from_json(snapshot),
+                  checked_at=checked_at, next_allowed_at=next_allowed_at)
+
+
+def _save_cache(path: Path, cached: _Cached) -> None:
+    try:
+        textio.write_text_lf(path, json.dumps({
+            "checked_at": cached.checked_at.isoformat(),
+            "next_allowed_at": cached.next_allowed_at.isoformat(),
+            "snapshot": _snapshot_to_json(cached.snapshot),
+        }))
+    except OSError:
+        pass  # best-effort - a cache write failing must not break the read it followed
+
+
+def invalidate_cache(credentials: Path | None = None) -> None:
+    """Drop the cached reading for this account's credential path.
+
+    For the one case a path-keyed cache cannot see for itself: a fresh
+    `claude auth login` against the *same* config directory swaps which
+    account that path's credentials describe without changing the path at
+    all, so the cache has to be told rather than inferring it from a new key.
+    """
+    path = credentials or CREDENTIALS
+    try:
+        _cache_path(path).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+#: Floor between live calls once one has succeeded. The metered windows are
+#: five hours and seven days; a reading up to this old is not meaningfully
+#: "wrong" for either one.
+CACHE_FRESH_FOR = dt.timedelta(seconds=90)
+
+#: Back-off applied after a 429 with no `Retry-After` header to honour instead.
+#: Longer than CACHE_FRESH_FOR on purpose — a 429 means the last interval was
+#: already too short, so repeating it on the same clock is not a fix.
+DEFAULT_BACKOFF = dt.timedelta(minutes=5)
+
+#: How long a cached *good* reading is still worth serving in place of a bare
+#: error line when a live call fails. Well past CACHE_FRESH_FOR/DEFAULT_BACKOFF
+#: — this is the last resort before falling back to "no reading", not the
+#: normal path.
+STALE_LIMIT = dt.timedelta(minutes=30)
+
+
+def read_cached(credentials: Path | None = None, *, now: dt.datetime | None = None,
+                force: bool = False) -> Snapshot:
+    """`read()`, shared across every process that reads this account's meters.
+
+    Reused within `CACHE_FRESH_FOR` of the last live call, cross-process, via a
+    file beside the credentials — not just within one long-lived server. A
+    failed live call (429 or otherwise) does not discard a still-recent good
+    reading: it is returned again with `stale=True` and its original
+    `checked_at`, so a caller can show "as of 2 minutes ago" instead of a raw
+    failure — which also makes a transient failure less likely to fail all the
+    way open than `check()` alone would (see its own docstring on that trade).
+    `force=True` is the explicit "ask now regardless" for a person who typed a
+    command wanting the current number, not a background poll.
+    """
+    now = now or dt.datetime.now()
+    path = credentials or CREDENTIALS
+    cache_path = _cache_path(path)
+    cached = _load_cache(cache_path)
+
+    if not force and cached is not None and now < cached.next_allowed_at:
+        if cached.snapshot.fetched:
+            return dataclasses.replace(cached.snapshot, stale=True,
+                                       checked_at=cached.checked_at)
+        return cached.snapshot
+
+    snapshot = read(path, now=now)
+
+    if snapshot.fetched:
+        _save_cache(cache_path, _Cached(snapshot, now, now + CACHE_FRESH_FOR))
+        return snapshot
+
+    backoff = DEFAULT_BACKOFF if snapshot.http_status == 429 else CACHE_FRESH_FOR
+    if snapshot.retry_after is not None:
+        backoff = max(backoff, snapshot.retry_after)
+    next_allowed = now + backoff
+
+    if (cached is not None and cached.snapshot.fetched
+            and now - cached.checked_at < STALE_LIMIT):
+        _save_cache(cache_path, _Cached(cached.snapshot, cached.checked_at, next_allowed))
+        return dataclasses.replace(cached.snapshot, stale=True, checked_at=cached.checked_at)
+
+    _save_cache(cache_path, _Cached(snapshot, now, next_allowed))
+    return snapshot
 
 
 def read_identity(path: Path | None = None) -> Identity:
@@ -455,7 +655,10 @@ def describe(snapshot: Snapshot) -> list[str]:
     """Human-readable meter lines, for a log, a digest or a panel."""
     if not snapshot.fetched:
         return [f"usage unavailable - {snapshot.reason}"]
-    lines = [f"{b.name:22} {b.utilization:5.1f}%"
+    lines = []
+    if snapshot.stale and snapshot.checked_at:
+        lines.append(f"(as of {snapshot.checked_at:%H:%M} - endpoint asked again too soon)")
+    lines += [f"{b.name:22} {b.utilization:5.1f}%"
              + (f"  resets {b.resets_at:%Y-%m-%d %H:%M}" if b.resets_at else "")
              for b in snapshot.buckets]
     if snapshot.paid_enabled:
