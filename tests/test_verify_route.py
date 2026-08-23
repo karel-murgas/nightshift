@@ -36,7 +36,7 @@ import _fixtures  # noqa: E402
 
 _FRONT = """\
 ---
-id: a-card
+id: {name}
 title: "A card"
 state: {lane}
 tier: worker
@@ -88,10 +88,15 @@ def _repo(tmp_path: Path) -> Path:
     return _fixtures.repo_copy("verify-route-proj", tmp_path / "proj", _build)
 
 
-def _card(repo: Path, lane: str, extra: str = "", body: str = "") -> Path:
-    path = repo / "Board" / lane / "a-card.md"
+def _card(repo: Path, lane: str, extra: str = "", body: str = "",
+          name: str = "a-card") -> Path:
+    """One card in `lane`. `name` defaults per-lane-unique only where a test asks
+    for it: `card_schema._duplicates` (2026-08-23) reports the same file name in two
+    lanes, so a test seeding several lanes at once must give each its own name — the
+    fixture would otherwise be building the very defect that check exists to find."""
+    path = repo / "Board" / lane / f"{name}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = _FRONT.format(lane=lane, extra=extra) + body
+    text = _FRONT.format(lane=lane, extra=extra, name=name) + body
     path.write_text(text, encoding="utf-8", newline="\n")
     return path
 
@@ -121,7 +126,7 @@ def test_an_archived_card_without_verify_is_not_retroactively_reddened(tmp_path)
     be rewritten — the same call `_DISPATCHED` already makes for `unattended:`."""
     repo = _repo(tmp_path)
     for lane in ("done", "testing", "failed", "review"):
-        _card(repo, lane)
+        _card(repo, lane, name=f"a-card-{lane}")
     assert card_schema.check(repo) == []
 
 
@@ -256,7 +261,8 @@ def test_a_block_form_tag_list_on_a_correct_card_is_silent(tmp_path):
     """Parsing the form must not mean flagging it — the shape is legitimate, and a
     gate that fired on the maintainer's own editor's output would get muted."""
     repo = _repo(tmp_path)
-    text = _FRONT.format(lane="tasks", extra="verify: review\ntags:\n  - nightshift\n")
+    text = _FRONT.format(lane="tasks", name="a-card",
+                         extra="verify: review\ntags:\n  - nightshift\n")
     path = repo / "Board" / "tasks" / "a-card.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text.replace("unattended: true", "unattended: false"),

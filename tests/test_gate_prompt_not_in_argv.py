@@ -43,12 +43,21 @@ def _tree(tmp_path: Path, name: str, source: str) -> Path:
 def test_reintroducing_the_crash_into_the_real_runner_goes_red(tmp_path):
     """The proof the gate works: take today's `runner.py`, put the prompt back on
     `-p` exactly as it was written before `worker-prompt-off-argv`, and require a
-    violation for each of the four dispatch sites.
+    violation for each dispatch site.
 
-    Four, not five: the same replacement also lands inside `_run_worker`'s
-    docstring, which quotes the defective line to explain it. That one is prose and
-    must stay invisible — a gate that flagged its own documentation would be muted
-    within a week, which is why this walks sequence literals instead of text.
+    **The count tracks the spawn sites and is meant to be edited when one lands.**
+    Four until 2026-08-23, five since `_resolve_conflict` (merge-conflict-has-no-
+    owner) — the same enumeration
+    `test_runner_dispatch.py::test_only_the_spawn_functions_may_execute_the_claude_cli`
+    pins by name. A new spawn site that forgot to leave `-p` bare is exactly what
+    this must catch, so the number is asserted rather than derived from the source
+    it is checking.
+
+    One more replacement also lands inside `_run_worker`'s docstring, which quotes
+    the defective line to explain it, and it is deliberately *not* counted: that one
+    is prose and must stay invisible — a gate that flagged its own documentation
+    would be muted within a week, which is why this walks sequence literals instead
+    of text.
     """
     source = REAL_RUNNER.read_text(encoding="utf-8")
     defective = source.replace('binary, "-p",', 'binary, "-p", prompt,')
@@ -60,8 +69,8 @@ def test_reintroducing_the_crash_into_the_real_runner_goes_red(tmp_path):
     root = _tree(tmp_path, "runner_copy.py", defective)
     violations = prompt_not_in_argv.check(root)
 
-    assert len(violations) == 4, \
-        f"expected the four dispatch sites, got {[str(v) for v in violations]}"
+    assert len(violations) == 5, \
+        f"expected the five dispatch sites, got {[str(v) for v in violations]}"
     assert all("WinError 206" in v.rule for v in violations)
     assert all("prompt=" in v.rule for v in violations)
 

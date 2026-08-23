@@ -303,6 +303,34 @@ def test_a_card_in_a_made_up_lane_is_caught(tmp_path):
     assert "which is not a lane" in _rules(card_schema.check(root))
 
 
+def test_the_same_card_in_two_lanes_is_caught(tmp_path):
+    """The mirror of the orphan case, and the same sentence justifies both: one
+    state means one lane. Found on 2026-08-23 — a board move ran `git mv` but the
+    commit that followed named only the destination path, so the source's deletion
+    never landed and the card sat in `review/` and `testing/` at once. Both copies
+    were internally valid, so all 45 gates passed; nothing was looking at the pair."""
+    root = _board(tmp_path, "testing", _GOOD.format(id="probe", lane="testing"))
+    stale = root / "Board" / "review"
+    stale.mkdir(parents=True, exist_ok=True)
+    (stale / "probe.md").write_text(
+        _GOOD.format(id="probe", lane="review"), encoding="utf-8")
+
+    rules = _rules(card_schema.check(root))
+    assert "also exists in" in rules
+    assert "one state means one lane" in rules
+
+
+def test_one_card_per_lane_is_not_a_duplicate(tmp_path):
+    """Two *different* cards, one in each of two lanes — the ordinary board. The
+    check keys on the file name, so it must not fire on a busy board."""
+    root = _board(tmp_path, "testing", _GOOD.format(id="probe", lane="testing"))
+    other = root / "Board" / "review"
+    other.mkdir(parents=True, exist_ok=True)
+    (other / "second.md").write_text(
+        _GOOD.format(id="second", lane="review"), encoding="utf-8")
+    assert card_schema.check(root) == []
+
+
 def test_lane_readmes_are_not_mistaken_for_orphans(tmp_path):
     root = _board(tmp_path, "tasks", _GOOD.format(id="probe", lane="tasks"))
     (root / "Board" / "README.md").write_text("the board", encoding="utf-8")

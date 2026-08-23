@@ -55,11 +55,13 @@ from pathlib import Path
 
 from nightshift import board          # the card model
 from nightshift import branches       # branch roles
+from nightshift import conflictmarkers  # what a hand-resolved conflict must not leave
 from nightshift import digest
 from nightshift import gitmerge       # merge strategy + failure reporting, one home
 from nightshift import gitpaths       # git's path lists, read NUL-separated
 from nightshift import limits
 from nightshift import manifest as _manifest
+from nightshift import memoryfold  # per-card memory records, folded serially on merge
 from nightshift import reconcile
 from nightshift import run_record
 from nightshift import stale_sweep
@@ -211,6 +213,19 @@ def default_base(root: Path | None = None) -> str:
 # itself on every code card, the way it dispatches `stale-hunter`. Resolved
 # against a real charter at `.claude/agents/code-reviewer.md`.
 REVIEWER_AGENT = "code-reviewer"
+
+# The rebase-conflict resolver (merge-conflict-has-no-owner). Like the reviewer it
+# is dispatched by the runner rather than named on a card, and for the same reason:
+# it is a pipeline stage, not somebody's worker. See `_resolve_conflict`.
+RESOLVER_AGENT = "merge-resolver"
+
+#: How many times `_resolve_conflict` will hand one card's rebase to the resolver.
+#: A rebase replays commit by commit and each one can conflict, so the bound is per
+#: *pause*, not per card — but it is a bound, because "resolve, continue, conflict
+#: again" with no ceiling is how an unattended loop spends a night on one card.
+#: Three covers every multi-commit collision observed so far (the worst was a
+#: 3-commit branch conflicting on its first).
+MAX_RESOLVE_ROUNDS = 3
 
 def fence_env(root: Path) -> str:
     """The worktree fence's activation switch
@@ -1716,6 +1731,7 @@ The card is at:
 You may append to its `## Thread` and write a `## Question` section. **Do not move the \
 card between lanes** — lane transitions are the runner's, and it will move this card \
 based on whether the gates pass.
+{fold}
 
 When you are finished, write your outcome to:
   {verdict_path}
@@ -2087,6 +2103,8 @@ def _read_verdict(path: Path) -> dict:
 # spawn site says which predicate it means rather than inlining a set of strings.
 PRODUCER_STAGE, CHECKER_STAGE = "producer", "checker"
 REVIEWER_STAGE, STALE_STAGE = "reviewer", "stale-hunter"
+#: The rebase-conflict resolver (`_resolve_conflict`), the fifth judge stage.
+RESOLVER_STAGE = "merge-resolver"
 
 
 def verdict_survives_a_wall(stage: str, verdict: dict, *, rounds_left: int = 0) -> bool:
@@ -2145,6 +2163,16 @@ def verdict_survives_a_wall(stage: str, verdict: dict, *, rounds_left: int = 0) 
         return str(verdict.get("verdict", "")).lower() in ("ok", "needs_fix", "needs_decision")
     if stage == STALE_STAGE:
         return bool(verdict.get("complete"))
+    if stage == RESOLVER_STAGE:
+        # Either answer is terminal for this stage — `resolved: false` is a real,
+        # useful decline that lands on the card in `blocked/`, not a non-result. The
+        # only thing that must not survive is a verdict with neither key, which the
+        # `in (…)` fails and `{}` already failed above.
+        #
+        # Terminal for the STAGE is not terminal for the FUNCTION: a rebase can pause
+        # again on the next replayed commit, and `_resolve_conflict` still stops its
+        # loop on a wall rather than spawning a second resolver into a closed window.
+        return verdict.get("resolved") in (True, False)
     return False
 
 
@@ -3238,6 +3266,7 @@ def run_producer(root: Path, card: board.Card, tree: Path, out_dir: Path, branch
             card_path=(board.board_dir(root) / "tasks" / card.path.name).resolve().as_posix(),
             verdict_path=verdict_path.resolve().as_posix(),
             tool_economy=worker_prompt.TOOL_ECONOMY,
+            fold=_fold_instruction(root, card),
             card_body=card.text,
         ) + (_CHORE_NOTE if card.kind == board.KIND_CHORE else "") \
           + continue_note + feedback
@@ -3746,6 +3775,236 @@ def _unmerged_paths(tree: Path) -> list[str]:
     return gitpaths.changed(tree, "--diff-filter=U")
 
 
+_RESOLVE_PROMPT = """\
+A rebase of `{branch}` onto `{base}` has stopped on a conflict. Resolve it, at \
+**tier: lead** (resolved to model `{model}`). Follow your charter.
+
+The repository is at `{repo}`, checked out in a throwaway worktree with the rebase \
+**paused mid-flight**. Card: `{card_id}` — {title}
+
+Conflicted paths ({count}), and you may edit **no others**:
+{conflicts}
+
+What is being replayed here is a card that has already passed gates, tests and code \
+review against the tip it forked from. The other side of the conflict is whatever \
+landed on `{base}` since. So the ordinary case is not a disagreement at all — it is \
+two cards that each appended to the same log or list and collided on the anchor, and \
+the correct resolution keeps **both** contributions.
+
+Do not run `git rebase --continue`, `--abort`, `--skip`, or commit anything. Resolve \
+the file contents and `git add` each path; the runner drives the rebase and re-runs \
+the gates and the affected tests over your result before anything lands.
+
+Write your verdict to `{verdict_path}` as JSON:
+
+{{"resolved": true|false, "summary": "<what you kept from each side, 1-3 lines>"}}
+
+`false` is a success, not a failure, and it is the right answer whenever the two \
+sides genuinely disagree about the same thing and picking one would be a judgment \
+about what the project should do. Say so in `summary` and the card goes to a human \
+with your reading of it attached. Never guess between two intents.
+"""
+
+
+def _dirty_outside(tree: Path, allowed: set[str]) -> list[str]:
+    """Tracked paths the resolver touched that were not its to touch.
+
+    The agent is told which files it may edit; this is the check that it did. An
+    unattended resolver with write access to a whole worktree is exactly the shape
+    that needs its blast radius asserted rather than requested — the gates and tests
+    that follow would catch a *broken* stray edit, but not a plausible one.
+    """
+    out = _git(tree, "status", "--porcelain", "-z")
+    # `-z` is NOT the `\0`-for-`\n` swap it looks like: a rename or copy emits **two**
+    # records, `R  <new>\0<old>\0`, where the second carries no `XY ` prefix at all.
+    # (Only the non-`-z` form uses the single `R  old -> new` line.) Slicing every
+    # record at [3:] therefore turns the bare `a.md` into `.md` and reports a stray
+    # edit that does not exist — verified against git before this was written, which
+    # is the only reason it is not still here.
+    records = [r for r in (out.stdout or "").split("\0") if r]
+    touched: list[str] = []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if len(record) < 4:
+            continue
+        status, rel = record[:2], record[3:].strip()
+        if status[0] in ("R", "C") or status[1] in ("R", "C"):
+            # Consume the source path; it is a path this resolver moved *from*, so
+            # it counts too, and it must not be re-read as a status record.
+            if index < len(records):
+                source = records[index].strip()
+                index += 1
+                if source and source not in allowed and source not in touched:
+                    touched.append(source)
+        if rel and rel not in allowed and rel not in touched:
+            touched.append(rel)
+    return touched
+
+
+def _resolve_conflict(root: Path, tree: Path, card: board.Card, branch: str,
+                      base: str, out_dir: Path, *, model: str = "", timeout: int = 600,
+                      card_budget: float = 0.0) -> tuple[bool, str]:
+    """Hand a paused rebase to the resolver agent until it replays or it cannot.
+
+    **Why this exists.** `rebase_and_merge` used to return `(False, "a human needs to
+    resolve it")` on any conflict, and that sentence was usually false. Karel,
+    2026-08-23, after resolving two of them by hand in one session: *"I didn't have to
+    resolve it, you did"* — both were two cards each prepending a register entry to the
+    same append-only log, which is bookkeeping, not judgment. The same class is in the
+    corrections log twice before that (2026-08-09, 2026-08-13). A merge path with no
+    resolver escalates every conflict at the difficulty of the hardest one.
+
+    **Why an agent and not a merge strategy.** `-Xunion` or a `.gitattributes` driver
+    would dissolve the log case declaratively and cheaply — and silently union two
+    branches that genuinely edited the same prose, with nothing able to tell the two
+    apart. The rule this function keeps instead is the one `gitmerge` already states:
+    dissolve a class only when it is *provably* noise. Nothing here is proved by the
+    resolution; it is proved by what follows it, which is why the caller's existing
+    gates-and-tests re-verification is not optional and is not duplicated here.
+
+    §12's "no LLM decides" is intact. The agent produces a *candidate tree*; every
+    accept/reject after that is an exit code — markers, stray edits, `rebase
+    --continue`, then the caller's gates and test slice. A resolver that declines, or
+    one that returns a tree that fails any of those, lands the card in `blocked/` with
+    the reason, which is where it would have gone anyway.
+
+    Returns `(replayed, detail)`. On `False` the rebase has been aborted and the
+    worktree is back where it started, so the caller's failure path is unchanged.
+    """
+    binary = claude_binary(root)
+    # Resolved here rather than by the caller, so that a caller which never reaches
+    # this function never pays for it — `rebase_and_merge` runs on every merged card
+    # and all but a few of them have no conflict at all, and `tiers.resolve` raises
+    # on a project whose binding document is missing. Judgment about whether two
+    # sides can both be kept is lead work; the charter says so too.
+    model = model or tiers.resolve(root, "lead")
+    # Defensive, though every production caller hands in a `run_dir()` that exists:
+    # an exception raised here escapes with the rebase still paused, which is the one
+    # state this function must never leave behind — the worktree is torn down by the
+    # caller's `finally`, but `branch` would keep a `rebase-merge/` directory.
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rounds = 0
+    kept: list[str] = []
+    while rounds < MAX_RESOLVE_ROUNDS:
+        conflicts = _unmerged_paths(tree)
+        if not conflicts:
+            break
+        rounds += 1
+        verdict_path = tree / ".resolve-verdict.json"
+        verdict_path.unlink(missing_ok=True)
+        prompt = _RESOLVE_PROMPT.format(
+            branch=branch, base=base, model=model, repo=tree.resolve().as_posix(),
+            card_id=card.id, title=card.title, count=len(conflicts),
+            conflicts="\n".join(f"- `{path}`" for path in conflicts),
+            verdict_path=verdict_path.resolve().as_posix(),
+        )
+        textio.write_text_lf(out_dir / f"resolve-{rounds}-prompt.md", prompt)
+
+        argv = [
+            binary, "-p",
+            "--agent", RESOLVER_AGENT,
+            "--model", model,
+            "--output-format", "json",
+            *_budget_argv(card_budget),
+            "--permission-mode", str(host_setting(root, "permission_mode", "acceptEdits")),
+            "--add-dir", str(tree.resolve()),
+        ]
+        try:
+            proc = _run_worker(argv, tree, timeout, prompt=prompt)
+        except subprocess.TimeoutExpired:
+            _git(tree, "rebase", "--abort")
+            return False, (f"the {RESOLVER_AGENT} timed out after {timeout}s on "
+                           f"{', '.join(conflicts)}")
+        textio.write_text_lf(out_dir / f"resolve-{rounds}.log", proc.stdout + proc.stderr)
+
+        verdict = _read_verdict(verdict_path)
+        summary = str(verdict.get("summary", "")).strip()[:300]
+        # The verdict is asked about FIRST, the process's exit second
+        # (`wall-on-review-wrapup-discards-a-verdict`, 2026-08-09): a resolver that
+        # wrote a complete answer and then walled on its own wrap-up turn has done
+        # its job, and reading the exit first would throw that answer away and record
+        # it identically to a resolver that died before writing anything.
+        wall = limits.detect(proc.returncode, proc.stdout, proc.stderr)
+        if wall and not verdict_survives_a_wall(RESOLVER_STAGE, verdict):
+            _git(tree, "rebase", "--abort")
+            return False, (f"the {RESOLVER_AGENT} hit the {wall.scope} usage limit "
+                           f"before it answered — not this card's fault, and the "
+                           f"conflict is unexamined rather than judged")
+        if not verdict.get("resolved"):
+            _git(tree, "rebase", "--abort")
+            return False, (f"the {RESOLVER_AGENT} declined {', '.join(conflicts)}"
+                           + (f": {summary}" if summary else " and gave no reason"))
+        verdict_path.unlink(missing_ok=True)
+
+        # Three exit-code checks, in cost order, before the rebase is allowed on.
+        markers = conflictmarkers.scan(tree, conflicts)
+        if markers:
+            _git(tree, "rebase", "--abort")
+            return False, ("the resolution left a conflict marker behind — "
+                           + "; ".join(markers[:3]))
+        strays = _dirty_outside(tree, set(conflicts))
+        if strays:
+            _git(tree, "rebase", "--abort")
+            return False, (f"the {RESOLVER_AGENT} edited {', '.join(strays[:5])}, which "
+                           f"was not part of the conflict")
+        still = _unmerged_paths(tree)
+        if still:
+            _git(tree, "rebase", "--abort")
+            return False, f"{', '.join(still)} is still unmerged after the resolver ran"
+
+        if summary:
+            kept.append(summary)
+        # `GIT_EDITOR=true` so the replayed commit keeps its existing message without
+        # opening an editor this process has no terminal for.
+        cont = subprocess.run(
+            ["git", "rebase", "--continue"], cwd=tree, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            env={**os.environ, "GIT_EDITOR": "true"},
+        )
+        if cont.returncode != 0 and not _unmerged_paths(tree):
+            _git(tree, "rebase", "--abort")
+            return False, (f"`git rebase --continue` failed after the resolution: "
+                           f"{gitmerge.failure_detail(cont)}")
+        if wall and _unmerged_paths(tree):
+            # This round's answer was complete and was honoured, but the window is
+            # shut: the next replayed commit conflicts too and spawning into a closed
+            # window buys nothing. Stop with the reason, rather than burning the
+            # remaining rounds on calls that cannot run.
+            _git(tree, "rebase", "--abort")
+            return False, (f"the {RESOLVER_AGENT} resolved one conflict and then hit "
+                           f"the {wall.scope} usage limit with more still to replay")
+
+    if _unmerged_paths(tree):
+        _git(tree, "rebase", "--abort")
+        return False, (f"still conflicting after {MAX_RESOLVE_ROUNDS} resolver "
+                       f"round(s) — this one wants a human")
+    # "No unmerged paths" is not "the rebase finished". Git also stops mid-rebase with
+    # a clean index — an emptied commit, an `edit` stop — and the caller's very next
+    # move is to read `HEAD` as the rebased tip, which would then be a partial replay
+    # merged as if it were the whole branch. Ask git directly instead of inferring.
+    if _rebase_in_progress(tree):
+        _git(tree, "rebase", "--abort")
+        return False, ("the rebase stopped without a conflict to resolve (an emptied "
+                       "commit, most likely) — this one wants a human")
+    return True, " | ".join(kept) or "resolved with no summary"
+
+
+def _rebase_in_progress(tree: Path) -> bool:
+    """Whether `tree` is still mid-rebase, asked of git rather than inferred.
+
+    Both state directories are checked: `rebase-merge/` is today's, `rebase-apply/`
+    the older `--am` backend's, and which one exists depends on flags this function
+    does not control.
+    """
+    return any(
+        (tree / ".git" / name).exists()
+        or Path(_git(tree, "rev-parse", "--git-path", name).stdout.strip() or "\0").exists()
+        for name in ("rebase-merge", "rebase-apply")
+    )
+
+
 def _delete_remote_branch(root: Path, remote: str, branch: str, *,
                           action: str = "merged") -> None:
     """Delete `branch` on `remote` once its work has landed, so a published card
@@ -3826,12 +4085,24 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
     especially — pass review each against the tip they forked from, then collide
     when the second tries to land. Rebasing `branch` onto today's `base` *before*
     merging replays the card's commits on the current tip, so a textual conflict
-    surfaces here (→ a human) and a clean replay is re-checked before it lands.
+    surfaces here and a clean replay is re-checked before it lands.
+
+    **A conflict is handed to `_resolve_conflict`, not straight to a human**
+    (2026-08-23). It used to be the latter, and the message said so — "a human needs
+    to resolve it" — which was usually untrue: the collision is nearly always two
+    cards appending to the same log, and Karel's objection was precisely that the
+    session resolving it by hand had made no judgment worth a person's time. Only a
+    resolution that is *declined, marker-ridden, out of bounds, or fails the replayed
+    gates and tests* reaches a human now, and it reaches them in `blocked/` rather
+    than in `review/`, because the card is not awaiting review — it was reviewed `ok`
+    and is awaiting a merge.
 
     Done entirely in a throwaway detached worktree, so the real `ai/<id>` branch is
     never rewritten while this runs, and `base` is untouched until the verified,
-    rebased result merges. Reuses `merge_check`'s worktree discipline. No LLM
-    (§12): rebase, gates, tests and the merge are all exit codes.
+    rebased result merges. Reuses `merge_check`'s worktree discipline. §12 holds
+    across the resolver too: it produces a candidate tree, and every accept/reject
+    after it — markers, stray edits, `rebase --continue`, gates, tests, the merge —
+    is an exit code.
 
     Once the rebased result actually merges, `branch` is deleted — locally, and
     on `remote` too. It was the deliverable back when Karel merged cards by hand
@@ -3852,10 +4123,10 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
     only that it must run **before** the local `-D`, because that guard is an
     ancestry test against the local branch's own tip.
 
-    Returns `(merged, detail)`. Any failure — the branch gone, a rebase conflict,
-    or gates/tests failing on the replayed result — returns `(False, reason)` with
-    `base` unmoved, and `settle` routes the card to review/ with the reason. Never
-    a guess (decision #3).
+    Returns `(merged, detail)`. Any failure — the branch gone, a conflict the
+    resolver could not settle, or gates/tests failing on the replayed result —
+    returns `(False, reason)` with `base` unmoved, and `settle` routes the card to
+    `blocked/` with the reason. Never a guess (decision #3).
     """
     if _git(root, "rev-parse", "--verify", branch).returncode != 0:
         return False, f"`{branch}` no longer exists"
@@ -3879,10 +4150,22 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
         if rebased.returncode != 0:
             conflicts = _unmerged_paths(tree)
             why = gitmerge.failure_detail(rebased)
-            _git(tree, "rebase", "--abort")
-            return False, (f"rebasing {branch} onto {base} conflicts in "
-                           f"{', '.join(conflicts) or '(no unmerged paths)'} — a human "
-                           f"needs to resolve it: {why}")
+            if not conflicts:
+                # A rebase that failed without leaving unmerged paths is not a
+                # content conflict at all — a dirty tree, a missing base, a hook
+                # refusal. There is nothing for a resolver to resolve.
+                _git(tree, "rebase", "--abort")
+                return False, f"rebasing {branch} onto {base} failed: {why}"
+            _log(f"    {len(conflicts)} conflict(s) rebasing {branch} onto {base} — "
+                 f"handing them to {RESOLVER_AGENT}")
+            resolved, detail = _resolve_conflict(
+                root, tree, card, branch, base, out_dir,
+                timeout=test_timeout, card_budget=0.0)
+            if not resolved:
+                return False, (f"rebasing {branch} onto {base} conflicts in "
+                               f"{', '.join(conflicts)} and {detail} — a human needs to "
+                               f"resolve it: {why}")
+            _log(f"    {RESOLVER_AGENT} resolved it — {detail}")
         rebased_sha = _git(tree, "rev-parse", "HEAD").stdout.strip()
 
         # Re-verify the *replayed* result, not the branch as reviewed (decision #2).
@@ -3910,6 +4193,12 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
         # `finally` drops the worktree only after.
         merged, why = merge_branch(root, rebased_sha, base, label=branch)
         if merged:
+            # The card's memory record goes into the shared logs *here*, on `base`,
+            # one card at a time — which is the whole point of the fragment
+            # (`nightshift.memoryfold`). Every card wants to prepend to the same
+            # list, so doing it on the branch made two same-night cards conflict by
+            # construction; doing it after the merge serialises the insertion.
+            _fold_memory(root, card, base)
             # The remote copy goes first, while `branch` still resolves: its
             # guard is an ancestry test against this ref, which `-D` would take
             # away. A refusal or a failure there is logged and swallowed, so the
@@ -3926,6 +4215,86 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
     finally:
         _git(root, "worktree", "remove", "--force", str(tree))
         _git(root, "worktree", "prune")
+
+
+def _fold_instruction(root: Path, card: board.Card) -> str:
+    """The paragraph telling a worker to write a memory *fragment*, or `""`.
+
+    Built from the project's own `[[memory.fold]]` rows rather than written into the
+    prompt as prose, so the keys a worker is told to use and the keys the fold reads
+    cannot drift — which is the failure this whole mechanism would otherwise just
+    move rather than remove. Empty for a project that declares no targets, so its
+    prompt is byte-identical to before.
+
+    `nightshift.hooks.fold_fence` refuses the direct edit; this is the half that says
+    what to do instead. Both are needed: a fence that only refuses teaches nothing,
+    and an instruction that only asks is one a worker can forget.
+    """
+    declared = memoryfold.targets(root)
+    if not declared:
+        return ""
+    rows = "\n".join(f"  `## {t.key}` -> {t.path}" for t in declared)
+    fragment = (memoryfold.fragment_path(root, card.id)
+                .relative_to(root).as_posix())
+    return f"""
+**Your memory record goes in a fragment, not in the shared log.** Write it to:
+  {fragment}
+as markdown with one section per target:
+{rows}
+Omit a section you have nothing for. The runner folds this into those files after your \
+branch merges, one card at a time — which is the point: every card appends at the same \
+anchor in them, so editing them on your branch conflicts with any sibling card that \
+finishes tonight. Editing them directly is refused by a hook.
+"""
+
+
+def _fold_memory(root: Path, card: board.Card, base: str) -> None:
+    """Fold this card's memory fragment into the shared logs and commit it.
+
+    Runs on `base` immediately after the card's work merged, which is the only
+    moment both halves are true: the work is landed, and no other card is mid-merge.
+
+    **Every failure is logged and swallowed.** The card's work is already on `base`
+    at this point; raising here would abort a merge that has happened, and returning
+    `False` would route a landed card to `blocked/`. A fragment that will not fold
+    stays on disk and `python -m nightshift.memoryfold` picks it up later — the
+    lossy direction is losing the card's record, and the fragment surviving is what
+    prevents that.
+    """
+    if not memoryfold.targets(root):
+        return
+    fragment = memoryfold.fragment_path(root, card.id)
+    if not fragment.is_file():
+        return
+    # `merge_branch` already refused unless the checkout was on `base`, and it has
+    # just succeeded — so this holds. Checked anyway because the failure it would
+    # otherwise produce is a commit on the wrong branch, which is the one outcome
+    # this file's guards exist to make impossible rather than unlikely.
+    head = current_branch(root)
+    if head != base:
+        _log(f"  ! merged {card.id} but did not fold its memory record — the checkout "
+             f"is on `{head}`, not `{base}`; run `python -m nightshift.memoryfold`")
+        return
+    try:
+        report = memoryfold.fold(root, card_id=card.id)
+    except OSError as exc:
+        _log(f"  ! merged {card.id} but its memory fragment would not fold — {exc}")
+        return
+    for line in report:
+        _log(f"    {line}")
+    if any("LEFT IN PLACE" in line for line in report):
+        return
+    paths = [str(root / target.path) for target in memoryfold.targets(root)]
+    added = _git(root, "add", "--", str(fragment), *paths)
+    if added.returncode != 0:
+        _log(f"  ! folded {card.id}'s memory record but could not stage it — "
+             f"{(added.stderr or added.stdout or '').strip()[:150]}")
+        return
+    committed = _git(root, "commit", "-m", f"memory: fold {card.id}'s record",
+                     "--", str(fragment), *paths)
+    if committed.returncode != 0:
+        _log(f"  ! folded {card.id}'s memory record but could not commit it — "
+             f"{(committed.stderr or committed.stdout or '').strip()[:150]}")
 
 
 def branch_has_commits(root: Path, base: str, branch: str) -> bool:
@@ -4469,21 +4838,26 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
             board.move(root, card, lane)
             return (f"{card_id}: → {lane}/ (reviewed ok, rebased {branch} onto "
                     f"{integration} and merged)")
-        # Reviewed ok but the branch will not rebase-and-merge — gates were green
-        # when it was reviewed, but it conflicts with what has landed on the
-        # integration branch since (a sibling card, a same-night memory edit), or
-        # the replayed result no longer passes. That is exactly what review/ means
-        # (03_board.md §1: "gates green, awaiting Claude review, or waiting on a
-        # sibling card"), so it goes there for a human to resolve — never silently
-        # into testing/ as if it had merged, and never a guessed resolution (§12).
+        # Reviewed ok but the branch will not rebase-and-merge, and `_resolve_conflict`
+        # could not settle it either — it conflicts with what has landed on the
+        # integration branch since (a sibling card, a same-night memory edit) in a way
+        # the resolver declined or could not verify, or the replayed result no longer
+        # passes. Never silently into testing/ as if it had merged, and never a guessed
+        # resolution (§12).
+        #
+        # `blocked/`, not `review/` (2026-08-23). This card was reviewed `ok`; parking
+        # it in the reviewer's lane made finished work read as outstanding Claude work
+        # on the NOW page, which is exactly what Karel objected to. See
+        # `board.BLOCKED_LANE` for why this is neither `needs-decision/` nor `failed/`.
         card.write_section(
             "Merge",
             f"Reviewed `ok`, but `{branch}` could not be rebased onto "
-            f"`{integration}` and merged: {why}. A human needs to resolve it; "
-            f"then it can go to testing/. The reviewed diff is in "
-            f"`.ai/runs/{card_id}/attempt-{card.attempts}/`.")
-        board.move(root, card, "review")
-        return f"{card_id}: → review/ (reviewed ok but {branch} will not rebase-merge — {why})"
+            f"`{integration}` and merged: {why}. The {RESOLVER_AGENT} could not settle "
+            f"it either, so this one needs a person; then it can go to testing/. The "
+            f"reviewed diff is in `.ai/runs/{card_id}/attempt-{card.attempts}/`.")
+        board.move(root, card, board.BLOCKED_LANE)
+        return (f"{card_id}: → {board.BLOCKED_LANE}/ (reviewed ok but {branch} will not "
+                f"rebase-merge — {why})")
 
     retiring = card.attempts >= attempt_limit(card)
     card.write_section("Error", _error_section(card_id, card.attempts, result,

@@ -329,8 +329,38 @@ def _toplevel(directory: Path) -> Path | None:
     return Path(line).resolve() if line else None
 
 
+def _is_delete(tail: list[str]) -> bool:
+    """A push that *removes* a remote ref rather than carrying content outward.
+
+    Two spellings: `git push origin --delete <branch>` (also `-d`) and the older
+    colon refspec `git push origin :<branch>`.
+
+    Not a publish, so not this guard's business, and demanding a receipt for it is
+    a false denial with a real cost. Deleting a card's branch after its work merges
+    is a required close-out step (Karel, 2026-08-09: *"Delete on merge, both local
+    and remote"*), and on 2026-08-23 the guard refused exactly that: the work had
+    already landed on the integration branch, the local `-d` had succeeded, and the
+    remote copy was left orphaned because the guard asked for a receipt for `HEAD`
+    — a commit the command does not send anywhere.
+
+    The receipt cannot say anything useful here either. There is no content to have
+    validated; what makes a deletion safe is that the branch merged, which is an
+    ancestry question `runner._delete_remote_branch` already asks and this hook
+    never did.
+    """
+    for token in tail:
+        if token in ("--delete", "-d"):
+            return True
+        # `:branch` deletes; `local:remote` and `+local:remote` do not.
+        if token.startswith(":") and len(token) > 1:
+            return True
+    return False
+
+
 def _sha(root: Path, sub: str, tail: list[str]) -> str | None:
     if sub == "push":
+        if _is_delete(tail):
+            return None   # removing a ref publishes nothing — see `_is_delete`
         return _git(root, "rev-parse", "HEAD") or None
     ref = next((a for a in tail if not a.startswith("-")), None)
     if ref is None:

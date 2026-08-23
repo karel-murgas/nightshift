@@ -543,11 +543,14 @@ def test_settle_threads_the_publish_remote_to_the_merge(tmp_path, monkeypatch):
     assert seen == ["origin"]
 
 
-def test_settle_reviewed_but_unmergeable_goes_to_review_not_testing(tmp_path, monkeypatch):
-    """Reviewed ok, but the branch will not merge — blocked on a sibling that
-    landed first (03_board.md §1: that is exactly what review/ means). It must go
-    to review/ for a human to resolve the merge, never silently to testing/ as if
-    it had merged, and never to done/."""
+def test_settle_reviewed_but_unmergeable_goes_to_blocked_not_testing(tmp_path, monkeypatch):
+    """Reviewed ok, but the branch will not merge even after the resolver tried.
+
+    It must go to `blocked/` — never silently to testing/ as if it had merged,
+    never to done/, and (since 2026-08-23) never to `review/` either. Karel, on
+    finding two finished cards under the panel's **Under review** heading: *"we
+    again got into 'human needs to resolve it' being in review — that is not what
+    review is for."* The card passed review; only the landing is stuck."""
     root = _worktree_repo(tmp_path)
     card = _reviewed_branch(root, tmp_path)
     card.write({"started": "2026-07-24T03:00:00"})
@@ -557,7 +560,8 @@ def test_settle_reviewed_but_unmergeable_goes_to_review_not_testing(tmp_path, mo
 
     note = runner.settle(root, "probe", runner.Dispatch("reviewed", "clean"))
     settled = board.find(root, "probe")
-    assert settled.lane == "review"
+    assert settled.lane == board.BLOCKED_LANE
+    assert settled.fields["state"] == board.BLOCKED_LANE
     assert "could not be rebased" in settled.text
     assert "conflict in board.py" in note
 
@@ -649,8 +653,10 @@ def test_only_a_verify_review_card_reaches_done_from_this_stage(tmp_path, monkey
         runner.settle(root, "probe", result)
         assert board.find(root, "probe").lane == expected_lane, label
 
-    # A card that cannot merge goes to review/ from either value: "a human must
-    # resolve a merge" is true whatever the card declares about verification.
+    # A card that cannot merge goes to blocked/ from either value: "a human must
+    # resolve a merge" is true whatever the card declares about verification. The
+    # lane was `review/` until 2026-08-23 — see
+    # `test_settle_reviewed_but_unmergeable_goes_to_blocked_not_testing`.
     for i, verify in enumerate(("play", "review")):
         sub = tmp_path / f"unmergeable{i}"
         sub.mkdir()
@@ -660,7 +666,7 @@ def test_only_a_verify_review_card_reaches_done_from_this_stage(tmp_path, monkey
                             lambda r, card, branch, base, test_timeout=600, remote="":
                             (False, "conflict"))
         runner.settle(root, "probe", runner.Dispatch("reviewed", "ok"))
-        assert board.find(root, "probe").lane == "review", verify
+        assert board.find(root, "probe").lane == board.BLOCKED_LANE, verify
 
 
 def test_a_play_card_lands_carrying_the_workers_scenario(tmp_path, monkeypatch):
@@ -1387,12 +1393,18 @@ def test_rebase_and_merge_replays_over_a_non_conflicting_sibling(tmp_path):
     assert (root / "sibling.py").read_text(encoding="utf-8") == "y = 2\n"
 
 
-def test_rebase_and_merge_leaves_a_conflicting_branch_for_a_human(tmp_path):
+def test_rebase_and_merge_leaves_a_conflicting_branch_for_a_human(tmp_path, monkeypatch):
     """The problem #2 fixes: a sibling edited the *same* file on development_team
     since this card was reviewed. The rebase conflicts, so the branch does NOT
     merge, development_team is left exactly where it was, and the reason names the
-    file — never a guessed resolution (decision #3)."""
+    file — never a guessed resolution (decision #3).
+
+    The resolver is stubbed to decline, which is what keeps this the test its name
+    claims: since 2026-08-23 a conflict is offered to `merge-resolver` first, and
+    what is under test here is the path *after* it says no."""
     root = _worktree_repo(tmp_path)
+    monkeypatch.setattr(runner, "_resolve_conflict",
+                        lambda *a, **k: (False, "the merge-resolver declined it"))
     _branch_with_file(root, tmp_path, "ai/probe", "shared.py", "value = 'A'\n")
     _commit_on_base(root, tmp_path, "shared.py", "value = 'B'\n")
     base_before = runner._git(root, "rev-parse", "development_team").stdout.strip()
@@ -1406,6 +1418,41 @@ def test_rebase_and_merge_leaves_a_conflicting_branch_for_a_human(tmp_path):
     assert (root / "shared.py").read_text(encoding="utf-8") == "value = 'B'\n"
     # The branch is kept — a human still needs it to resolve the conflict.
     assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode == 0
+
+
+def test_rebase_and_merge_lands_a_card_the_resolver_settles(tmp_path, monkeypatch):
+    """The 2026-08-23 change, end to end: a conflict that used to stop the merge and
+    summon Karel is now offered to `merge-resolver`, and a resolution it settles
+    lands the card exactly as a clean rebase would.
+
+    The resolver is stubbed — it is a subprocess boundary, and its own guardrails
+    are `test_runner_resolve_conflict.py`. What this pins is the wiring around it:
+    that a settled conflict reaches the merge, moves the base, and deletes the
+    branch, rather than returning `(False, …)` on its way to `blocked/`."""
+    root = _worktree_repo(tmp_path)
+    _branch_with_file(root, tmp_path, "ai/probe", "shared.py", "value = 'A'\n")
+    _commit_on_base(root, tmp_path, "shared.py", "value = 'B'\n")
+    base_before = runner._git(root, "rev-parse", "development_team").stdout.strip()
+
+    def settle_it(root_, tree, card_, branch, base, out_dir, **kwargs):
+        (tree / "shared.py").write_bytes(b"value = 'A and B'\n")
+        runner._git(tree, "add", "shared.py")
+        cont = runner.subprocess.run(
+            ["git", "rebase", "--continue"], cwd=tree, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            env={**runner.os.environ, "GIT_EDITOR": "true"})
+        assert cont.returncode == 0, cont.stderr
+        return True, "kept both sides"
+
+    monkeypatch.setattr(runner, "_resolve_conflict", settle_it)
+    card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
+    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+
+    assert merged, why
+    assert runner._git(root, "rev-parse", "development_team").stdout.strip() != base_before
+    assert (root / "shared.py").read_text(encoding="utf-8") == "value = 'A and B'\n"
+    # Merged, so the branch goes — the same close-out a clean rebase gets.
+    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode != 0
 
 
 def test_rebase_and_merge_deletes_the_branch_on_the_remote_too(tmp_path):
@@ -1475,10 +1522,15 @@ def test_rebase_and_merge_refuses_to_delete_a_remote_carrying_unmerged_commits(t
     assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode != 0
 
 
-def test_rebase_and_merge_deletes_neither_copy_when_the_merge_fails(tmp_path):
+def test_rebase_and_merge_deletes_neither_copy_when_the_merge_fails(tmp_path, monkeypatch):
     """A conflicting card keeps both refs: a human needs the branch to resolve it,
-    and needs it reachable from wherever they are, which is the remote."""
+    and needs it reachable from wherever they are, which is the remote.
+
+    Resolver stubbed to decline — see the note on
+    `test_rebase_and_merge_leaves_a_conflicting_branch_for_a_human`."""
     root = _worktree_repo(tmp_path)
+    monkeypatch.setattr(runner, "_resolve_conflict",
+                        lambda *a, **k: (False, "the merge-resolver declined it"))
     bare = _bare_origin(root, tmp_path)
     _branch_with_file(root, tmp_path, "ai/probe", "shared.py", "value = 'A'\n")
     runner.publish(root, "origin", "development_team")

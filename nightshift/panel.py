@@ -861,6 +861,10 @@ class Context:
     decisions: list[board.Card] = field(default_factory=list)
     testing: list[board.Card] = field(default_factory=list)
     review: list[board.Card] = field(default_factory=list)
+    #: `blocked/` — reviewed ok, work done, the merge needs a person. Gathered
+    #: beside `review` because the NOW page draws them adjacently and they used to
+    #: be the same list; see `board.BLOCKED_LANE` for why they stopped being one.
+    blocked: list[board.Card] = field(default_factory=list)
     notes: list[ingest.Note] = field(default_factory=list)
     ideas: list[str] = field(default_factory=list)
     routing: ingest.RoutingView = field(default_factory=ingest.RoutingView)
@@ -965,8 +969,11 @@ class Context:
 
     def counts(self) -> dict[str, int]:
         return {
+            # `blocked` counts here, not under `verify`: it is work waiting on a
+            # person's hands, which is what the NOW rail number means. It used to be
+            # invisible inside the `review` count, which is the whole complaint.
             "now": len(self.decisions) + len(self.do_now) + len(self.tonight)
-                   + len(self.elsewhere) + len(self.chores),
+                   + len(self.elsewhere) + len(self.chores) + len(self.blocked),
             "verify": len(self.testing) + len(self.review),
             "inbox": len(self.notes),
             "ideas": len(self.ideas),
@@ -1009,6 +1016,7 @@ def read_context(root: Path, *, fetch_freshness: bool = False) -> Context:
         decisions=board.cards(root, "needs-decision"),
         testing=board.cards(root, "testing"),
         review=board.cards(root, "review"),
+        blocked=board.cards(root, board.BLOCKED_LANE),
         notes=ingest.notes(root),
         ideas=read_ideas(root),
         routing=ingest.read_view(root),
@@ -1880,6 +1888,12 @@ def _render_now(ctx: Context) -> str:
                         empty="Nothing is waiting on a decision.",
                         sec_id="decide"))
 
+    # Blocked before review, because it is the one of the two that is *waiting on
+    # Karel*: the work is finished and reviewed and only the landing is stuck, so it
+    # sits with the other things a person has to do rather than under a heading that
+    # says a reviewer still owes something.
+    out.append(_blocked_section(ctx))
+
     # `review/` used to be invisible unless you opened Verify — a card could sit
     # there for weeks with nothing on the page you actually land on saying so.
     # Same section, same data, shown here too, so it cannot be missed just
@@ -2031,6 +2045,42 @@ def _stamp_of(path: Path) -> str:
         return f"written {dt.datetime.fromtimestamp(path.stat().st_mtime):%d %b %H:%M}"
     except OSError:
         return ""
+
+
+def _blocked_section(ctx: Context) -> str:
+    """The `blocked/` lane: reviewed ok, work done, the merge needs a person.
+
+    Karel, 2026-08-23, having found two finished cards sitting under **Under review**:
+    *"we again got into 'human needs to resolve it' being in review — that is not what
+    review is for."* They were not awaiting review; they had passed it, and their
+    branches would not rebase onto a `test` that had moved under them. The lane split
+    is in `board.BLOCKED_LANE`; this is the half of it he actually sees.
+
+    Every row carries the `## Merge` note verbatim, because that is the whole content
+    of the blockage — which branch, onto which base, and what the resolver hit. No
+    action button: unsticking a merge is a git operation in a checkout, not something
+    the panel can spawn, and a button that only pretends is worse than none.
+    """
+    rows = []
+    for card in ctx.blocked:
+        branch = card.fields.get("branch") or f"ai/{card.id}"
+        why = (board.section(card.text, "Merge") or "").strip()
+        meta = [_e(stat) for stat in [diff_stat(ctx.root, ctx.base, branch)] if stat]
+        meta.append(_chip("reviewed ok", "ok"))
+        rows.append(_row(marker="!", acts=_act("Diff", href=f"/diff/{card.id}"),
+                         body=_card_body(card, meta=meta, why=why[:400])))
+    flag = ""
+    if ctx.blocked:
+        flag = ('<div class="flag"><h3>Finished work that cannot land</h3>'
+                '<p>Each of these passed gates, tests and review, then would not rebase '
+                'onto the integration branch — and the resolver could not settle it '
+                'either. Resolving one is a git operation in a real checkout: rebase the '
+                'branch, fix the conflict, re-run preflight, merge, then move the card to '
+                '<code>testing/</code>. Nothing here is waiting on a decision.</p></div>')
+    return _section("Blocked on you", len(ctx.blocked), flag + "".join(rows),
+                    note="Reviewed and done; only the merge is stuck.",
+                    empty="Nothing is blocked.",
+                    sec_id="blocked")
 
 
 def _review_section(ctx: Context) -> str:

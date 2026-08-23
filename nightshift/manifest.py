@@ -221,6 +221,29 @@ class FreshnessRule:
 
 
 @dataclass(frozen=True)
+class FoldTarget:
+    """One shared append-at-the-top log, and where in it a new entry goes.
+
+    `path` is the file. `under` is the heading line the entry is inserted directly
+    beneath — matched exactly, after stripping, so `## Current State` finds that
+    heading and nothing else. The insertion point is *after* the heading and any
+    blank line following it, i.e. the top of the list, because every one of these
+    files is newest-first.
+
+    `key` is the fragment field this target reads. One fragment per finished card
+    carries a field per target, so a card can write a one-line register entry to
+    the orientation file and a several-paragraph narrative to the history file in
+    the same fragment, and either may be absent.
+
+    `under` is required rather than defaulted to "the top of the file" because
+    these files open with frontmatter and a preamble that must not be pushed down.
+    """
+    path: str
+    under: str
+    key: str
+
+
+@dataclass(frozen=True)
 class Memory:
     """`budget_bytes = None` means **the orientation-budget gate does not run**, and
     that is the recommended starting value.
@@ -233,6 +256,17 @@ class Memory:
     orientation: tuple[str, ...] = ()
     budget_bytes: int | None = None
     freshness: tuple[FreshnessRule, ...] = ()
+    #: Files a finished card's record is *folded into* rather than edited directly —
+    #: see `nightshift.memoryfold`. Empty (the default) leaves the whole mechanism
+    #: off, and a project that never declares one behaves exactly as before.
+    #:
+    #: These are the shared append-at-the-top logs: a per-subsystem register, a
+    #: dated history. Every card wants to add a line at the same anchor, so two
+    #: cards finishing the same night collide **by construction** — which is what
+    #: produced four hand-resolved rebases in Dungeoneer (2026-08-09, 2026-08-13,
+    #: and two on 2026-08-22). Declaring a file here moves the write off the card's
+    #: branch and into a serial post-merge step, where two cards cannot race.
+    fold: tuple[FoldTarget, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -523,7 +557,7 @@ _KNOWN: dict[str, tuple[str, ...]] = {
     "branches": ("integration", "stable", "forbidden_extra"),
     "board": ("root",),
     "worker": ("harvest_dirs", "fence_env", "integration_checkout_dir"),
-    "memory": ("orientation", "budget_bytes", "freshness"),
+    "memory": ("orientation", "budget_bytes", "freshness", "fold"),
     "layering": ("forbid",),
     "i18n": ("adapter", "base", "targets", "untranslated_allowlist", "loanwords_denylist"),
     "dead_code": ("paths", "min_confidence"),
@@ -569,6 +603,25 @@ def parse(data: dict, root: Path) -> Manifest:
             raise ManifestError(
                 f"memory.freshness `when` must be \"touched\" or \"added\", not {when!r}")
         freshness.append(FreshnessRule(str(row["touches"]), str(row["requires"]), when))
+
+    fold = []
+    for row in memory_t.get("fold", []):
+        if not isinstance(row, dict) or not {"path", "under", "key"} <= set(row):
+            raise ManifestError(
+                "memory.fold rows must be { path = ..., under = ..., key = ... }")
+        unknown = sorted(set(row) - {"path", "under", "key"})
+        if unknown:
+            raise ManifestError(
+                f"memory.fold row has unknown key(s) {', '.join(unknown)} — "
+                f"known keys are path, under, key")
+        fold.append(FoldTarget(str(row["path"]), str(row["under"]), str(row["key"])))
+    keys = [target.key for target in fold]
+    duplicate = next((k for k in keys if keys.count(k) > 1), None)
+    if duplicate is not None:
+        # Two targets reading one fragment field would write the same text into two
+        # files, which is never what a register+history split wants and is silent.
+        raise ManifestError(f"memory.fold has two rows with key = {duplicate!r} — "
+                            f"each target reads its own fragment field")
 
     layering = []
     for row in layering_t.get("forbid", []):
@@ -676,6 +729,7 @@ def parse(data: dict, root: Path) -> Manifest:
             orientation=_as_str_tuple(memory_t.get("orientation", []), "memory.orientation"),
             budget_bytes=budget,
             freshness=tuple(freshness),
+            fold=tuple(fold),
         ),
         layering=tuple(layering),
         i18n=i18n,

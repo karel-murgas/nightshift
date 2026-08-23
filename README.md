@@ -338,9 +338,10 @@ inbox/ → tasks/ → review/ → testing/ → done/
 | `tasks` | 2 |
 | `needs-decision` | 3 |
 | `review` | 4 |
-| `testing` | 5 |
-| `done` | 6 |
-| `failed` | 7 |
+| `blocked` | 5 |
+| `testing` | 6 |
+| `done` | 7 |
+| `failed` | 8 |
 <!-- /generated:board-lanes -->
 
 `inbox/` is where a raw note becomes an actionable card; `tasks/` is
@@ -506,6 +507,7 @@ project's one.
 | `board_view_sync` | the board view's oversize formula must agree with runner.CARD_COMFORT_BYTES |
 | `branch_role_prose` | docs naming the integration branch must agree with .ai/manifest.toml [branches] |
 | `card_schema` | cards on the board match the card schema, and `state:` agrees with the lane |
+| `conflict_markers` | no tracked text file carries a git conflict marker |
 | `corrections_log` | the correction log parses and its class/channel values are in vocabulary |
 | `dead_code` | vulture reports no dead code in the project's source at the configured confidence |
 | `deletion_sweep` | a removed file or top-level class/def must not still be named by any live doc |
@@ -594,7 +596,7 @@ marker for the same purpose.
 | `[branches]` | `integration=None`, `stable='main'`, `forbidden_extra=()` | `integration` has no default on purpose (module docstring). |
 | `[board]` | `root='Board'` | Lane names are framework config, not project facts (D5), so they are not here — only where the board lives, and who signs a decision on it. |
 | `[worker]` | `harvest_dirs=()`, `fence_env=''`, `integration_checkout_dir=''` | The three constants that were the entire project-specific content of `runner.py`'s 3,597 lines. |
-| `[memory]` | `orientation=()`, `budget_bytes=None`, `freshness=()` | `budget_bytes = None` means **the orientation-budget gate does not run**, and that is the recommended starting value. |
+| `[memory]` | `orientation=()`, `budget_bytes=None`, `freshness=()`, `fold=()` | `budget_bytes = None` means **the orientation-budget gate does not run**, and that is the recommended starting value. |
 | `[layering]` | `forbid = [{importer, imports, exempt}]` | `importer` must not import `imports`. |
 | `[i18n]` | `adapter` (required), `base='en'`, `targets=()`, `untranslated_allowlist=''`, `loanwords_denylist=''` | Present only if the project has localisation; `Manifest.i18n` is `None` otherwise and a project's i18n gates find nothing to check. |
 | `[dead_code]` | `paths=()`, `min_confidence=80` | What `nightshift.gates.dead_code` points `vulture` at, and how sure it must be before it speaks. |

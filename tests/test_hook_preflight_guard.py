@@ -103,6 +103,32 @@ def test_a_git_command_that_publishes_nothing_is_untouched(tmp_path):
         assert _verdict(preflight_guard.decide(command, repo)) == "allow", command
 
 
+def test_deleting_a_remote_branch_needs_no_receipt(tmp_path):
+    """A deletion carries no content outward, so there is nothing for a receipt to
+    have validated — and demanding one has a real cost.
+
+    2026-08-23: a card's work had merged, `git branch -d` had succeeded locally, and
+    `git push origin --delete ai/<id>` — a required close-out step (Karel,
+    2026-08-09: *"Delete on merge, both local and remote"*) — was refused because the
+    guard resolved the push to `HEAD`, a commit the command does not send anywhere.
+    The remote branch was left orphaned, which is the exact leak that rule exists to
+    prevent.
+    """
+    repo = _repo(tmp_path, "proj")   # deliberately NOT validated
+    for command in ("git push origin --delete ai/probe",
+                    "git push origin -d ai/probe",
+                    "git push origin :ai/probe"):
+        assert _verdict(preflight_guard.decide(command, repo)) == "allow", command
+
+
+def test_an_ordinary_push_is_still_guarded_alongside_the_delete_exemption(tmp_path):
+    """The exemption must be narrow: a refspec push that happens to contain a colon
+    is publishing, and `+local:remote` even force-publishes. Neither is a deletion."""
+    repo = _repo(tmp_path, "proj")
+    for command in ("git push origin main:main", "git push origin +main:main"):
+        assert _verdict(preflight_guard.decide(command, repo)) == "deny", command
+
+
 # --- the incident ----------------------------------------------------------------
 
 

@@ -186,7 +186,8 @@ _section = board.section
 # Every lane a card can be reported from. `ideas/` is excluded on principle, not
 # by accident of scope: no judgment actor may read that folder (03_board.md §…),
 # and the digest is read as a judgment about what to do next.
-_LANES = ("inbox", "tasks", "needs-decision", "review", "testing", "done", "failed")
+_LANES = ("inbox", "tasks", "needs-decision", "review", "blocked", "testing", "done",
+          "failed")
 
 
 class Card(board.Card):

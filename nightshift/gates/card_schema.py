@@ -56,6 +56,7 @@ LANES: tuple[str, ...] = (
     "tasks",
     "needs-decision",
     "review",
+    "blocked",
     "testing",
     "done",
     "failed",
@@ -71,7 +72,10 @@ _UNTRIAGED = frozenset({"inbox"})
 # history, and so is prose about it. Rewriting a shipped card to agree with a rule
 # clarified afterwards falsifies the record that made the clarification necessary,
 # which is the same reason `doc_scope: history` exists.
-_DISPATCHED = frozenset({"testing", "done", "failed"})
+#
+# `blocked/` is one of them: a card only reaches it *after* a dispatch produced a
+# reviewed-ok branch, so its `unattended:` decision is as spent as a shipped card's.
+_DISPATCHED = frozenset({"blocked", "testing", "done", "failed"})
 
 _AUTHOR_FIELDS: tuple[str, ...] = (
     "id",
@@ -537,6 +541,43 @@ def _orphans(repo_root: Path) -> list[Violation]:
     return out
 
 
+def _duplicates(found: list[tuple[Path, str]], repo_root: Path) -> list[Violation]:
+    """One card file name appearing in more than one lane.
+
+    The exact mirror of `_orphans`, and the same sentence justifies both: *one state
+    means one lane*. A card in no lane has no state; a card in two has two, and every
+    reader picks a different one — `board.find` returns whichever lane it enumerates
+    first, the digest counts the card twice, and the runner can re-dispatch work that
+    already shipped.
+
+    Found the hard way on 2026-08-23. A board move ran `git mv`, but the commit that
+    followed named only the destination path, so the deletion of the source stayed
+    unstaged and never landed: `grid-distance-metric` was committed into `testing/`
+    while its `review/` copy stayed on the branch. All 45 gates passed — this one
+    walked both copies, validated each against its own lane, and had nothing to say
+    about there being two. The half-done *move* is already covered (`state:`
+    disagreeing with the folder is the crash check `board.move` is ordered around);
+    what was uncovered is the half-done *commit*, which leaves both copies internally
+    consistent and only wrong in relation to each other.
+    """
+    seen: dict[str, list[str]] = {}
+    for path, lane in found:
+        seen.setdefault(path.name, []).append(lane)
+    out: list[Violation] = []
+    for name, lanes in sorted(seen.items()):
+        if len(lanes) < 2:
+            continue
+        board_rel = _board.board_dir(repo_root).relative_to(repo_root).as_posix()
+        out.append(Violation(
+            f"{board_rel}/{lanes[0]}/{name}", 1,
+            f"card_schema: `{name}` also exists in {', '.join(f'`{l}/`' for l in lanes[1:])} "
+            f"— one state means one lane, and every reader picks a different copy. "
+            f"A `git mv` whose commit named only the destination leaves exactly this; "
+            f"delete the stale copy with `git rm`",
+        ))
+    return out
+
+
 def cards(repo_root: Path) -> list[tuple[Path, str]]:
     found: list[tuple[Path, str]] = []
     for lane in LANES:
@@ -552,7 +593,9 @@ def cards(repo_root: Path) -> list[tuple[Path, str]]:
 
 def check(repo_root: Path) -> list[Violation]:
     violations: list[Violation] = _orphans(repo_root)
-    for path, lane in cards(repo_root):
+    found = cards(repo_root)
+    violations.extend(_duplicates(found, repo_root))
+    for path, lane in found:
         violations.extend(_check_card(path, lane, repo_root))
     return violations
 

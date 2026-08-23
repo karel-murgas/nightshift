@@ -1001,14 +1001,23 @@ def test_only_the_spawn_functions_may_execute_the_claude_cli():
     CLI is executed only where a worker is started, and nothing that decides what
     to do (select, recover, settle, backoff) may reach for it.
 
-    Four functions now: `run_producer`, `run_checker`, `run_stale_check` and
-    `review_branch` (automate-review-step). Each *starts a worker* — a producer,
-    its checker, `stale-hunter` on one doc, or the diff reviewer on one finished
-    branch — and none of them *decides* anything: `review_stage` reads the
-    reviewer's verdict and routes on it (a file-state lookup), exactly as the card
-    loop selects and then calls `dispatch`. The reviewer having its own spawn is
-    the point — its context is built here rather than by the worker, which is what
-    makes §16's blindness structural instead of a charter instruction.
+    Five functions now: `run_producer`, `run_checker`, `run_stale_check`,
+    `review_branch` (automate-review-step) and `_resolve_conflict`
+    (merge-conflict-has-no-owner). Each *starts a worker* — a producer, its checker,
+    `stale-hunter` on one doc, the diff reviewer on one finished branch, or the
+    merge resolver on one paused rebase — and none of them *decides* anything:
+    `review_stage` reads the reviewer's verdict and routes on it (a file-state
+    lookup), exactly as the card loop selects and then calls `dispatch`. The reviewer
+    having its own spawn is the point — its context is built here rather than by the
+    worker, which is what makes §16's blindness structural instead of a charter
+    instruction.
+
+    `_resolve_conflict` belongs on this list for the same reason and keeps §12
+    intact the same way: the resolver produces a candidate *tree*, and every
+    accept/reject after it is an exit code — no conflict markers left, no edits
+    outside the conflicted paths, nothing still unmerged, `git rebase --continue`,
+    then the gates and the affected test slice its caller already re-runs. What the
+    LLM supplies is file contents, not a routing decision.
 
     `review_branch` is where the reviewer's spawn now lives; `run_reviewer` is the
     one-card wrapper that lifts `## Acceptance`/`## Intent` off a card and calls
@@ -1022,7 +1031,8 @@ def test_only_the_spawn_functions_may_execute_the_claude_cli():
     """
     source = _RUNNER_SOURCE.read_text(encoding="utf-8")
     assert _functions_spawning(source, "binary") == {
-        "run_producer", "run_checker", "run_stale_check", "review_branch"}
+        "run_producer", "run_checker", "run_stale_check", "review_branch",
+        "_resolve_conflict"}
 
 
 def test_every_spawn_sites_wall_path_routes_through_the_shared_helper():
@@ -1042,6 +1052,16 @@ def test_every_spawn_sites_wall_path_routes_through_the_shared_helper():
     `run_producer` and `run_checker` are two different stages with two different
     predicates, and a fix that routed one and forgot the other is the specific
     mistake this catches.
+
+    **A spawn site may also answer for itself, and that satisfies the rule.** The
+    four original sites return `(verdict, cost, wall)` and leave the ordering to
+    their caller, so the guard grew up asking about callers. `_resolve_conflict`
+    (2026-08-23) does not: it spawns in a loop and has to decide *within* the loop
+    whether to run another round, so it consults the helper in its own body and
+    returns a plain `(bool, str)`. That is the same rule enforced one frame closer
+    to the spawn, not an exception to it — so it is recognised here rather than
+    parked in `_WALL_HANDLING_EXEMPT`, which would have switched the check off for
+    the one site whose wall handling is the newest and least reviewed.
     """
     source = _RUNNER_SOURCE.read_text(encoding="utf-8")
     spawn_sites = _functions_spawning(source, "binary") - _WALL_HANDLING_EXEMPT
@@ -1049,6 +1069,8 @@ def test_every_spawn_sites_wall_path_routes_through_the_shared_helper():
 
     helper_calls = _functions_calling(source, "verdict_survives_a_wall")
     for site in sorted(spawn_sites):
+        if site in helper_calls:
+            continue   # handles its own wall, in its own body — see the docstring
         callers = _functions_calling(source, site)
         assert callers, (
             f"{site} spawns a worker but nothing calls it — a spawn site with no "

@@ -70,10 +70,30 @@ LANES: tuple[str, ...] = (
     "tasks",
     "needs-decision",
     "review",
+    "blocked",
     "testing",
     "done",
     "failed",
 )
+
+#: Reviewed `ok`, work finished, and the branch will not land without a person.
+#:
+#: Added 2026-08-23. This state existed long before the lane did and was parked in
+#: `review/`, which says *"gates green, awaiting Claude review"* — the one thing such
+#: a card is definitely not. Karel: *"we again got into 'human needs to resolve it'
+#: being in review — that is not what review is for."* It read on the NOW page as
+#: outstanding Claude work, so the two cards sitting in it looked queued rather than
+#: blocked, and nothing distinguished them from a card the reviewer had yet to reach.
+#:
+#: Distinct from `needs-decision/`, which is a question about what the *product*
+#: should do and is answered by writing a Thread reply. A card here needs an
+#: *operation* — resolve the conflict, or fix what the replayed tests caught. Nothing
+#: is being asked; something is being blocked. Distinct from `failed/` too: the work
+#: is good and reviewed, only the landing is stuck.
+#:
+#: `runner.settle` routes here when `rebase_and_merge` returns `False`, which now
+#: happens only after `_resolve_conflict` has tried and could not.
+BLOCKED_LANE = "blocked"
 
 # The private lane's name, owned here because the board's vocabulary is owned here —
 # `reconcile` and `card_schema` each used to carry their own copy of the string.

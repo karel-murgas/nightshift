@@ -5,8 +5,8 @@ mechanism — no database, no daemon, resumable from disk alone after a 3 AM reb
 
 ```
 ideas/ → inbox/ → tasks/ → review/ → testing/ → done/
-  ↑                 ↕                             ↘ failed/
-{{maintainer}}'s      needs-decision/
+  ↑                 ↕          ↘                  ↘ failed/
+{{maintainer}}'s      needs-decision/   blocked/
 ```
 
 ## Seeing it
@@ -93,6 +93,13 @@ Kanban, not by dragging the file in the sidebar. A manual file move leaves the o
   failure. A card here must carry a `## Question` section stating what was attempted,
   what is ambiguous, the candidate answers and what each implies.
 - **`review/`** — gates green, awaiting Claude review, or waiting on a sibling card.
+- **`blocked/`** — reviewed `ok`, work finished, and the branch will not land without a
+  person. Almost always a rebase conflict the `merge-resolver` agent tried and declined; the
+  card carries a `## Merge` section saying which branch, onto which base, and what the
+  resolver hit. **Nothing is being asked of you** — unlike `needs-decision/`, there is no
+  question to answer, there is a git operation to perform: rebase, resolve, re-run preflight,
+  merge, then move the card to `testing/`. Its own lane because it used to be `review/`,
+  where finished work read as outstanding Claude work.
 - **`testing/`** — merged to the session branch, awaiting {{maintainer}} at the keyboard.
 - **`done/` and `failed/`** are the archive. **Nothing is deleted** — Session H's
   self-improvement loop reads them as its evidence. Filter them out of the Bases view
