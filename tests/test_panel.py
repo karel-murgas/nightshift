@@ -2390,6 +2390,22 @@ def test_a_note_edited_after_it_was_routed_says_so(server):
     assert "edited since routing" in text
 
 
+def test_a_hand_set_route_the_last_pass_never_saw_still_wears_its_chip(server):
+    """`route: triage` typed straight into a note's frontmatter groups it under
+    "Waiting on triage" (the group is keyed on `note.route`) even though no
+    `Decision` backs it — the routing view was written before this note existed.
+    The chip announcing the route used to be gated on that missing `Decision`
+    too, so the row sat in the right group with no chip saying why."""
+    base, root = server
+    _notes(root, **{"handset.md": _routed("triage")})
+    (root / board.ROUTING_VIEW).write_text(_ROUTED, encoding="utf-8")
+
+    _, text = _get(base, "inbox")
+
+    assert "handset.md" in text
+    assert 'class="chip warn">triage</span>' in text
+
+
 def test_with_no_routing_pass_the_page_says_which_button_fills_it_in(server):
     base, root = server
     _notes(root, **{"lonely.md": "a"})

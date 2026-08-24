@@ -2216,8 +2216,15 @@ def _render_inbox(ctx: Context) -> str:
         for note, decision in bucket:
             rel = _rel(ctx.root, note.path)
             meta = [f"{note.size} B", _e(_stamp_of(note.path))]
-            if decision:
+            # The group chip follows `route` — the bucket the row is actually in,
+            # true whether a classifier decision backs it or the frontmatter was
+            # hand-set — not `decision`, which is None for a note routed by hand
+            # after the last pass (route: triage typed into a note nobody has
+            # classified yet). Gating the chip on `decision` left such a row
+            # grouped under "Waiting on triage" but wearing no chip saying so.
+            if route:
                 meta.insert(0, _chip(route, kind))
+            if decision:
                 if decision.confidence != "high":
                     meta.append(_chip(f"confidence {decision.confidence}", "warn"))
                 if not decision.dispatchable:
