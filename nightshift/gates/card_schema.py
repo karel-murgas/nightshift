@@ -527,6 +527,19 @@ def _orphans(repo_root: Path) -> list[Violation]:
     a card outside every lane has no state, so it is invisible to the runner,
     absent from the digest, and silently not-done. A drag that lands slightly
     wrong produces exactly this, so it will recur.
+
+    **A dot-prefixed subdirectory is never a lane, and is skipped rather than
+    flagged.** The board's lanes are its plain subdirectories; a dot-prefixed one
+    is framework or tooling state that happens to sit under `Board/` — invisible to
+    Obsidian's Bases view by the same convention. Found the same way as the check
+    above: `nightshift.memoryfold` wrote its per-card memory fragments to
+    `<board>/.memory/<card-id>.md` on exactly that assumption, and this scan not
+    sharing it meant a card that followed the documented fragment convention
+    correctly still failed this gate, reported as an orphaned card
+    (2026-08-25). Fragments have since moved out of the board entirely
+    (`.ai/memory-fragments/`), but the exemption stays as a general rule: nothing
+    called a lane has ever started with a dot, so treating one as "not a card"
+    can only ever agree with the board's own convention, not fight it.
     """
     board = _board.board_dir(repo_root)
     if not board.is_dir():
@@ -536,8 +549,9 @@ def _orphans(repo_root: Path) -> list[Violation]:
     for path in sorted(board.rglob("*.md")):
         if path.name.upper() == "README.MD":
             continue
-        lane = path.relative_to(board).parts[0] if len(path.relative_to(board).parts) > 1 else None
-        if lane in known:
+        parts = path.relative_to(board).parts
+        lane = parts[0] if len(parts) > 1 else None
+        if lane in known or (lane is not None and lane.startswith(".")):
             continue
         rel = path.relative_to(repo_root).as_posix()
         where = f"`{lane}/`, which is not a lane" if lane else "the board root, outside every lane"

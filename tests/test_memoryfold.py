@@ -84,7 +84,7 @@ key = "history"
 
 
 def _fragment(root: Path, card_id: str, text: str) -> Path:
-    directory = root / "Board" / memoryfold.FRAGMENT_DIR
+    directory = memoryfold.fragment_dir(root)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{card_id}.md"
     path.write_text(text, encoding="utf-8")
@@ -219,6 +219,26 @@ def test_only_the_named_card_is_folded(tmp_path):
     assert "- **Mine**" in text
     assert "- **Theirs**" not in text
     assert sibling.exists()
+
+
+def test_a_fragment_left_at_the_old_board_location_still_folds(tmp_path):
+    """The transition case: a worker dispatched before the fragment moved out of the
+    board was told to write `Board/.memory/<card-id>.md`, and its branch merges after
+    the move. `fold()` must still find and fold it rather than silently skipping a
+    card's record because it looked only in the new location."""
+    root = _project(tmp_path, fold_rows=BOTH_ROWS)
+    legacy = memoryfold._legacy_fragment_dir(root)
+    legacy.mkdir(parents=True, exist_ok=True)
+    path = legacy / "probe.md"
+    path.write_text("## register\n\n- **New thing** (2026-08-25, `probe`): x.\n",
+                     encoding="utf-8")
+
+    report = memoryfold.fold(root)
+
+    assert "- **New thing** (2026-08-25, `probe`): x." in \
+        (root / "mem" / "state.md").read_text(encoding="utf-8")
+    assert not path.exists()
+    assert len(report) == 1
 
 
 def test_a_project_declaring_no_targets_folds_nothing(tmp_path):

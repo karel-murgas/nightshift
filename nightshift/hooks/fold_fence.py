@@ -12,10 +12,11 @@ card that finishes the same night, by construction rather than by disagreement. 
 cost four hand-resolved rebases in Dungeoneer (2026-08-09, 2026-08-13, and two on
 2026-08-22) before anyone counted them as one problem.
 
-So a dispatched worker writes `<board>/.memory/<card-id>.md` instead — a file no other
-card touches — and `nightshift.memoryfold` folds it into the real log after the card's
-branch merges, serially, where the insertion is safe. See that module for why this is
-the newsfragment pattern and why a union merge driver was rejected.
+So a dispatched worker writes `.ai/memory-fragments/<card-id>.md` instead — a file no
+other card touches — and `nightshift.memoryfold` folds it into the real log after the
+card's branch merges, serially, where the insertion is safe. See that module for why
+this is the newsfragment pattern, why a union merge driver was rejected, and why the
+fragment lives under `.ai/` rather than under the board it was mistaken for at first.
 
 **Off unless the runner turns it on, and off unless the project declares a target.**
 It arms on the same `[worker].fence_env` variable `worktree_fence` reads, which only a
@@ -118,13 +119,16 @@ def evaluate(payload: dict, fold_paths: list[str]) -> str | None:
     declared = _fenced(str(target), fold_paths)
     if declared is None:
         return None
+    # gate-ok(source_reference_liveness): `.ai/memory-fragments/` is a per-consuming-project
+    # runtime directory nightshift.memoryfold creates on demand; this framework's own
+    # checkout carries none, since fragments belong to a project's cards, not this package's.
     return (
         f"Blocked: `{declared}` is a shared memory log and a dispatched card must not "
         f"edit it directly.\n"
         f"Every card appends at the same anchor in this file, so two cards finishing "
         f"the same night conflict by construction — that cost four hand-resolved "
         f"rebases before it was fixed.\n"
-        f"Write your record to `Board/.memory/<card-id>.md` instead, with one `## "
+        f"Write your record to `.ai/memory-fragments/<card-id>.md` instead, with one `## "
         f"<key>` section per fold target (see `[[memory.fold]]` in .ai/manifest.toml "
         f"for the keys). It is folded into this file automatically, serially, once "
         f"your branch merges (nightshift.hooks.fold_fence)."

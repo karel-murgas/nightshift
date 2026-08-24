@@ -14,8 +14,8 @@ then the escalation's cause: *"Fix the cause too (the append, state.md and all t
 stuff.)"*
 
 **The fix is to move the write, not to merge it better.** A card writes its record to
-a file of its own — `<board>/.memory/<card-id>.md`, one fragment, nobody else's — and
-that file is the only thing on its branch. Two cards therefore touch two different
+a file of its own — `.ai/memory-fragments/<card-id>.md`, one fragment, nobody else's —
+and that file is the only thing on its branch. Two cards therefore touch two different
 paths and cannot conflict at all. After a card's branch **merges**, `fold()` moves the
 fragment's contents into the real logs and deletes it. Merges are serial, so the
 insertion that used to race now happens one card at a time on the integration branch,
@@ -30,6 +30,20 @@ dissolve the conflict declaratively and would also silently union two branches t
 genuinely edited the same prose, with nothing able to tell the two apart. It treats the
 symptom in a way that can lose content; this removes the cause.
 
+**Why `.ai/`, not the board.** This lived at `<board>/.memory/` from 2026-08-23 to
+2026-08-25, on the theory that a dot prefix would keep every board-scanning tool blind
+to it — Obsidian's Bases view does honour that convention, but `nightshift.gates.
+card_schema`'s orphan check does not: it walks every `.md` file under the board looking
+for one outside a known lane, with no notion of an exempt subdirectory, dot-prefixed or
+not. A card that wrote its fragment exactly as instructed therefore failed that gate as
+an "orphaned card" (Karel, 2026-08-25: *"is board a good place to store these? ... maybe
+some dedicated folder would be better"*). `.ai/` already holds this project's other
+per-run, per-card machinery — `runs/`, `gates/`, `corrections.log` — so a fragment
+belongs beside its actual neighbours, not inside the board it was mistaken for.
+`card_schema`'s orphan check was also hardened to ignore any dot-prefixed board
+subdirectory on general principle, in case the board ever grows another one, but the
+fragment itself no longer depends on that exemption at all.
+
 **Off unless declared.** A project with no `[[memory.fold]]` rows has no fragment
 directory, no fold step and no behaviour change.
 """
@@ -41,20 +55,17 @@ from pathlib import Path
 
 from nightshift import board as _board
 from nightshift import textio
-from nightshift.manifest import FoldTarget, ManifestError
+from nightshift.manifest import AI_DIR, FoldTarget, ManifestError
 from nightshift.manifest import load as _load
 
 __all__ = ["FRAGMENT_DIR", "Fragment", "fragment_path", "fragments", "targets",
            "insert_under", "fold"]
 
-#: Where a card's pending record lives, relative to the board root. Under the board
-#: rather than under the memory directory on purpose: it is card state, it is deleted
-#: when the card lands, and `[memory].orientation`'s budget gate must not count it.
-#:
-#: A dot prefix so Obsidian's Bases view does not read the fragments as cards — the
-#: board's lanes are its subdirectories, and an undotted one would need adding to
-#: every enumeration that walks them.
-FRAGMENT_DIR = ".memory"
+#: Where a card's pending record lives, relative to `.ai/` -- framework/build state,
+#: not board content: it has no lane, it is deleted the moment it folds, and
+#: `[memory].orientation`'s budget gate must not count it. See the module docstring's
+#: "Why `.ai/`, not the board" for why this is not under `Board/`.
+FRAGMENT_DIR = "memory-fragments"
 
 
 @dataclass(frozen=True)
@@ -86,7 +97,7 @@ def targets(root: Path) -> tuple[FoldTarget, ...]:
 
 
 def fragment_dir(root: Path) -> Path:
-    return _board.board_dir(root) / FRAGMENT_DIR
+    return root / AI_DIR / FRAGMENT_DIR
 
 
 def fragment_path(root: Path, card_id: str) -> Path:
@@ -112,15 +123,31 @@ def _sections(text: str) -> dict[str, str]:
     return {name: "\n".join(body).strip() for name, body in found.items()}
 
 
+def _legacy_fragment_dir(root: Path) -> Path:
+    """Where a fragment lived from 2026-08-23 to 2026-08-25, before landing under
+    `.ai/` instead of the board (see the module docstring's "Why `.ai/`, not the
+    board"). Read-only fallback, for exactly one reason: a worker already dispatched
+    with the old instruction baked into its prompt will still write here, and its
+    branch will merge after this change is live. Without this, `fold()` would look
+    only in the new location, find nothing, and silently skip that card's record —
+    the exact loss this whole mechanism exists to prevent. Delete once no branch
+    still to merge can contain a fragment at this path."""
+    return _board.board_dir(root) / ".memory"
+
+
 def fragments(root: Path) -> list[Fragment]:
-    """Every pending fragment, oldest card id first for a stable fold order."""
-    directory = fragment_dir(root)
-    if not directory.is_dir():
-        return []
+    """Every pending fragment, oldest card id first for a stable fold order.
+
+    Checks the legacy directory too (`_legacy_fragment_dir`) — see its docstring.
+    """
     out: list[Fragment] = []
-    for path in sorted(directory.glob("*.md")):
-        text = path.read_text(encoding="utf-8")
-        out.append(Fragment(path.stem, path, _sections(text)))
+    for directory in (fragment_dir(root), _legacy_fragment_dir(root)):
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.md")):
+            text = path.read_text(encoding="utf-8")
+            out.append(Fragment(path.stem, path, _sections(text)))
+    out.sort(key=lambda fragment: fragment.card_id)
     return out
 
 

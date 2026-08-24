@@ -340,6 +340,21 @@ def test_a_card_in_a_made_up_lane_is_caught(tmp_path):
     assert "which is not a lane" in _rules(card_schema.check(root))
 
 
+def test_a_dot_prefixed_board_subdirectory_is_not_mistaken_for_an_orphan(tmp_path):
+    """`nightshift.memoryfold` used to write per-card fragments to `Board/.memory/`
+    on the theory that a dot prefix keeps board-scanning tools blind to it — true for
+    Obsidian's Bases view, but this orphan check did not share the exemption, so a
+    card that wrote its fragment exactly as instructed still failed as an "orphaned
+    card" (2026-08-25). Fragments have since moved to `.ai/memory-fragments/`, but the
+    exemption stays: any dot-prefixed subdirectory is framework state, never a lane,
+    and is skipped rather than flagged — a `.md` file placed there is not a card."""
+    root = _board(tmp_path, "tasks", _GOOD.format(id="probe", lane="tasks"))
+    dotdir = root / "Board" / ".memory"
+    dotdir.mkdir()
+    (dotdir / "stray.md").write_text("## register\n- not a card\n", encoding="utf-8")
+    assert card_schema.check(root) == []
+
+
 def test_the_same_card_in_two_lanes_is_caught(tmp_path):
     """The mirror of the orphan case, and the same sentence justifies both: one
     state means one lane. Found on 2026-08-23 — a board move ran `git mv` but the

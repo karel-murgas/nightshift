@@ -84,7 +84,7 @@ def test_a_similarly_named_file_is_allowed(tmp_path):
 def test_the_fragment_a_worker_should_write_is_allowed(tmp_path):
     """The fence has to leave open the thing it tells the worker to do instead."""
     root = _project(tmp_path)
-    assert _verdict(root, "Board/.memory/probe.md") == "allow"
+    assert _verdict(root, ".ai/memory-fragments/probe.md") == "allow"
 
 
 def test_a_project_declaring_no_fold_targets_is_untouched(tmp_path):
@@ -108,7 +108,7 @@ def test_the_denial_names_the_fragment_to_write_instead(tmp_path):
     reason = fold_fence.evaluate(
         {"tool_name": "Edit", "tool_input": {"file_path": ".claude/memory/state.md"}},
         fold_fence._fold_paths(root))
-    assert "Board/.memory/<card-id>.md" in reason
+    assert ".ai/memory-fragments/<card-id>.md" in reason
 
 
 def test_armed_only_when_the_dispatch_variable_is_set(tmp_path, monkeypatch):
