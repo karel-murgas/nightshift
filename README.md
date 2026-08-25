@@ -509,6 +509,7 @@ project's one.
 | `branch_role_prose` | docs naming the integration branch must agree with .ai/manifest.toml [branches] |
 | `card_schema` | cards on the board match the card schema, and `state:` agrees with the lane |
 | `conflict_markers` | no tracked text file carries a git conflict marker |
+| `coreference_sweep` | a numeric series or SCREAMING_SNAKE symbol this diff replaced must not survive in a live doc |
 | `corrections_log` | the correction log parses and its class/channel values are in vocabulary |
 | `dead_code` | vulture reports no dead code in the project's source at the configured confidence |
 | `deletion_sweep` | a removed file or top-level class/def must not still be named by any live doc |
