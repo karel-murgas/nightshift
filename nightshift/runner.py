@@ -153,6 +153,14 @@ def neighbours_dir(root: Path) -> Path | None:
 # A card gets this many dispatches before it is filed as failed. Three is not a
 # tuned number — it is "one flake, one real retry, then stop burning the night."
 MAX_ATTEMPTS = 3
+# How many review-owed cards the end-of-night drain will conclude in one run.
+# `drain.py`'s recorded objection to draining inside a night is that the lane is
+# unbounded while the night's accounting is not; a cap is the answer to that
+# rather than a rebuttal of it. Four is "last night's backlog, twice" — enough
+# that a normal night never leaves anything owed, small enough that a lane that
+# has quietly grown to thirty cannot turn a run into a review marathon. The rest
+# wait for `python -m nightshift.drain`, which is unbounded on purpose.
+DRAIN_CAP = 4
 # A `kind: chore` gets exactly one, and the arithmetic is the argument: a batch of
 # eight one-prompters at three attempts each is a night, at one attempt each it is
 # an hour. A failed one-prompter is also the more useful artefact — it is worth a
@@ -2033,11 +2041,17 @@ stand alone and be answerable in fifteen seconds from a phone. You never edit, f
 
 @dataclass
 class Dispatch:
-    # "review" (gates+tests passed, nobody has concluded — the review stage either
-    # has not run yet or could not conclude, and `nightshift.drain` is the pass that
-    # takes it from there. Until that module existed this comment said "awaiting the
-    # review stage *or* a human's eye", and those two states behind one lane name are
-    # what hid `review/` having no exit at all) |
+    # "review" (gates+tests passed and a review is OWED AND OBTAINABLE — the stage
+    # has not run yet, the window closed before it could, or the card is
+    # artefact-only and Karel is its reviewer. `nightshift.drain` is the pass that
+    # takes it from there, and since 2026-08-25 the night runs one itself at the
+    # end. Until `drain` existed this comment said "awaiting the review stage *or*
+    # a human's eye", and those two states behind one lane name are what hid
+    # `review/` having no exit at all; the second of them is now "unreviewable") |
+    # "unreviewable" (gates+tests passed but no verdict can be had here — no CLI,
+    # no tier binding, a timeout, an unreadable verdict. Settle files it to
+    # blocked/ with the command that unsticks it, never to review/, because a card
+    # nothing will come back for must not sit in the lane that means it will) |
     # "reviewed" (the diff reviewer said ok — settle merges and lands it in testing/) |
     # "needs_fix" (the reviewer found a concrete, verifiable defect with one correct
     # answer — settle sends the card back to tasks/ for another attempt, bounded by
@@ -4395,11 +4409,25 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
       carrying the finding, bounded by the same attempt_limit as an ordinary
       `failed` retry.
     * `reviewed` — the reviewer said `ok`; settle merges and lands it in testing/.
-    * `review` (unchanged from the input) — the graceful fallback. An artefact-only
-      card (art: no commit to review), no CLI, a wall, a timeout or an unreadable
-      verdict all land the card in review/ for a human, exactly as before this
-      stage existed. Degrading to "a human looks" is always safe; guessing a
-      routing is not (§12, §13).
+    * `review` (unchanged from the input) — **a review is still owed and can
+      still be had.** Either the card is artefact-only (art: no commit to review,
+      and Karel is its reviewer) or the window closed before a verdict was
+      written. `review/` is the lane for exactly this and nothing else.
+    * `unreviewable` — **the review will not happen by itself.** No CLI, no tier
+      binding, a worktree that would not cut, a timeout, or a reviewer that ran
+      and produced nothing readable. Settle files it to `blocked/` carrying the
+      command that unsticks it.
+
+    **The split between those last two is the point** (2026-08-25). Every
+    degradation used to return `review`, each with a log line saying "leaving it
+    in review/ for a manual look" — so the lane meant both *"queued for Claude"*
+    and *"Claude could not, a human must"*, and a card in the second state was
+    indistinguishable from one merely waiting its turn. Karel, on finding one:
+    *"we again got into 'human needs to resolve it' being in review — that is not
+    what review is for."* That is the same complaint `blocked/` was created for on
+    2026-08-23, arriving by a different road, and the fourth time it has been
+    raised. Degrading to "a human looks" is still always safe; what was not safe
+    was degrading into a lane that does not say so.
 
     The returned outcome's `cost_usd` carries the dispatch cost forward plus the
     reviewer's own, so the run loop accounts for it with one `spent +=`.
@@ -4414,7 +4442,7 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
     # the wall still on the returned Dispatch so the night stops or sleeps.
     if result.wall is not None:
         _log(f"    a usage limit already closed this window — not spawning "
-             f"{REVIEWER_AGENT} for {card.id}; leaving it in review/ for a manual look")
+             f"{REVIEWER_AGENT} for {card.id}; its review is still owed")
         return result
 
     # Nothing to review as a diff: an artefact-only card (art) has no commit on
@@ -4426,8 +4454,10 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
     try:
         model = tiers.resolve(root, "lead")
     except tiers.TierError as exc:
-        _log(f"  review stage skipped for {card.id} — {exc}; leaving it in review/")
-        return result
+        # Not a wall and not a card defect — this host cannot resolve the lead
+        # tier at all, so no amount of waiting produces a verdict.
+        return _unreviewable(card, f"the `lead` tier does not resolve on this host: {exc}",
+                             result)
 
     out_dir = run_dir(root, card, card.attempts)
     _status(root, phase="review", card=card.id, branch=branch, model=model, since=_now())
@@ -4447,10 +4477,11 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
     # the plan running out is a fact about the *night* whatever this card did.
     if wall is not None and not verdict_survives_a_wall(REVIEWER_STAGE, verdict):
         # The plan ran out mid-review with nothing usable written. Gates+tests
-        # already passed, so this is not the card's fault — land it in review/ for
-        # a manual look rather than spending the night's machinery re-deciding a
-        # card that is otherwise done.
-        _log(f"    review hit a usage limit — leaving {card.id} in review/ for a manual look")
+        # already passed, so this is not the card's fault and the review is still
+        # perfectly obtainable — it just needs a window. `review/`, genuinely
+        # meaning "a review is owed", and the end-of-night drain (or the next
+        # one) is what comes back for it.
+        _log(f"    review hit a usage limit — {card.id}'s review is still owed")
         return Dispatch("review", result.detail, total, result.rounds, wall,
                         how_to_test=result.how_to_test)
     if wall is not None:
@@ -4477,10 +4508,32 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
     if called == "ok":
         return Dispatch("reviewed", str(verdict.get("notes", "reviewed ok"))[:300],
                         total, result.rounds, wall, how_to_test=result.how_to_test)
-    # No usable verdict — degrade to the old behaviour, a human review at review/.
-    _log(f"    no usable review verdict for {card.id} — leaving it in review/")
-    return Dispatch("review", result.detail, total, result.rounds, wall,
-                    how_to_test=result.how_to_test)
+    # The reviewer ran to completion and wrote nothing this can route on — no
+    # verdict file, an unparseable one, a verdict naming none of the three words,
+    # a timeout, a worktree that would not cut, or no CLI on this host at all
+    # (`review_branch` returns an empty verdict for every one of those). None of
+    # them gets better by waiting, so this is not `review/`: re-running the same
+    # reviewer would produce the same nothing.
+    return _unreviewable(
+        card, "the reviewer produced no usable verdict — no verdict file, an "
+        "unreadable one, or one naming none of `ok` / `needs_fix` / "
+        "`needs_decision`", result, cost=total, wall=wall)
+
+
+def _unreviewable(card: board.Card, why: str, result: Dispatch, *,
+                  cost: float | None = None,
+                  wall: limits.Wall | None = None) -> Dispatch:
+    """A review that will not happen by itself, on a card that is otherwise done.
+
+    Kept to one helper so every such path phrases it the same way and lands in
+    the same lane — the old code had five sites each degrading to `review/` with
+    their own wording, which is how two different states ended up sharing a lane
+    name for four months.
+    """
+    _log(f"    {card.id} cannot be reviewed here — {why}; → {board.BLOCKED_LANE}/")
+    return Dispatch("unreviewable", why,
+                    result.cost_usd if cost is None else cost,
+                    result.rounds, wall, how_to_test=result.how_to_test)
 
 
 # --------------------------------------------------------------------------
@@ -4906,6 +4959,30 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
     # actually play were buried among them. `needs_decision` still diverts to
     # needs-decision/ from either value; `needs_fix` is handled above it, back to
     # tasks/ rather than needs-decision/, because it never needed Karel at all.
+    if result.outcome == "unreviewable":
+        # Finished work whose review cannot be obtained here. `blocked/`, not
+        # `review/`: there is an operation for a person, and `blocked/`'s whole
+        # contract is "nothing is being asked of you; something is being
+        # blocked". Leaving it in `review/` is what made finished work read as
+        # queued Claude work — Karel's complaint, for the fourth time
+        # (2026-08-25). Not `needs-decision/` either: nobody has a question, and
+        # `drain.py` already states the principle — "'review this diff' is not a
+        # decision, it is work".
+        branch = branches.work_branch(card_id, card.fields.get("branch", ""))
+        card.write_section(
+            "Review",
+            f"Gates and tests passed on `{branch}`, but the diff reviewer could not "
+            f"be run to a verdict here: {result.detail}.\n\n"
+            f"**Nothing is being asked of you.** Once the cause is fixed (the worker "
+            f"CLI on this host, the `lead` tier binding in `.ai/manifest.toml`, or "
+            f"whatever `.ai/runs/{card_id}/attempt-{card.attempts}/review.log` "
+            f"reports), the review is one command:\n\n"
+            f"    python -m nightshift.drain --card {card_id}\n\n"
+            f"That routes it onward exactly as a dispatch would have. Reviewing the "
+            f"diff yourself and moving the card by hand is the other way.")
+        board.move(root, card, board.BLOCKED_LANE)
+        return f"{card_id}: → {board.BLOCKED_LANE}/ (no review obtainable — {result.detail[:60]})"
+
     if result.outcome == "needs_decision":
         card.write_section("Question", result.detail or
                            "The reviewer flagged this for your decision but recorded no "
@@ -5714,6 +5791,49 @@ def run(root: Path, args: argparse.Namespace) -> int:
                     result.wall, candidate.card.id, retrying=False):
                 break
 
+        # Before the stale sweep and after the cards: conclude any review this
+        # night left owed.
+        #
+        # `drain.py` records the decision NOT to do this, on three grounds, and
+        # names what would have to change: *"there would have to be evidence that
+        # cards actually pile up faster than they are looked at."* 2026-08-25 is
+        # that evidence — two cards, one night, both finished and green, both
+        # parked because the reviewer walled and nothing came back for them. The
+        # other two grounds hold up and shape this: the lane is unbounded, so
+        # this is capped; and a card in `review/` is already green, so it never
+        # competes with `tasks/` for the window — it gets what is left, if
+        # anything is.
+        #
+        # Placed inside the same `window remains` guard as the sweep below, for
+        # the same reason, and *before* it: concluding finished work is worth
+        # more than a maintenance check. `drain` brings its own kill-switch,
+        # money-rule and wall handling, so the phase is the call plus its report.
+        # Imported here, not at module scope: `drain` imports `runner` for
+        # `review_stage`/`settle`, so the dependency only works in one direction
+        # at import time. This is the one call site.
+        from nightshift import drain
+
+        drained = None
+        if args.drain and not (deadline and dt.datetime.now() >= deadline) \
+                and not _stop_requested():
+            owed = [c.id for c in drain.waiting(work)
+                    if not drain.skip_reason(work, base, c)]
+            if owed:
+                _log(f"draining {len(owed)} card(s) whose review this night left owed: "
+                     f"{', '.join(owed[:DRAIN_CAP])}"
+                     + (f" (+{len(owed) - DRAIN_CAP} beyond tonight's cap)"
+                        if len(owed) > DRAIN_CAP else ""))
+                drained = drain.drain(work, base, limit=DRAIN_CAP,
+                                      card_budget=args.card_budget,
+                                      test_timeout=args.test_timeout)
+                for line in drain.describe(drained):
+                    _log(line)
+                spent += drained.cost_usd
+                record.note(f"drained {len(owed)} review-owed card(s): "
+                            + "; ".join(f"{o.card_id} {o.state}"
+                                        for o in drained.outcomes))
+                publish(work, publish_remote, base)
+
         # After the cards, spend whatever window is left on staleness — never
         # before, so a card that produces real work always wins the budget over
         # a maintenance check. Only if a window remains: a run that already hit a
@@ -5815,6 +5935,14 @@ def _parser(root: Path | None = None) -> argparse.ArgumentParser:
                              "passes no cap at all")
     parser.add_argument("--test-timeout", type=int, default=600,
                         help="seconds allowed for the test suite (~2 min today)")
+    parser.add_argument("--no-drain", dest="drain", action="store_false",
+                        help=f"skip the end-of-night pass that concludes any review this "
+                             f"run left owed (up to {DRAIN_CAP} cards, from whatever "
+                             f"window is left after the cards). On by default since "
+                             f"2026-08-25: without it a card whose reviewer walled sits "
+                             f"in review/ until someone runs `python -m nightshift.drain` "
+                             f"by hand, which is how two finished cards spent a night "
+                             f"looking like queued work")
     parser.add_argument("--stale", type=int, default=0, nargs="?", const=10_000,
                         metavar="N",
                         help="after the cards, run the Tier-2 staleness sweep on the N "

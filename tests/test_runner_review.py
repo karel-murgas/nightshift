@@ -143,10 +143,16 @@ def test_the_review_stage_falls_back_to_review_on_a_wall(tmp_path, monkeypatch):
     assert result.wall is not None
 
 
-def test_the_review_stage_falls_back_to_review_on_an_unusable_verdict(tmp_path, monkeypatch):
-    """No verdict file, or a verdict the runner cannot read, degrades to the
-    pre-existing behaviour — a human review at review/ — never to a guessed
-    routing (§12)."""
+def test_an_unusable_verdict_is_unreviewable_not_a_review_still_owed(tmp_path, monkeypatch):
+    """No verdict file, or one the runner cannot read, still never becomes a
+    guessed routing (§12) — but it is no longer `review/` either.
+
+    Re-running the same reviewer on the same diff produces the same nothing, so
+    nothing will come back for this card on its own. `review/` promises the
+    opposite, and that promise is what let two finished cards sit there for a
+    night looking like queued Claude work (2026-08-25). `unreviewable` settles to
+    `blocked/`, which says an operation is needed and names it.
+    """
     root = _worktree_repo(tmp_path)
     _tier_binding(root)
     card = _reviewed_branch(root, tmp_path)
@@ -154,7 +160,48 @@ def test_the_review_stage_falls_back_to_review_on_an_unusable_verdict(tmp_path, 
 
     result = runner.review_stage(root, card, runner.Dispatch("review", "x", 0.0),
                                  "development_team", 0.0, 120)
+    assert result.outcome == "unreviewable"
+
+
+def test_a_wall_mid_review_still_leaves_the_review_owed(tmp_path, monkeypatch):
+    """The other side of the split, and the reason it is a split rather than a
+    rename. A window that closed is the one degradation a retry actually fixes,
+    so the card stays in `review/` — where it now genuinely means "a review is
+    owed", and where the end-of-night drain will come back for it."""
+    root = _worktree_repo(tmp_path)
+    _tier_binding(root)
+    card = _reviewed_branch(root, tmp_path)
+    _stub_reviewer(monkeypatch, {}, cost=0.0,
+                   wall=limits.Wall(limits.SESSION, None, "session limit"))
+
+    result = runner.review_stage(root, card, runner.Dispatch("review", "x", 0.0),
+                                 "development_team", 0.0, 120)
     assert result.outcome == "review"
+    assert result.wall is not None
+
+
+def test_settle_files_an_unreviewable_card_to_blocked_with_the_command(tmp_path):
+    """`blocked/` means "nothing is being asked of you, something is being
+    blocked" — so the card has to carry the operation, not just the diagnosis.
+    Reading it should not require knowing that `drain` exists."""
+    from nightshift.gates import card_schema
+
+    root = _worktree_repo(tmp_path)
+    card = _reviewed_branch(root, tmp_path)
+    card.write({"started": "2026-07-24T03:00:00"})
+
+    message = runner.settle(root, "probe", runner.Dispatch(
+        "unreviewable", "the reviewer produced no usable verdict"))
+
+    settled = board.find(root, "probe")
+    assert settled.lane == board.BLOCKED_LANE
+    assert "## Review" in settled.text
+    assert "python -m nightshift.drain --card probe" in settled.text
+    assert "Nothing is being asked of you" in settled.text
+    # Not the lanes that mean something else entirely.
+    assert "## Question" not in settled.text      # nobody has a question
+    assert board.BLOCKED_LANE in message
+    assert [str(v) for v in card_schema.check(root) if "probe" in str(v)] == []
 
 
 def test_a_checker_that_walls_after_writing_pass_has_its_verdict_honoured(

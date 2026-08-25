@@ -386,6 +386,113 @@ def test_a_needs_fix_does_not_count_toward_the_consecutive_failure_breaker(tmp_p
     assert calls == ["a", "a", "b", "b", "c", "c"]
 
 
+# --- the night concludes the reviews it left owed ----------------------------
+#
+# `drain.py` records the decision not to drain inside a night, and names what
+# would have to change: *"there would have to be evidence that cards actually
+# pile up faster than they are looked at."* 2026-08-25 is that evidence — two
+# finished, green cards parked because the reviewer walled, with nothing coming
+# back for them. The other two objections shape this rather than block it: the
+# pass is capped (`DRAIN_CAP`), and it runs only on window the cards did not use.
+
+class _Owed:
+    """The one attribute the end-of-night phase reads off a waiting card."""
+
+    def __init__(self, card_id: str):
+        self.id = card_id
+
+
+def _drain_calls(monkeypatch, owed: tuple[str, ...] = ("stuck",)) -> list[dict]:
+    """Record what the end-of-night phase asks `drain.drain` for."""
+    from nightshift import drain
+    seen: list[dict] = []
+
+    def fake(root, base, **kw):
+        seen.append({"base": base, **kw})
+        return drain.Pass()
+
+    monkeypatch.setattr(drain, "drain", fake)
+    monkeypatch.setattr(drain, "waiting",
+                        lambda root, card_id="": [_Owed(c) for c in owed])
+    monkeypatch.setattr(drain, "skip_reason",
+                        lambda root, base, card, named=False: "")
+    monkeypatch.setattr(drain, "describe", lambda result: [])
+    return seen
+
+
+def test_the_night_drains_the_reviews_it_left_owed(tmp_path, monkeypatch):
+    """The gap that let two finished cards spend a night looking like queued
+    work. A card whose reviewer walled is still owed a review, and the run that
+    owes it is the one that should pay — not whoever next remembers the
+    command."""
+    root = _loaded_board(tmp_path, "a")
+    seen = _drain_calls(monkeypatch)
+
+    _night(monkeypatch, root, [runner.Dispatch("review", "ok")])
+    runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
+
+    assert len(seen) == 1
+    assert seen[0]["limit"] == runner.DRAIN_CAP
+
+
+def test_no_drain_turns_the_end_of_night_pass_off(tmp_path, monkeypatch):
+    root = _loaded_board(tmp_path, "a")
+    seen = _drain_calls(monkeypatch)
+
+    _night(monkeypatch, root, [runner.Dispatch("review", "ok")])
+    runner.run(root, runner._parser(root).parse_args(
+        ["--base", "development_team", "--no-drain"]))
+
+    assert seen == []
+
+
+def test_a_night_that_ran_out_of_window_does_not_start_a_drain(tmp_path, monkeypatch):
+    """The same guard the stale sweep sits behind, and for the same reason: a run
+    that already hit its deadline has nothing left to give, and a drain is the
+    one phase that would happily spend a window it does not have.
+
+    The deadline is patched rather than passed on the command line because
+    `--until` resolves forward to the next occurrence and so can never *be* in
+    the past — `--until 00:01` at 20:00 means tomorrow. What the guard reads is
+    the resolved datetime, and that is what this replaces.
+    """
+    root = _loaded_board(tmp_path, "a")
+    seen = _drain_calls(monkeypatch)
+    monkeypatch.setattr(runner, "_deadline",
+                        lambda until, max_minutes: dt.datetime.now() - dt.timedelta(minutes=1))
+
+    _night(monkeypatch, root, [runner.Dispatch("review", "ok")])
+    runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
+
+    assert seen == []
+
+
+def test_the_kill_switch_stops_the_drain_from_starting(tmp_path, monkeypatch):
+    """A drain that began after the stop file appeared would keep spawning
+    reviewers for minutes after Karel asked the run to end. `drain` consumes the
+    switch itself once started, so the check has to happen before the call."""
+    root = _loaded_board(tmp_path, "a")
+    seen = _drain_calls(monkeypatch)
+
+    _night(monkeypatch, root, [runner.Dispatch("review", "ok")])
+    monkeypatch.setattr(runner, "_stop_requested", lambda: True)
+    runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
+
+    assert seen == []
+
+
+def test_the_drain_is_skipped_when_nothing_is_owed(tmp_path, monkeypatch):
+    """A quiet night must not log a pass it did not run, and must not pay
+    `drain`'s startup for an empty lane."""
+    root = _loaded_board(tmp_path, "a")
+    seen = _drain_calls(monkeypatch, owed=())
+
+    _night(monkeypatch, root, [runner.Dispatch("review", "ok")])
+    runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
+
+    assert seen == []
+
+
 def test_a_weekly_limit_ends_the_night_even_with_sessions_to_spare(tmp_path, monkeypatch):
     """A weekly window does not reopen inside a night; sleeping on one would idle
     until morning and produce nothing."""
