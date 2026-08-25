@@ -282,6 +282,110 @@ def test_a_card_moved_off_the_board_while_we_slept_is_left_alone(tmp_path, monke
     assert calls == ["a", "b"]  # a is not retried; it is no longer in tasks/
 
 
+# --- a review fix is this run's work, not the next run's ---------------------
+#
+# 2026-08-25. Two cards came back `needs_fix` at 13:13 and 13:34 — one wanting a
+# single substring replaced in a memory doc, the other two single-token
+# citations — and then sat in `tasks/` for the remaining four hours of the run's
+# window, because the loop had already advanced past them. The log said "will
+# retry", which reads as a promise this loop had declined to keep.
+
+def test_a_needs_fix_is_retried_in_the_same_run(tmp_path, monkeypatch):
+    """`settle` puts the card back in `tasks/` with the finding on it and hands
+    the next attempt its finished branch. Both of those are wasted if the loop
+    walks on: the card is dispatchable *now*, and applying a verified one-line
+    finding is the cheapest work the run has left."""
+    root = _loaded_board(tmp_path, "a", "b")
+
+    calls = _night(monkeypatch, root, [
+        runner.Dispatch("needs_fix", "name commit Y instead"),
+        runner.Dispatch("review", "ok"),
+    ])
+    runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
+
+    assert calls == ["a", "a", "b"]
+
+
+def test_a_needs_fix_that_escalates_ends_the_cards_turn(tmp_path, monkeypatch):
+    """The bound is `settle`'s: a card out of attempts goes to needs-decision/
+    instead of back to tasks/, and the loop must read that and move on rather
+    than re-dispatching a card that has left the lane."""
+    root = _loaded_board(tmp_path, "a", "b")
+    calls: list[str] = []
+
+    def fake_dispatch(root_, card, base, model, card_budget, test_timeout):
+        calls.append(card.id)
+        return runner.Dispatch("needs_fix", "still wrong")
+
+    def fake_settle(r, cid, result):
+        # What the real settle does once `attempts >= attempt_limit`.
+        board.move(root, board.find(root, cid), "needs-decision")
+        return f"{cid}: → needs-decision/"
+
+    monkeypatch.setattr(runner, "dispatch", fake_dispatch)
+    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(runner, "settle", fake_settle)
+    runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
+
+    assert calls == ["a", "b"]
+
+
+def test_a_card_cannot_spin_on_review_fixes_forever(tmp_path, monkeypatch):
+    """The backstop under `settle`'s bound.
+
+    Every turn of this loop spends money unattended, so it must terminate on its
+    own arithmetic rather than on another function's staying correct. Here
+    `settle` never moves the card and never spends an attempt — the loop still
+    stops, at the card's own attempt limit, and goes on to the next card.
+    """
+    root = _loaded_board(tmp_path, "a", "b")
+
+    calls = _night(monkeypatch, root, [runner.Dispatch("needs_fix", "still wrong")] * 8)
+    runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
+
+    # Each card spins its own limit and no more, and the counter resets when the
+    # loop moves on rather than carrying `a`'s rounds over to `b`.
+    assert calls == ["a"] * runner.MAX_ATTEMPTS + ["b"] * runner.MAX_ATTEMPTS
+
+
+def test_a_wall_on_a_needs_fix_closes_the_window_before_any_retry(tmp_path, monkeypatch):
+    """The reviewer can wall on its wrap-up after writing a complete verdict, so
+    a `needs_fix` can arrive with the window already shut. Re-dispatching into
+    that would spend the card's next attempt on a closed plan — the exact damage
+    the wall machinery exists to prevent."""
+    root = _loaded_board(tmp_path, "a", "b")
+
+    calls = _night(monkeypatch, root, [
+        runner.Dispatch("needs_fix", "name commit Y instead", 0.0, 1,
+                        limits.Wall(limits.SESSION, None, "session limit")),
+    ])
+    runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
+
+    assert calls == ["a"]        # not retried, and `b` never started
+
+
+def test_a_needs_fix_does_not_count_toward_the_consecutive_failure_breaker(tmp_path,
+                                                                          monkeypatch):
+    """The breaker is for dispatches that produced *no verdict* — "not about the
+    cards". A `needs_fix` is a verdict, from a run whose gates and tests passed;
+    three in a row is three cards being tidied, not a night going wrong."""
+    root = _loaded_board(tmp_path, "a", "b", "c")
+    calls: list[str] = []
+
+    def fake_dispatch(root_, card, base, model, card_budget, test_timeout):
+        calls.append(card.id)
+        # One fix each, then the card lands.
+        return (runner.Dispatch("needs_fix", "tidy this")
+                if calls.count(card.id) == 1 else runner.Dispatch("review", "ok"))
+
+    monkeypatch.setattr(runner, "dispatch", fake_dispatch)
+    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(runner, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
+    runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
+
+    assert calls == ["a", "a", "b", "b", "c", "c"]
+
+
 def test_a_weekly_limit_ends_the_night_even_with_sessions_to_spare(tmp_path, monkeypatch):
     """A weekly window does not reopen inside a night; sleeping on one would idle
     until morning and produce nothing."""

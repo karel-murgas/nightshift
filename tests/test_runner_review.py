@@ -56,6 +56,7 @@ from _runner_helpers import (  # noqa: F401  (fixtures register by name)
     _remote_has,
     _remote_tip,
     _repo,
+    _rev,
     _reviewed_branch,
     _roots,
     _split_repo,
@@ -609,6 +610,113 @@ def test_settle_needs_fix_sends_the_card_back_to_tasks_with_a_review_finding(tmp
     assert "will retry" in message
     probe_violations = [str(v) for v in card_schema.check(root) if "probe" in str(v)]
     assert probe_violations == []
+
+
+def test_settle_needs_fix_hands_the_branch_to_the_next_attempt(tmp_path):
+    """The half that makes the finding applicable.
+
+    A `needs_fix` card's branch is finished work — gates green, tests green, one
+    verifiable detail wrong. `settle` records a handover so `prepare_worktree`
+    continues from it instead of cold-starting, which is what lets the next
+    attempt be one small commit rather than a re-implementation.
+    """
+    root = _worktree_repo(tmp_path)
+    card = _reviewed_branch(root, tmp_path)
+    card.write({"started": "2026-07-24T03:00:00"})
+    tip = _rev(root, "ai/probe")
+
+    runner.settle(root, "probe", runner.Dispatch("needs_fix", "name commit Y instead"))
+
+    assert runner.read_handover(root, "probe").review_fix is True
+    # The branch is still where the work is — not renamed out of the way.
+    assert _rev(root, "ai/probe") == tip
+
+
+def test_settle_needs_fix_does_not_promise_a_branch_that_is_not_there(tmp_path):
+    """A card whose branch never got cut (the worker committed nothing) still
+    routes to tasks/, but must not carry a handover pointing at nothing — that
+    would send the next attempt down FROM_REVIEW to a `_branch_exists` check
+    that fails, for no gain. It cold-starts, which is correct."""
+    root = _worktree_repo(tmp_path)
+    card = _reviewed_branch(root, tmp_path, commit=False)
+    card.write({"started": "2026-07-24T03:00:00"})
+    subprocess.run(["git", "branch", "-D", "ai/probe"], cwd=root, check=True)
+
+    runner.settle(root, "probe", runner.Dispatch("needs_fix", "nothing to fix, oddly"))
+
+    assert board.find(root, "probe").lane == "tasks"
+    assert runner.read_handover(root, "probe").review_fix is False
+
+
+def test_a_review_fix_retry_continues_from_the_reviewed_branch(tmp_path):
+    """`prepare_worktree`'s FROM_REVIEW path, and the whole point of it.
+
+    Measured 2026-08-25: this used to `git branch -m` the finished branch to a
+    rescue ref and cut a fresh tree from base, so a one-substring correction to
+    a memory doc meant re-implementing an economy rebalance to reach it — and
+    `catalog-registry-and-guards` spent all three of its attempts that way, each
+    a sound implementation producing a *different* stale citation, before being
+    filed as "a reviewer-flagged fix recurred across 3 attempts". Nothing
+    recurred; the fix was never applied once.
+    """
+    root = _worktree_repo(tmp_path)
+    card = _reviewed_branch(root, tmp_path)
+    tip = _rev(root, "ai/probe")
+    runner.write_handover(root, "probe", runner.Handover(review_fix=True))
+
+    tree, branch, mode = runner.prepare_worktree(root, card, "development_team")
+    try:
+        assert mode == runner.FROM_REVIEW
+        assert branch == "ai/probe"
+        # The reviewed commit is checked out, so the finding has something to
+        # apply to — the property the old code's own prose claimed and broke.
+        assert _rev(tree, "HEAD") == tip
+        assert (tree / "feature.py").is_file()
+        # And the branch was not renamed out from under it.
+        assert runner._branch_exists(root, "ai/probe")
+        assert runner._rescue_branches(root, "probe") == []
+    finally:
+        runner.drop_worktree(root, tree)
+
+
+def test_an_interrupted_attempt_still_outranks_a_review_fix(tmp_path):
+    """Both are "continue from what exists", and they can only disagree about
+    *which* existing thing. An interruption left uncommitted work in a kept
+    worktree; a review fix left committed work on a branch. The uncommitted half
+    is the one that is lost if it is not chosen, so it wins."""
+    root = _worktree_repo(tmp_path)
+    card = _reviewed_branch(root, tmp_path)
+    runner.write_handover(root, "probe", runner.Handover(
+        session_id="sess-1", review_fix=True))
+
+    tree, _, mode = runner.prepare_worktree(root, card, "development_team")
+    try:
+        assert mode == runner.FROM_WIP
+    finally:
+        runner.drop_worktree(root, tree)
+
+
+def test_the_review_fix_worker_is_told_not_to_reimplement_the_card(tmp_path, monkeypatch):
+    """The note is the other half of not re-doing the work: a warm tree the
+    worker treats as a cold one buys nothing. It must say the card is already
+    implemented, that the finding is the entire task, and that anything outside
+    it is unreviewed work arriving after review."""
+    root = _worktree_repo(tmp_path)
+    card = _reviewed_branch(root, tmp_path)
+    card.write_section("Review Finding", "change `Row 79.` to `Row 80.`")
+    runner.write_handover(root, "probe", runner.Handover(review_fix=True))
+    _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "fixed"})
+    _stub_reviewer(monkeypatch, {"verdict": "ok", "notes": "good"})
+
+    runner.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 0.0, 60)
+
+    archived = sorted((root / ".ai" / "runs" / "probe").glob("attempt-*/prompt-1.md"))
+    prompt = archived[-1].read_text(encoding="utf-8")
+    assert "already implemented" in prompt
+    assert "Do not re-implement the card" in prompt
+    assert "park the card" in prompt
+    # And the finding itself rides along, since the card body is the prompt.
+    assert "change `Row 79.` to `Row 80.`" in prompt
 
 
 def test_settle_needs_fix_escalates_to_needs_decision_past_the_attempt_limit(tmp_path):

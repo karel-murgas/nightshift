@@ -1175,7 +1175,11 @@ def ensure_integration_checkout(root: Path, base: str) -> Path:
 #   FROM_WIP — the worktree was lost but the branch survives with a `wip:` commit,
 #             so a checkout is cut from the branch and the worker is handed a
 #             `## Progress` note (fallback path 3, the deepest persistence).
-FRESH, REENTER, FROM_WIP = "fresh", "reenter", "from-wip"
+#   FROM_REVIEW — the last attempt *finished*: gates green, tests green, and the
+#             reviewer returned `needs_fix`. Its commits are on `ai/<id>` and the
+#             only work left is the finding. A checkout is cut from the branch,
+#             exactly like FROM_WIP, and the worker is handed `_REVIEW_FIX_NOTE`.
+FRESH, REENTER, FROM_WIP, FROM_REVIEW = "fresh", "reenter", "from-wip", "from-review"
 
 
 @dataclass
@@ -1188,10 +1192,17 @@ class Handover:
     input to the progress gate (Decision 2). `no_progress` counts consecutive
     resumes that moved nothing, so a card that cannot advance is filed rather
     than given its attempt back forever.
+
+    `review_fix` is the one field that is not about an interruption: the last
+    attempt ran to completion and the reviewer sent it back with a finding. It
+    rides in the same file because it answers the same question — *does the next
+    attempt start from what the last one built, or from nothing* — and a second
+    file answering that question would be a second thing to keep in sync.
     """
     session_id: str = ""
     diff_hash: str = ""
     no_progress: int = 0
+    review_fix: bool = False
 
 
 def _handover_path(root: Path, card_id: str) -> Path:
@@ -1204,6 +1215,7 @@ def read_handover(root: Path, card_id: str) -> Handover:
         session_id=str(data.get("session_id", "")),
         diff_hash=str(data.get("diff_hash", "")),
         no_progress=int(data.get("no_progress", 0) or 0),
+        review_fix=bool(data.get("review_fix", False)),
     )
 
 
@@ -1416,12 +1428,13 @@ def _normalize_worktree(path: Path) -> None:
 
 def prepare_worktree(root: Path, card: board.Card,
                      base: str) -> tuple[Path, str, str]:
-    """The worktree for this attempt, plus how it continues (FRESH/REENTER/FROM_WIP).
+    """The worktree for this attempt, plus how it continues.
 
     A cold card gets a brand-new checkout cut from `base`, exactly as before. A
     card that was limit-interrupted (it has a handover on disk) is continued:
     its kept worktree is reused in place if it still exists, or — if only the
-    branch survived a WIP commit — a checkout is cut from that branch.
+    branch survived a WIP commit — a checkout is cut from that branch. A card the
+    reviewer returned `needs_fix` is continued too, from its own finished branch.
 
     Every path out of here normalizes the worktree's line endings first
     (`_normalize_worktree`) — a freshly cut worktree is a fresh checkout, which
@@ -1432,21 +1445,46 @@ def prepare_worktree(root: Path, card: board.Card,
     handover = read_handover(root, card.id)
     warm = bool(handover.session_id or handover.diff_hash)
 
-    if warm and _worktree_registered(root, path):
-        _normalize_worktree(path)
-        return path, branch, REENTER
-    if warm and _branch_exists(root, branch):
-        # The worktree was lost but the branch (with its `wip:` commit) was not.
-        # Clear any stale directory/registration, then re-check out the branch.
+    def from_branch(mode: str, why: str) -> tuple[Path, str, str]:
+        """A fresh checkout of the existing `branch`, keeping its commits."""
         if path.exists() or _worktree_registered(root, path):
             _git(root, "worktree", "remove", "--force", str(path))
         _git(root, "worktree", "prune")
         path.parent.mkdir(parents=True, exist_ok=True)
         made = _worktree_add(root, str(path), branch)
         if made.returncode != 0:
-            raise RuntimeError(f"git worktree add (from wip) failed: {made.stderr.strip()}")
+            raise RuntimeError(f"git worktree add ({why}) failed: {made.stderr.strip()}")
         _normalize_worktree(path)
-        return path, branch, FROM_WIP
+        return path, branch, mode
+
+    if warm and _worktree_registered(root, path):
+        _normalize_worktree(path)
+        return path, branch, REENTER
+    if warm and _branch_exists(root, branch):
+        # The worktree was lost but the branch (with its `wip:` commit) was not.
+        return from_branch(FROM_WIP, "from wip")
+    if handover.review_fix and _branch_exists(root, branch):
+        # The reviewer sent a *finished* attempt back with a concrete finding.
+        #
+        # This branch's work is not a failed attempt and must not be treated as
+        # one. Its gates passed, its tests passed, and the reviewer's objection
+        # was to one verifiable detail — so the cheapest correct next step is to
+        # apply that detail on top, which needs the commits that are already
+        # here. Cutting from `base` instead is what the code below used to do,
+        # and it was wrong in a way that hid behind a green board: the branch was
+        # renamed to a rescue ref nothing ever checked out again, and the worker
+        # was handed an empty tree plus a finding phrased as "apply this fix
+        # directly; it does not need re-deriving" — advice that could not be
+        # followed, because the thing to fix did not exist yet.
+        #
+        # Measured on 2026-08-25. `economy-early-late-balance` came back with a
+        # one-substring correction to a memory doc and had to re-implement an
+        # economy rebalance to reach it. `catalog-registry-and-guards` did three
+        # full attempts, each a sound implementation, each producing a *different*
+        # stale citation because each started from nothing — and was then filed to
+        # needs-decision/ under "a reviewer-flagged fix recurred across 3
+        # attempts". Nothing recurred. The fix was never applied once.
+        return from_branch(FROM_REVIEW, "from review")
 
     # Cold start — the empty case and every non-interrupted card.
     if path.exists() or _worktree_registered(root, path):
@@ -1804,6 +1842,33 @@ was preserved as a `wip: {card_id} interrupted` commit, now checked out on your 
 `git show HEAD` and `git log` to see what it had done, then continue from there. **Before you \
 finish, replace that WIP commit with a real commit** (e.g. `git reset --soft HEAD~1` then \
 commit properly) so the branch does not carry a `wip:` commit into review.
+"""
+
+# The `needs_fix` continuation. Its job is to stop a worker re-doing work that is
+# already done and already green — the failure mode this whole path exists to end.
+_REVIEW_FIX_NOTE = """\
+
+--- this card is already implemented; apply the review finding and stop ---
+**The work is done.** A previous attempt implemented this card in full, its commits are \
+checked out on your branch right now, and both the gate runner and the test suite passed \
+on exactly this tree. It was then read by a diff reviewer, which found **one concrete, \
+verifiable defect** and sent it back. That finding is in the card's `## Review Finding` \
+section, and it is your entire task.
+
+Read `git log` and `git diff {base}...HEAD` first, so you are looking at what actually \
+exists rather than at what the card describes. Then apply the finding, exactly as stated. \
+The reviewer verified it and stated the correct answer; you are not being asked to \
+re-derive it, re-litigate it, or re-check the rest of the diff.
+
+**Do not re-implement the card. Do not improve, refactor or extend anything the finding \
+does not name.** A change outside it is unreviewed work arriving after review, which is \
+the one thing this step cannot absorb — and the acceptance criteria are already met, so \
+there is nothing for it to buy. If the finding turns out to be wrong, or cannot be \
+applied without a decision, **park the card and say why**: that is a success state, and \
+it is far better than a guess or a second implementation.
+
+Expect this to be a small commit. Re-run the gates and the tests that your change can \
+reach, write your verdict, and stop.
 """
 
 # A `kind: chore` is a one-prompter: the note already said what to change and what
@@ -3454,6 +3519,11 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
         resume_session = ""
         continue_note = _WIP_NOTE.format(card_id=card.id)
         _log(f"  {card.id} worktree was lost — continuing from its `wip:` commit")
+    elif mode == FROM_REVIEW:
+        resume_session = ""
+        continue_note = _REVIEW_FIX_NOTE.format(base=base)
+        _log(f"  {card.id} is already implemented on {branch} — applying the "
+             f"reviewer's finding on top of it, not re-implementing the card")
     else:
         resume_session = ""
         continue_note = ""
@@ -4572,14 +4642,22 @@ def _review_finding_section(card_id: str, finding: str) -> str:
     maintainer's judgment, only a fix. The next attempt is the reader: `finding`
     is the reviewer's own account of the defect and its correct answer, precise
     enough (by the reviewer's prompt) to apply without re-deriving it.
+
+    The closing paragraph used to promise the opposite of what happened. It said
+    the commits were "preserved as a rescue branch" and told the worker to "apply
+    this fix directly" — while `prepare_worktree` renamed the branch away and cut
+    a fresh tree from `base`, so there was nothing to apply the fix *to*. The
+    branch is now checked out for the next attempt (FROM_REVIEW), which is what
+    makes this paragraph true rather than merely encouraging.
     """
     return "\n\n".join([
         "The reviewer found a fixable defect — not a judgment call — in a diff whose "
         "gates and tests had already passed:",
         finding,
-        f"This attempt's commits stay on `ai/{card_id}` and are preserved as a rescue "
-        f"branch once this card is dispatched again. Apply this fix directly; it does "
-        f"not need re-deriving.",
+        f"The rest of this card is **already implemented and already green** on "
+        f"`ai/{card_id}`, and the next attempt starts from that branch with those "
+        f"commits checked out. Apply this finding on top of them and stop: it does not "
+        f"need re-deriving, and the card does not need re-implementing.",
     ])
 
 
@@ -4801,6 +4879,16 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
             return (f"{card_id}: → needs-decision/ (a reviewer-flagged fix recurred across "
                     f"{card.attempts} attempts)")
         card.write_section("Review Finding", _review_finding_section(card_id, finding))
+        # The next attempt continues from this branch instead of cold-starting —
+        # `prepare_worktree`'s FROM_REVIEW path, and the reason the finding can
+        # honestly say "apply this directly". Written after the section above so
+        # a crash between them leaves the card readable rather than the flag
+        # pointing at a finding nobody recorded. `dispatch` clears it by dropping
+        # the worktree, so it survives exactly one attempt: if that attempt fails
+        # outright, the ordinary cold-start retry takes over.
+        branch = branches.work_branch(card_id, card.fields.get("branch", ""))
+        if _branch_exists(root, branch):
+            write_handover(root, card_id, Handover(review_fix=True))
         if card.lane == "tasks":
             board.commit_board(
                 root, f"board: {card_id} attempt {card.attempts} needs a fix, will retry")
@@ -5434,10 +5522,20 @@ def run(root: Path, args: argparse.Namespace) -> int:
 
         # An index rather than `for candidate in ready`, because a card that met
         # the wall was never actually attempted and has to be retried at the head
-        # of the next window. Only a real outcome advances it.
+        # of the next window. Only a real outcome advances it — and since
+        # `needs_fix` joined the outcomes that do not, the loop can now turn
+        # several times on one card for a reason other than a wall.
         index = 0
+        # Consecutive review-fix retries of the card currently at `index`, and
+        # the index that count belongs to. Paired so the counter resets itself
+        # whenever the loop moves on, rather than depending on every `index += 1`
+        # site remembering to clear it.
+        fix_rounds = 0
+        fix_rounds_for = -1
         while index < len(ready):
             candidate = ready[index]
+            if fix_rounds_for != index:
+                fix_rounds_for, fix_rounds = index, 0
             if args.max_cards and done >= args.max_cards:
                 _stop(f"reached --max-cards {args.max_cards}")
                 break
@@ -5508,6 +5606,62 @@ def run(root: Path, args: argparse.Namespace) -> int:
                 candidate.card = fresh
                 _log("window reopened — resuming")
                 continue  # same card, new window
+
+            # A `needs_fix` verdict is not the end of this card's turn.
+            #
+            # `settle` has just put the card back in `tasks/` with the reviewer's
+            # finding on it, and `prepare_worktree` will now continue from its
+            # finished branch — so the fix is something this run can do in one
+            # small commit. Advancing the index instead deferred it to *the next
+            # invocation of the runner*, which is what happened on 2026-08-25:
+            # two cards were sent back at 13:13 and 13:34 and simply sat in
+            # `tasks/` for the rest of a run that had four more hours of window.
+            # Nothing said so, either — "will retry" in the log reads as a
+            # promise this loop had already declined to keep.
+            #
+            # Bounded by `attempt_limit`, which `settle` enforces: once a card is
+            # out of attempts it escalates to `needs-decision/` instead of coming
+            # back to `tasks/`, and the lane check below is what sees that.
+            if result.outcome == "needs_fix":
+                _log("  " + _settled(candidate, result, model))
+                publish(work, publish_remote, base,
+                        trusted_branch=f"ai/{candidate.card.id}")
+                # Before the retry, not after: a wall means the window that would
+                # have to pay for the fix is shut, and the sleep belongs here for
+                # the same reason it does on a landed card.
+                if result.wall is not None and not _window_closed(
+                        result.wall, candidate.card.id, retrying=True):
+                    break
+                fix_rounds += 1
+                # A backstop, not the bound. `settle` already escalates a card
+                # that is out of attempts, and that is what normally ends this —
+                # but the thing being bounded is an unattended loop that spends
+                # money per turn, and it must not depend on another function's
+                # arithmetic staying correct to terminate. Counted locally, reset
+                # whenever the index moves.
+                if fix_rounds >= attempt_limit(candidate.card):
+                    _log(f"  {candidate.card.id} has taken {fix_rounds} review-fix "
+                         f"rounds this run without settling — moving on rather than "
+                         f"spending another; it keeps its lane and its attempts")
+                    index += 1
+                    done += 1
+                    in_a_row = 0
+                    continue
+                # Reloaded for the same reason the `limited` branch reloads: the
+                # copy in `ready` predates the attempt `settle` just committed.
+                fresh = board.find(work, candidate.card.id)
+                if fresh is None or fresh.lane != "tasks":
+                    # Out of attempts (escalated to `needs-decision/`), or moved
+                    # by hand. Either way this card is finished for tonight.
+                    index += 1
+                    done += 1
+                    in_a_row = 0
+                    continue
+                candidate.card = fresh
+                in_a_row = 0
+                _log(f"  re-dispatching {candidate.card.id} to apply the "
+                     f"reviewer's finding")
+                continue  # same card, same run, one fix to apply
 
             index += 1
             done += 1
