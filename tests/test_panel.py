@@ -1346,10 +1346,27 @@ def test_an_old_record_is_not_presented_as_this_run(server):
     assert "2026-08-01" in text, "the date is what stops it reading as today"
 
 
-def test_refresh_returns_the_same_page_the_browser_is_looking_at(server):
+def test_refresh_returns_the_same_page_the_browser_is_looking_at(server, monkeypatch):
     """One rendering path, deliberately. A purpose-built refresh payload is a second
     thing to keep in step with every section added, and the first time it fell behind
-    the panel would quietly stop updating whatever nobody remembered to add to it."""
+    the panel would quietly stop updating whatever nobody remembered to add to it.
+
+    **The allowance meter is stubbed, and it has to be.** This compares two
+    *separate* HTTP renders for byte equality, and the status rail — which is on
+    every page — carries `usage.read_cached()`. That is a live, rate-limited
+    external endpoint behind a TTL cache, so the two requests can legitimately
+    disagree: one render gets meters, the next gets *"as of 23:00 (endpoint asked
+    again too soon)"*. Measured at 2-3 failures in 12 runs, naming whichever page
+    lost the race — `now` and `inbox` in the same batch — which is why it read as
+    an unattributable full-suite flake rather than as a fact about this test.
+
+    Stubbing it also stops the panel suite consulting Karel's real usage endpoint
+    on every run, which it should not have been doing: the neighbouring tests
+    that care about the meters already stub `read_cached` for exactly that
+    reason, and this one simply never did.
+    """
+    monkeypatch.setattr(panel.usage, "read_cached",
+                        lambda creds=None, **k: panel.usage.Snapshot())
     base, root = server
     for page in panel.PAGES:
         _, page_html = _get(base, page)
