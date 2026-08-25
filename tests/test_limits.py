@@ -192,6 +192,120 @@ def test_a_session_wall_is_not_filed_as_a_transient_hiccup():
     assert wall.spends_a_session
 
 
+# --- the meter in the refusal outranks the sentence in it --------------------
+#
+# Karel, 2026-08-25: *"Does it mean that one bad 429 would break the night? This
+# should not happen. If error occurs and last known value was low enough (90%?)
+# it should continue."* The CLI attaches `unifiedWindows` with a `utilization`
+# per window to its own refusal, so the meter reading is inside the evidence.
+
+def _refusal(window: str = "five_hour", utilization: float | None = 1.0,
+             prose: str = "refused", resets: int = 1787673000) -> str:
+    used = "" if utilization is None else \
+        f',"unifiedWindows":{{"{window}":{{"utilization":{utilization},' \
+        f'"resetsAt":{resets}}}}}'
+    return (f'{{"type":"assistant","rate_limit_info":{{"status":"rejected",'
+            f'"rateLimitType":"{window}","resetsAt":{resets}{used}}}}}\n'
+            f'{{"is_error":true,"api_error_status":429,"result":"{prose}",'
+            f'"type":"result"}}')
+
+
+def test_a_refusal_on_a_window_that_is_not_spent_is_only_a_hiccup():
+    """The whole point. The service declined this request, and the window it
+    named is 31% used — so sleeping until that window resets would idle the
+    night on a number the CLI itself says is fine. A short wait instead, and no
+    session spent."""
+    wall = limits.detect(1, _refusal(utilization=0.31), now=NOW)
+    assert wall.scope == limits.TRANSIENT
+    assert not wall.spends_a_session
+    assert limits.resume_at(wall, NOW) == NOW + dt.timedelta(
+        minutes=limits.TRANSIENT_MINUTES + limits.GRACE_MINUTES)
+
+
+def test_the_meter_outranks_the_prose_even_when_the_prose_says_session_limit():
+    """Both are the CLI's own output and they can disagree; the number is the
+    one to believe. Without this the phrase list alone would put the night to
+    sleep for five hours on a window with most of its allowance left."""
+    wall = limits.detect(
+        1, _refusal(utilization=0.4, prose="You've hit your session limit"), now=NOW)
+    assert wall.scope == limits.TRANSIENT
+
+
+def test_a_spent_window_is_still_a_wall():
+    """The other side of the threshold — this must not have made walls
+    undetectable. Last night's real refusal reported `utilization: 1`."""
+    wall = limits.detect(1, _refusal(utilization=1.0), now=NOW)
+    assert wall.scope == limits.SESSION
+    assert wall.spends_a_session
+
+
+def test_a_window_just_under_full_is_still_a_wall():
+    """Concurrent requests can be refused a shade under a full window, so the
+    bar is `PLAN_WALL_UTILIZATION`, not exactly 1."""
+    wall = limits.detect(1, _refusal(utilization=0.97), now=NOW)
+    assert wall.scope == limits.SESSION
+
+
+def test_no_utilization_reported_leaves_the_refusal_as_read():
+    """`None` and "low" are different answers. With no meter attached there is
+    nothing to argue with, so the named window stands."""
+    wall = limits.detect(1, _refusal(utilization=None), now=NOW)
+    assert wall.scope == limits.SESSION
+
+
+def test_an_unknown_window_name_does_not_default_to_a_five_hour_sleep():
+    """`_window_scope` returns None for a unit it does not recognise, so the
+    refusal falls through to the prose reading — here a bare 429, which is
+    TRANSIENT. Defaulting to SESSION would mean a short-window throttle the CLI
+    names in a new word costs the whole night."""
+    wall = limits.detect(1, _refusal(window="requests_per_minute",
+                                     utilization=None), now=NOW)
+    assert wall.scope == limits.TRANSIENT
+
+
+def test_the_weekly_window_is_read_off_its_own_name():
+    wall = limits.detect(1, _refusal(window="seven_day"), now=NOW)
+    assert wall.scope == limits.WEEKLY
+    assert not wall.waits_out
+
+
+def test_an_allowed_window_is_not_read_as_the_rejected_one():
+    """A stream carries one `rate_limit_info` per message and almost all of them
+    say `allowed`. Only the rejected block describes the refusal; parsing rather
+    than scanning is what keeps a `rateLimitType` from one message pairing with
+    a `"rejected"` from another."""
+    text = ('{"type":"assistant","rate_limit_info":{"status":"allowed",'
+            '"rateLimitType":"five_hour","unifiedWindows":'
+            '{"five_hour":{"utilization":0.2,"resetsAt":1787673000}}}}\n'
+            '{"is_error":true,"api_error_status":429,"result":"429 Too Many '
+            'Requests","type":"result"}')
+    wall = limits.detect(1, text, now=NOW)
+    assert wall.scope == limits.TRANSIENT      # from the prose, not the block
+
+
+def test_the_rejected_block_is_found_when_the_cli_nests_it():
+    """`rate_limit_info` has been seen at an event's top level and under
+    `message`. Pinning either would be a second thing to keep in step with the
+    CLI, so the read is depth-bounded rather than shape-bound."""
+    text = ('{"type":"assistant","message":{"rate_limit_info":{"status":"rejected",'
+            '"rateLimitType":"five_hour","unifiedWindows":'
+            '{"five_hour":{"utilization":1,"resetsAt":1787673000}}}}}\n'
+            '{"is_error":true,"api_error_status":429,"result":"refused","type":"result"}')
+    assert limits.detect(1, text, now=NOW).scope == limits.SESSION
+
+
+def test_a_hiccup_never_inherits_a_plan_windows_reset_time():
+    """A TRANSIENT reopens in seconds by definition, so a reset time in the same
+    text belongs to a plan window described alongside it. Measured while adding
+    `resetsAt` as an epoch source: a 429 at 02:00 whose stream mentioned the
+    five-hour window's 17:50 reset produced a 15h52m sleep for a wall that
+    spends no session and is meant to cost seven minutes."""
+    wall = limits.detect(1, _refusal(utilization=0.31), now=NOW)
+    assert wall.scope == limits.TRANSIENT
+    assert limits.resume_at(wall, NOW) - NOW <= dt.timedelta(
+        minutes=limits.TRANSIENT_MINUTES + limits.GRACE_MINUTES)
+
+
 def test_the_structured_reset_time_is_preferred_over_the_prose_clock():
     """`resetsAt` is the same instant without the am/pm and timezone guessing —
     1787673000 is 17:50 local, which is what "5:50pm" meant."""

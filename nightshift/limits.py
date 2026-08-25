@@ -39,14 +39,34 @@ same object (2026-08-25) — its own fields disagree, so the exit code is not th
 only thing worth reading.
 
 **Prefer the CLI's structured fields over its prose wherever it emits them.**
-A `--output-format stream-json` run carries `"rate_limit_info": {"status":
-"rejected", "resetsAt": <epoch>, "rateLimitType": "five_hour"}`, which answers
-both "which wall" and "until when" exactly, with no wording to keep up with.
-`--output-format json` does not carry that block, so the phrase list is still
-the only reading available there — which is precisely how the 2026-08-25 review
-walls got through (see `_WALL`'s `session limit` entry).
+A `--output-format stream-json` run carries, on the request that was refused:
 
-No LLM (`00_architecture.md` §12) — regexes over text the CLI already printed.
+    "rate_limit_info": {"status": "rejected", "rateLimitType": "five_hour",
+                        "resetsAt": <epoch>,
+                        "unifiedWindows": {"five_hour": {"utilization": 1, ...},
+                                           "seven_day": {"utilization": 0.23, ...}}}
+
+which answers *which* wall, *until when*, and — the one no sentence carries —
+**how spent that window actually is**. `--output-format json` carries none of
+it, so the phrase list is still the only reading available there, which is
+precisely how the 2026-08-25 review walls got through (see `_WALL`'s
+`session limit` entry).
+
+**`utilization` is the check that keeps a hiccup from ending a night.** A
+refusal naming a window that is 31% used is not plan exhaustion however its
+prose reads, and treating it as one would sleep until a window resets that the
+CLI itself says is fine. So a low utilization downgrades the wall to TRANSIENT:
+a short wait, no session spent (Karel, 2026-08-25: *"one bad 429 would break the
+night? This should not happen"*). The threshold and the asymmetry behind it are
+on `PLAN_WALL_UTILIZATION`.
+
+The scope this module returns therefore comes from, in order: the CLI's own
+window name and meter; then its prose; then a bare 429, which is TRANSIENT. An
+unrecognised window name yields *no* structured answer rather than a guessed
+one — see `_window_scope` on why defaulting there would be the expensive
+mistake.
+
+No LLM (`00_architecture.md` §12) — lookups over text the CLI already printed.
 """
 from __future__ import annotations
 
@@ -158,15 +178,37 @@ _TRANSIENT_ONLY = re.compile(r"\brate[ _]limit(?:_error)?\b|\btoo many requests\
 # by the same naming scheme, a longer one for the weekly allowance — so the match
 # is on the *unit*, not on an enumeration this module would have to chase.
 #
-# Matched as one object rather than as two independent searches: a stream holds
-# a `rate_limit_info` for every message, almost all of them `"status":
-# "allowed"`, so a loose pair of scans could take the `rateLimitType` of an
-# allowed window and the `"rejected"` of the one that actually closed.
-_LIMIT_REJECTED = re.compile(
-    r'"rate_limit_info"\s*:\s*\{[^{}]*?"status"\s*:\s*"rejected"[^{}]*?\}',
-    re.IGNORECASE)
-_LIMIT_TYPE = re.compile(r'"rateLimitType"\s*:\s*"([a-z0-9_]+)"', re.IGNORECASE)
-_LONG_WINDOW = re.compile(r"day|week|month", re.IGNORECASE)
+# **Parsed, not matched.** The first version of this was a regex over the block,
+# and it never fired once: `rate_limit_info` contains a nested `unifiedWindows`
+# object, and the `[^{}]*?` that kept the match from wandering across a stream
+# could not reach the closing brace past it. It was dead code that looked like a
+# working structured read, and the `session limit` phrase below was quietly doing
+# all the work — which is the same "wrote it down confidently, never ran it
+# against the corpus" shape this module already carries a correction for.
+#
+# A stream holds one of these per message, almost all `"status": "allowed"`, so
+# the one that matters is the *rejected* one — and reading it as JSON is what
+# makes "the block that says rejected" and "the window it names" the same object
+# rather than two independent searches that could pair up across messages.
+_HAS_LIMIT_INFO = '"rate_limit_info"'
+
+#: How spent a window must be before a refusal naming it counts as plan
+#: exhaustion. Karel, 2026-08-25: *"If error occurs and last known value was low
+#: enough (90%?) it should continue."*
+#:
+#: The CLI attaches `unifiedWindows` to its refusal, with a `utilization` per
+#: window — so the meter reading arrives *inside the evidence*, and there is no
+#: need to go and ask for it. Below this, a refusal is a hiccup whatever its
+#: prose says: the service declined this request, but the window it named is
+#: nowhere near spent, so sleeping until that window resets would idle the night
+#: on a number the CLI itself says is fine.
+#:
+#: The asymmetry sets the threshold. Downgrading a real wall costs three short
+#: waits before the transient cap stops the run; upgrading a hiccup costs the
+#: rest of the night. So the bar for "this really is exhaustion" is high, and
+#: 0.9 leaves room for a rejection that lands slightly under a full window
+#: (concurrent requests can be refused at 0.97 without the window being closed).
+PLAN_WALL_UTILIZATION = 0.9
 
 # `Claude AI usage limit reached|1750000000` — seconds, or milliseconds when the
 # value is long enough that seconds would put it in the year 5138. `resetsAt` is
@@ -259,6 +301,85 @@ def _clock(text: str, now: dt.datetime) -> dt.datetime | None:
     return when if when > now else when + dt.timedelta(days=1)
 
 
+def _find_key(value: object, key: str, depth: int = 6) -> object:
+    """The first `key` anywhere in a decoded JSON value, or `None`.
+
+    Depth-bounded rather than trusting the shape: `rate_limit_info` has been seen
+    at the top level of an event and nested under `message`, and pinning either
+    one would make this a second thing to keep in step with the CLI.
+    """
+    if depth < 0:
+        return None
+    if isinstance(value, dict):
+        if key in value:
+            return value[key]
+        for nested in value.values():
+            found = _find_key(nested, key, depth - 1)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _find_key(item, key, depth - 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _rejected_window(text: str) -> dict | None:
+    """The `rate_limit_info` block attached to the request the service refused.
+
+    The rejected one specifically — a stream carries an `"allowed"` block per
+    message, and those describe a window that is doing fine.
+    """
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if _HAS_LIMIT_INFO not in line or not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        info = _find_key(event, "rate_limit_info")
+        if isinstance(info, dict) and str(info.get("status", "")).lower() == "rejected":
+            return info
+    return None
+
+
+def _window_is_spent(info: dict) -> bool | None:
+    """Is the window this refusal names actually used up? `None` if unstated.
+
+    `None` and `False` are different answers and the caller must not conflate
+    them: `None` means the CLI attached no `utilization` for that window, so
+    there is nothing to argue with and the refusal stands as read. `False` means
+    it attached one and it is low — the positive evidence that this is a hiccup.
+    """
+    windows = info.get("unifiedWindows")
+    named = str(info.get("rateLimitType", ""))
+    window = windows.get(named) if isinstance(windows, dict) else None
+    used = window.get("utilization") if isinstance(window, dict) else None
+    if not isinstance(used, (int, float)) or isinstance(used, bool):
+        return None
+    return used >= PLAN_WALL_UTILIZATION
+
+
+def _window_scope(name: str) -> str | None:
+    """Which wall a `rateLimitType` names, or `None` if this does not know.
+
+    Read off the *unit* rather than an enumeration of values, so `five_hour` and
+    a hypothetical `one_hour` both land on SESSION without a table edit. `None`
+    is the important return: an unrecognised name is not evidence, and must fall
+    through to the prose reading rather than defaulting to a scope. Defaulting
+    to SESSION here would mean a short-window throttle the CLI names in a word
+    this function has not seen puts the night to sleep for five hours.
+    """
+    name = name.lower()
+    if "hour" in name:
+        return SESSION
+    if "day" in name or "week" in name or "month" in name:
+        return WEEKLY
+    return None
+
+
 def _error_terminal(text: str) -> dict | None:
     """The CLI's own terminal result object, if it reported an API error.
 
@@ -330,14 +451,20 @@ def detect(returncode: int, stdout: str = "", stderr: str = "",
     resets = next((when for when in (_epoch(text), _iso(text), _clock(text, now))
                    if when is not None and when > now), None)
 
-    # The CLI's own `rateLimitType` first, on a block that says it was rejected —
-    # it names the window that closed, so there is nothing to infer from wording.
-    # Everything below it is the prose fallback for the output format that does
-    # not carry the block.
-    rejected = _LIMIT_REJECTED.search(text)
-    named = _LIMIT_TYPE.search(rejected.group(0)) if rejected else None
+    # The CLI's own account of which window closed, and how spent it is. Both
+    # outrank every prose reading below: they are the same facts without the
+    # wording risk, and the utilization is the one signal that can say "the
+    # service refused this, and it was still not exhaustion".
+    named = _window_scope(str((rejected or {}).get("rateLimitType", ""))) \
+        if (rejected := _rejected_window(text)) else None
+    if named and _window_is_spent(rejected) is False:
+        # Refused, but the window it named is under `PLAN_WALL_UTILIZATION`. Not
+        # plan exhaustion, whatever the prose says — a short wait that spends no
+        # session, rather than sleeping until a window that is 31% used resets.
+        named = TRANSIENT
+
     if named:
-        scope = WEEKLY if _LONG_WINDOW.search(named.group(1)) else SESSION
+        scope = named
     elif _MONTHLY.search(text):
         scope = MONTHLY
     elif _PLAN.search(text):
@@ -377,6 +504,14 @@ def resume_at(wall: Wall, now: dt.datetime | None = None) -> dt.datetime:
     overage unnecessary. So this scope is capped at one session window: without
     the cap, a `resets_at` parsed off the spend-limit message would put the night
     to sleep until next month.
+
+    TRANSIENT is capped for the same reason, one scale down. A hiccup reopens in
+    seconds *by definition* — that is what the scope means — so any reset time
+    read out of the same text belongs to a plan window that happened to be
+    described alongside it, not to the hiccup. Measured while adding
+    `rate_limit_info`'s `resetsAt` as an epoch source: a 429 at 02:00 whose
+    stream mentioned the five-hour window's 17:50 reset produced a **15h52m**
+    sleep for a wall that spends no session and is meant to cost seven minutes.
     """
     now = now or dt.datetime.now()
     default = dt.timedelta(minutes=TRANSIENT_MINUTES) if wall.scope == TRANSIENT \
@@ -384,4 +519,6 @@ def resume_at(wall: Wall, now: dt.datetime | None = None) -> dt.datetime:
     when = wall.resets_at or (now + default)
     if wall.scope == MONTHLY:
         when = min(when, now + dt.timedelta(hours=SESSION_HOURS))
+    if wall.scope == TRANSIENT:
+        when = min(when, now + dt.timedelta(minutes=TRANSIENT_MINUTES))
     return when + dt.timedelta(minutes=GRACE_MINUTES)
