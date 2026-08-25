@@ -147,6 +147,131 @@ def test_a_session_limit_is_waited_out():
     assert wall.spends_a_session
 
 
+# --- the 2026-08-25 wall, in the two shapes it actually arrived in -----------
+#
+# Verbatim from `.ai/runs/`, trimmed to the fields that decide the answer. The
+# night cost six dispatches and landed nothing, and this phrasing is why: it
+# matches none of the entries that predate it.
+
+_SESSION_PROSE = "You've hit your session limit · resets 5:50pm (Europe/Prague)"
+
+_JSON_TERMINAL = (
+    '{"is_error":true,"terminal_reason":"api_error","subtype":"success",'
+    f'"api_error_status":429,"result":"{_SESSION_PROSE}","type":"result"}}'
+)
+
+_STREAM_TERMINAL = (
+    '{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text",'
+    f'"text":"{_SESSION_PROSE}"}}]}},"rate_limit_info":{{"status":"rejected",'
+    '"resetsAt":1787673000,"rateLimitType":"five_hour","overageStatus":"rejected"}}\n'
+    + _JSON_TERMINAL
+)
+
+
+def test_the_clis_session_limit_wording_is_recognised():
+    """The phrase that got through. `--output-format json` carries no
+    `rate_limit_info` block, so prose was the only reading available to
+    `review_branch`, `run_checker` and `run_stale_check` — and none of `usage
+    limit`, `plan limit`, `spend limit` or `rate limit` appears in it. Two
+    finished cards were filed "no usable review verdict" and parked in `review/`
+    as though a human owed them something."""
+    wall = limits.detect(1, _JSON_TERMINAL, now=NOW)
+    assert wall is not None
+    assert wall.scope == limits.SESSION
+    assert wall.spends_a_session and wall.waits_out
+
+
+def test_a_session_wall_is_not_filed_as_a_transient_hiccup():
+    """The stream shape, where detection *did* fire — on `rate_limit_info`'s
+    `rate_limit` substring, which put a five-hour wall in the TRANSIENT bucket.
+    It then did not count against `--sessions` and was capped by
+    `TRANSIENT_RETRIES` instead: three waits and the night stops, whatever
+    `--sessions` was set to."""
+    wall = limits.detect(1, _STREAM_TERMINAL, now=NOW)
+    assert wall.scope == limits.SESSION
+    assert wall.spends_a_session
+
+
+def test_the_structured_reset_time_is_preferred_over_the_prose_clock():
+    """`resetsAt` is the same instant without the am/pm and timezone guessing —
+    1787673000 is 17:50 local, which is what "5:50pm" meant."""
+    wall = limits.detect(1, _STREAM_TERMINAL, now=dt.datetime(2026, 8, 25, 14, 8))
+    assert wall.resets_at == dt.datetime(2026, 8, 25, 17, 50)
+
+
+def test_a_stale_reset_time_does_not_shadow_a_usable_one():
+    """Ranked by precision, filtered by "is it in the future" — per candidate.
+    A stream carries a `resetsAt` from whenever the block was emitted, and if
+    ranking picked it and the past-check then discarded it, the perfectly good
+    prose time below would never be consulted and the caller would fall back to
+    a blind five hours."""
+    stale = int(dt.datetime(2026, 7, 23, 1, 0).timestamp())
+    text = (f'{{"rate_limit_info":{{"status":"rejected","resetsAt":{stale},'
+            '"rateLimitType":"five_hour"}}\n'
+            'You have hit your session limit, resets at 4am')
+    wall = limits.detect(1, text, now=NOW)
+    assert wall.resets_at == dt.datetime(2026, 7, 23, 4, 0)
+
+
+def test_an_error_terminal_is_a_wall_even_on_a_zero_exit():
+    """The CLI's own fields disagreed on 2026-08-25 — `"is_error": true` beside
+    `"subtype": "success"` — so the exit code is not the only thing worth
+    reading. The escape from the non-zero precondition is structural: a line
+    that parses as the terminal `result` event, says `is_error`, and carries a
+    4xx/5xx status."""
+    wall = limits.detect(0, _JSON_TERMINAL, now=NOW)
+    assert wall is not None and wall.scope == limits.SESSION
+
+
+def test_a_429_status_is_a_wall_even_if_the_prose_is_reworded():
+    """The number is the protocol; the sentence around it is not. This is the
+    net under the phrase list for the next time the wording changes — it lands
+    as TRANSIENT, the safe reading, rather than as nothing at all."""
+    blob = ('{"is_error":true,"terminal_reason":"api_error","api_error_status":429,'
+            '"result":"Something entirely new and unmatched","type":"result"}')
+    wall = limits.detect(1, blob, now=NOW)
+    assert wall is not None
+    assert wall.scope == limits.TRANSIENT
+
+
+def test_the_evidence_line_is_the_clis_message_not_the_json_boilerplate():
+    """A stream's terminal result is one enormous line whose first 200
+    characters are field names. This string is what the run log prints and what
+    lands on the card, so it is the whole account a 6 AM reader gets."""
+    wall = limits.detect(1, _STREAM_TERMINAL, now=NOW)
+    assert wall.evidence == _SESSION_PROSE
+
+
+# --- the structural escape stays narrow -------------------------------------
+
+def test_a_non_error_terminal_on_a_zero_exit_is_still_not_a_wall():
+    """The precondition that makes the phrase list safe, still holding. A worker
+    that finished a card *about* rate limiting writes about it in its summary,
+    and that must not stop the night."""
+    blob = ('{"is_error":false,"subtype":"success","type":"result",'
+            '"result":"Added session limit handling and a usage limit banner"}')
+    assert limits.detect(0, blob) is None
+
+
+def test_prose_that_merely_looks_like_an_error_terminal_is_not_one():
+    """Four conditions, all structural: parses as JSON, is the `result` event,
+    says `is_error`, carries a 4xx/5xx status. A worker quoting the shape in its
+    summary — which is a real thing to do in the repo that owns this module —
+    satisfies none of them."""
+    quoted = ('Fixed the detector. The CLI emits "is_error": true with '
+              '"api_error_status": 429 and "type": "result" on a session limit.')
+    assert limits.detect(0, quoted) is None
+
+
+def test_a_non_429_error_terminal_is_not_a_wall():
+    """A 500 is the service falling over, not the window closing. It has no
+    wall phrase and no 429, so it stays a plain failure and the card is retried
+    rather than the night put to sleep."""
+    blob = ('{"is_error":true,"terminal_reason":"api_error","api_error_status":500,'
+            '"result":"Internal server error","type":"result"}')
+    assert limits.detect(1, blob) is None
+
+
 def test_a_bare_429_is_transient_and_does_not_spend_a_session():
     """A service-side rate limit reopens in seconds. Reading one as the plan
     window closing would throw away five hours of a good night over a hiccup."""

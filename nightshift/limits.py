@@ -28,16 +28,30 @@ breaker, so an unrecognised wall costs three cards instead of the whole queue.
 Fixing a missed wall means adding a line to `_WALL` and a case to
 `tests/test_board_limits.py`; nothing else has to change.
 
-The scan only ever runs on a **non-zero exit**. That single precondition is what
-makes a phrase list safe: `stdout` carries the worker's own final message, so a
-card about rate limiting would otherwise trip the detector by talking about it.
-A worker that succeeded did not hit a wall, whatever its prose says.
+The scan only ever runs on a **non-zero exit**, or on a CLI *error terminal* —
+a line that parses as the CLI's own `{"type": "result", "is_error": true,
+"api_error_status": <4xx/5xx>}` object. That precondition is what makes a phrase
+list safe: `stdout` carries the worker's own final message, so a card about rate
+limiting would otherwise trip the detector by talking about it. Prose alone
+never qualifies; the escape hatch is structural, and it exists because the CLI
+has been observed reporting `"is_error": true` and `"subtype": "success"` in the
+same object (2026-08-25) — its own fields disagree, so the exit code is not the
+only thing worth reading.
+
+**Prefer the CLI's structured fields over its prose wherever it emits them.**
+A `--output-format stream-json` run carries `"rate_limit_info": {"status":
+"rejected", "resetsAt": <epoch>, "rateLimitType": "five_hour"}`, which answers
+both "which wall" and "until when" exactly, with no wording to keep up with.
+`--output-format json` does not carry that block, so the phrase list is still
+the only reading available there — which is precisely how the 2026-08-25 review
+walls got through (see `_WALL`'s `session limit` entry).
 
 No LLM (`00_architecture.md` §12) — regexes over text the CLI already printed.
 """
 from __future__ import annotations
 
 import datetime as dt
+import json
 import re
 from dataclasses import dataclass
 
@@ -86,11 +100,24 @@ TRANSIENT = "transient"
 # How long to wait out a TRANSIENT wall that named no retry time.
 TRANSIENT_MINUTES = 5
 
-# Matched case-insensitively against stdout+stderr, and only on a non-zero exit.
-# Grow this list from `.ai/runs/` evidence when a wall gets through.
+# Matched case-insensitively against stdout+stderr, and only past the
+# precondition in `detect`. Grow this list from `.ai/runs/` evidence when a wall
+# gets through.
+#
+# `session limit` is the 2026-08-25 evidence, and it cost a whole run. The CLI's
+# wording for the rolling window is "You've hit your session limit · resets
+# 5:50pm (Europe/Prague)" — which matches none of the entries above it. Under
+# `--output-format stream-json` that went unnoticed, because the worker's stream
+# also carries a `rate_limit_info` block and `rate[ _]limit` caught *that*
+# (as TRANSIENT, wrongly — see `_PLAN`). Under `--output-format json` there is no
+# such block, so `review_branch`, `run_checker` and `run_stale_check` saw no wall
+# at all: two finished cards had their reviewer walled mid-verdict, were filed as
+# "no usable review verdict", and were parked in `review/` as though a human had
+# to look at them. Neither the sleep nor the give-back ran.
 _WALL = re.compile(
     r"\busage limit\b"
     r"|\bplan limit\b"
+    r"|\bsession limit\b"               # the rolling window, as the CLI words it
     r"|\bspend limit\b"                 # the monthly billing cap, worded like none of the others
     r"|limit reached\|\d+"              # the machine-readable form, with an epoch
     r"|\brate[ _]limit(?:_error)?\b"
@@ -111,13 +138,41 @@ _MONTHLY = re.compile(r"\bspend limit\b", re.IGNORECASE)
 # sometimes delivered *as* a `rate_limit_error` with usage-limit prose attached,
 # and reading that as a hiccup would have the runner retry into the same wall
 # every five minutes until morning.
-_PLAN = re.compile(r"\b(?:usage|plan) limit\b|limit reached\|\d+", re.IGNORECASE)
+#
+# `session limit` belongs here for a sharper version of that reason. On
+# 2026-08-25 a genuine five-hour wall reached this function inside a stream that
+# also held `"rate_limit_info"`, so `_TRANSIENT_ONLY` claimed it and the night
+# logged "transient, 2 of 3": it never counted against `--sessions`, and it was
+# capped by `TRANSIENT_RETRIES` instead — three waits and the run stops, whatever
+# `--sessions` said. The sleep time happened to be right (the prose carried a
+# reset), so the misfiling was invisible in the log except as one wrong word.
+_PLAN = re.compile(r"\b(?:usage|plan|session) limit\b|limit reached\|\d+", re.IGNORECASE)
 _TRANSIENT_ONLY = re.compile(r"\brate[ _]limit(?:_error)?\b|\btoo many requests\b",
                              re.IGNORECASE)
 
+# The CLI's own machine-readable verdict on which window closed, emitted in the
+# `rate_limit_info` block of a `--output-format stream-json` run. Preferred over
+# every prose reading below: it is the same fact without the wording risk, and it
+# is what would have classified the 2026-08-25 wall correctly with no phrase list
+# involved at all. Observed values: `five_hour` (the rolling session window) and,
+# by the same naming scheme, a longer one for the weekly allowance — so the match
+# is on the *unit*, not on an enumeration this module would have to chase.
+#
+# Matched as one object rather than as two independent searches: a stream holds
+# a `rate_limit_info` for every message, almost all of them `"status":
+# "allowed"`, so a loose pair of scans could take the `rateLimitType` of an
+# allowed window and the `"rejected"` of the one that actually closed.
+_LIMIT_REJECTED = re.compile(
+    r'"rate_limit_info"\s*:\s*\{[^{}]*?"status"\s*:\s*"rejected"[^{}]*?\}',
+    re.IGNORECASE)
+_LIMIT_TYPE = re.compile(r'"rateLimitType"\s*:\s*"([a-z0-9_]+)"', re.IGNORECASE)
+_LONG_WINDOW = re.compile(r"day|week|month", re.IGNORECASE)
+
 # `Claude AI usage limit reached|1750000000` — seconds, or milliseconds when the
-# value is long enough that seconds would put it in the year 5138.
-_EPOCH = re.compile(r"limit reached\|(\d{9,13})", re.IGNORECASE)
+# value is long enough that seconds would put it in the year 5138. `resetsAt` is
+# the same number under the CLI's own key, from the `rate_limit_info` block.
+_EPOCH = re.compile(r"limit reached\|(\d{9,13})|\"resetsAt\"\s*:\s*(\d{9,13})",
+                    re.IGNORECASE)
 _ISO = re.compile(
     r"reset(?:s|ting)?(?:\s+at)?\s+(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?)",
     re.IGNORECASE,
@@ -159,7 +214,8 @@ def _epoch(text: str) -> dt.datetime | None:
     found = _EPOCH.search(text)
     if not found:
         return None
-    value = int(found.group(1))
+    # Two alternatives, one number: whichever group matched is the epoch.
+    value = int(found.group(1) or found.group(2))
     if value > 10_000_000_000:  # milliseconds
         value //= 1000
     try:
@@ -203,39 +259,107 @@ def _clock(text: str, now: dt.datetime) -> dt.datetime | None:
     return when if when > now else when + dt.timedelta(days=1)
 
 
+def _error_terminal(text: str) -> dict | None:
+    """The CLI's own terminal result object, if it reported an API error.
+
+    A *structural* read, deliberately: it must parse as JSON, be the terminal
+    `result` event, say `is_error`, and carry an HTTP status of 400 or above.
+    Prose cannot satisfy all four, which is what makes this safe to trust past a
+    zero exit code — unlike a phrase, which the worker's own final message could
+    contain innocently (that is the whole reason `detect` has a precondition).
+
+    Exists because the CLI's fields have been seen to disagree: the 2026-08-25
+    walls arrived as `{"is_error": true, "subtype": "success", "terminal_reason":
+    "api_error", "api_error_status": 429}`. Reading the exit code alone means
+    trusting whichever of those two the launcher happened to map it from.
+
+    Line-oriented, so it works on both output formats with one pass: `json`
+    prints a single object, `stream-json` prints one per line and the terminal
+    result is the last of them.
+    """
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if not line.startswith("{") or '"is_error"' not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(event, dict) or event.get("type") != "result":
+            continue
+        if event.get("is_error") is not True:
+            continue
+        status = event.get("api_error_status")
+        if isinstance(status, int) and status >= 400:
+            return event
+    return None
+
+
 def detect(returncode: int, stdout: str = "", stderr: str = "",
            now: dt.datetime | None = None) -> Wall | None:
     """The wall this CLI run hit, or `None` if it did not hit one.
 
-    `None` is the answer for every successful run without reading a character of
-    its output — see the module docstring on why that precondition is what makes
-    a phrase list safe.
+    `None` is the answer for every clean run — a zero exit with no error
+    terminal — without reading a character of its prose. See the module
+    docstring on why that precondition is what makes a phrase list safe.
     """
-    if returncode == 0:
-        return None
     text = f"{stdout}\n{stderr}"
+    terminal = _error_terminal(text)
+    if returncode == 0 and terminal is None:
+        return None
+
+    # A 429 the CLI reported in its own status field *is* "too many requests",
+    # whatever prose came with it. Reading it here rather than adding another
+    # phrase is what keeps this working through the next rewording: the number is
+    # the protocol, the sentence around it is not.
+    throttled = bool(terminal) and terminal.get("api_error_status") == 429
     found = _WALL.search(text)
-    if not found:
+    if not found and not throttled:
         return None
 
     now = now or dt.datetime.now()
-    resets = _epoch(text) or _iso(text) or _clock(text, now)
     # A reset already in the past tells us nothing useful — a stale timestamp
     # from an earlier attempt in the same log is likelier than a window that
     # reopened while we were reading about it. Treat it as unknown.
-    if resets is not None and resets <= now:
-        resets = None
+    #
+    # Filtered per candidate, not once over the winner: the readings are ranked
+    # by precision, and a stale `resetsAt` earlier in a stream must not shadow a
+    # perfectly good reset time in the prose below it. Ranking first and
+    # discarding after would do exactly that — `or` short-circuits on the stale
+    # one and the later candidates are never consulted.
+    resets = next((when for when in (_epoch(text), _iso(text), _clock(text, now))
+                   if when is not None and when > now), None)
 
-    if _MONTHLY.search(text):
+    # The CLI's own `rateLimitType` first, on a block that says it was rejected —
+    # it names the window that closed, so there is nothing to infer from wording.
+    # Everything below it is the prose fallback for the output format that does
+    # not carry the block.
+    rejected = _LIMIT_REJECTED.search(text)
+    named = _LIMIT_TYPE.search(rejected.group(0)) if rejected else None
+    if named:
+        scope = WEEKLY if _LONG_WINDOW.search(named.group(1)) else SESSION
+    elif _MONTHLY.search(text):
         scope = MONTHLY
     elif _PLAN.search(text):
         scope = WEEKLY if _WEEKLY_WORD.search(text) else SESSION
     elif _TRANSIENT_ONLY.search(text):
         scope = TRANSIENT
+    elif throttled:
+        # A bare 429 with nothing else to go on: the pre-existing reading, and
+        # the safe one — a short wait that does not spend one of the night's
+        # sessions. If it was really the window closing, the next attempt says so.
+        scope = TRANSIENT
     else:
         scope = SESSION
 
-    line = next((l.strip() for l in text.splitlines() if _WALL.search(l)), found.group(0))
+    line = next((l.strip() for l in text.splitlines() if _WALL.search(l)),
+                found.group(0) if found else "")
+    # A stream's terminal result is one enormous line, and its first 200
+    # characters are boilerplate — the CLI's own message says more in less, so
+    # prefer it when there is one. This is what the run log prints and what
+    # lands on the card, so it is the only account a 6 AM reader gets.
+    if terminal and isinstance(terminal.get("result"), str) and terminal["result"].strip():
+        line = terminal["result"].strip()
     return Wall(scope=scope, resets_at=resets, evidence=line[:200])
 
 
