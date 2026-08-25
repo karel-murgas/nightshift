@@ -493,6 +493,141 @@ def test_the_drain_is_skipped_when_nothing_is_owed(tmp_path, monkeypatch):
     assert seen == []
 
 
+def test_the_baseline_run_is_never_asked_about_a_file_that_is_not_on_base(
+        tmp_path, monkeypatch):
+    """The "does this file exist on base" filter, asserted on directly rather
+    than through its outcome.
+
+    Handing pytest a node id whose file does not exist happens to be harmless
+    today — it errors out, writes no report, and the caller blames nobody — so
+    the end-to-end test above passes with the filter removed (measured). That is
+    exactly the shape that lets a guard rot: the behaviour is right for a reason
+    nothing checks. A pytest that recorded the collection error as a `<testcase>`
+    `error` would turn every card's own broken new test into "already failing on
+    base", which is a free attempt for being wrong.
+
+    So the assertion is on the mechanism: with nothing comparable, no worktree is
+    cut and no pytest is spawned. The membership question goes to `git cat-file`,
+    which is also why the expensive half is not paid on every ordinary red run —
+    a card breaking a test it wrote itself is the common case.
+    """
+    root = _worktree_repo(tmp_path)
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<testsuite><testcase classname="tests.test_brand_new" name="test_new">'
+        '<failure message="assert False">boom</failure></testcase></testsuite>',
+        encoding="utf-8")
+    real_run, spawned = subprocess.run, []
+
+    def spy(argv, *a, **kw):
+        # The invocation, not the word: `pytest` also appears inside pytest's own
+        # tmp_path (`.../pytest-of-karel/pytest-3269/...`), and a substring scan
+        # matched the worktree path instead of the command. A test finding its own
+        # false positive, which is the mistake this whole check exists to avoid.
+        argv = list(argv)
+        if argv[1:3] == ["-m", "pytest"]:
+            spawned.append(argv)
+        return real_run(argv, *a, **kw)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    why = runner._already_failing_on_base(root, "development_team", junit, "probe", 120)
+
+    assert why == ""
+    assert spawned == []
+    # And no worktree was cut to find that out.
+    assert not (runner.worktree_root(root) / "_baseline-probe").exists()
+
+
+# --- one test failing for two cards is the baseline, not the cards -----------
+
+def _junit_naming(root: Path, card_id: str, attempt: int, *tests: str) -> None:
+    """Write the report a dispatch of `card_id` would have left behind."""
+    cases = "".join(
+        f'<testcase classname="tests.{t.split("::")[0][6:-3]}" name="{t.split("::")[1]}">'
+        f'<failure message="assert False">boom</failure></testcase>' for t in tests)
+    out = root / ".ai" / "runs" / card_id / f"attempt-{attempt}"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "junit.xml").write_text(f"<testsuite>{cases}</testsuite>", encoding="utf-8")
+
+
+def test_one_test_failing_for_two_cards_stops_the_night_and_blames_neither(
+        tmp_path, monkeypatch):
+    """The 2026-08-25 shape, which the baseline re-run structurally cannot see.
+
+    That failure was order-dependent — a leaked module global, visible only when
+    another file had run earlier in the same xdist worker — so re-running the
+    test alone on `base` passes. What gave it away was three unrelated branches
+    dying on one assertion. Only the consecutive-failure breaker noticed, at
+    three cards, after one had already reached `failed/`.
+    """
+    root = _loaded_board(tmp_path, "a", "b", "c")
+    calls: list[str] = []
+    shared = "tests/test_overlay.py::test_tints"
+
+    def fake_dispatch(root_, card, base, model, card_budget, test_timeout):
+        calls.append(card.id)
+        _junit_naming(root, card.id, card.attempts + 1, shared)
+        card.write({"attempts": str(card.attempts + 1)})
+        return runner.Dispatch("failed", "pytest: 1 failure(s)")
+
+    monkeypatch.setattr(runner, "dispatch", fake_dispatch)
+    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(runner, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
+    runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
+
+    # Stopped at the second card, not the third — and `c` never ran.
+    assert calls == ["a", "b"]
+    # And `b` is not blamed: its attempt is handed back the way a drifted gate's is.
+    assert board.find(root, "b").attempts == 0
+
+
+def test_two_cards_failing_on_different_tests_is_just_two_failures(tmp_path, monkeypatch):
+    """The check must key on the *test*, not on the count. Two cards each broken
+    in their own way is an ordinary night, and the consecutive-failure breaker —
+    which needs three — is the only thing that should have an opinion."""
+    root = _loaded_board(tmp_path, "a", "b")
+    calls: list[str] = []
+
+    def fake_dispatch(root_, card, base, model, card_budget, test_timeout):
+        calls.append(card.id)
+        _junit_naming(root, card.id, card.attempts + 1,
+                      f"tests/test_{card.id}.py::test_its_own")
+        card.write({"attempts": str(card.attempts + 1)})
+        return runner.Dispatch("failed", "pytest: 1 failure(s)")
+
+    monkeypatch.setattr(runner, "dispatch", fake_dispatch)
+    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(runner, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
+    runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
+
+    assert calls == ["a", "b"]
+    assert board.find(root, "b").attempts == 1      # blamed, correctly
+
+
+def test_the_same_card_failing_twice_is_not_cross_card_drift(tmp_path, monkeypatch):
+    """A card retried after a `needs_fix` can fail the same test twice, and that
+    is a fact about the card. The set only carries tests from cards that have
+    already *settled*, so a card cannot trigger this against itself."""
+    root = _loaded_board(tmp_path, "a")
+    calls: list[str] = []
+    shared = "tests/test_overlay.py::test_tints"
+
+    def fake_dispatch(root_, card, base, model, card_budget, test_timeout):
+        calls.append(card.id)
+        _junit_naming(root, card.id, card.attempts + 1, shared)
+        card.write({"attempts": str(card.attempts + 1)})
+        return (runner.Dispatch("needs_fix", "tidy this") if len(calls) == 1
+                else runner.Dispatch("failed", "pytest: 1 failure(s)"))
+
+    monkeypatch.setattr(runner, "dispatch", fake_dispatch)
+    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(runner, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
+    runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
+
+    assert calls == ["a", "a"]
+    assert board.find(root, "a").attempts == 2      # both spent, neither given back
+
+
 def test_a_weekly_limit_ends_the_night_even_with_sessions_to_spare(tmp_path, monkeypatch):
     """A weekly window does not reopen inside a night; sleeping on one would idle
     until morning and produce nothing."""
@@ -953,19 +1088,94 @@ def test_a_gate_stub_that_does_not_understand_json_never_classifies_as_drift(
     assert result.repo_drift is False
 
 
+def _worker_breaking_a_test(monkeypatch, verdict: dict):
+    """A worker that commits a test failure of its own making, on its branch."""
+    def fake(argv, cwd, timeout, stream_path=None, env=None, prompt=""):
+        (Path(cwd) / "tests" / "test_ok.py").write_text(
+            "def test_ok():\n    assert False\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=cwd, check=True)
+        subprocess.run(["git", "commit", "-qm", "worker: broke it"], cwd=cwd, check=True)
+        path = Path(next(l.strip() for l in prompt.splitlines()
+                         if l.strip().endswith(".json")))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(verdict), encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
+
+    monkeypatch.setattr(runner, "_run_worker", fake)
+    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+
+
 def test_a_failing_test_suite_fails_the_card(tmp_path, monkeypatch):
+    """The test the card itself broke — green on base, red on the branch."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+    _worker_breaking_a_test(monkeypatch, {"outcome": "done", "summary": "x"})
+
+    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+                             "sonnet", 5.0, 120)
+    assert result.outcome == "failed"
+    assert result.repo_drift is False
+    assert "pytest" in result.detail
+
+
+def test_a_test_already_red_on_base_is_not_the_cards_fault(tmp_path, monkeypatch):
+    """The pytest half of the drift check, and the case that had none.
+
+    On 2026-08-25 a leaked `SCREEN_WIDTH`/`HEIGHT` global made one test red for
+    three consecutive cards; `catalog-registry-and-guards` reached `failed/` for
+    it. A gate violation names a path, so "is this about the diff?" was already
+    answerable; a test failure names a test, and the only way to ask is to run it
+    somewhere else. `blocked` + `repo_drift` is the same landing a drifted gate
+    gets: no attempt spent, no card blamed, and the night stops.
+
+    Note what this fixture used to be: `test_a_failing_test_suite_fails_the_card`
+    committed its red test to `development_team` — the base — and asserted the
+    card was blamed for it. It was the drift case all along, asserting the bug.
+    """
     root = _worktree_repo(tmp_path)
     _charter(root, "code-thread")
     _card(root, "tasks", "probe")
     (root / "tests" / "test_ok.py").write_text(
         "def test_ok():\n    assert False\n", encoding="utf-8")
-    subprocess.run(["git", "commit", "-aqm", "red test"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-aqm", "red on base"], cwd=root, check=True)
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
 
     result = runner.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
+    assert result.outcome == "blocked"
+    assert result.repo_drift is True
+    assert "fail on `development_team` too" in result.detail
+
+
+def test_a_test_the_card_itself_added_gets_no_baseline_excuse(tmp_path, monkeypatch):
+    """A test file that does not exist on base cannot have been failing there, and
+    treating "missing" as "was already red" would hand a free attempt to every
+    card whose brand-new test is simply wrong."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+
+    def fake(argv, cwd, timeout, stream_path=None, env=None, prompt=""):
+        (Path(cwd) / "tests" / "test_brand_new.py").write_text(
+            "def test_new():\n    assert False\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=cwd, check=True)
+        subprocess.run(["git", "commit", "-qm", "worker: new red test"],
+                       cwd=cwd, check=True)
+        path = Path(next(l.strip() for l in prompt.splitlines()
+                         if l.strip().endswith(".json")))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"outcome": "done", "summary": "x"}),
+                        encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
+
+    monkeypatch.setattr(runner, "_run_worker", fake)
+    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+
+    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+                             "sonnet", 5.0, 120)
     assert result.outcome == "failed"
-    assert "pytest" in result.detail
+    assert result.repo_drift is False
 
 
 def test_a_worker_with_no_verdict_falls_through_to_the_gates(tmp_path, monkeypatch):

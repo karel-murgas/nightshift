@@ -3077,6 +3077,94 @@ def _run_tests(cwd: Path, log: Path, timeout: int, junit: Path,
     return ok, why, ("" if ok else suite.failure_excerpt(junit))
 
 
+def _failing_test_ids(junit: Path) -> list[str]:
+    """The pytest node ids the report says failed, deduplicated, order kept."""
+    seen: list[str] = []
+    for failure in suite.junit_failures(junit):
+        node = str(failure.get("test", "")).strip()
+        if node and "::" in node and node not in seen:
+            seen.append(node)
+    return seen
+
+
+def _already_failing_on_base(root: Path, base: str, junit: Path, label: str,
+                             timeout: int) -> str:
+    """Do this attempt's failing tests fail on `base` too? The reason, or `""`.
+
+    The pytest half of `_is_repo_drift`, and it exists because there was none.
+    A gate violation names a path, so "is this about the diff?" is a set
+    membership test; a test failure names a *test*, and the same question can
+    only be answered by running it somewhere else. Until this, every red test was
+    the card's fault by construction — which on 2026-08-25 filed
+    `catalog-registry-and-guards` to `failed/` for a `SCREEN_WIDTH`/`HEIGHT` leak
+    it had not written, and then let two more cards spend an attempt each on the
+    identical assertion before the consecutive-failure breaker ended the run.
+
+    Only the failing node ids are re-run, and only those whose file exists on
+    `base` — a test the card itself added cannot have a baseline, and treating a
+    missing file as "fails on base too" would hand a free attempt to every card
+    whose new test is simply wrong.
+
+    **What this does not catch: an order-dependent failure.** The 2026-08-25 leak
+    was one — the test failed only when a *different* file had run earlier in the
+    same xdist worker — so re-running it alone on `base` passes and this returns
+    `""`. That case is caught by the cross-dispatch repeat check in `run()`
+    instead, which needs no re-run at all. The two are complementary and neither
+    subsumes the other: this one protects the *first* card, the other one
+    recognises the pattern.
+    """
+    nodes = _failing_test_ids(junit)
+    # Which of them even exist on `base`, asked of git rather than of a checkout:
+    # the common case is a card that broke a test it also wrote, and cutting a
+    # worktree to discover there is nothing to compare would pay the expensive
+    # half of this check on every ordinary red run.
+    on_base = [n for n in nodes
+               if _git(root, "cat-file", "-e",
+                       f"{base}:{n.split('::', 1)[0]}").returncode == 0]
+    if not on_base:
+        return ""
+    tree = worktree_root(root) / f"_baseline-{label}"
+    if tree.exists() or _worktree_registered(root, tree):
+        _git(root, "worktree", "remove", "--force", str(tree))
+    _git(root, "worktree", "prune")
+    tree.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        made = _worktree_add(root, "--detach", str(tree), base)
+    except WorktreePathTooLong:
+        return ""
+    if made.returncode != 0:
+        return ""
+    try:
+        report = tree / ".baseline-junit.xml"
+        argv = [sys.executable, "-m", "pytest", *on_base, "-q",
+                f"--junitxml={report}"]
+        try:
+            # Serial on purpose. The set is small, and xdist would reintroduce
+            # the very cross-file ordering effects this comparison is trying to
+            # hold constant between the two runs.
+            #
+            # gate-ok(subprocess_result_checked): a non-zero exit is the EXPECTED
+            # outcome here — it is what pytest returns when tests fail, which is
+            # the hypothesis being tested. The verdict comes from the JUnit report
+            # below, the same way `_run_tests` judges the real run, and a run that
+            # died before writing one leaves `still_red` empty and returns "",
+            # which blames nobody.
+            subprocess.run(argv, cwd=tree, capture_output=True, text=True,
+                           timeout=timeout, encoding="utf-8", errors="replace")
+        except subprocess.TimeoutExpired:
+            return ""
+        still_red = _failing_test_ids(report)
+        if not still_red:
+            return ""
+        shown = ", ".join(still_red[:3])
+        more = f" (+{len(still_red) - 3} more)" if len(still_red) > 3 else ""
+        return (f"{len(still_red)} of the {len(on_base)} failing test(s) re-run "
+                f"fail on `{base}` too: {shown}{more}")
+    finally:
+        _git(root, "worktree", "remove", "--force", str(tree))
+        _git(root, "worktree", "prune")
+
+
 def _run_worker(argv: list[str], cwd: Path, timeout: int,
                 stream_path: Path | None = None,
                 env: dict[str, str] | None = None,
@@ -3796,6 +3884,14 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
 
     drop_worktree(root, tree)
     if not ok:
+        # Symmetrical with the gate-drift check above: before this card is
+        # blamed, ask whether the same tests were already red on the base it
+        # forked from. If they were, the diff is not what broke them, and
+        # spending an attempt teaches the board something false.
+        if drifted := _already_failing_on_base(root, base, out_dir / "junit.xml",
+                                               card.id, test_timeout):
+            return Dispatch("blocked", f"pytest: {drifted}", cost, round_no,
+                            honoured_wall, repo_drift=True, evidence=evidence)
         return Dispatch("failed", why, cost, round_no, honoured_wall, evidence=evidence)
     made = f"{commits} commit(s) on {branch}" + (f", {rescued} artefact(s)" if rescued else "")
     if checked:
@@ -5609,6 +5705,9 @@ def run(root: Path, args: argparse.Namespace) -> int:
         # site remembering to clear it.
         fix_rounds = 0
         fix_rounds_for = -1
+        # Every test id that has failed for some *already-settled* card this run.
+        # A new failure intersecting this set is the baseline, not the card.
+        red_elsewhere: set[str] = set()
         while index < len(ready):
             candidate = ready[index]
             if fix_rounds_for != index:
@@ -5651,9 +5750,9 @@ def run(root: Path, args: argparse.Namespace) -> int:
             if result.outcome == "blocked":
                 _log("  " + _settled(candidate, result, model))
                 if result.repo_drift:
-                    _stop(f"a gate violation outside {candidate.card.id}'s own diff — "
-                          f"repo drift, not this card's fault. No attempt was spent and "
-                          f"no card was blamed; fix the drifted gate and re-run. "
+                    _stop(f"a failure outside {candidate.card.id}'s own diff — repo "
+                          f"drift, not this card's fault. No attempt was spent and no "
+                          f"card was blamed; fix it on `{base}` and re-run. "
                           f"{result.detail}")
                 else:
                     _stop("the gate harness is broken on this machine, so no card "
@@ -5739,6 +5838,47 @@ def run(root: Path, args: argparse.Namespace) -> int:
                 _log(f"  re-dispatching {candidate.card.id} to apply the "
                      f"reviewer's finding")
                 continue  # same card, same run, one fix to apply
+
+            # The same test failing across two *different* cards is not about
+            # either of them.
+            #
+            # This is the order-dependent baseline breakage `_already_failing_on_
+            # base` structurally cannot see: on 2026-08-25 a leaked
+            # `SCREEN_WIDTH`/`HEIGHT` global made one test fail only when another
+            # file had run earlier in the same xdist worker, so re-running it
+            # alone on `base` passes. What gave it away was the repetition —
+            # `catalog-registry-and-guards`, `credit-telemetry-by-source` and
+            # `player-text-explains-design-decisions` all died on
+            # `test_range_overlay_tints_exactly_what_validate_accepts`, with the
+            # identical assertion and the identical missing tile. Three unrelated
+            # branches do not independently break one test.
+            #
+            # Only the consecutive-failure breaker noticed, at three cards, after
+            # one had already reached `failed/`. This notices at two, gives the
+            # second card's attempt back, and names the test instead of the card.
+            if result.outcome == "failed":
+                fresh_red = _failing_test_ids(
+                    run_dir(work, candidate.card, candidate.card.attempts) / "junit.xml")
+                repeated = sorted(set(fresh_red) & set(red_elsewhere))
+                if repeated:
+                    _stop(f"{', '.join(repeated[:3])} failed for "
+                          f"{candidate.card.id} and for a different card earlier "
+                          f"in this run. One test breaking on unrelated branches "
+                          f"is the baseline, not the cards — most likely state "
+                          f"leaking between test files. Fix it on `{base}` and "
+                          f"re-run; the evidence is in `.ai/runs/`")
+                    # Not settled as this card's failure: give the attempt back
+                    # the way a drifted gate does, so the board does not record a
+                    # verdict the next run would have to undo.
+                    card_back = board.find(work, candidate.card.id)
+                    if card_back is not None:
+                        card_back.write({"attempts": str(max(0, card_back.attempts - 1)),
+                                         "started": None})
+                        board.commit_board(
+                            work, f"board: {candidate.card.id} attempt given back — "
+                                  f"{repeated[0]} is failing across cards")
+                    break
+                red_elsewhere.update(fresh_red)
 
             index += 1
             done += 1
