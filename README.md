@@ -404,6 +404,7 @@ shortfall.
 | `--budget` | optional USD cap for the whole run. |
 | `--card-budget` | optional USD cap handed to each worker process; 0 (default) passes no cap at all |
 | `--test-timeout` | seconds allowed for the test suite (~2 min today) |
+| `--no-drain` | skip the end-of-night pass that concludes any review this run left owed (up to 4 cards, from whatever window is left after the cards). |
 | `--stale` | after the cards, run the Tier-2 staleness sweep on the N highest-churn docs, spending only leftover window. |
 | `--append-digest` | write this run's digest without advancing the read baseline, so the next run's digest still reaches back to the last one written *without* this flag — for a stretch of runs (a scheduled weekend) nobody is there to read each one. |
 <!-- /generated:runner-flags -->

@@ -185,10 +185,19 @@ class _Reviewer:
     is that a card was *not* reviewed.
     """
 
-    def __init__(self, verdict: dict | None = None, per_card: dict | None = None):
+    #: The CLI's own session-limit terminal, verbatim from `.ai/runs/` on
+    #: 2026-08-25. Used rather than a hand-rolled phrase so a stub wall is the
+    #: same shape `limits.detect` meets in production.
+    WALL_OUTPUT = (
+        '{"is_error":true,"terminal_reason":"api_error","api_error_status":429,'
+        '"result":"You\'ve hit your session limit","type":"result"}')
+
+    def __init__(self, verdict: dict | None = None, per_card: dict | None = None,
+                 walls: bool = False):
         self.verdict = verdict if verdict is not None else {"verdict": "ok",
                                                             "notes": "fine"}
         self.per_card = per_card or {}
+        self.walls = walls
         self.reviewed: list[str] = []
 
     def install(self, monkeypatch):
@@ -201,6 +210,10 @@ class _Reviewer:
                       if "`ai/" in line)
         card_id = branch.split("/", 1)[1]
         self.reviewed.append(card_id)
+        if self.walls:
+            # Walled before writing anything — the shape that leaves a review
+            # genuinely owed rather than unobtainable.
+            return subprocess.CompletedProcess(argv, 1, self.WALL_OUTPUT, "")
         target = Path(next(line.strip() for line in prompt.splitlines()
                            if line.strip().endswith(".json")))
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -288,18 +301,39 @@ def test_a_needs_fix_verdict_sends_the_card_back_to_tasks_not_needs_decision(
     assert not _merged_into_base(root, "a-card"), "a card needing a fix merged"
 
 
-def test_an_unreadable_verdict_leaves_the_card_where_it_was(tmp_path, monkeypatch):
-    """Degrading to 'a human looks' is always safe; guessing a routing is not.
-    The drain must not turn a failed review into a lane change."""
+def test_an_unreadable_verdict_moves_the_card_out_of_the_queue(tmp_path, monkeypatch):
+    """Degrading to 'a human looks' is still always safe and a guessed routing
+    is still never taken — but "a human looks" is `blocked/`, not `review/`.
+
+    A drain that left this card here would re-review it on every subsequent
+    pass, get the same nothing, and bill for it each time; and in between, the
+    lane would keep reporting a card nothing is actually coming back for. The
+    work is green and merged nowhere, which is exactly what `blocked/` is for.
+    """
     root = _repo(tmp_path, ("a-card", "play"))
     _branch_with_a_commit(root, "a-card")
     _Reviewer({}).install(monkeypatch)
 
     result = drain.drain(root, BASE)
 
+    assert [o.state for o in result.outcomes] == [drain.BLOCKED]
+    assert _lane_of(root, "a-card") == board.BLOCKED_LANE
+    assert not _merged_into_base(root, "a-card")
+
+
+def test_a_wall_mid_pass_leaves_the_card_in_the_queue(tmp_path, monkeypatch):
+    """The distinction the state names carry. This card's review really is still
+    owed — the window closed, nothing about the card or the host is wrong — so it
+    stays where the next pass will find it."""
+    root = _repo(tmp_path, ("a-card", "play"))
+    _branch_with_a_commit(root, "a-card")
+    _Reviewer(walls=True).install(monkeypatch)
+
+    result = drain.drain(root, BASE)
+
     assert [o.state for o in result.outcomes] == [drain.LEFT]
     assert _lane_of(root, "a-card") == "review"
-    assert not _merged_into_base(root, "a-card")
+    assert result.stopped
 
 
 # --------------------------------------------------- the card that must be left alone

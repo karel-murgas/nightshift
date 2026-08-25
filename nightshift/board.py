@@ -76,14 +76,30 @@ LANES: tuple[str, ...] = (
     "failed",
 )
 
-#: Reviewed `ok`, work finished, and the branch will not land without a person.
+#: Work finished and green, and it will not move on without a person.
 #:
-#: Added 2026-08-23. This state existed long before the lane did and was parked in
-#: `review/`, which says *"gates green, awaiting Claude review"* — the one thing such
-#: a card is definitely not. Karel: *"we again got into 'human needs to resolve it'
-#: being in review — that is not what review is for."* It read on the NOW page as
-#: outstanding Claude work, so the two cards sitting in it looked queued rather than
-#: blocked, and nothing distinguished them from a card the reviewer had yet to reach.
+#: Two ways in, and they share everything that matters — the work is good, nobody
+#: has a question, and what is missing is an *operation*:
+#:
+#:   * reviewed `ok`, but the branch will not rebase-and-merge (`## Merge`)
+#:   * gates and tests green, but no review can be obtained on this host at all —
+#:     no worker CLI, no `lead` tier binding, a reviewer that timed out or wrote
+#:     nothing readable (`## Review`, carrying the `drain --card` that fixes it)
+#:
+#: Added 2026-08-23 for the first. This state existed long before the lane did and
+#: was parked in `review/`, which says *"gates green, awaiting Claude review"* — the
+#: one thing such a card is definitely not. Karel: *"we again got into 'human needs
+#: to resolve it' being in review — that is not what review is for."* It read on the
+#: NOW page as outstanding Claude work, so the two cards sitting in it looked queued
+#: rather than blocked, and nothing distinguished them from a card the reviewer had
+#: yet to reach.
+#:
+#: The second way in arrived 2026-08-25, when the same complaint came back a fourth
+#: time by a different road: `review_stage` had five degradation paths and *all* of
+#: them returned to `review/`, so "the reviewer has not got here yet" and "the
+#: reviewer cannot get here" were one lane. The rule that keeps it fixed is on
+#: `review_stage`: **a card is left in `review/` only when a review is genuinely
+#: owed and obtainable.** Everything else that is finished-but-stuck comes here.
 #:
 #: Distinct from `needs-decision/`, which is a question about what the *product*
 #: should do and is answered by writing a Thread reply. A card here needs an

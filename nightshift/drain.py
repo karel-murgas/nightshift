@@ -127,11 +127,18 @@ BLOCKED_SECTION = "Merge"
 #:                   `tasks/` for another attempt (or, past its attempt limit, on to
 #:                   needs-decision/ — either way `settle` decides, this is just the log)
 #:   NEEDS_DECISION— the reviewer flagged a choice; `settle` filed it with the question
-#:   LEFT          — the review could not conclude; the card stays in `review/`
+#:   BLOCKED       — no verdict can be had here (no CLI, no tier, a timeout, an
+#:                   unreadable verdict); `settle` filed it to `blocked/` with the
+#:                   command that unsticks it. Distinct from LEFT: nothing will come
+#:                   back for this one on its own
+#:   LEFT          — the review is still owed and obtainable — the window closed
+#:                   mid-pass — so the card stays in `review/` and the next pass
+#:                   takes it from the top
 #:   SKIPPED       — no commits on its branch; nothing to review, nothing spent
 #:   NOT_REACHED   — the pass stopped before this card; it is untouched
 REVIEWED, NEEDS_FIX, NEEDS_DECISION = "reviewed", "needs-fix", "needs-decision"
 LEFT, SKIPPED, NOT_REACHED = "left", "skipped", "not-reached"
+BLOCKED = "blocked"
 
 
 @dataclass(frozen=True)
@@ -258,10 +265,12 @@ def drain(root: Path, base: str, *, card_id: str = "", limit: int = 0,
                                         how_to_test=_how_to_test(card, branch)),
             base, card_budget, test_timeout)
 
-        if reviewed.outcome in ("reviewed", "needs_fix", "needs_decision"):
+        if reviewed.outcome in ("reviewed", "needs_fix", "needs_decision",
+                                "unreviewable"):
             landed = runner.settle(root, card.id, reviewed)
             state = (REVIEWED if reviewed.outcome == "reviewed"
                      else NEEDS_FIX if reviewed.outcome == "needs_fix"
+                     else BLOCKED if reviewed.outcome == "unreviewable"
                      else NEEDS_DECISION)
             result.outcomes.append(Outcome(card.id, state, landed, reviewed.cost_usd))
         else:
