@@ -377,6 +377,53 @@ def test_a_card_with_no_route_and_a_live_question_says_so(tmp_path):
         decide.promote_to_tasks(root, "parked")
 
 
+def test_a_promoted_chore_at_its_attempt_cap_says_so(tmp_path):
+    """`chores.py` charges a chore's one attempt the moment it parks to
+    `needs-decision/` (see `run_one`'s docstring) — parking is not free there. So a
+    chore promoted back to `tasks/` still reads `attempts >= CHORE_MAX_ATTEMPTS`
+    afterwards: `chores.eligible()` keeps refusing it and the ordinary runner skips
+    `kind: chore` cards outright. The card must not look dispatchable in silence —
+    found 2026-08-26 when the panel's button did exactly that for `docs-production`.
+    """
+    (tmp_path / ".ai").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".ai" / "manifest.toml").write_text(
+        '[project]\nname = "probe"\n\n[board]\ndecision_attributor = "karel"\n',
+        encoding="utf-8")
+    lane = tmp_path / "Board" / "needs-decision"
+    lane.mkdir(parents=True, exist_ok=True)
+    (lane / "a-chore.md").write_text(
+        "---\n"
+        "id: a-chore\n"
+        "title: A parked chore\n"
+        "state: needs-decision\n"
+        "tier: worker\n"
+        "worker: code-thread\n"
+        "kind: chore\n"
+        "unattended: true\n"
+        "verify: review\n"
+        "attempts: 1\n"
+        "created: 2026-08-18\n"
+        "---\n\n"
+        "## Intent\n\nSomething.\n\n"
+        "## Acceptance\n\n- decided\n\n"
+        "## Open questions\n\nnone\n\n"
+        "## Question\n\nWhat was found.\n",
+        encoding="utf-8")
+
+    message = decide.promote_to_tasks(tmp_path, "a-chore")
+
+    assert "→ tasks/" in message
+    assert "already used its 1 attempt" in message
+    assert "--card a-chore" in message
+
+
+def test_a_promoted_full_card_gets_no_chore_warning(tmp_path):
+    """The warning is specific to `kind: chore` — an ordinary card must not grow it."""
+    root = _repo(tmp_path, "- A\n- B\n", open_questions="none")
+    message = decide.promote_to_tasks(root, "parked")
+    assert message == "parked → tasks/"
+
+
 def test_settling_twice_does_not_stack_two_headers(tmp_path):
     """`board.settle_open_questions` is idempotent — a card promoted, moved back and
     promoted again must not grow a second `none — answered on …` line."""

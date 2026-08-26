@@ -471,6 +471,20 @@ def promote_to_tasks(root: Path, card_id: str, *, today: dt.date | None = None) 
     maintainer looking at the answer may reasonably conclude the card is dispatchable
     after all. What the field must never do is refuse a move a person deliberately
     chose while looking at more information than the parker had.
+
+    **A chore that parked has already spent its one attempt, and this does not give
+    it back.** `chores.py` charges the attempt the moment a chore bounces to
+    `needs-decision/` — parking is not free there, by design (`run_one`'s docstring:
+    "One attempt, so it is a human's to read"). So a promoted chore still reads
+    `attempts >= CHORE_MAX_ATTEMPTS` afterwards, which means `chores.eligible()` will
+    keep refusing it and the ordinary runner skips `kind: chore` cards outright — the
+    card sits in `tasks/` looking dispatchable and is not. Found 2026-08-26: the panel's
+    "move to tasks" button flipped `docs-production` straight past this with no word
+    to the maintainer, who only found out when it never ran. The move itself is still
+    allowed — refusing it would block the legitimate case of answering now and
+    dispatching by name later (`--card`, which waives both restrictions on purpose) —
+    but the return message says so, so the fact surfaces at the moment of the click
+    rather than in a digest line easy to miss.
     """
     card = board.find(root, card_id)
     if card is None:
@@ -499,4 +513,15 @@ def promote_to_tasks(root: Path, card_id: str, *, today: dt.date | None = None) 
 
     text = re.sub(r"^state:.*$", "state: tasks", text, count=1, flags=re.MULTILINE)
     textio.write_text_lf(card.path, text)
-    return f"{card_id} → tasks/"
+
+    note = ""
+    if card.kind == board.KIND_CHORE:
+        from nightshift.runner import CHORE_MAX_ATTEMPTS  # local: keeps this module's
+        # imports to board/manifest/textio at module scope; see the module docstring.
+        if card.attempts >= CHORE_MAX_ATTEMPTS:
+            note = (f" — heads up: this chore already used its {card.attempts} attempt "
+                    f"(a chore gets {CHORE_MAX_ATTEMPTS}), so the chore batch will refuse "
+                    f"it again and the ordinary runner skips `kind: chore` cards. Dispatch "
+                    f"it by name when you're ready: `python -m nightshift.runner --card "
+                    f"{card_id}`")
+    return f"{card_id} → tasks/{note}"
