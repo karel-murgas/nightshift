@@ -44,6 +44,7 @@ No LLM anywhere in here (`00_architecture.md` §12) — it is a file mover.
 
     python -m nightshift.boardcmd reorder <card-id> <order>
     python -m nightshift.boardcmd verified <card-id>
+    python -m nightshift.boardcmd rejected <card-id> --note "<what was wrong>"
     python -m nightshift.boardcmd promote <note.md>
     python -m nightshift.boardcmd note <note.md> --body-file -
     python -m nightshift.boardcmd note <note.md> --lane ideas --body-file -
@@ -73,6 +74,10 @@ INBOX = "inbox"
 #: lane that means "waiting to be played" is `testing/`. A card anywhere else
 #: reaching `done/` through this verb would be a lane transition nobody made.
 VERIFIED_FROM = "testing"
+
+#: The lane `rejected` accepts a card from — the same one `verified` does,
+#: because they are the two outcomes of the same play-through.
+REJECTED_FROM = "testing"
 
 
 class BoardCommandError(RuntimeError):
@@ -169,6 +174,46 @@ def mark_verified(root: Path, card_id: str) -> str:
     if errors:
         tail += f", {len(errors)} of which need a human"
     return f"{card.id}: {VERIFIED_FROM}/ → done/{tail}"
+
+
+def mark_rejected(root: Path, card_id: str, note: str) -> str:
+    """Verb — `testing/` → `tasks/`, carrying the play-tester's own account of why.
+
+    `verified`'s opposite number, for the play-through the automated reviewer never
+    sees: a card only reaches `testing/` after gates, tests and an LLM review all
+    passed, so whatever is wrong here is something none of them could catch —
+    which is exactly why `verify: play` cards exist. That is not a decision either,
+    the same reasoning `drain.py` and `runner.settle` give for a reviewer's
+    `needs_fix`: a concrete "this is wrong, here is how" is work for the next
+    attempt, not a question for `needs-decision/`.
+
+    `## Feedback` rather than `## Review Finding` — the section the automated path
+    writes — because this is not that path: nobody re-verified anything and the
+    words are Karel's own, in his terms, not a reviewer's account of a diff. It
+    would be dishonest for a card to carry `## Review Finding` when no review ran.
+
+    No branch to continue from: the card's own branch is already merged and gone
+    by the time it reaches `testing/` (`prune_rescue_branches`), unlike a
+    mid-dispatch `needs_fix`, which still has one. The next attempt cold-starts
+    from the integration branch, which already carries the merged work — the fix
+    lands on top of it, not instead of it.
+    """
+    if not note.strip():
+        raise BoardCommandError("no feedback given — a card sent back with nothing "
+                                "to say why would leave the next attempt guessing")
+    card = _find(root, card_id)
+    if card.lane != REJECTED_FROM:
+        raise BoardCommandError(
+            f"{card.id} is in {card.lane}/, not {REJECTED_FROM}/ — this verb is for a "
+            f"card that failed its play-through, and any other lane sending work back "
+            f"through it would be a transition nobody made")
+    card.write_section("Feedback", note.strip())
+    # Same front-of-queue bucket a reviewer's `needs_fix` earns
+    # (`board.dispatch_order`): a fix this concrete is the cheapest next dispatch,
+    # not one to make wait behind whatever Karel dragged to the top by hand.
+    card.write({"last_outcome": "needs_fix"})
+    board.move(root, card, "tasks")
+    return f"{card.id}: {REJECTED_FROM}/ → tasks/ (feedback recorded)"
 
 
 def promote(root: Path, name: str) -> str:
@@ -423,6 +468,10 @@ def _parser() -> argparse.ArgumentParser:
     verified = subs.add_parser("verified", help=f"{VERIFIED_FROM}/ → done/, and reconcile")
     verified.add_argument("card_id")
 
+    rejected = subs.add_parser("rejected", help=f"{REJECTED_FROM}/ → tasks/, with feedback")
+    rejected.add_argument("card_id")
+    rejected.add_argument("--note", required=True, help="what was wrong, in your own words")
+
     moved = subs.add_parser("promote", help=f"move one note into {INBOX}/ without reading it")
     moved.add_argument("name", help="the note's filename, no path")
 
@@ -460,6 +509,8 @@ def main(argv: list[str] | None = None) -> int:
             print(reorder(root, args.card_id, args.order))
         elif args.verb == "verified":
             print(mark_verified(root, args.card_id))
+        elif args.verb == "rejected":
+            print(mark_rejected(root, args.card_id, args.note))
         elif args.verb == "promote":
             print(promote(root, args.name))
         elif args.verb == "close":

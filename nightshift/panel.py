@@ -1222,8 +1222,13 @@ def _tier_chip(card: board.Card) -> str:
             f'title="{_e(title)}">tier {_e(tier or "none")}</span>')
 
 
-def _card_body(card: board.Card, *, meta: list[str] | None = None, why: str = "") -> str:
-    out = [f'<span class="id">{_e(card.id)}</span>']
+def _card_body(card: board.Card, *, meta: list[str] | None = None, why: str = "",
+               clickable: bool = False) -> str:
+    if clickable:
+        out = [f'<span class="id clickable" onclick="toggleInfo(\'{_attr(card.id)}\')" '
+              f'title="Goal and how to test">{_e(card.id)}</span>']
+    else:
+        out = [f'<span class="id">{_e(card.id)}</span>']
     if card.title and card.title != card.id:
         out.append(f'<span class="title">{_e(card.title)}</span>')
     if why:
@@ -1234,6 +1239,45 @@ def _card_body(card: board.Card, *, meta: list[str] | None = None, why: str = ""
     # appears on some rows and not others reads as a property of the card.
     out.append(_meta(_tag_chips(card) + [_tier_chip(card)] + (meta or [])))
     return "".join(out)
+
+
+def _info_box(card: board.Card, *, how_to_test: bool = False) -> str:
+    """The goal, and — on a `testing/` row — the play-through scenario, collapsed
+    under the row until `toggleInfo` opens it.
+
+    In the card's own words rather than summarised: `board.section` returns the
+    `## Intent`/`## How to test` body verbatim, and this only ever wraps it in
+    markdown. Each part is its own `<details>` so either can be closed without
+    closing the other — a card whose goal is short and scenario is long (or the
+    reverse) should not force both open or both shut.
+
+    `how_to_test` is a separate flag, not `card.verify == "play"`: the review
+    lane's cards are pre-merge, and `## How to test` is written by `settle` only
+    once a card actually lands (`runner.py`) — asking for it there would show
+    "not recorded" on every row, for a section nothing has had the chance to
+    write yet, rather than the absence of a scenario meaning anything.
+
+    **Each `<details>` carries an id, and it has to.** `open` here is a static
+    attribute this function always writes — it says nothing about whether a
+    person closed one by hand. The live refresh (`softRefresh`, every 10 s)
+    re-renders the whole section and swaps in whatever changed; `carryState`
+    already knows how to carry a checkbox, a slider and this very box's own
+    `.card-info.open` class across that swap, but nothing carried a native
+    `<details>`'s open/closed state, so closing "Goal" and waiting past one tick
+    reopened it — the swap was comparing the live DOM's `outerHTML`, which no
+    longer said `open` once you closed it, against a fresh render that always
+    does, and the mismatch alone triggered a full re-swap. The id is what
+    `carryState`'s new branch matches on to restore the boolean rather than the
+    markup.
+    """
+    intent = board.section(card.text, "Intent") or "(no `## Intent` on this card)"
+    parts = [f'<details open id="info-{_e(card.id)}-goal"><summary>Goal</summary>'
+             f'<div class="doc">{markdown(intent)}</div></details>']
+    if how_to_test:
+        how = board.section(card.text, "How to test") or "(not recorded on this card)"
+        parts.append(f'<details open id="info-{_e(card.id)}-test"><summary>How to test</summary>'
+                     f'<div class="doc">{markdown(how)}</div></details>')
+    return f'<div class="card-info" id="info-{_e(card.id)}">{"".join(parts)}</div>'
 
 
 def _section(title: str, count: int, rows: str, *, note: str = "", sub: str = "",
@@ -2114,12 +2158,14 @@ def _review_section(ctx: Context) -> str:
             meta.append(_chip("left alone", "mute"))
         else:
             stuck.append(card.id)
-        acts = _act("Diff", href=f"/diff/{card.id}")
+        acts = (_act("Read card", href=f"/card/{card.id}")
+                + _act("Diff", href=f"/diff/{card.id}"))
         if not reason:
             acts += _act("Review it", onclick=f"post('/api/review',{{card_id:'{_attr(card.id)}'}})",
                          primary=True)
         review_rows.append(_row(marker="!", acts=acts,
-                                body=_card_body(card, meta=meta, why=reason)))
+                                body=_card_body(card, meta=meta, why=reason, clickable=True)))
+        review_rows.append(_info_box(card))
 
     flag = ""
     bar = ""
@@ -2168,10 +2214,22 @@ def _render_verify(ctx: Context) -> str:
                 meta.append(_chip("verify: review", "ok"))
             control = (f'<input type="checkbox" class="tick" data-id="{_e(card.id)}" '
                        f'aria-label="{_e(card.id)} verified">')
-            acts = (_act("Diff", href=f"/diff/{card.id}")
+            acts = (_act("Read card", href=f"/card/{card.id}")
+                    + _act("Diff", href=f"/diff/{card.id}")
+                    + _act("Not OK", onclick=f"openEditor('feedback-{_attr(card.id)}')")
+                    + _act("Open inline",
+                           onclick=f"post('/api/work-feedback',{{card_id:'{_attr(card.id)}'}})",
+                           extra='title="Opens an interactive session on this card, waiting '
+                                 'for you to say what was wrong before it fixes anything."')
                     + _act("Mark OK", onclick=f"markOK(this,'{_attr(card.id)}')", primary=True))
             rows.append(_row(control=control, marker="&nbsp;", acts=acts,
-                             body=_card_body(card, meta=meta)))
+                             body=_card_body(card, meta=meta, clickable=True)))
+            rows.append(_info_box(card, how_to_test=True))
+            rows.append(_editor(f"feedback-{card.id}",
+                                save=f"submitFeedback('{_attr(card.id)}')",
+                                placeholder="What was wrong, in your own words — this goes "
+                                            "onto the card as ## Feedback and sends it back "
+                                            "to tasks/."))
 
     bar = ('<div class="barbox">'
            '<p><span id="ticked">Nothing ticked.</span> Saving reconciles every ticked '
@@ -4095,6 +4153,15 @@ class Handler(BaseHTTPRequestHandler):
                     for cid in body.get("card_ids", [])]
             return f"{len(done)} card(s) marked verified"
 
+        if path == "api/rejected":
+            # `Not OK`: spends nothing and dispatches nothing — a board write, same
+            # shape as `api/verified`, carrying the textbox's feedback onto the card.
+            note = str(body.get("note", ""))
+            if not note.strip():
+                raise PanelError("say what was wrong first")
+            return _verb(run_command(
+                "boardcmd", ["rejected", str(body.get("card_id", "")), "--note", note], root))
+
         if path == "api/promote":
             return _verb(run_command("boardcmd", ["promote", str(body.get("name", ""))], root))
 
@@ -4216,6 +4283,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "api/work":
             return _work_verb(root, body)
+
+        if path == "api/work-feedback":
+            return _work_feedback_verb(root, body)
 
         if path == "api/talk":
             # **Resumed as a conversation, not as a worker.** `claude --resume <id>`
@@ -4342,6 +4412,35 @@ def _work_verb(root: Path, body: dict) -> str:
         return f"working {note} — {tier or 'default'} tier"
 
     raise PanelError("no card or note given")
+
+
+def _work_feedback_verb(root: Path, body: dict) -> str:
+    """`Open inline`: the Verify page's other "not OK" tool — a session opened on
+    a card that just failed its play-through, told to wait for the maintainer's
+    own account of what was wrong before it fixes anything.
+
+    Built the same way `_work_verb` builds a card session — same branch, same
+    tier, same charter — because it is the same card opened the same way; only
+    the prompt differs, by design (`INTERACTIVE_CARD_FEEDBACK`'s own docstring).
+    Unlike `boardcmd rejected`, nothing here touches the board: the card stays in
+    `testing/` and the session decides, with the maintainer, whether the fix is
+    good enough to leave it there.
+    """
+    base = preflight.integration_base(root)
+    card_id = str(body.get("card_id", ""))
+    card = board.find(root, card_id)
+    if card is None:
+        raise PanelError(f"no card named {card_id!r} on the board")
+    lane = board.finished_lane(card)
+    prompt = worker_prompt.INTERACTIVE_CARD_FEEDBACK.format(
+        branch=branches.work_branch(card.id, card.fields.get("branch", "")), base=base,
+        card_path=card.path.resolve().as_posix(), finished_lane=lane,
+        tool_economy=worker_prompt.TOOL_ECONOMY, card_body=card.text,
+    )
+    tier = effective_tier(card.tier)
+    open_terminal(root, *session_argv(root, name=f"{card.id} feedback", prompt=prompt,
+                                     tier=tier, agent=card.worker))
+    return f"opened a terminal on {card.id}, waiting for your feedback"
 
 
 def read_body(root: Path, target: str) -> str:

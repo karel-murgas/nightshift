@@ -22,8 +22,8 @@ of good practice, so guidance that has to be found first is the weaker of the tw
 """
 from __future__ import annotations
 
-__all__ = ["TOOL_ECONOMY", "INTERACTIVE_CARD", "INTERACTIVE_NOTE", "HOW_TO_TEST_STEP",
-           "INTERACTIVE_TRIAGE", "INTERACTIVE_RETRIAGE"]
+__all__ = ["TOOL_ECONOMY", "INTERACTIVE_CARD", "INTERACTIVE_CARD_FEEDBACK", "INTERACTIVE_NOTE",
+           "HOW_TO_TEST_STEP", "INTERACTIVE_TRIAGE", "INTERACTIVE_RETRIAGE"]
 
 TOOL_ECONOMY = """\
 **Tool calls cost wall time, not just tokens.** Each one is a round-trip, and any \
@@ -112,6 +112,49 @@ HOW_TO_TEST_STEP = """ Then write `## How to test` — the scenario in the \
 maintainer's terms: open the game, go here, do this, expect that. Name the door: which \
 menu, which key, which enemy, what the screen should show. It is the only thing telling \
 them what to do with what you built."""
+
+#: The Verify page's "Open inline" — a card that just failed its play-through, opened
+#: for a fix with the maintainer's feedback still to come rather than typed into a
+#: box first (`boardcmd rejected`, this prompt's async counterpart). The card is
+#: already merged and sitting in `{finished_lane}/`, so unlike `INTERACTIVE_CARD` there
+#: is no queue transition to describe: the session fixes it in place and it never
+#: leaves the lane it is already in.
+INTERACTIVE_CARD_FEEDBACK = """\
+This card just failed its play-through in `{finished_lane}/`, and the maintainer is at \
+the keyboard to say why.
+
+**Wait for their feedback before you touch anything.** The gates, the tests and a review \
+all passed already — do not re-read `## Acceptance` and start redoing the card from \
+scratch. Something specific about it did not hold up when it was actually played; ask what \
+that was if they have not said yet, then fix precisely that.
+
+Once you have it:
+
+- Write what they told you onto the card as `## Feedback`, in their own words.
+- **Branch before you edit.** Cut `{branch}` from `{base}` and commit your work there. \
+Never commit directly to `{base}`.
+- The card is at `{card_path}` — read it there rather than trusting the copy below to be \
+current if the session runs long.
+- Run the project's gates and the tests your change touches, and say plainly what passed \
+and what did not. Do not weaken a gate or a test to make it pass.
+
+**Closing the card out**, once the maintainer agrees the fix is good:
+
+1. Run the project's preflight and get it green.
+2. Merge `{branch}` into `{base}` and delete the branch — local and remote. Use `git \
+branch -d`, never `-D`.
+3. Update `## Summary` with what changed this time.
+4. Leave the card in `{finished_lane}/` — it already landed once; this is a fix to what \
+is there, not a new pass through `tasks/`.
+
+**If you cannot finish**, do not guess. Write a `## Question` section and move the card to \
+`needs-decision/` — parking is a success state.
+
+{tool_economy}
+
+--- the card ---
+{card_body}
+"""
 
 INTERACTIVE_NOTE = """\
 Work this note from the board's inbox, with the maintainer at the keyboard.
