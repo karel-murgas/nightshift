@@ -160,6 +160,15 @@ class Decision:
     why: str = ""
     dispatchable: bool = True
     confidence: str = "high"
+    #: Set when the classifier judged this note's subject to be nightshift's own
+    #: tooling surface (the command center, the runner, boardcmd, the dispatch
+    #: loop) rather than the consuming project's own code — see classifier.md.
+    #: `card_inline` reads this to tag the card `nightshift`, which is what puts
+    #: the NIGHTSHIFT chip on it in the panel (`_tag_chips` keys on exactly that
+    #: tag). Before this field existed the signal reached only `why`, as prose,
+    #: and nothing carried it onto the card itself — an inline-routed nightshift
+    #: note landed in `tasks/` with no tag and no chip.
+    nightshift: bool = False
 
     @property
     def suspect(self) -> bool:
@@ -391,7 +400,8 @@ def classify(found: list[Note], root: Path, *, model: str = CLASSIFIER_MODEL,
         routing.decisions.append(Decision(
             note=name, route=route, why=str(entry.get("why", "")).strip(),
             dispatchable=bool(entry.get("dispatchable", True)),
-            confidence=str(entry.get("confidence", "high")).strip().lower()))
+            confidence=str(entry.get("confidence", "high")).strip().lower(),
+            nightshift=bool(entry.get("nightshift", False))))
 
     # A note the classifier skipped is not silently dropped. Unrouted means Karel looks
     # at it, which is what `inline` means — the charter is explicit that an unclear note
@@ -427,6 +437,12 @@ def classify(found: list[Note], root: Path, *, model: str = CLASSIFIER_MODEL,
 #: `## Acceptance` says who decides rather than inventing criteria. A note is routed
 #: `inline` *because* it has no machine-checkable brief; writing one here would
 #: fabricate the brief the route exists to do without.
+#:
+#: `{tags}` is empty for an ordinary inline note and `tags:\\n  - nightshift\\n` for
+#: one the classifier judged to be nightshift's own tooling surface — see
+#: `Decision.nightshift`. `card_schema` already requires `unattended: false` on any
+#: card tagged `nightshift`, which every inline card carries regardless, so the tag
+#: never lands on a card the runner would try to dispatch.
 _INLINE_CARD = """\
 ---
 id: {ident}
@@ -439,7 +455,7 @@ unattended: false
 kind: inline
 verify: review
 created: {today}
----
+{tags}---
 
 ## Intent
 
@@ -459,7 +475,7 @@ none
 """
 
 
-def card_inline(root: Path, note: Note) -> str:
+def card_inline(root: Path, note: Note, *, nightshift: bool = False) -> str:
     """Turn one `inline`-routed note into its card in `tasks/`. Returns the card id.
 
     **The route that used to be the exception is now on the same rails as the rest.**
@@ -476,6 +492,12 @@ def card_inline(root: Path, note: Note) -> str:
 
     The note's own text becomes `## Intent` — it is the best statement of what the
     work is, and it was written before anyone knew the answer.
+
+    `nightshift=True` stamps `tags: [nightshift]` on the card, which is what the
+    panel keys the NIGHTSHIFT chip off (`_tag_chips`). The caller passes the same
+    flag the classifier attached to the routing decision — the note said "this is
+    the command center / the runner / boardcmd" in `why`, and that has to survive
+    onto the card itself or the board stops saying it too.
     """
     ident = board.slug(note.path.stem)
     target = board.board_dir(root) / "tasks" / f"{ident}.md"
@@ -486,7 +508,8 @@ def card_inline(root: Path, note: Note) -> str:
     textio.write_text_lf(target, _INLINE_CARD.format(
         ident=ident, title=note.path.stem.replace('"', "'"),
         today=dt.date.today().isoformat(), body=body or "(the note was empty)",
-        lane="inbox", filename=note.name))
+        lane="inbox", filename=note.name,
+        tags="tags:\n  - nightshift\n" if nightshift else ""))
     note.path.unlink()
     return ident
 
@@ -537,7 +560,7 @@ def apply_routing(root: Path, routing: Routing, found: list[Note]) -> Applied:
             continue
         try:
             if decision.route == "inline":
-                out.carded.append(card_inline(root, note))
+                out.carded.append(card_inline(root, note, nightshift=decision.nightshift))
             elif decision.route in STAMPED_ROUTES:
                 if note.route == decision.route:
                     continue
@@ -1064,15 +1087,16 @@ def set_route(root: Path, note: str, route: str, why: str,
     if target is None:
         return False
 
+    prior = view.of(note)
     if route == "inline":
-        card_inline(root, target)
+        card_inline(root, target, nightshift=prior.nightshift if prior else False)
     else:
         textio.write_text_lf(target.path, stamp_route(target, route))
 
-    prior = view.of(note)
     view.decisions[note] = Decision(
         note=note, route=route, why=why, confidence="high",
-        dispatchable=prior.dispatchable if prior else True)
+        dispatchable=prior.dispatchable if prior else True,
+        nightshift=prior.nightshift if prior else False)
     found = notes(root)
     live = [d for d in view.decisions.values() if d.note in {n.name for n in found}]
     stamp = view.written or dt.datetime.now()

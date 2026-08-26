@@ -269,20 +269,25 @@ def test_triage_is_listed_and_never_dispatched(tmp_path: Path, calls, capsys):
 
 
 def _routes(monkeypatch: pytest.MonkeyPatch, routing: dict[str, str],
-            *, effect=None) -> list[str]:
+            *, effect=None, nightshift: frozenset[str] = frozenset()) -> list[str]:
     """Classify `routing` (note → route), then record which notes reach the scribe.
 
     `effect` is what the scribe does to the board; the default is what a working
     one does. Pass a no-op to fake a scribe that returns cleanly and achieves
     nothing.
+
+    `nightshift` names the notes the fake classifier marks as its own tooling
+    surface — what `Decision.nightshift` and, downstream, the card's `nightshift`
+    tag are meant to carry.
     """
     scribed: list[str] = []
     act = _card_the_note if effect is None else effect
 
     def fake(agent: str, prompt: str, root: Path, *_a, **_k):
         if agent == "classifier":
-            return json.dumps({"notes": [{"file": f, "route": r, "why": "x"}
-                                         for f, r in routing.items()]}), ""
+            return json.dumps({"notes": [
+                {"file": f, "route": r, "why": "x", "nightshift": f in nightshift}
+                for f, r in routing.items()]}), ""
         note = _note_of(prompt)
         scribed.append(note)
         act(root, note)
@@ -342,6 +347,54 @@ def test_the_inline_card_satisfies_the_schema_it_lands_in(
     root = _repo(tmp_path, alpha="a")
     _routes(monkeypatch, {"alpha.md": "inline"})
     assert ingest.main(["--root", str(root)]) == 0
+    assert card_schema.check(root) == []
+
+
+def test_classify_reads_the_nightshift_flag_off_the_note(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The classifier says which notes are nightshift's own tooling surface (the
+    command center, the runner, boardcmd) rather than the consuming project's code;
+    `Decision.nightshift` is how that answer survives past the JSON reply."""
+    root = _repo(tmp_path, alpha="a", beta="b")
+    monkeypatch.setattr(ingest, "_dispatch", lambda *a, **k: (json.dumps({"notes": [
+        {"file": "alpha.md", "route": "inline", "why": "the command center",
+         "nightshift": True},
+        {"file": "beta.md", "route": "inline", "why": "a game bug"}]}), ""))
+    routing = ingest.classify(ingest.notes(root), root)
+    by_note = {d.note: d for d in routing.decisions}
+    assert by_note["alpha.md"].nightshift is True
+    assert by_note["beta.md"].nightshift is False
+
+
+def test_a_note_missing_the_nightshift_field_defaults_to_not_nightshift(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """An older classifier build, or one that just did not mention the field, must
+    not tag every inline card `nightshift` by accident."""
+    root = _repo(tmp_path, alpha="a")
+    monkeypatch.setattr(ingest, "_dispatch", lambda *a, **k: (json.dumps({"notes": [
+        {"file": "alpha.md", "route": "inline", "why": "x"}]}), ""))
+    assert ingest.classify(ingest.notes(root), root).decisions[0].nightshift is False
+
+
+def test_an_inline_note_flagged_nightshift_carries_the_tag_onto_its_card(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A note the classifier judged to be nightshift's own tooling surface must land
+    in `tasks/` wearing the tag that puts the NIGHTSHIFT chip on it in the panel —
+    the chip is how Karel tells, from `/now`, which cards need a nightshift-repo
+    card instead of a Dungeoneer one (classifier.md's whole reason for the route).
+    A note the classifier did not flag must not pick up the tag either.
+    """
+    root = _repo(tmp_path, alpha="a", beta="b")
+    _routes(monkeypatch, {"alpha.md": "inline", "beta.md": "inline"},
+            nightshift=frozenset({"alpha.md"}))
+    assert ingest.main(["--root", str(root)]) == 0
+
+    tagged = board.parse_fields(
+        (root / "Board" / "tasks" / "alpha.md").read_text(encoding="utf-8"))
+    untagged = board.parse_fields(
+        (root / "Board" / "tasks" / "beta.md").read_text(encoding="utf-8"))
+    assert card_schema._tags(tagged) == ["nightshift"]
+    assert card_schema._tags(untagged) == []
     assert card_schema.check(root) == []
 
 
