@@ -438,6 +438,24 @@ class Card:
         except ValueError:
             return 0
 
+    @property
+    def last_outcome(self) -> str:
+        """What the most recent completed attempt ended in, for `dispatch_order` —
+        `needs_fix`, `failed`, or `""`.
+
+        Written by `settle` the moment it routes a card back to `tasks/` on a
+        `needs_fix` or a non-retiring `failed` verdict, overwriting whatever the
+        field held before — so it never confuses a stale verdict with a current
+        one the way a text search over `## Error`/`## Review Finding` could,
+        since both sections persist as history and only one is current.
+        `dispatch` deliberately leaves it alone when a new attempt starts: the
+        `limited`/`blocked`/`interrupted` give-back restores a card to exactly
+        how it looked before that attempt, and clearing this field on dispatch
+        would make that restoration lose the one fact — the *previous* attempt's
+        real verdict — that give-back is supposed to preserve.
+        """
+        return self.fields.get("last_outcome", "")
+
     def write(self, values: dict[str, str | None]) -> None:
         self.text = set_fields(self.text, values)
         write_text_lf(self.path, self.text)
@@ -526,8 +544,8 @@ def settle_open_questions(card_text: str, *, on: str) -> str:
     return append_section(card_text, "Open questions", body)
 
 
-def dispatch_order(card: Card) -> tuple[int, str, str]:
-    """Karel's column order first, filename second.
+def dispatch_order(card: Card) -> tuple[int, int, str, str]:
+    """`last_outcome` first, Karel's column order second, filename third.
 
     `kanban_order` is Base Board's fractional index, written into a card's
     frontmatter every time he drags it within a column. It sorts
@@ -546,9 +564,26 @@ def dispatch_order(card: Card) -> tuple[int, str, str]:
     `card_schema` tolerate the unknown key and quietly answered a second question
     nobody had asked — whether dragging a card up the column means anything. It
     does: it is the only prioritisation gesture the GUI offers.
+
+    **The leading bucket is `last_outcome` (2026-08-26, replacing the flat
+    time-based backoff).** A card the reviewer just sent back with `needs_fix`
+    is not a card in trouble — it is the cheapest possible next dispatch, a
+    finished branch plus one small commit — so it sorts to the *front*, ahead of
+    even Karel's own drag order: nothing he prioritised by hand is worth
+    finishing after a fix that is already scoped and waiting. A card whose most
+    recent attempt was a plain `failed` earns no such trust — something about it
+    did not work, and hammering it again first is how one broken card burns a
+    whole night's window before anything else gets a turn — so it sorts *last*,
+    behind every card that has not just failed, including ones with no
+    `kanban_order` at all. Between two cards in the same bucket, `kanban_order`
+    still decides, so this reorders *when* a card is due, never which of two
+    equally-due cards goes first.
     """
     order = card.fields.get("kanban_order", "")
-    return (0, order, card.path.name) if order else (1, "", card.path.name)
+    within_bucket = (0, order, card.path.name) if order else (1, "", card.path.name)
+    outcome = card.last_outcome
+    bucket = 0 if outcome == "needs_fix" else 2 if outcome == "failed" else 1
+    return (bucket, *within_bucket)
 
 
 def cards(root: Path, lane: str, card_cls: type[Card] = Card) -> list[Card]:

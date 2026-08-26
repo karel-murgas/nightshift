@@ -141,7 +141,7 @@ _ROUTES = frozenset(_board.ROUTES)
 # desk, because a card reaching `done/` because somebody forgot a field is the
 # one direction nothing recovers from.
 _VERIFY = frozenset({"play", "review"})
-_RUNNER_FIELDS = frozenset({"attempts", "branch", "started", "finished"})
+_RUNNER_FIELDS = frozenset({"attempts", "branch", "started", "finished", "last_outcome"})
 # Written by Base Board when a card is dragged within a column, never by us.
 # It has to be allowed or the first reorder turns the whole board red, and a
 # gate that fires on the maintainer using their own board is a gate that gets

@@ -724,7 +724,6 @@ def test_a_failed_attempts_branch_is_a_rescue_ref_after_the_next_dispatch(tmp_pa
     _fake_worker(monkeypatch, commit=True, returncode=0,
                  verdict={"outcome": "done", "summary": "x"})
     card = board.find(root, "probe")
-    card.write({"finished": None})  # skip the backoff wait, not the counting
     runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
 
     assert _rev(root, "ai/probe@failed-1") == first_sha, \
@@ -1199,7 +1198,6 @@ def test_three_failures_retire_the_card_to_failed(tmp_path, monkeypatch):
 
     for expected_lane in ("tasks", "tasks", "failed"):
         card = board.find(root, "probe")
-        card.write({"finished": None})  # skip the backoff wait, not the counting
         result = runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
         runner.settle(root, "probe", result)
         assert board.find(root, "probe").lane == expected_lane
@@ -1420,7 +1418,7 @@ def test_only_the_spawn_functions_may_execute_the_claude_cli():
     """§5 and §12: the orchestrator contains no judgment. A worker is the thing
     being *orchestrated*, not a decision procedure the runner consults — so the
     CLI is executed only where a worker is started, and nothing that decides what
-    to do (select, recover, settle, backoff) may reach for it.
+    to do (select, recover, settle, dispatch_order) may reach for it.
 
     Five functions now: `run_producer`, `run_checker`, `run_stale_check`,
     `review_branch` (automate-review-step) and `_resolve_conflict`
@@ -1520,7 +1518,7 @@ def test_the_deciding_functions_are_pure_file_state_lookups():
     import ast
 
     tree = ast.parse(_RUNNER_SOURCE.read_text(encoding="utf-8"))
-    deciders = {"select", "_backoff_remaining", "host_capabilities", "_deadline"}
+    deciders = {"select", "host_capabilities", "_deadline"}
     for function in [n for n in tree.body if isinstance(n, ast.FunctionDef)]:
         if function.name not in deciders:
             continue

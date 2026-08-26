@@ -171,13 +171,23 @@ DRAIN_CAP = 4
 CHORE_MAX_ATTEMPTS = 1
 # Producer→checker iterations *inside* one dispatch, for a card that names a
 # `checker:`. Distinct from MAX_ATTEMPTS on purpose: an attempt is a dispatch of
-# the card and is what backoff and `failed/` count; a round is one make-then-judge
-# cycle within it. Conflating them would make `attempts` mean different things
+# the card and is what `failed/` counts; a round is one make-then-judge cycle
+# within it. Conflating them would make `attempts` mean different things
 # depending on the worker.
 MAX_ROUNDS = 3
-# Backoff before re-dispatching a card that failed, indexed by attempts already
-# made. A table, not a formula: §5 says the runner's decisions are lookups.
-BACKOFF_MINUTES: tuple[int, ...] = (0, 20, 90)
+# There used to be a flat time-based backoff here (0, 20, 90 minutes, indexed
+# by attempts already made) before a card could be re-dispatched. Removed
+# 2026-08-26 (Karel: *"I'm not generally convinced that cooldown is helpful in
+# any scenario"*): a clock is the wrong instrument for a queue that already has
+# an ordering mechanism. `board.dispatch_order`'s `last_outcome` bucket does the
+# job it was standing in for — a card that just needs a mechanical fix sorts to
+# the *front* instead of waiting out a timer that has nothing to do with whether
+# the fix is ready, and a card that hard-failed sorts to the *back* instead of
+# being frozen out of the run entirely, so it still gets a turn once healthier
+# work has had first pick. Neither case benefits from wall-clock delay: waiting
+# does not make a `needs_fix` fix any more ready, and a `failed` card sitting
+# at the tail of the same run is exactly as safe as one that waited 90 minutes
+# for a *different* run to pick it up, without spending the window on nothing.
 
 def repo_root() -> Path:
     """The project this run is against.
@@ -768,7 +778,11 @@ def recover(root: Path) -> list[str]:
         if not card.fields.get("started") or card.fields.get("finished"):
             continue
         started = card.fields["started"]
-        card.write({"started": None, "finished": _now()})
+        # Same bucket a plain `failed` verdict earns in `settle` — a card whose
+        # machine vanished mid-dispatch is not proven broken, but it is not
+        # proven healthy either, and it should not be first back in line ahead
+        # of cards that never had trouble.
+        card.write({"started": None, "finished": _now(), "last_outcome": "failed"})
         card.write_section(
             "Error",
             f"Attempt {card.attempts} was interrupted — the runner or the machine went "
@@ -866,20 +880,6 @@ def oversize_note(card: board.Card) -> str:
             f"separate cards, before it is dispatched again")
 
 
-def _backoff_remaining(card: board.Card) -> int:
-    """Minutes still to wait before this card may be retried, from `finished:`."""
-    finished = card.fields.get("finished")
-    if not finished or card.attempts <= 0:
-        return 0
-    wait = BACKOFF_MINUTES[min(card.attempts, len(BACKOFF_MINUTES) - 1)]
-    try:
-        when = dt.datetime.fromisoformat(finished)
-    except ValueError:
-        return 0
-    elapsed = (dt.datetime.now() - when).total_seconds() / 60
-    return max(0, int(wait - elapsed))
-
-
 def attempt_limit(card: board.Card) -> int:
     """How many dispatches this card gets before it is retired to `failed/`.
 
@@ -905,11 +905,11 @@ def select(root: Path, capabilities: set[str], bad_schema: dict[str, list[str]],
     one card the **advisory** checks are waived and the **physical** ones are
     not, which is the only division that makes sense here:
 
-    * waived — `unattended:`, backoff, the attempt limit. Each of these exists to
-      decide what may run *with nobody watching*, and someone typing the card's
-      id is the watching. `unattended: false` in particular means "a machine
-      cannot tell whether this attempt succeeded"; a human asking for it is a
-      human volunteering to be the judge.
+    * waived — `unattended:`, the attempt limit. Each of these exists to decide
+      what may run *with nobody watching*, and someone typing the card's id is
+      the watching. `unattended: false` in particular means "a machine cannot
+      tell whether this attempt succeeded"; a human asking for it is a human
+      volunteering to be the judge.
     * enforced — a broken schema, no worker, no charter, a missing host
       capability. Wanting it harder does not put a GPU in the laptop, and
       dispatching a malformed card produces confident nonsense rather than an
@@ -954,8 +954,6 @@ def select(root: Path, capabilities: set[str], bad_schema: dict[str, list[str]],
                f"(.ai/hosts.json)")  # gate-ok(source_reference_liveness): same HOSTS_FILE as above
         elif card.attempts >= attempt_limit(card) and not forced_now:
             no(f"attempts: {card.attempts} — at the limit, belongs in failed/")
-        elif (wait := _backoff_remaining(card)) > 0 and not forced_now:
-            no(f"backoff: {wait} more minute(s) after attempt {card.attempts}")
         else:
             why = f"tier: {card.tier}, worker: {card.worker}"
             if forced_now and not card.unattended:
@@ -3595,6 +3593,10 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
 
     # Committed BEFORE the worker starts. A machine that dies mid-dispatch must
     # come back with `attempts` already spent, or a reboot loop retries forever.
+    # `last_outcome` is deliberately left alone here — see its docstring and the
+    # `limited`/`blocked`/`interrupted` give-back below, which restores a card to
+    # exactly how it looked before this attempt and depends on nothing having
+    # touched the field in between.
     card.write({"attempts": str(attempt), "branch": branch,
                 "started": _now(), "finished": None})
     board.commit_board(root, f"board: {card.id} attempt {attempt} ({model})")
@@ -5028,6 +5030,10 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
             return (f"{card_id}: → needs-decision/ (a reviewer-flagged fix recurred across "
                     f"{card.attempts} attempts)")
         card.write_section("Review Finding", _review_finding_section(card_id, finding))
+        # `board.dispatch_order`'s front bucket, so an unattended queue reaches
+        # this card before anything Karel merely dragged higher — see the
+        # constant retired above for why a clock is not what this needed.
+        card.write({"last_outcome": "needs_fix"})
         # The next attempt continues from this branch instead of cold-starting —
         # `prepare_worktree`'s FROM_REVIEW path, and the reason the finding can
         # honestly say "apply this directly". Written after the section above so
@@ -5140,6 +5146,9 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
         prune_run_dir(root, card_id)
         prune_rescue_branches(root, card_id)
         return f"{card_id}: → failed/ after {card.attempts} attempts ({result.detail})"
+    # `board.dispatch_order`'s back bucket — this card gets another attempt, but
+    # only after every card that has not just failed has had its turn.
+    card.write({"last_outcome": "failed"})
     board.commit_board(root, f"board: {card_id} attempt {card.attempts} failed")
     return f"{card_id}: attempt {card.attempts} failed, will retry ({result.detail})"
 
@@ -6054,8 +6063,8 @@ def _parser(root: Path | None = None) -> argparse.ArgumentParser:
     base = default_base(root)
     parser.add_argument("--base", default=base, help=f"branch to build on (default {base})")
     parser.add_argument("--card", help="dispatch only this card id. Naming a card is an "
-                                       "explicit human request, so `unattended: false`, "
-                                       "backoff and the attempt limit are waived for it; "
+                                       "explicit human request, so `unattended: false` and "
+                                       "the attempt limit are waived for it; "
                                        "`requires:`, a missing charter and a broken schema "
                                        "are not. Exits non-zero with a reason if it cannot run.")
     parser.add_argument("--max-cards", type=int, default=0, help="stop after N dispatches")

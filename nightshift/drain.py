@@ -35,7 +35,7 @@ night self-healing, and it was rejected on three grounds:
   yesterday's leftovers before starting today's work would be paying for that
   urgency with the one resource the whole cost programme is about.
 * The lane is unbounded and the night's accounting is not built for it. Attempts,
-  backoff, rescue branches, the session/wall arithmetic and the run record all
+  dispatch order, rescue branches, the session/wall arithmetic and the run record all
   hang off a `Candidate` taken from `tasks/`. A drain inside the loop would either
   duplicate that arithmetic or restructure it, in a module that runs unattended
   and has ~320 tests around it — for work that is not time-critical.
@@ -195,7 +195,7 @@ def skip_reason(root: Path, base: str, card: board.Card, *, named: bool = False)
 
     `named` is what `--card` buys: an explicit request is a decision, so the checks a
     sweep applies to protect an at-rest card are waived, the same way `runner --card`
-    waives `unattended:`, backoff and the attempt limit. The commits check is *not*
+    waives `unattended:` and the attempt limit. The commits check is *not*
     waived — there is genuinely nothing to review, and no request makes a diff exist.
     """
     branch = branch_of(card)

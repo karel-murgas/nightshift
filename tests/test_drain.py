@@ -393,7 +393,7 @@ def test_a_card_already_reviewed_and_blocked_on_a_merge_is_not_reviewed_again(
 def test_naming_a_blocked_card_reviews_it_anyway(tmp_path, monkeypatch):
     """`--card` is an explicit human request, and after resolving the conflict by hand
     asking for another review is a legitimate thing to want. Same waiver `runner --card`
-    makes for `unattended:`, backoff and the attempt limit."""
+    makes for `unattended:` and the attempt limit."""
     root = _repo(tmp_path, ("blocked", "review"))
     _branch_with_a_commit(root, "blocked")
     card = root / "Board" / LANE_DIR / "blocked.md"

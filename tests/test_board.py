@@ -136,6 +136,28 @@ def test_dispatch_order_puts_dragged_cards_first(tmp_path):
     assert [c.id for c in board.cards(root, "tasks")] == ["probe", "dragged", "undragged"]
 
 
+def test_dispatch_order_buckets_by_last_outcome_before_kanban_order(tmp_path):
+    """A `needs_fix` card jumps ahead of even a dragged-to-top card; a `failed`
+    one sinks behind an undragged, never-attempted one — see the constant
+    retired in `runner.py` (2026-08-26) for why a clock is not the mechanism
+    that used to gate this."""
+    root = _repo(tmp_path)
+    lane = root / "Board" / "tasks"
+    (lane / "dragged.md").write_text(
+        "---\nid: dragged\nstate: tasks\nkanban_order: a1\n---\n\nbody\n", encoding="utf-8")
+    (lane / "undragged.md").write_text(
+        "---\nid: undragged\nstate: tasks\n---\n\nbody\n", encoding="utf-8")
+    (lane / "fixable.md").write_text(
+        "---\nid: fixable\nstate: tasks\nlast_outcome: needs_fix\n---\n\nbody\n",
+        encoding="utf-8")
+    (lane / "flaky.md").write_text(
+        "---\nid: flaky\nstate: tasks\nkanban_order: a0\nlast_outcome: failed\n"
+        "---\n\nbody\n", encoding="utf-8")
+
+    assert [c.id for c in board.cards(root, "tasks")] == [
+        "fixable", "probe", "dragged", "undragged", "flaky"]
+
+
 # ------------------------------------------------------- YAML's other list form
 
 

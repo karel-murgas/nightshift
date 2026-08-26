@@ -191,21 +191,45 @@ def test_a_chores_prompt_tells_the_worker_to_bounce_and_a_full_cards_does_not(
     assert "one-prompter" not in prompts["big"]
 
 
-def test_a_recently_failed_card_waits_for_its_backoff(tmp_path):
+def test_a_recently_failed_card_is_dispatchable_right_away(tmp_path):
+    """No time-based backoff (retired 2026-08-26, `board.dispatch_order`'s
+    `last_outcome` bucket replaces it) — a card whose most recent attempt just
+    failed a moment ago is still selectable; see the ordering tests below for
+    how it gets deprioritised instead of blocked."""
     root = _repo(tmp_path)
     _charter(root, "code-thread")
-    _card(root, "tasks", "flaky", attempts="1", finished=dt.datetime.now().isoformat())
+    _card(root, "tasks", "flaky", attempts="1",
+          finished=dt.datetime.now().isoformat(), last_outcome="failed")
     candidate = _select(root)["flaky"]
-    assert not candidate.dispatchable
-    assert "backoff" in candidate.reason
+    assert candidate.dispatchable
+    assert "backoff" not in candidate.reason
 
 
-def test_backoff_expires(tmp_path):
+def test_dispatch_order_sinks_a_failed_card_behind_healthy_ones(tmp_path):
+    """A card that just failed does not get first crack at the queue again —
+    it sorts after every card that has not just failed, even one Karel never
+    dragged (no `kanban_order` at all beats a failed card with an earlier
+    filename)."""
     root = _repo(tmp_path)
     _charter(root, "code-thread")
-    long_ago = (dt.datetime.now() - dt.timedelta(days=1)).isoformat()
-    _card(root, "tasks", "flaky", attempts="1", finished=long_ago)
-    assert _select(root)["flaky"].dispatchable
+    _card(root, "tasks", "a-flaky", attempts="1",
+          finished=dt.datetime.now().isoformat(), last_outcome="failed")
+    _card(root, "tasks", "z-healthy")
+    ready = [c.card.id for c in runner.select(root, set(), {}) if c.dispatchable]
+    assert ready == ["z-healthy", "a-flaky"]
+
+
+def test_dispatch_order_promotes_a_needs_fix_card_ahead_of_kanban_order(tmp_path):
+    """A card the reviewer just sent back with `needs_fix` jumps to the front
+    of the queue — ahead of a card Karel dragged to the top of the column,
+    because the fix is already scoped and the cheapest thing this run can do."""
+    root = _repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "dragged-to-top", kanban_order="a0")
+    _card(root, "tasks", "needs-a-fix", attempts="1",
+          finished=dt.datetime.now().isoformat(), last_outcome="needs_fix")
+    ready = [c.card.id for c in runner.select(root, set(), {}) if c.dispatchable]
+    assert ready == ["needs-a-fix", "dragged-to-top"]
 
 
 def test_only_the_tasks_lane_is_dispatched(tmp_path):
@@ -402,7 +426,7 @@ def test_naming_a_card_waives_unattended_false(tmp_path):
     assert "waived" in forced["attended"].reason
 
 
-def test_naming_a_card_waives_backoff_and_the_attempt_limit(tmp_path):
+def test_naming_a_card_waives_the_attempt_limit(tmp_path):
     root = _repo(tmp_path)
     _charter(root, "code-thread")
     _card(root, "tasks", "burnt", attempts=str(runner.MAX_ATTEMPTS),
@@ -500,12 +524,19 @@ def test_recovery_is_idempotent(tmp_path):
     assert board.find(root, "crashed").attempts == 1
 
 
-def test_a_recovered_card_backs_off_before_retrying(tmp_path):
+def test_a_recovered_card_sinks_behind_healthy_ones_but_is_dispatchable(tmp_path):
+    """`recover` marks the interrupted attempt `last_outcome: failed` — the
+    machine going away mid-dispatch is not proven safe to retry first, so it
+    gets the same back-of-queue treatment a plain `failed` verdict earns, but
+    no time-based block (retired 2026-08-26)."""
     root = _repo(tmp_path)
     _charter(root, "code-thread")
     _card(root, "tasks", "crashed", attempts="1", started="2026-07-23T03:00:00")
+    _card(root, "tasks", "z-healthy")
     runner.recover(root)
-    assert not _select(root)["crashed"].dispatchable
+    assert _select(root)["crashed"].dispatchable
+    ready = [c.card.id for c in runner.select(root, set(), {}) if c.dispatchable]
+    assert ready == ["z-healthy", "crashed"]
 
 
 # --- settling an outcome ----------------------------------------------------

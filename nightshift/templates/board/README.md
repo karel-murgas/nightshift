@@ -134,8 +134,8 @@ fact about that card.
 **Running one card on purpose.** `--card <id>` (the id is the filename stem) is the
 interactive path — ask Claude in chat to "run card XYZ via the runner" and this is what it
 does. Because naming a card is an explicit human request, the checks that exist to decide
-what may run *with nobody watching* are waived for it: `unattended: false`, the backoff
-wait, and the attempt limit. The ones about physical reality are not — a missing
+what may run *with nobody watching* are waived for it: `unattended: false` and the attempt
+limit. The ones about physical reality are not — a missing
 `requires:` capability, no `worker:`, no charter, or a card that fails `card_schema` still
 refuse, and so does a card that is not in `tasks/`. **It always says why and exits
 non-zero** rather than quietly doing nothing.

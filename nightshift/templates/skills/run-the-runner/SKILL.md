@@ -42,8 +42,14 @@ takes budget from cards. Drop it (or pass `--stale 0`) if a night must stay card
 `YES`/`no` and the reason, costs nothing, and does not mind a dirty tree.
 
 A night takes cards in **{{maintainer}}'s Kanban column order** (`kanban_order`, written by Base
-Board on every drag); cards they never dragged sort last, alphabetically. So "run the top of
-the queue" is `--max-cards 1`, and the dry run already prints them in the order they will go.
+Board on every drag); cards they never dragged sort last, alphabetically — with one override on
+each edge: a card the reviewer just sent back `needs_fix` jumps to the *front*, ahead of even a
+dragged-to-top card, because the fix is already scoped and is the cheapest thing the run can do
+next; a card whose most recent attempt plain-`failed` sinks to the *back*, behind every card that
+has not just failed, so one broken card cannot burn the whole window before anything else gets a
+turn (`board.dispatch_order`, 2026-08-26 — see it for why this replaced a flat time-based
+backoff). So "run the top of the queue" is `--max-cards 1`, and the dry run already prints them
+in the order they will go.
 
 ### Where the runner works (topology, runner-hardening #3)
 
@@ -100,8 +106,8 @@ you invoking the runner means you are here to read `Digest.md` right after, so l
 - **Confirm if {{maintainer}} was not explicit.** A dispatch makes real commits and burns real
   session window. *"Run card XYZ now"* is explicit; *"what about card XYZ?"* is not — answer
   with `--dry-run` instead.
-- **Naming a card waives the unattended-night checks** — `unattended: false`, backoff and
-  the attempt limit — because a person asking by name is the supervision those substitute
+- **Naming a card waives the unattended-night checks** — `unattended: false` and the attempt
+  limit — because a person asking by name is the supervision those substitute
   for. It does **not** waive `requires:`, `worker: none`, a missing charter, a `card_schema`
   violation, or a card outside `tasks/`. The runner refuses with the reason and exits
   non-zero; relay that reason, do not retry around it.

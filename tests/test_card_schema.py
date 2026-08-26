@@ -110,6 +110,16 @@ def test_unknown_field_is_rejected(tmp_path):
     assert "unknown field" in _rules(card_schema.check(_board(tmp_path, "tasks", body)))
 
 
+def test_last_outcome_is_an_allowed_runner_field(tmp_path):
+    """`board.dispatch_order`'s queue-priority field (2026-08-26, replacing the
+    flat backoff) is machine-written, same family as `attempts`/`started`/
+    `finished` — not something a schema violation should flag."""
+    body = _GOOD.format(id="probe", lane="tasks").replace(
+        "created: 2026-07-22", "created: 2026-07-22\nlast_outcome: needs_fix"
+    )
+    assert card_schema.check(_board(tmp_path, "tasks", body)) == []
+
+
 def test_unresolvable_worker_and_recipe_are_caught(tmp_path):
     body = _GOOD.format(id="probe", lane="tasks").replace(
         "worker: code-thread", "worker: nobody"
