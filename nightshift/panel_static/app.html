@@ -385,6 +385,8 @@
 
   .body { min-width: 0; }
   .id { font-family: var(--mono); color: var(--phosphor); word-break: break-word; }
+  .id.clickable { cursor: pointer; }
+  .id.clickable:hover { text-decoration: underline; }
   .title { display: block; margin-top: 0.1rem; }
   .meta {
     margin-top: 0.28rem;
@@ -683,6 +685,32 @@
     margin-bottom: 0.5rem;
   }
   .editor .acts { margin-top: 0.6rem; justify-content: flex-start; }
+
+  /* The goal / how-to-test box a row's own id toggles open. Sized to its content —
+     no max-height, no scroll — because the whole point is reading it without
+     scrolling to find the rest. Each part is its own <details> so either can be
+     closed without closing the box; the box itself is plain JS-toggled (`.open`),
+     not a <details> itself, because native <summary> would also swallow clicks on
+     the row's own buttons and checkbox sitting beside the id it decorates. */
+  .card-info { display: none; margin: 0 1.5rem 0.9rem; border: 1px solid var(--line); background: var(--panel); }
+  .card-info.open { display: block; }
+  .card-info details { border-bottom: 1px solid var(--line-soft); }
+  .card-info details:last-child { border-bottom: 0; }
+  .card-info summary {
+    cursor: pointer;
+    padding: 0.55rem 1rem;
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    list-style: none;
+  }
+  .card-info summary::-webkit-details-marker { display: none; }
+  .card-info summary::before { content: "\25B8  "; color: var(--phosphor-d); }
+  .card-info details[open] summary::before { content: "\25BE  "; }
+  .card-info summary:hover { color: var(--phosphor); }
+  .card-info .doc { padding: 0 1rem 0.9rem; max-width: none; }
 
   footer {
     padding: 1.5rem;
@@ -1068,6 +1096,23 @@ document.addEventListener("change", function (e) {
 });
 countTicked();
 
+/* ---- the goal / how-to-test box, and the "not OK" feedback textbox ---- */
+
+function toggleInfo(cardId) {
+  var box = document.getElementById("info-" + cardId);
+  if (box) { box.classList.toggle("open"); }
+}
+
+/* `Not OK` opens the same editor shell `openEditor`/`closeEditor` already drive
+   for new notes and ideas; this just names its own save action. */
+function submitFeedback(cardId) {
+  var panel = document.getElementById("ed-feedback-" + cardId);
+  var field = panel ? panel.querySelector("textarea") : null;
+  var note = field ? field.value.trim() : "";
+  if (!note) { toast("say what was wrong first", true); return; }
+  post("/api/rejected", { card_id: cardId, note: note });
+}
+
 function markOK(button, cardId) {
   post("/api/verified", { card_id: cardId }, { reload: false }).then(function (r) {
     if (!r || !r.ok) { return; }
@@ -1293,6 +1338,17 @@ function carryState(oldRegion, newRegion) {
   oldRegion.querySelectorAll(".open[id]").forEach(function (was) {
     var now = newRegion.querySelector("#" + CSS.escape(was.id));
     if (now) { now.classList.add("open"); }
+  });
+  /* A native <details> (the card-info Goal/How-to-test parts) always renders
+     `open` server-side — that attribute says nothing about whether a person
+     closed one by hand. Without this, closing one and waiting past a tick
+     reopened it: the live DOM's `outerHTML` no longer said `open` once closed,
+     the fresh render always did, and that mismatch alone drove the swap that
+     then handed back the server's static markup. Carried by id, like the
+     checkbox and slider above — the boolean is restored, not the markup. */
+  oldRegion.querySelectorAll("details[id]").forEach(function (was) {
+    var now = newRegion.querySelector("#" + CSS.escape(was.id));
+    if (now) { now.open = was.open; }
   });
 }
 

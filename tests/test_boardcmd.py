@@ -204,6 +204,56 @@ def test_marking_a_card_verified_commits_the_move(tmp_path):
     assert not _git(root, "status", "--porcelain", "--", "Board").stdout.strip()
 
 
+# ------------------------------------------------------------------ verb 2b (rejected)
+
+
+def test_rejecting_a_card_sends_it_back_to_tasks_with_the_feedback(tmp_path):
+    """`verified`'s opposite number: the play-through failed, and the maintainer's
+    own words are what the next attempt has to go on."""
+    root = _repo(tmp_path)
+    _card(root, "testing", "played")
+
+    message = boardcmd.mark_rejected(root, "played", "the door never opens")
+
+    assert _lane_of(root, "played") == "tasks"
+    card = board.find(root, "played")
+    assert card.fields["state"] == "tasks"
+    assert card.fields["last_outcome"] == "needs_fix"
+    assert "the door never opens" in card.text
+    assert "## Feedback" in card.text
+    assert "tasks/" in message
+
+
+def test_rejecting_refuses_from_any_other_lane(tmp_path):
+    """`testing/` means a human is playing it through. Sending work back to
+    `tasks/` through this verb from any other lane would be a transition
+    nobody made."""
+    root = _repo(tmp_path)
+    _card(root, "review", "unreviewed")
+    with pytest.raises(boardcmd.BoardCommandError, match="review/"):
+        boardcmd.mark_rejected(root, "unreviewed", "not ready")
+    assert _lane_of(root, "unreviewed") == "review"
+
+
+def test_rejecting_refuses_an_empty_note(tmp_path):
+    """A card sent back with nothing to say why would leave the next attempt
+    guessing — which is no better than not sending it back at all."""
+    root = _repo(tmp_path)
+    _card(root, "testing", "played")
+    with pytest.raises(boardcmd.BoardCommandError, match="feedback"):
+        boardcmd.mark_rejected(root, "played", "   ")
+    assert _lane_of(root, "played") == "testing"
+
+
+def test_rejecting_commits_the_move(tmp_path):
+    root = _repo(tmp_path)
+    _card(root, "testing", "played")
+
+    boardcmd.mark_rejected(root, "played", "wrong door")
+
+    assert not _git(root, "status", "--porcelain", "--", "Board").stdout.strip()
+
+
 # ------------------------------------------------------------------ verb 3
 
 
@@ -388,6 +438,17 @@ def test_no_verb_touches_stdin_unless_it_was_named(tmp_path, monkeypatch, argv):
     monkeypatch.setattr(sys, "stdin", _Forbidden())
 
     assert boardcmd.main(["--root", str(root), *argv]) == 0
+
+
+def test_rejected_does_not_touch_stdin_either(tmp_path, monkeypatch):
+    """Not in the parametrize list above: `rejected` needs its own card already in
+    `testing/`, which the other verbs in that list would then also collide on."""
+    root = _repo(tmp_path)
+    _card(root, "testing", "played")
+    monkeypatch.setattr(sys, "stdin", _Forbidden())
+
+    assert boardcmd.main(["--root", str(root), "rejected", "played",
+                          "--note", "feedback text"]) == 0
 
 
 def test_a_body_may_be_piped_in_explicitly(tmp_path, monkeypatch, capsys):

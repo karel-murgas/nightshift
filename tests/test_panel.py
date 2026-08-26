@@ -1933,6 +1933,136 @@ def test_a_card_that_cannot_be_finished_is_parked_not_landed(server, monkeypatch
     assert "do not move the card to `testing/`" in prompt.lower()
 
 
+# ------------------------------------------ the Verify page's "not OK" tools
+
+
+def test_verify_page_offers_read_card_in_one_click_on_both_rows(server):
+    """Used to take two clicks — Diff, then Read card on that page. Both the
+    Play-through and Under-review rows now carry it directly."""
+    base, root = server
+    _card(root, "testing", "played")
+    _card(root, "review", "reviewed")
+
+    status, html = _get(base, "verify")
+
+    assert status == 200
+    assert "/card/played" in html
+    assert "/card/reviewed" in html
+
+
+def test_play_through_row_carries_the_goal_and_how_to_test_collapsed_beneath_it(server):
+    """Clicking the card id unrolls the box; nothing here asserts the CSS that
+    hides it, only that the goal and the scenario are on the page at all and are
+    reached through the id rather than a navigation."""
+    base, root = server
+    path = _card(root, "testing", "played")
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + "\n## How to test\n\nOpen the vault door and expect it to creak.\n",
+        encoding="utf-8", newline="")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "scenario")
+
+    status, html = _get(base, "verify")
+
+    assert status == 200
+    assert 'id="info-played"' in html
+    assert "toggleInfo('played')" in html
+    assert "One thing." in html, "the ## Intent text (the goal) is missing"
+    assert "Open the vault door and expect it to creak." in html
+
+
+def test_under_review_row_shows_the_goal_but_never_a_how_to_test_box(server):
+    """`## How to test` is written by `settle` only once a card lands — a
+    pre-merge `review/` card never has one, so asking for it there would show
+    "not recorded" on every row for a section nothing has had the chance to
+    write yet."""
+    base, root = server
+    _card(root, "review", "reviewed")
+
+    status, html = _get(base, "verify")
+
+    assert status == 200
+    assert 'id="info-reviewed"' in html
+    assert "How to test" not in html, "no testing/ card exists in this repo either"
+
+
+def test_play_through_row_offers_not_ok_and_open_inline(server):
+    base, root = server
+    _card(root, "testing", "played")
+
+    status, html = _get(base, "verify")
+
+    assert status == 200
+    assert "Not OK" in html
+    assert "openEditor('feedback-played')" in html
+    assert 'id="ed-feedback-played"' in html
+    assert "Open inline" in html
+    assert "post('/api/work-feedback',{card_id:'played'})" in html
+
+
+def test_rejected_round_trips_through_the_real_cli(server):
+    """`Not OK`'s textbox: a board write, same shape as `api/verified`, going
+    through the real `boardcmd` CLI rather than a Python call to it."""
+    base, root = server
+    _card(root, "testing", "played")
+
+    status, data = _post(base, "api/rejected",
+                         {"card_id": "played", "note": "the door never opens"})
+
+    assert status == 200, data
+    assert data["ok"] is True
+    card = board.find(root, "played")
+    assert card.lane == "tasks"
+    assert "the door never opens" in card.text
+    assert "## Feedback" in card.text
+
+
+def test_rejected_is_refused_server_side_with_no_note(server):
+    """The textarea being empty must not reach the CLI as a card sent back with
+    nothing to say why."""
+    base, root = server
+    _card(root, "testing", "played")
+
+    status, data = _post(base, "api/rejected", {"card_id": "played", "note": "   "})
+
+    assert status == 400
+    assert data["ok"] is False
+    assert "wrong" in data["message"]
+    assert board.find(root, "played").lane == "testing", (
+        "a refused feedback POST must not have moved the card anyway")
+
+
+def test_work_feedback_opens_a_session_that_waits_before_fixing_anything(
+        server, monkeypatch):
+    """`Open inline`: the other "not OK" tool, distinct from `Work on this` in
+    exactly one respect — the prompt tells the session to listen first."""
+    base, root = server
+    _card(root, "testing", "played")
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    status, data = _post(base, "api/work-feedback", {"card_id": "played"})
+
+    assert status == 200, data
+    prompt = opened[0][-1]
+    assert prompt.startswith("This card just failed its play-through in `testing/`")
+    assert "Wait for their feedback before you touch anything" in prompt
+    assert "played" in prompt
+    assert "Leave the card in `testing/`" in prompt
+    assert "waiting for your feedback" in data["message"]
+
+
+def test_work_feedback_refuses_a_card_that_is_not_there(server, monkeypatch):
+    base, _ = server
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: None)
+
+    status, data = _post(base, "api/work-feedback", {"card_id": "ghost"})
+
+    assert status == 400
+    assert "ghost" in data["message"]
+
+
 def test_triage_is_told_the_deliverable_is_the_card_not_the_work(server, monkeypatch):
     """Karel's other half: *"triage for task"*. The failure this guards against is a
     triage session that reads the note and starts building what it describes."""
