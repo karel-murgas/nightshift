@@ -834,6 +834,13 @@ class Context:
     #: beside `review` because the NOW page draws them adjacently and they used to
     #: be the same list; see `board.BLOCKED_LANE` for why they stopped being one.
     blocked: list[board.Card] = field(default_factory=list)
+    #: `failed/` — gates or tests stayed red past `MAX_ATTEMPTS` dispatches and the
+    #: card was retired. Shown in the same section as `blocked`, not a section of
+    #: its own (Karel, 2026-08-26): both are "reviewed nothing further, a person's
+    #: hands fix it", not a decision. Unlike `blocked`, the card's own branch is
+    #: already reaped by the time it lands here (README's runner section) — its
+    #: `## Error` excerpt is what is left to work from.
+    failed: list[board.Card] = field(default_factory=list)
     notes: list[ingest.Note] = field(default_factory=list)
     ideas: list[str] = field(default_factory=list)
     routing: ingest.RoutingView = field(default_factory=ingest.RoutingView)
@@ -942,7 +949,8 @@ class Context:
             # person's hands, which is what the NOW rail number means. It used to be
             # invisible inside the `review` count, which is the whole complaint.
             "now": len(self.decisions) + len(self.do_now) + len(self.tonight)
-                   + len(self.elsewhere) + len(self.chores) + len(self.blocked),
+                   + len(self.elsewhere) + len(self.chores) + len(self.blocked)
+                   + len(self.failed),
             "verify": len(self.testing) + len(self.review),
             "inbox": len(self.notes),
             "ideas": len(self.ideas),
@@ -986,6 +994,7 @@ def read_context(root: Path, *, fetch_freshness: bool = False) -> Context:
         testing=board.cards(root, "testing"),
         review=board.cards(root, "review"),
         blocked=board.cards(root, board.BLOCKED_LANE),
+        failed=board.cards(root, "failed"),
         notes=ingest.notes(root),
         ideas=read_ideas(root),
         routing=ingest.read_view(root),
@@ -2023,7 +2032,8 @@ def _stamp_of(path: Path) -> str:
 
 
 def _blocked_section(ctx: Context) -> str:
-    """The `blocked/` lane: reviewed ok, work done, the merge needs a person.
+    """The `blocked/` and `failed/` lanes: nothing further to review, a person's
+    hands fix it — not a decision, so this is not `Decide`.
 
     Karel, 2026-08-23, having found two finished cards sitting under **Under review**:
     *"we again got into 'human needs to resolve it' being in review — that is not what
@@ -2031,10 +2041,21 @@ def _blocked_section(ctx: Context) -> str:
     branches would not rebase onto a `test` that had moved under them. The lane split
     is in `board.BLOCKED_LANE`; this is the half of it he actually sees.
 
-    Every row carries the `## Merge` note verbatim, because that is the whole content
-    of the blockage — which branch, onto which base, and what the resolver hit. No
-    action button: unsticking a merge is a git operation in a checkout, not something
-    the panel can spawn, and a button that only pretends is worse than none.
+    `failed/` joined the same section rather than getting its own (Karel, 2026-08-26):
+    both lanes mean "reviewed nothing further, only your hands move this" — one because
+    the merge won't land, the other because gates stayed red past `MAX_ATTEMPTS`. A
+    blocked row carries its `## Merge` note; a failed row carries its `## Error`
+    excerpt — the only trace left of the attempt, since the runner reaps a card's
+    rescue branches the moment it is retired to `failed/` (README's runner section), so
+    unlike a blocked row there is no branch left to diff.
+
+    `Work on this` opens an interactive session on the card's own branch. For a blocked
+    row that branch still exists and is the one the flag text tells you to rebase by
+    hand — the button does not attempt the merge itself, only gets you into the seat to
+    do it (Karel, 2026-08-26: cards stuck here need a way to start working on them from
+    the panel, same as any other lane). For a failed row the branch is gone, so the
+    session cuts a fresh one from the integration base, same as any other first click on
+    a card nothing has touched yet.
     """
     rows = []
     for card in ctx.blocked:
@@ -2042,19 +2063,33 @@ def _blocked_section(ctx: Context) -> str:
         why = (board.section(card.text, "Merge") or "").strip()
         meta = [_e(stat) for stat in [diff_stat(ctx.root, ctx.base, branch)] if stat]
         meta.append(_chip("reviewed ok", "ok"))
-        rows.append(_row(marker="!", acts=_act("Diff", href=f"/diff/{card.id}"),
+        acts = (_act("Diff", href=f"/diff/{card.id}")
+                + _work_act(card=card.id, tier=card.tier, worker=card.worker,
+                           lane=board.finished_lane(card), primary=True))
+        rows.append(_row(marker="!", acts=acts,
+                         body=_card_body(card, meta=meta, why=why[:400])))
+    for card in ctx.failed:
+        why = (board.section(card.text, "Error") or "").strip()
+        meta = [_chip(f"failed · {card.attempts} attempt(s)"
+                      if card.attempts else "failed", "bad")]
+        acts = _work_act(card=card.id, tier=card.tier, worker=card.worker,
+                         lane=board.finished_lane(card), primary=True)
+        rows.append(_row(marker="!", acts=acts,
                          body=_card_body(card, meta=meta, why=why[:400])))
     flag = ""
-    if ctx.blocked:
-        flag = ('<div class="flag"><h3>Finished work that cannot land</h3>'
-                '<p>Each of these passed gates, tests and review, then would not rebase '
-                'onto the integration branch — and the resolver could not settle it '
-                'either. Resolving one is a git operation in a real checkout: rebase the '
-                'branch, fix the conflict, re-run preflight, merge, then move the card to '
-                '<code>testing/</code>. Nothing here is waiting on a decision.</p></div>')
-    return _section("Blocked on you", len(ctx.blocked), flag + "".join(rows),
-                    note="Reviewed and done; only the merge is stuck.",
-                    empty="Nothing is blocked.",
+    if ctx.blocked or ctx.failed:
+        flag = ('<div class="flag"><h3>Finished work that cannot land, or never turned '
+                'green</h3>'
+                '<p>A blocked card passed gates, tests and review, then would not '
+                'rebase onto the integration branch — and the resolver could not settle '
+                'it either; resolving one is a git operation in a real checkout: rebase '
+                'the branch, fix the conflict, re-run preflight, merge, then move the '
+                'card to <code>testing/</code>. A failed card ran out of attempts with '
+                'gates or tests still red; <b>Work on this</b> starts over on a fresh '
+                'branch. Nothing here is waiting on a decision.</p></div>')
+    return _section("Blocked on you", len(ctx.blocked) + len(ctx.failed), flag + "".join(rows),
+                    note="Reviewed and done, or out of attempts — either way, your hands fix it.",
+                    empty="Nothing is blocked or failed.",
                     sec_id="blocked")
 
 
