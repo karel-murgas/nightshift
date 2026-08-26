@@ -470,6 +470,60 @@ def test_dispatch_is_refused_server_side_for_a_never_account(server, monkeypatch
     assert "never" in data["message"]
 
 
+def test_blocked_card_offers_work_on_this(server, monkeypatch):
+    """A card in `blocked/` passed review and only the merge is stuck — the flag
+    text tells Karel to rebase it by hand in a real checkout, so the row needs a
+    way to open one, same as any other lane's card (2026-08-26)."""
+    base, root = server
+    _git(root, "branch", "-M", "main")
+    _card(root, "blocked", "b-card")
+    _branch_with_a_commit(root, "b-card")
+
+    status, html = _get(base, "now")
+    assert status == 200, html
+    assert "Blocked on you" in html
+    assert "Work on this" in html
+    assert "post('/api/work',{card:'b-card'})" in html
+
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+    status, data = _post(base, "api/work", {"card": "b-card"})
+    assert status == 200, data
+    argv = opened[0]
+    assert argv[argv.index("--name") + 1] == "b-card"
+
+
+def test_failed_card_joins_the_blocked_section(server, monkeypatch):
+    """`failed/` doesn't get a section of its own (Karel, 2026-08-26) — it joins
+    `blocked/` under the same "reviewed nothing further, your hands fix it" heading.
+    Unlike a blocked card, a failed card's own branch is already reaped by the time
+    it lands here (README's runner section), so `Work on this` must still work with
+    no branch to diff against — the row carries `## Error`, not a diff stat."""
+    base, root = server
+    _git(root, "branch", "-M", "main")
+    text = (CARD.format(id="f-card", state="failed", unattended="true")
+            .replace("verify: play\n", "verify: play\nattempts: 3\n")
+            + "\n## Error\n\npytest: 2 failed\n")
+    path = root / "Board" / "failed" / "f-card.md"
+    path.write_text(text, encoding="utf-8", newline="")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "card f-card")
+
+    status, html = _get(base, "now")
+    assert status == 200, html
+    assert "Blocked on you" in html
+    assert "f-card" in html
+    assert "3 attempt(s)" in html
+    assert "pytest: 2 failed" in html
+
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+    status, data = _post(base, "api/work", {"card": "f-card"})
+    assert status == 200, data
+    argv = opened[0]
+    assert argv[argv.index("--name") + 1] == "f-card"
+
+
 def test_dispatch_spawns_the_runner_for_an_ordinary_account(server, monkeypatch):
     base, root = server
     _card(root, "tasks", "a-card")
