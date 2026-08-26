@@ -4053,7 +4053,7 @@ def _resolve_conflict(root: Path, tree: Path, card: board.Card, branch: str,
     Returns `(replayed, detail)`. On `False` the rebase has been aborted and the
     worktree is back where it started, so the caller's failure path is unchanged.
     """
-    binary = claude_binary(root)
+    binary = claude_binary()
     # Resolved here rather than by the caller, so that a caller which never reaches
     # this function never pays for it — `rebase_and_merge` runs on every merged card
     # and all but a few of them have no conflict at all, and `tiers.resolve` raises

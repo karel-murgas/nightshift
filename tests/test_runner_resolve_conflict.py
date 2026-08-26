@@ -105,7 +105,7 @@ def _resolver(monkeypatch, *, write: str | None, verdict: dict | None,
         return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
 
     monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda root: "claude")
+    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
     monkeypatch.setattr(runner, "host_setting",
                         lambda root, key, default=None: default)
 
@@ -229,7 +229,7 @@ def test_the_resolver_is_bounded(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(argv, 0, "{}", "")
 
     monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda root: "claude")
+    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
     monkeypatch.setattr(runner, "host_setting", lambda root, key, default=None: default)
 
     replayed, _ = _run(repo, tmp_path, branch, base)
