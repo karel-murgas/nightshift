@@ -49,6 +49,8 @@ No LLM anywhere in here (`00_architecture.md` §12) — it is a file mover.
     python -m nightshift.boardcmd note <note.md> --body-file -
     python -m nightshift.boardcmd note <note.md> --lane ideas --body-file -
     python -m nightshift.boardcmd edit <path-under-the-board> --body-file -
+    python -m nightshift.boardcmd delete <note.md>
+    python -m nightshift.boardcmd delete <note.md> --lane ideas
 
 The sixth verb the panel needs — reviewing a card sitting in `review/` — is not
 here. It is a dispatch rather than a board write, and it belongs to
@@ -387,6 +389,37 @@ def create_note(root: Path, name: str, body: str, lane: str = INBOX) -> str:
     return f"{filename}: written to {lane}/ ({len(body)} B)"
 
 
+def delete_note(root: Path, name: str, lane: str = INBOX) -> str:
+    """Verb — permanently remove a note from `inbox/` or `ideas/`, via `git rm`.
+
+    The one verb in this module that makes a file stop existing rather than
+    relocating or replacing it — every other write here is recoverable by opening
+    the result; a deleted note is recoverable only from git history, the same way
+    any other commit is. That is deliberate: `Board/README.md`'s "nothing is
+    deleted" line is about `done/`/`failed/`, the board's own record of finished
+    work, and does not extend to a note or an idea that was never carded — a
+    half-thought somebody decided against carries no record worth keeping on the
+    board itself.
+
+    Restricted to the two lanes a bare, schema-free note can live in, for the same
+    reason `create_note` is: a card in any other lane carries state worth keeping
+    — an attempt count, a review, a summary — and this verb reads none of it and
+    would destroy all of it without a trace.
+    """
+    if lane not in _NOTE_LANES:
+        raise BoardCommandError(f"{lane!r} is not a lane a note may be deleted from — "
+                                f"only {_NOTE_LANES}")
+    filename = _bare_name(name)
+    target = board.board_dir(root) / lane / filename
+    if not target.is_file():
+        raise BoardCommandError(f"no note called {filename!r} in {lane}/")
+    removed = _git(root, "rm", "-f", "--", str(target))
+    if removed.returncode != 0:
+        target.unlink()
+    board.commit_board(root, f"board: deleted {lane}/{filename}")
+    return f"{filename}: deleted from {lane}/"
+
+
 def edit_body(root: Path, target: str | Path, body: str) -> str:
     """Verb 5 — replace a file's body, leaving its frontmatter byte-identical.
 
@@ -487,6 +520,12 @@ def _parser() -> argparse.ArgumentParser:
     edit = subs.add_parser("edit", help="replace a board file's body, keeping its frontmatter")
     edit.add_argument("path", help="path to the file, absolute or relative to the repo root")
 
+    deleted = subs.add_parser(
+        "delete", help=f"permanently remove a note from {INBOX}/ or {board.PRIVATE_LANE}/, via git rm")
+    deleted.add_argument("name", help="the note's filename, no path")
+    deleted.add_argument("--lane", choices=_NOTE_LANES, default=INBOX,
+                         help=f"which lane to delete from (default {INBOX})")
+
     for sub in (note, edit):
         body = sub.add_mutually_exclusive_group(required=True)
         body.add_argument("--body", help="the body text itself")
@@ -519,6 +558,8 @@ def main(argv: list[str] | None = None) -> int:
             print(create_note(root, args.name, _body(args), lane=args.lane))
         elif args.verb == "edit":
             print(edit_body(root, args.path, _body(args)))
+        elif args.verb == "delete":
+            print(delete_note(root, args.name, lane=args.lane))
     except BoardCommandError as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 1

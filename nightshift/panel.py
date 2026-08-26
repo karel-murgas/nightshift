@@ -2333,7 +2333,8 @@ def _render_inbox(ctx: Context) -> str:
                 marker="&rsaquo;", body=body + _meta(meta),
                 acts=_act("Edit", href=_body_href(rel, edit=True))
                      + _act("Open note", href=_body_href(rel))
-                     + _route_act(note.name, route)))
+                     + _route_act(note.name, route)
+                     + _delete_act(note.name, "inbox")))
     rows = "".join(rows)
 
     # **Classify writes the cards it can, in the same pass, because triage is
@@ -2494,6 +2495,22 @@ def _done_act(note: str) -> str:
                       'so the next classify pass will not route it again."')
 
 
+def _delete_act(name: str, lane: str) -> str:
+    """The one destructive row action on the board: `git rm` a bare note.
+
+    Confined to `inbox/` and `ideas/` — the two lanes a note with no history can
+    live in — for the reason `boardcmd.delete_note` itself gives: anything that
+    reached a further lane carries state (attempts, a review, a summary) this
+    button knows nothing about. `confirmDeleteNote` is the typed-name guard, the
+    same shape as `confirmUninstall`'s: the cheapest confirmation a stray click
+    cannot produce, checked again by the button's own label matching the file.
+    """
+    return _act("Delete", onclick=f"confirmDeleteNote('{_attr(name)}','{_attr(lane)}')",
+                extra='title="Permanently removes this note via git rm — recoverable '
+                      'only from git history, same as any other commit. Asks you to '
+                      'type the filename first."')
+
+
 def _changed_since(path: Path, when: dt.datetime | None) -> bool:
     """Whether the note was written after the routing pass that judged it.
 
@@ -2547,7 +2564,8 @@ def _render_ideas(ctx: Context) -> str:
         acts = (_act("Read", href=_body_href(path))
                 + _act("Edit", href=_body_href(path, edit=True))
                 + _act("Promote", onclick=f"post('/api/promote',{{name:'{_attr(name)}'}})",
-                       primary=True))
+                       primary=True)
+                + _delete_act(name, board.PRIVATE_LANE))
         rows.append(_row(marker=str(position), acts=acts,
                          body=f'<span class="id">{_e(name)}</span>'))
 
@@ -4164,6 +4182,15 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "api/promote":
             return _verb(run_command("boardcmd", ["promote", str(body.get("name", ""))], root))
+
+        if path == "api/delete":
+            # No server-side confirmation to check: the typed-name guard is
+            # `confirmDeleteNote`, client-side, the same shape as the uninstall
+            # button's — a verb here stays scriptable and non-interactive, exactly
+            # like every other one `boardcmd` exposes.
+            lane = str(body.get("lane") or "inbox")
+            return _verb(run_command(
+                "boardcmd", ["delete", str(body.get("name", "")), "--lane", lane], root))
 
         if path == "api/close":
             # Spends nothing and dispatches nothing: it is a board write, so it

@@ -894,6 +894,20 @@ function confirmUninstall(name) {
   post("/api/system/uninstall", { confirm: typed });
 }
 
+/* Same shape as confirmUninstall above: a typed filename is the cheapest
+   confirmation a stray click cannot produce. `boardcmd delete` itself takes no
+   confirmation flag — this dialog is the only guard, so it runs before the
+   POST rather than alongside it. */
+function confirmDeleteNote(name, lane) {
+  var typed = window.prompt(
+    "This permanently deletes " + name + " from " + lane + "/ (git rm, committed). " +
+    "There is no undo from this page — only from git history.\n\n" +
+    "Type the filename to confirm:");
+  if (typed === null) { return; }
+  if (typed !== name) { toast("that is not " + name + " — nothing was deleted", true); return; }
+  post("/api/delete", { name: name, lane: lane });
+}
+
 /* ---- drag to reorder, renumber, and persist kanban_order ---- */
 
 function renumber(list) {

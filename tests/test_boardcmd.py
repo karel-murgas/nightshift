@@ -428,6 +428,7 @@ class _Forbidden:
     ["promote", "thought.md"],
     ["note", "fresh.md", "--body", "text"],
     ["edit", "Board/tasks/a-card.md", "--body", "text"],
+    ["delete", "thought.md", "--lane", "ideas"],
 ])
 def test_no_verb_touches_stdin_unless_it_was_named(tmp_path, monkeypatch, argv):
     root = _repo(tmp_path)
@@ -488,6 +489,104 @@ def test_every_verb_is_invocable_from_a_real_command_line(tmp_path):
     assert "kanban_order" in done.stdout
     assert "kanban_order: VZ" in (root / "Board" / "tasks" / "a-card.md").read_text(
         encoding="utf-8")
+
+
+# ------------------------------------------------------------------ verb: delete
+
+
+def _committed_note(root: Path, lane: str, filename: str, body: str = NOTE) -> Path:
+    """A note already in git history — the ordinary case for a real board note,
+    which reaches disk through `create_note` (which commits it) or was there
+    before this session opened. Deleting a note that was *never* committed is
+    its own case below, where `git rm` has nothing tracked to remove."""
+    path = root / "Board" / lane / filename
+    path.write_text(body, encoding="utf-8", newline="")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", f"note {filename}")
+    return path
+
+
+def test_deleting_an_inbox_note_removes_it_and_commits(tmp_path):
+    root = _repo(tmp_path)
+    _committed_note(root, "inbox", "thought.md")
+
+    message = boardcmd.delete_note(root, "thought.md")
+
+    assert not (root / "Board" / "inbox" / "thought.md").exists()
+    assert "thought.md" in message and "inbox/" in message
+    assert not _git(root, "status", "--porcelain", "--", "Board").stdout.strip()
+    log = _git(root, "log", "-1", "--format=%s").stdout
+    assert "deleted" in log and "thought.md" in log
+
+
+def test_deleting_leaves_the_notes_text_out_of_the_commit_message(tmp_path):
+    root = _repo(tmp_path)
+    _committed_note(root, "inbox", "thought.md")
+
+    boardcmd.delete_note(root, "thought.md")
+
+    log = _git(root, "log", "-1", "--format=%B").stdout
+    assert "pomeranian-carburettor" not in log, log
+
+
+def test_deleting_a_note_that_was_never_committed_needs_no_commit(tmp_path):
+    """`git rm` has nothing tracked to remove, so the fallback plain `unlink` is
+    what runs — and with no tracked change left behind, `commit_board` finds
+    nothing to stage and quietly makes no commit. That is correct: a scratch
+    note nobody committed leaves no trace to commit its removal of."""
+    root = _repo(tmp_path)
+    (root / "Board" / "inbox" / "thought.md").write_text(NOTE, encoding="utf-8", newline="")
+    before = _git(root, "log", "-1", "--format=%H").stdout
+
+    message = boardcmd.delete_note(root, "thought.md")
+
+    assert not (root / "Board" / "inbox" / "thought.md").exists()
+    assert "thought.md" in message
+    after = _git(root, "log", "-1", "--format=%H").stdout
+    assert after == before, "an untracked file's removal has nothing to commit"
+
+
+def test_deleting_an_idea_targets_the_private_lane(tmp_path):
+    root = _repo(tmp_path)
+    (root / "Board" / board.PRIVATE_LANE / "spark.md").write_text(
+        NOTE, encoding="utf-8", newline="")
+
+    boardcmd.delete_note(root, "spark.md", lane=board.PRIVATE_LANE)
+
+    assert not (root / "Board" / board.PRIVATE_LANE / "spark.md").exists()
+
+
+def test_deleting_refuses_a_note_that_does_not_exist(tmp_path):
+    root = _repo(tmp_path)
+    with pytest.raises(boardcmd.BoardCommandError, match="no note called"):
+        boardcmd.delete_note(root, "ghost.md")
+
+
+def test_deleting_refuses_a_lane_that_is_not_inbox_or_ideas(tmp_path):
+    root = _repo(tmp_path)
+    with pytest.raises(boardcmd.BoardCommandError, match="not a lane"):
+        boardcmd.delete_note(root, "a-card.md", lane="tasks")
+
+
+def test_deleting_refuses_a_filename_that_is_a_path(tmp_path):
+    root = _repo(tmp_path)
+    for name in ("../outside.md", "sub/thought.md", ".."):
+        with pytest.raises(boardcmd.BoardCommandError):
+            boardcmd.delete_note(root, name)
+
+
+def test_deleting_is_invocable_from_a_real_command_line(tmp_path):
+    root = _repo(tmp_path)
+    (root / "Board" / "inbox" / "thought.md").write_text(NOTE, encoding="utf-8", newline="")
+
+    done = subprocess.run(
+        [sys.executable, "-m", "nightshift.boardcmd", "--root", str(root),
+         "delete", "thought.md"],
+        cwd=root, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", check=False)
+
+    assert done.returncode == 0, done.stderr
+    assert not (root / "Board" / "inbox" / "thought.md").exists()
 
 
 # ------------------------------------------------------- no second parser

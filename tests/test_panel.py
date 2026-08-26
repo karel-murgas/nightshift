@@ -448,6 +448,61 @@ def test_note_can_target_the_private_lane_and_the_response_carries_no_body_text(
         encoding="utf-8") == "pomeranian-carburettor\n"
 
 
+def test_an_inbox_note_can_be_deleted_from_the_page(server):
+    """Runs the real `boardcmd delete` — same rule as the Close button's test:
+    a board write the panel performs must be one a terminal could perform too."""
+    base, root = server
+    (root / "Board" / "inbox" / "stray thought.md").write_text(
+        "not worth carding\n", encoding="utf-8")
+
+    status, data = _post(base, "api/delete", {"name": "stray thought.md"})
+
+    assert status == 200, data
+    assert "stray thought.md" in data["message"]
+    assert not (root / "Board" / "inbox" / "stray thought.md").exists()
+
+
+def test_an_idea_can_be_deleted_from_the_page(server):
+    base, root = server
+    (root / "Board" / board.PRIVATE_LANE / "spark.md").write_text(
+        "a distinctive secret: pomeranian-carburettor\n", encoding="utf-8")
+
+    status, data = _post(base, "api/delete", {"name": "spark.md", "lane": board.PRIVATE_LANE})
+
+    assert status == 200, data
+    assert "pomeranian-carburettor" not in json.dumps(data)
+    assert not (root / "Board" / board.PRIVATE_LANE / "spark.md").exists()
+
+
+def test_deleting_a_note_that_does_not_exist_is_refused(server):
+    base, _ = server
+    status, data = _post(base, "api/delete", {"name": "ghost.md"})
+    assert status == 400
+    assert "no note called" in data["message"]
+
+
+def test_the_inbox_page_offers_delete_on_every_note_row(server):
+    base, root = server
+    _notes(root, **{"needs-you.md": _routed("inline")})
+
+    _, text = _get(base, "inbox")
+
+    assert "confirmDeleteNote(" in text
+    assert "'needs-you.md'" in text
+
+
+def test_the_ideas_page_offers_delete_on_every_row(server):
+    base, root = server
+    (root / "Board" / board.PRIVATE_LANE / "thought.md").write_text(
+        "a secret\n", encoding="utf-8")
+
+    _, text = _get(base, "ideas")
+
+    assert "confirmDeleteNote(" in text
+    assert "'thought.md'" in text
+    assert f"'{board.PRIVATE_LANE}'" in text
+
+
 def test_a_refused_verb_reports_400_and_the_reason(server):
     base, _ = server
     status, data = _post(base, "api/reorder", {"card_id": "ghost", "order": "VA"})
