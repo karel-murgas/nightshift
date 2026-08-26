@@ -1225,7 +1225,20 @@ function saveNew(slug, lane) {
   var name = panel.querySelector("input[type=text]");
   var field = panel.querySelector("textarea");
   if (!name || !name.value.trim()) { toast("give it a filename first", true); return; }
-  post("/api/note", { name: name.value.trim(), body: field ? field.value : "", lane: lane });
+  post("/api/note", { name: name.value.trim(), body: field ? field.value : "", lane: lane })
+    .then(function (r) {
+      /* Cleared only once the server has it, and before the soft refresh that
+         follows: `carryState` copies an old field's value into the fresh render
+         whenever the new field is empty, on the theory that it must be unsaved
+         text the swap would otherwise destroy. Leaving these full after a
+         successful save made that carry paste the just-submitted note straight
+         back in, so the box that was supposed to be ready for the next one kept
+         showing the last one instead. */
+      if (r && r.ok) {
+        name.value = "";
+        if (field) { field.value = ""; }
+      }
+    });
 }
 
 /* ---- answering a parked card ----
