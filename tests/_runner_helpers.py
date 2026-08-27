@@ -678,7 +678,7 @@ def _stub_reviewer(monkeypatch, verdict: dict, cost: float = 0.2,
     spawned: list = []
 
     def fake(root, label, out_dir, model, base, branch, card_budget, timeout,
-             *, criteria, intent):
+             *, criteria, intent, since="", prior_finding=""):
         spawned.append(branch)
         return verdict, cost, wall
 

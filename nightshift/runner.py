@@ -1204,11 +1204,24 @@ class Handover:
     rides in the same file because it answers the same question — *does the next
     attempt start from what the last one built, or from nothing* — and a second
     file answering that question would be a second thing to keep in sync.
+
+    `reviewed_sha` and `review_finding` exist for the same reason, one layer
+    later: they are what the *next review* — not the next worker attempt — needs
+    to avoid re-deriving what the last one already established. `reviewed_sha` is
+    the branch tip `review_branch` actually diffed against last time, captured
+    the moment the `needs_fix` verdict lands (before the next attempt adds a
+    single commit on top); `review_stage` only trusts it as an incremental base
+    after confirming it is still an ancestor of the current tip, so a branch that
+    was cold-started from scratch in between (its history no longer contains that
+    commit) falls back to a full review rather than silently hiding a rebuilt
+    diff (`review-reviews-only-the-fix`).
     """
     session_id: str = ""
     diff_hash: str = ""
     no_progress: int = 0
     review_fix: bool = False
+    reviewed_sha: str = ""
+    review_finding: str = ""
 
 
 def _handover_path(root: Path, card_id: str) -> Path:
@@ -1222,6 +1235,8 @@ def read_handover(root: Path, card_id: str) -> Handover:
         diff_hash=str(data.get("diff_hash", "")),
         no_progress=int(data.get("no_progress", 0) or 0),
         review_fix=bool(data.get("review_fix", False)),
+        reviewed_sha=str(data.get("reviewed_sha", "")),
+        review_finding=str(data.get("review_finding", "")),
     )
 
 
@@ -1276,6 +1291,15 @@ def _worktree_state_hash(tree: Path) -> str:
 
 def _branch_exists(root: Path, branch: str) -> bool:
     return _git(root, "rev-parse", "--verify", branch).returncode == 0
+
+
+def _is_ancestor(root: Path, ancestor: str, ref: str) -> bool:
+    """Whether `ancestor` is reachable from `ref` — the safety check before
+    reusing a prior review's sha as an incremental diff base (`review_stage`).
+    False on any git failure (an empty or garbage sha, `ref` gone), never an
+    exception: an invalid sha must fall back to a full review, not crash the
+    stage that was about to run one anyway."""
+    return _git(root, "merge-base", "--is-ancestor", ancestor, ref).returncode == 0
 
 
 def _worktree_registered(root: Path, path: Path) -> bool:
@@ -2000,18 +2024,32 @@ and the worker picked. If two people could disagree about the right answer, this
 `needs_fix` is reserved for the case where nobody reasonable would.\
 """
 
+#: The re-review addendum (`review-reviews-only-the-fix`): only ever non-empty
+#: when `review_branch` was given `since` — see its docstring. Substituted into
+#: `_REVIEW_PROMPT` as `{prior_review}`; empty string leaves that paragraph blank
+#: for an ordinary first review, so the template needs no separate variant.
+_PRIOR_REVIEW_BLOCK = """
+--- your own prior review of this branch ---
+You already reviewed an earlier point on this branch and returned `needs_fix`. The diff \
+above is only what changed since then — everything before it was already reviewed and is \
+not repeated here. Verify that the finding below was actually fixed, and that the fix \
+introduces nothing new; you do not need to re-verify code you already approved unless this \
+diff touches it.
+
+{finding}
+"""
+
 _REVIEW_PROMPT = """\
 Review the finished diff below against the card's acceptance criteria and the surrounding \
 code, at **tier: lead** (resolved to model `{model}`).
 
-The change is on branch `{branch}`. Its diff against the integration branch — what this \
-branch added since it forked — is in:
+The change is on branch `{branch}`. Its diff {diff_desc} is in:
   {diff}
 The repository it changes is rooted at:
   {repo}
 Read the diff, then read whatever surrounding code you need to judge whether the change \
 does what the card asked and touched nothing it should not have.
-
+{prior_review}
 You are **not** told how this was made, and you must not go looking: no worker prompt, no \
 transcript, no reasoning. The gates and the full test suite have **already passed** on this \
 exact branch — do not re-check anything they cover, and run `python -m nightshift.gates.run` \
@@ -2581,7 +2619,7 @@ def card_review_context(card: board.Card) -> tuple[str, str]:
 
 def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
                   branch: str, card_budget: float, timeout: int, *,
-                  criteria: str, intent: str,
+                  criteria: str, intent: str, since: str = "", prior_finding: str = "",
                   template: str = _REVIEW_PROMPT) -> tuple[dict, float, limits.Wall | None]:
     """Spawn the diff reviewer on a finished branch (automate-review-step).
 
@@ -2612,6 +2650,21 @@ def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
     worktree and the log lines: a card id in the first case, a batch name in the
     second.
 
+    **`since`/`prior_finding` (`review-reviews-only-the-fix`).** Every review used
+    to diff `base...branch` unconditionally — first review and every re-review
+    after a `needs_fix` alike — so a card that round-tripped through the reviewer
+    twice paid for the *whole* branch's verification twice, at lead-tier prices,
+    to approve a one-line fix. `review_stage` now passes `since` (the branch tip
+    its own previous review actually saw, only once it has confirmed that point
+    is still an ancestor of `branch`) and `prior_finding` (that review's own
+    finding) whenever this is a `needs_fix` continuation. When `since` is given,
+    the diff handed to the reviewer is `since...branch` — only the fix — and the
+    prompt tells it what it already approved, instead of the ordinary
+    `base...branch` full-branch diff. The reviewer still has the whole checked-out
+    branch to read for context; only the *foregrounded* diff narrows. Empty
+    `since` (the default, and every non-continuation call) is the original
+    behaviour, byte-for-byte.
+
     Returns `(verdict, cost, wall)`, all lookups — `{}` (no verdict file, a
     timeout, no CLI, or a worktree that would not cut) degrades in the caller to
     a human's eye, never to a guessed routing (§12).
@@ -2639,16 +2692,31 @@ def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
         # directory handed to the reviewer holds the change and nothing about how
         # it was made. Archived copies go to out_dir (in the main repo, never shown
         # to the reviewer) for the post-mortem.
-        diff = _git(root, "diff", f"{base}...{branch}")
+        #
+        # `since`, when given, replaces `base` as the diff's near side — the
+        # incremental re-review (`review-reviews-only-the-fix`). The reviewer
+        # still gets the whole checked-out branch to read; only what is
+        # foregrounded as "the diff" narrows to what changed since its own last
+        # look.
+        diff = _git(root, "diff", f"{since or base}...{branch}")
         diff_path = tree / ".review-diff.patch"
         textio.write_text_lf(diff_path, diff.stdout)
         verdict_path = tree / ".review-verdict.json"
+
+        if since and prior_finding:
+            diff_desc = ("since your own last review of this branch — everything before "
+                        "that point was already reviewed and is not repeated below")
+            prior_review = _PRIOR_REVIEW_BLOCK.format(finding=prior_finding)
+        else:
+            diff_desc = "against the integration branch — what this branch added since it forked"
+            prior_review = ""
 
         prompt = template.format(
             model=model, branch=branch, diff=diff_path.resolve().as_posix(),
             repo=tree.resolve().as_posix(),
             verdict_path=verdict_path.resolve().as_posix(),
             criteria=criteria, intent=intent, rubric=_REVIEW_RUBRIC,
+            diff_desc=diff_desc, prior_review=prior_review,
         )
         textio.write_text_lf(out_dir / "review-prompt.md", prompt)
         textio.write_text_lf(out_dir / "review-diff.patch", diff.stdout)
@@ -4955,9 +5023,29 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
     _status(root, phase="review", card=card.id, branch=branch, model=model, since=_now())
     _log(f"    reviewing {card.id} → {REVIEWER_AGENT} @ {model}")
     criteria, intent = card_review_context(card)
+
+    # A `needs_fix` continuation (`review_fix` in the handover, `prepare_worktree`'s
+    # FROM_REVIEW) means this exact branch was already reviewed once, and the only
+    # thing that changed since is the fix. Reusing that point as the diff base
+    # (`review-reviews-only-the-fix`) is what keeps a re-review from re-deriving
+    # everything it already approved, at lead-tier prices, every single round. The
+    # ancestor check is the safety net: a card that instead cold-started (its
+    # `needs_fix` retry ran out its attempts down the ordinary path, or the branch
+    # was otherwise rebuilt) no longer contains that commit, and reusing it then
+    # would silently hide the rebuilt diff rather than fail loud — so it falls back
+    # to a full review exactly as before.
+    handover = read_handover(root, card.id)
+    since = ""
+    prior_finding = ""
+    if (handover.review_fix and handover.reviewed_sha
+            and _is_ancestor(root, handover.reviewed_sha, branch)):
+        since = handover.reviewed_sha
+        prior_finding = handover.review_finding
+
     verdict, cost, wall = review_branch(root, card.id, out_dir, model, base, branch,
                                         card_budget, timeout * 3,
-                                        criteria=criteria, intent=intent)
+                                        criteria=criteria, intent=intent,
+                                        since=since, prior_finding=prior_finding)
     total = result.cost_usd + cost
 
     # The artefact before the process's exit. A reviewer's *entire* output is its
@@ -5437,7 +5525,14 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
         # outright, the ordinary cold-start retry takes over.
         branch = branches.work_branch(card_id, card.fields.get("branch", ""))
         if _branch_exists(root, branch):
-            write_handover(root, card_id, Handover(review_fix=True))
+            # Captured now, before the next attempt adds a single commit on top —
+            # this is the exact point the reviewer just diffed against, and the
+            # only moment that sha is still the branch tip. `review_stage` uses it
+            # to diff only the fix next time instead of the whole branch again
+            # (`review-reviews-only-the-fix`).
+            reviewed_sha = _git(root, "rev-parse", branch).stdout.strip()
+            write_handover(root, card_id, Handover(
+                review_fix=True, reviewed_sha=reviewed_sha, review_finding=finding))
         if card.lane == "tasks":
             board.commit_board(
                 root, f"board: {card_id} attempt {card.attempts} needs a fix, will retry")

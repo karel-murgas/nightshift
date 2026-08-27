@@ -108,6 +108,169 @@ def test_a_needs_fix_verdict_carries_the_reviewers_finding(tmp_path, monkeypatch
     assert "a0bc0c2" in result.detail
 
 
+def test_a_review_fix_continuation_reviews_only_since_the_prior_verdict(tmp_path, monkeypatch):
+    """`review-reviews-only-the-fix`: when this card's branch was already
+    reviewed once (the handover `settle` writes on `needs_fix`), the next
+    `review_stage` call must pass that point and its finding through to
+    `review_branch` — so the re-review diffs only the fix, not the whole branch
+    again at lead-tier prices."""
+    root = _worktree_repo(tmp_path)
+    _tier_binding(root)
+    card = _reviewed_branch(root, tmp_path)
+    reviewed_sha = _rev(root, "ai/probe")
+    runner.write_handover(root, "probe", runner.Handover(
+        review_fix=True, reviewed_sha=reviewed_sha, review_finding="name commit Y instead"))
+    # The fix: one more commit on top of the point the handover names.
+    seed = tmp_path / "seed-fix"
+    subprocess.run(["git", "worktree", "add", str(seed), "ai/probe"], cwd=root, check=True)
+    (seed / "feature.py").write_text("x = 2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=seed, check=True)
+    subprocess.run(["git", "commit", "-qm", "worker: applied the fix"], cwd=seed, check=True)
+    subprocess.run(["git", "worktree", "remove", "--force", str(seed)], cwd=root, check=True)
+
+    seen: dict = {}
+
+    def fake(root_, label, out_dir, model, base, branch, card_budget, timeout,
+             *, criteria, intent, since="", prior_finding=""):
+        seen["since"] = since
+        seen["prior_finding"] = prior_finding
+        return {"verdict": "ok", "notes": "fixed"}, 0.1, None
+
+    monkeypatch.setattr(runner, "review_branch", fake)
+
+    result = runner.review_stage(root, card, runner.Dispatch("review", "x", 0.1),
+                                 "development_team", 0.0, 120)
+
+    assert result.outcome == "reviewed"
+    assert seen["since"] == reviewed_sha
+    assert seen["prior_finding"] == "name commit Y instead"
+
+
+def test_a_first_review_passes_no_since_or_prior_finding(tmp_path, monkeypatch):
+    """The ordinary case — no handover at all — must not accidentally narrow the
+    diff; `since`/`prior_finding` stay empty so `review_branch` falls back to its
+    original `base...branch` behaviour."""
+    root = _worktree_repo(tmp_path)
+    _tier_binding(root)
+    card = _reviewed_branch(root, tmp_path)
+
+    seen: dict = {}
+
+    def fake(root_, label, out_dir, model, base, branch, card_budget, timeout,
+             *, criteria, intent, since="", prior_finding=""):
+        seen["since"] = since
+        seen["prior_finding"] = prior_finding
+        return {"verdict": "ok"}, 0.1, None
+
+    monkeypatch.setattr(runner, "review_branch", fake)
+    runner.review_stage(root, card, runner.Dispatch("review", "x", 0.1),
+                        "development_team", 0.0, 120)
+
+    assert seen == {"since": "", "prior_finding": ""}
+
+
+def test_a_reviewed_sha_no_longer_reachable_falls_back_to_a_full_review(tmp_path, monkeypatch):
+    """A stale or invalid `reviewed_sha` (the branch was cold-started fresh in
+    between, or the handover is simply wrong) must not be trusted as an
+    incremental diff base — that would silently hide whatever the rebuild
+    changed. The ancestor check catches it and `review_stage` falls back to the
+    full `base...branch` review, exactly as if there were no handover."""
+    root = _worktree_repo(tmp_path)
+    _tier_binding(root)
+    card = _reviewed_branch(root, tmp_path)
+    runner.write_handover(root, "probe", runner.Handover(
+        review_fix=True, reviewed_sha="0" * 40, review_finding="stale finding"))
+
+    seen: dict = {}
+
+    def fake(root_, label, out_dir, model, base, branch, card_budget, timeout,
+             *, criteria, intent, since="", prior_finding=""):
+        seen["since"] = since
+        seen["prior_finding"] = prior_finding
+        return {"verdict": "ok"}, 0.1, None
+
+    monkeypatch.setattr(runner, "review_branch", fake)
+    runner.review_stage(root, card, runner.Dispatch("review", "x", 0.1),
+                        "development_team", 0.0, 120)
+
+    assert seen == {"since": "", "prior_finding": ""}
+
+
+def test_review_branch_diffs_only_since_the_prior_review_when_given(tmp_path, monkeypatch):
+    """One level down from `review_stage`: given `since`, `review_branch` itself
+    must diff from that point rather than from `base`, and the prompt must name
+    it as a re-review and quote the prior finding — so the reviewer is told what
+    is already approved instead of re-deriving it."""
+    root = _worktree_repo(tmp_path)
+    _tier_binding(root)
+    card = _reviewed_branch(root, tmp_path)
+    branch = card.fields["branch"]
+    reviewed_sha = _rev(root, branch)
+
+    seed = tmp_path / "seed-fix"
+    subprocess.run(["git", "worktree", "add", str(seed), branch], cwd=root, check=True)
+    (seed / "other.py").write_text("y = 2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=seed, check=True)
+    subprocess.run(["git", "commit", "-qm", "worker: applied the fix"], cwd=seed, check=True)
+    subprocess.run(["git", "worktree", "remove", "--force", str(seed)], cwd=root, check=True)
+
+    def fake(argv, cwd, timeout, stream_path=None, env=None, prompt=""):
+        verdict_line = next(l.strip() for l in prompt.splitlines()
+                            if l.strip().endswith(".json"))
+        Path(verdict_line).parent.mkdir(parents=True, exist_ok=True)
+        Path(verdict_line).write_text(json.dumps({"verdict": "ok"}), encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
+
+    monkeypatch.setattr(runner, "_run_worker", fake)
+    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    runner.review_branch(root, "probe", out_dir, "opus", "development_team", branch,
+                         0.0, 60, criteria="x", intent="y",
+                         since=reviewed_sha, prior_finding="fix the thing")
+
+    diff_text = (out_dir / "review-diff.patch").read_text(encoding="utf-8")
+    assert "other.py" in diff_text
+    assert "feature.py" not in diff_text     # already reviewed, not repeated here
+
+    prompt_text = (out_dir / "review-prompt.md").read_text(encoding="utf-8")
+    assert "fix the thing" in prompt_text
+    assert "your own last review" in prompt_text
+
+
+def test_review_branch_defaults_to_the_full_diff_without_since(tmp_path, monkeypatch):
+    """No `since` — the ordinary first-review call — must reproduce the original
+    behaviour exactly: the full `base...branch` diff, and no re-review wording in
+    the prompt."""
+    root = _worktree_repo(tmp_path)
+    _tier_binding(root)
+    card = _reviewed_branch(root, tmp_path)
+    branch = card.fields["branch"]
+
+    def fake(argv, cwd, timeout, stream_path=None, env=None, prompt=""):
+        verdict_line = next(l.strip() for l in prompt.splitlines()
+                            if l.strip().endswith(".json"))
+        Path(verdict_line).parent.mkdir(parents=True, exist_ok=True)
+        Path(verdict_line).write_text(json.dumps({"verdict": "ok"}), encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
+
+    monkeypatch.setattr(runner, "_run_worker", fake)
+    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    runner.review_branch(root, "probe", out_dir, "opus", "development_team", branch,
+                         0.0, 60, criteria="x", intent="y")
+
+    diff_text = (out_dir / "review-diff.patch").read_text(encoding="utf-8")
+    assert "feature.py" in diff_text
+
+    prompt_text = (out_dir / "review-prompt.md").read_text(encoding="utf-8")
+    assert "your own last review" not in prompt_text
+    assert "what this branch added since it forked" in prompt_text
+
+
 def test_the_review_stage_skips_an_artefact_only_card(tmp_path, monkeypatch):
     """Art produces no commit on its branch, so there is no diff to review and
     nothing to merge. The stage leaves it exactly as before — a human eye at
@@ -674,9 +837,15 @@ def test_settle_needs_fix_hands_the_branch_to_the_next_attempt(tmp_path):
 
     runner.settle(root, "probe", runner.Dispatch("needs_fix", "name commit Y instead"))
 
-    assert runner.read_handover(root, "probe").review_fix is True
+    handover = runner.read_handover(root, "probe")
+    assert handover.review_fix is True
     # The branch is still where the work is — not renamed out of the way.
     assert _rev(root, "ai/probe") == tip
+    # And the point just reviewed rides along too (review-reviews-only-the-fix):
+    # the next review diffs from here, not from base, so it does not re-derive
+    # the verdict it already reached on everything before this commit.
+    assert handover.reviewed_sha == tip
+    assert handover.review_finding == "name commit Y instead"
 
 
 def test_settle_needs_fix_does_not_promise_a_branch_that_is_not_there(tmp_path):
