@@ -227,6 +227,14 @@ Do not start building what the card describes. The deliverable is the card.
 #: Deliberately not a refusal to work. "Talk" often ends in "…so fix that", and a
 #: session that had to be restarted to act on its own answer would be a worse
 #: button than the one this replaces. The rule is only about who goes first.
+#:
+#: **Carries the runner's own close-out ritual, gated on the maintainer's word rather
+#: than on lane.** A resumed session already knows its own branch, base and card path
+#: from the transcript it is resuming — nothing here needs to name them again — so
+#: once told the fix is good it can run preflight, merge, delete the branch and land
+#: the card same as the runner would, from whatever lane the card is sitting in when
+#: the conversation happens (Karel, 2026-08-27: "card should be able to close out
+#: from anywhere... after the work is considered ready", not tied to `testing/`).
 RESUMED_FOR_TALK = """\
 This session has been resumed by the maintainer from the Command Center, after the \
 attempt above had already finished. The work is over; this is a conversation about it.
@@ -234,6 +242,13 @@ attempt above had already finished. The work is over; this is a conversation abo
 Your first job is to listen. Do not resume, revisit or continue the card's work, and do \
 not summarise what you did unless asked — wait for their question and answer that. If \
 they ask you to change something, do it then; until they do, nothing is outstanding.
+
+**Once they tell you the change is good, close it out the way the runner would**: run \
+this project's preflight, merge your branch into base, delete the branch (local and \
+remote) once merged, and leave the card in whichever lane its own state now calls for. \
+Do this only once they say the work is ready — never on your own judgment, and never \
+because the gates and tests happen to be green. This applies wherever the card sits \
+right now, not only when it was reopened from a lane it had already landed in.
 
 The charter you ran the attempt under no longer governs you. You are answering to the \
 person in front of you.

@@ -2118,6 +2118,69 @@ def test_work_feedback_refuses_a_card_that_is_not_there(server, monkeypatch):
     assert "ghost" in data["message"]
 
 
+def _give_card_a_recorded_session(root: Path, card_id: str, session: str,
+                                  attempt: int = 1) -> None:
+    """Stand in for what a real runner dispatch leaves behind: an `attempts:` count
+    on the card and the `worker-N.json` `_latest_session_for_card` reads to find
+    the session those attempts ran under."""
+    path = root / "Board" / "testing" / f"{card_id}.md"
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        "verify: play", f"verify: play\nattempts: {attempt}"),
+        encoding="utf-8", newline="")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", f"{card_id} attempts")
+    out_dir = root / panel.RUNS / card_id / f"attempt-{attempt}"
+    out_dir.mkdir(parents=True)
+    (out_dir / "worker-1.json").write_text(
+        json.dumps({"session_id": session}), encoding="utf-8")
+
+
+def test_open_inline_resumes_the_cards_own_session_when_one_survived(server, monkeypatch):
+    """`Open inline` should not have to re-derive the card from scratch when the
+    worker that built it is still findable — it should come back exactly as `Talk`
+    would, wait first, and be told it may close the card out once told to."""
+    base, root = server
+    _card(root, "testing", "played")
+    _give_card_a_recorded_session(root, "played", "cafe1234-session")
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    status, data = _post(base, "api/work-feedback", {"card_id": "played"})
+
+    assert status == 200, data
+    argv = opened[0]
+    assert argv[argv.index("--resume") + 1] == "cafe1234-session"
+    assert "--" not in argv, "resuming must not also open with a first turn said for you"
+    appended = argv[argv.index("--append-system-prompt") + 1]
+    assert "wait for their question" in appended
+    assert "close it out the way the runner would" in appended
+    assert "from anywhere" not in appended, "that phrasing is the code comment, not the prompt"
+    assert "resuming" in data["message"]
+
+
+def test_open_inline_falls_back_to_a_fresh_session_with_no_recorded_session(server, monkeypatch):
+    """`attempts:` on the card with no matching `worker-N.json` on disk (a fresh
+    checkout, or `.ai/runs/` never synced) must not error — it is exactly the
+    "never dispatched" case as far as this button is concerned."""
+    base, root = server
+    _card(root, "testing", "played")
+    path = root / "Board" / "testing" / "played.md"
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        "verify: play", "verify: play\nattempts: 1"), encoding="utf-8", newline="")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "played attempts, no runs dir")
+    opened = []
+    monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
+
+    status, data = _post(base, "api/work-feedback", {"card_id": "played"})
+
+    assert status == 200, data
+    argv = opened[0]
+    assert "--resume" not in argv
+    prompt = argv[-1]
+    assert prompt.startswith("This card just failed its play-through in `testing/`")
+
+
 def test_triage_is_told_the_deliverable_is_the_card_not_the_work(server, monkeypatch):
     """Karel's other half: *"triage for task"*. The failure this guards against is a
     triage session that reads the note and starts building what it describes."""
