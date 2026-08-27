@@ -47,7 +47,8 @@ def test_reintroducing_the_crash_into_the_real_runner_goes_red(tmp_path):
 
     **The count tracks the spawn sites and is meant to be edited when one lands.**
     Four until 2026-08-23, five since `_resolve_conflict` (merge-conflict-has-no-
-    owner) — the same enumeration
+    owner), six since `_resolve_merge_conflict` (the merge-fallback escalation,
+    2026-08-27) — the same enumeration
     `test_runner_dispatch.py::test_only_the_spawn_functions_may_execute_the_claude_cli`
     pins by name. A new spawn site that forgot to leave `-p` bare is exactly what
     this must catch, so the number is asserted rather than derived from the source
@@ -69,8 +70,8 @@ def test_reintroducing_the_crash_into_the_real_runner_goes_red(tmp_path):
     root = _tree(tmp_path, "runner_copy.py", defective)
     violations = prompt_not_in_argv.check(root)
 
-    assert len(violations) == 5, \
-        f"expected the five dispatch sites, got {[str(v) for v in violations]}"
+    assert len(violations) == 6, \
+        f"expected the six dispatch sites, got {[str(v) for v in violations]}"
     assert all("WinError 206" in v.rule for v in violations)
     assert all("prompt=" in v.rule for v in violations)
 

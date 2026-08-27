@@ -1420,16 +1420,17 @@ def test_only_the_spawn_functions_may_execute_the_claude_cli():
     CLI is executed only where a worker is started, and nothing that decides what
     to do (select, recover, settle, dispatch_order) may reach for it.
 
-    Five functions now: `run_producer`, `run_checker`, `run_stale_check`,
-    `review_branch` (automate-review-step) and `_resolve_conflict`
-    (merge-conflict-has-no-owner). Each *starts a worker* — a producer, its checker,
+    Six functions now: `run_producer`, `run_checker`, `run_stale_check`,
+    `review_branch` (automate-review-step), `_resolve_conflict`
+    (merge-conflict-has-no-owner) and `_resolve_merge_conflict` (the merge-fallback
+    escalation, 2026-08-27). Each *starts a worker* — a producer, its checker,
     `stale-hunter` on one doc, the diff reviewer on one finished branch, or the
-    merge resolver on one paused rebase — and none of them *decides* anything:
-    `review_stage` reads the reviewer's verdict and routes on it (a file-state
-    lookup), exactly as the card loop selects and then calls `dispatch`. The reviewer
-    having its own spawn is the point — its context is built here rather than by the
-    worker, which is what makes §16's blindness structural instead of a charter
-    instruction.
+    merge resolver on one paused rebase or merge — and none of them *decides*
+    anything: `review_stage` reads the reviewer's verdict and routes on it (a
+    file-state lookup), exactly as the card loop selects and then calls `dispatch`.
+    The reviewer having its own spawn is the point — its context is built here
+    rather than by the worker, which is what makes §16's blindness structural
+    instead of a charter instruction.
 
     `_resolve_conflict` belongs on this list for the same reason and keeps §12
     intact the same way: the resolver produces a candidate *tree*, and every
@@ -1437,6 +1438,14 @@ def test_only_the_spawn_functions_may_execute_the_claude_cli():
     outside the conflicted paths, nothing still unmerged, `git rebase --continue`,
     then the gates and the affected test slice its caller already re-runs. What the
     LLM supplies is file contents, not a routing decision.
+
+    `_resolve_merge_conflict` is the same function again for a plain merge instead
+    of a paused rebase — `rebase_and_merge`'s retry when a rebase-based resolution
+    fails but `base` has only moved in board/memory bookkeeping since the branch
+    forked (`_bookkeeping_divergence`). Same exit-code discipline, same "no
+    routing decision", one fewer round (a merge conflicts once, not per replayed
+    commit) and `git merge --abort`/nothing-to-continue in place of
+    `git rebase --continue`.
 
     `review_branch` is where the reviewer's spawn now lives; `run_reviewer` is the
     one-card wrapper that lifts `## Acceptance`/`## Intent` off a card and calls
@@ -1451,7 +1460,7 @@ def test_only_the_spawn_functions_may_execute_the_claude_cli():
     source = _RUNNER_SOURCE.read_text(encoding="utf-8")
     assert _functions_spawning(source, "binary") == {
         "run_producer", "run_checker", "run_stale_check", "review_branch",
-        "_resolve_conflict"}
+        "_resolve_conflict", "_resolve_merge_conflict"}
 
 
 def test_every_spawn_sites_wall_path_routes_through_the_shared_helper():

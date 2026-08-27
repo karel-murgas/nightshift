@@ -4258,6 +4258,128 @@ def _resolve_conflict(root: Path, tree: Path, card: board.Card, branch: str,
     return True, " | ".join(kept) or "resolved with no summary"
 
 
+_MERGE_RESOLVE_PROMPT = """\
+A rebase of `{branch}` onto `{base}` could not be settled (see below), so the runner is \
+retrying it as a plain merge instead — `git merge --no-ff {branch}` into `{base}`, done in \
+a throwaway worktree. It has stopped on a conflict. Resolve it, at **tier: lead** \
+(resolved to model `{model}`). Follow your charter.
+
+The repository is at `{repo}`, checked out in a throwaway worktree with the merge \
+**paused mid-flight** — a merge this time, not a rebase. Card: `{card_id}` — {title}
+
+Conflicted paths ({count}), and you may edit **no others**:
+{conflicts}
+
+Why a merge and not the rebase this card was first tried as: `{base}` moved since \
+`{branch}` forked, and the rebase's per-commit replay could not settle it ({rebase_reason}). \
+A merge conflicts at most once per path, compared against the merge-base directly, rather \
+than replaying each of `{branch}`'s commits against a `{base}` that keeps moving underneath \
+them — which is exactly the shape of conflict a card's own board file produces when it \
+changes lanes on `{base}` (dispatched from `tasks/`, finished in `blocked/` or `testing/`) \
+while the branch still carries a commit that touches the old path. If that is what you are \
+looking at, see your charter's rule on it.
+
+Do not run `git merge --continue`, `--abort`, or commit anything. Resolve the file contents \
+and `git add` each path — for a path deleted on one side, that may mean `git rm` rather than \
+writing content. The runner checks your result and commits the merge itself.
+
+Write your verdict to `{verdict_path}` as JSON:
+
+{{"resolved": true|false, "summary": "<what you kept from each side, 1-3 lines>"}}
+
+`false` is a success, not a failure, and it is the right answer whenever the two sides \
+genuinely disagree about the same thing and picking one would be a judgment about what \
+the project should do. Say so in `summary` and the card goes to a human with your reading \
+of it attached. Never guess between two intents.
+"""
+
+
+def _resolve_merge_conflict(root: Path, tree: Path, card: board.Card, branch: str,
+                            base: str, out_dir: Path, *, rebase_reason: str = "",
+                            model: str = "", timeout: int = 600,
+                            card_budget: float = 0.0) -> tuple[bool, str]:
+    """Hand a paused **merge** (not rebase) to the resolver agent, once.
+
+    Sibling of `_resolve_conflict`, for the retry `_merge_with_resolver` drives after
+    a rebase-based resolution failed. A merge conflicts at most once — there is no
+    per-commit replay to cascade through the way a rebase has — so this is a single
+    dispatch rather than `_resolve_conflict`'s bounded round loop; `MAX_RESOLVE_ROUNDS`
+    does not apply here.
+
+    Same agent (`RESOLVER_AGENT`), same charter, same exit-code discipline (markers,
+    stray edits, still-unmerged) as `_resolve_conflict` — only the situation and the
+    finishing move differ: a rebase is driven onward with `git rebase --continue`; a
+    merge has nothing to continue and is committed by the caller once this returns
+    `True`.
+
+    Returns `(resolved, detail)`. On `False` the merge has been aborted and the
+    worktree is back at its pre-merge HEAD, matching `_resolve_conflict`'s contract.
+    """
+    binary = claude_binary()
+    model = model or tiers.resolve(root, "lead")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    conflicts = _unmerged_paths(tree)
+    if not conflicts:
+        return True, "no conflicts to resolve"
+    verdict_path = tree / ".resolve-verdict.json"
+    verdict_path.unlink(missing_ok=True)
+    prompt = _MERGE_RESOLVE_PROMPT.format(
+        branch=branch, base=base, model=model, repo=tree.resolve().as_posix(),
+        card_id=card.id, title=card.title, count=len(conflicts),
+        conflicts="\n".join(f"- `{path}`" for path in conflicts),
+        rebase_reason=rebase_reason or "the same paths",
+        verdict_path=verdict_path.resolve().as_posix(),
+    )
+    textio.write_text_lf(out_dir / "merge-resolve-prompt.md", prompt)
+
+    argv = [
+        binary, "-p",
+        "--agent", RESOLVER_AGENT,
+        "--model", model,
+        "--output-format", "json",
+        *_budget_argv(card_budget),
+        "--permission-mode", str(host_setting(root, "permission_mode", "acceptEdits")),
+        "--add-dir", str(tree.resolve()),
+    ]
+    try:
+        proc = _run_worker(argv, tree, timeout, prompt=prompt)
+    except subprocess.TimeoutExpired:
+        _git(tree, "merge", "--abort")
+        return False, (f"the {RESOLVER_AGENT} timed out after {timeout}s on "
+                       f"{', '.join(conflicts)}")
+    textio.write_text_lf(out_dir / "merge-resolve.log", proc.stdout + proc.stderr)
+
+    verdict = _read_verdict(verdict_path)
+    summary = str(verdict.get("summary", "")).strip()[:300]
+    wall = limits.detect(proc.returncode, proc.stdout, proc.stderr)
+    if wall and not verdict_survives_a_wall(RESOLVER_STAGE, verdict):
+        _git(tree, "merge", "--abort")
+        return False, (f"the {RESOLVER_AGENT} hit the {wall.scope} usage limit before it "
+                       f"answered — the merge conflict is unexamined rather than judged")
+    if not verdict.get("resolved"):
+        _git(tree, "merge", "--abort")
+        return False, (f"the {RESOLVER_AGENT} declined {', '.join(conflicts)}"
+                       + (f": {summary}" if summary else " and gave no reason"))
+    verdict_path.unlink(missing_ok=True)
+
+    markers = conflictmarkers.scan(tree, conflicts)
+    if markers:
+        _git(tree, "merge", "--abort")
+        return False, ("the resolution left a conflict marker behind — "
+                       + "; ".join(markers[:3]))
+    strays = _dirty_outside(tree, set(conflicts))
+    if strays:
+        _git(tree, "merge", "--abort")
+        return False, (f"the {RESOLVER_AGENT} edited {', '.join(strays[:5])}, which "
+                       f"was not part of the conflict")
+    still = _unmerged_paths(tree)
+    if still:
+        _git(tree, "merge", "--abort")
+        return False, f"{', '.join(still)} is still unmerged after the resolver ran"
+
+    return True, summary or "resolved with no summary"
+
+
 def _rebase_in_progress(tree: Path) -> bool:
     """Whether `tree` is still mid-rebase, asked of git rather than inferred.
 
@@ -4364,6 +4486,20 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
     than in `review/`, because the card is not awaiting review — it was reviewed `ok`
     and is awaiting a merge.
 
+    **A rebase-based resolution that still fails gets one more try, as a plain
+    merge, before it reaches a human** (`_merge_with_resolver`, 2026-08-27). The
+    `stun-animation` incident: a card's own board file changes lanes on `base`
+    while the branch still carries a commit touching the old path, and a *rebase*
+    replays that commit against a moving target and conflicts on paths the two
+    sides never actually disagree about (verified by hand that night — Karel:
+    *"I didn't have to resolve it, you did... it automatically runs a subagent,
+    that handles it"*). A plain merge conflicts once, against the merge-base
+    directly, and is retried **only** when `base`'s own divergence since the
+    merge-base is provably confined to board/memory bookkeeping
+    (`_bookkeeping_divergence`) — narrow scope, Karel's own choice: this is not a
+    second chance at a genuine production-code conflict, which still goes straight
+    to a human exactly as before.
+
     Done entirely in a throwaway detached worktree, so the real `ai/<id>` branch is
     never rewritten while this runs, and `base` is untouched until the verified,
     rebased result merges. Reuses `merge_check`'s worktree discipline. §12 holds
@@ -4429,6 +4565,20 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
                 root, tree, card, branch, base, out_dir,
                 timeout=test_timeout, card_budget=0.0)
             if not resolved:
+                merge_base = _git(root, "merge-base", branch, base).stdout.strip()
+                production = (_bookkeeping_divergence(root, base, merge_base)
+                             if merge_base else ["(no merge-base found)"])
+                if not production:
+                    _log(f"    rebase conflict on {branch} was not settled, but {base} "
+                         f"has only moved in board/memory bookkeeping since it forked — "
+                         f"retrying as a plain merge")
+                    landed, why2 = _merge_with_resolver(
+                        root, card, branch, base, out_dir, rebase_reason=detail,
+                        test_timeout=test_timeout, remote=remote)
+                    if landed:
+                        _log(f"    landed as a plain merge — {why2}")
+                        return True, why2
+                    detail = f"{detail}; retried as a plain merge and {why2}"
                 return False, (f"rebasing {branch} onto {base} conflicts in "
                                f"{', '.join(conflicts)} and {detail} — a human needs to "
                                f"resolve it: {why}")
@@ -4479,6 +4629,165 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
                 _log(f"  ! merged {branch} but could not delete it — "
                      f"{(deleted.stderr or deleted.stdout or '').strip()[:150]}")
         return merged, why
+    finally:
+        _git(root, "worktree", "remove", "--force", str(tree))
+        _git(root, "worktree", "prune")
+
+
+_BOOKKEEPING_CLASSES = frozenset({suite.BOARD, suite.NOTE})
+_MEMORY_PREFIX = ".claude/memory/"
+
+
+def _bookkeeping_divergence(root: Path, base: str, merge_base: str) -> list[str]:
+    """Paths `base` gained since `merge_base` that are production code, not board or
+    memory bookkeeping — empty means the narrow-scope condition for
+    `_merge_with_resolver` holds.
+
+    **Deliberately narrower than `suite.classify`'s own `"other"` bucket.** `other`
+    is that function's catch-all for "docs, memory, `.claude/` config — anything no
+    pytest asserts on" (its own docstring), which is the right answer for deciding
+    which *tests* to run but the wrong one here: it also covers a bare top-level
+    production file outside every declared `source_dir` (a `main.py`, a
+    `pyproject.toml`), and this function's whole job is telling those apart from
+    board and memory bookkeeping. So this checks `BOARD`/`NOTE` — the same
+    board-lane split `suite.select` already trusts — plus two explicit
+    bookkeeping prefixes rather than `classify`'s broad default: `.claude/memory/`
+    (`CLAUDE.md`'s own memory directory, never production code by construction)
+    and the memory-fragment directory (which `classify` would otherwise call
+    `SYSTEM`, since gates and tooling live under `.ai/` too, and a per-card
+    fragment is neither of those things — see `memoryfold.FRAGMENT_DIR`'s own
+    docstring on why it lives under `.ai/` rather than the board).
+    """
+    changed = gitpaths.changed(root, f"{merge_base}...{base}")
+    frag_prefix = memoryfold.fragment_dir(root).relative_to(root).as_posix() + "/"
+    production = []
+    for rel in changed:
+        norm = rel.replace("\\", "/")
+        if norm.startswith(frag_prefix) or norm.startswith(_MEMORY_PREFIX):
+            continue
+        if suite.classify(norm, root) not in _BOOKKEEPING_CLASSES:
+            production.append(rel)
+    return production
+
+
+def _merge_with_resolver(root: Path, card: board.Card, branch: str, base: str,
+                         out_dir: Path, *, rebase_reason: str = "",
+                         test_timeout: int = 600, remote: str = "") -> tuple[bool, str]:
+    """The narrow-scope escalation `rebase_and_merge` reaches for when a
+    *rebase*-based resolution of `branch` onto `base` could not be settled, but
+    `base` has only moved in board/memory bookkeeping since `branch` forked
+    (`_bookkeeping_divergence` empty). Retries as a plain `git merge --no-ff
+    branch` instead of a rebase replay.
+
+    **Why this exists** (`stun-animation`, 2026-08-27). A card's own board file
+    moves lanes on `base` — dispatched from `Board/tasks/`, finished in
+    `Board/blocked/` or `Board/testing/` — while the branch still carries a
+    commit that touches the old path. A *rebase* replays that commit against a
+    `base` that has already moved the file, and conflicts on it even though
+    nothing about the card's actual work disagrees with anything on `base`. A
+    *merge* compares `branch` and `base` against their real merge-base directly,
+    conflicts on that one path once, and — when the check above holds — touches
+    nothing a human needs to weigh in on. Watching a human resolve exactly this
+    by hand, Karel asked for the automatic version: *"if there is such a problem
+    with rebase, it automatically runs a subagent, that handles it... It is
+    obviously something you can handle, so it does not need human attention"* —
+    full autonomy, landing the card end to end, but narrowly scoped to provable
+    non-production divergence (his own choice, offered as the safer of two, over
+    every conflict the rebase path could produce).
+
+    **§12 still holds.** The resolver (`_resolve_merge_conflict`, same
+    `RESOLVER_AGENT`, same charter) only produces a candidate tree; the merge is
+    committed in a throwaway worktree and re-verified with the *same*
+    gates-and-tests re-run `rebase_and_merge` already does for the ordinary path
+    — before anything touches `root`. Landing into `root` itself is a bare
+    `git merge --ff-only`, never `--no-ff`: the throwaway worktree's merge commit
+    already has `root`'s current `base` tip as its first parent (nothing else can
+    have moved `base` mid-call), so fast-forwarding is the correct move and the
+    only one that does not wrap one merge commit inside another.
+
+    Because this *is* a real merge (unlike the rebase path, whose `rebased_sha`
+    is a linear replay with no merge commit of its own), `branch`'s own tip
+    becomes a genuine ancestor of `base` once this lands — so the branch delete
+    below uses the safe `-d`, not the rebase path's `-D`, matching the same
+    reasoning `manage-board`'s inline-merge flow already documents.
+
+    Returns `(landed, detail)`. `True` means the merge is on `base`, `branch` is
+    deleted (local and, if `remote` is configured, there too), and the card's
+    memory fragment has been folded — exactly what the ordinary merged path in
+    `rebase_and_merge` does. `False` leaves `root` and `branch` untouched for a
+    human, and the caller's existing failure message still fires.
+    """
+    tree = worktree_root(root) / f"_merge-{card.id}"
+    if tree.exists() or _worktree_registered(root, tree):
+        _git(root, "worktree", "remove", "--force", str(tree))
+    _git(root, "worktree", "prune")
+    tree.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        made = _worktree_add(root, "--detach", str(tree), base)
+    except WorktreePathTooLong as exc:
+        return False, f"could not cut a merge worktree for {branch}: {exc}"
+    if made.returncode != 0:
+        return False, (f"could not cut a merge worktree for {branch}: "
+                       f"{(made.stderr or made.stdout or '').strip()[:150]}")
+
+    try:
+        merge = _git(tree, "merge", *gitmerge.STRATEGY_ARGS, "--no-ff", "--no-commit",
+                     branch)
+        if merge.returncode != 0:
+            conflicts = _unmerged_paths(tree)
+            if not conflicts:
+                # No unmerged paths but a non-zero exit is not a content conflict —
+                # a dirty tree, a missing branch, a hook refusal. Nothing to resolve.
+                _git(tree, "merge", "--abort")
+                return False, (f"merging {branch} into {base} failed: "
+                               f"{gitmerge.failure_detail(merge)}")
+            _log(f"    {len(conflicts)} conflict(s) merging {branch} into {base} — "
+                 f"handing them to {RESOLVER_AGENT}")
+            resolved, detail = _resolve_merge_conflict(
+                root, tree, card, branch, base, out_dir,
+                rebase_reason=rebase_reason, timeout=test_timeout)
+            if not resolved:
+                return False, (f"merging {branch} into {base} conflicts in "
+                               f"{', '.join(conflicts)} and {detail}")
+            _log(f"    {RESOLVER_AGENT} resolved it — {detail}")
+
+        committed = _git(tree, "commit", "-m",
+                         f"merge {branch}: reviewed ok by the runner (rebase conflicted "
+                         f"on bookkeeping-only paths; resolved as a plain merge)")
+        if committed.returncode != 0:
+            _git(tree, "merge", "--abort")
+            return False, (f"could not commit the resolved merge of {branch}: "
+                           f"{(committed.stderr or committed.stdout or '').strip()[:150]}")
+        merged_sha = _git(tree, "rev-parse", "HEAD").stdout.strip()
+
+        # Re-verify the *merged* result, exactly as the rebase path re-verifies its
+        # replay, before this touches `root` at all (decision #2).
+        status, why = _run_gates(root, tree, out_dir / "merge-gates.txt")
+        if status != GATE_PASS:
+            return False, f"after merging into {base}, {why}"
+        changed = set(gitpaths.changed(tree, f"{base}...HEAD"))
+        selection = suite.select(changed, tree)
+        try:
+            ok, why, _ = _run_tests(tree, out_dir / "merge-pytest.txt", test_timeout,
+                                    out_dir / "merge-junit.xml",
+                                    selection.pytest_args(tree / suite.tests_rel(root)))
+        except subprocess.TimeoutExpired:
+            ok, why = False, f"pytest: timed out after {test_timeout}s"
+        if not ok:
+            return False, f"after merging into {base}, {why}"
+
+        landed = _git(root, "merge", "--ff-only", merged_sha)
+        if landed.returncode != 0:
+            return False, (f"verified the merge but could not fast-forward {base} onto "
+                           f"it: {(landed.stderr or landed.stdout or '').strip()[:150]}")
+        _fold_memory(root, card, base)
+        _delete_remote_branch(root, remote, branch)
+        deleted = _git(root, "branch", "-d", branch)
+        if deleted.returncode != 0:
+            _log(f"  ! merged {branch} but could not delete it — "
+                 f"{(deleted.stderr or deleted.stdout or '').strip()[:150]}")
+        return True, ("resolved as a plain merge — the rebase conflicted on "
+                      "bookkeeping-only paths")
     finally:
         _git(root, "worktree", "remove", "--force", str(tree))
         _git(root, "worktree", "prune")

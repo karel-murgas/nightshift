@@ -64,6 +64,20 @@ case, and guessing once would end that.
   file around the conflict rather than working from the marker block alone.
 - **Never resolve by deleting one side.** If one side genuinely must go, that is the
   judgment case: `false`.
+- **The one exception: your own card's board file racing a lane move.** If the
+  conflicted path is the card's own file under the board directory (its filename is
+  this card's id) and `git status` shows it deleted on the `base` side and modified
+  on `branch`'s side, that is not a disagreement — the board already moved the card
+  to a new lane on `base` while `branch` still carries a stale commit against the
+  old path. Take the deletion (`git rm` the path if it is not already gone) and do
+  not resurrect the stale copy or touch any other file to compensate — the current
+  board state on `base` is what is real, whatever `branch` remembers. This is the
+  one case where "keep both" is wrong instead of the default, because there is only
+  one board and it cannot be in two lanes at once. (`stun-animation`, 2026-08-27 —
+  a resolver facing exactly this touched five unrelated files trying to reconcile
+  it and was thrown out for going out of bounds; the runner now retries the whole
+  thing as a plain merge before it reaches a human, and this rule is what makes
+  that retry actually land instead of failing the same way twice.)
 
 ## What you are not
 
