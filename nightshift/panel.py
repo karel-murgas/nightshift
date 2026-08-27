@@ -1041,6 +1041,20 @@ def session_id(out_dir: Path) -> str:
     return ""
 
 
+def _latest_session_for_card(root: Path, card: board.Card) -> str:
+    """The CLI session behind a card's most recent attempt, if the runner ran one.
+
+    Empty for a card with no `attempts:` (never dispatched through the runner) or
+    whose attempt directory did not survive — `.ai/runs/` is gitignored and
+    machine-local, so a card built on a different machine has no session here
+    even though its frontmatter still says `attempts: N`. Callers must treat
+    empty as "fall back to a fresh session", not as an error.
+    """
+    if not card.attempts:
+        return ""
+    return session_id(attempt_dir(root, card.id, card.attempts))
+
+
 def diff_stat(root: Path, base: str, branch: str) -> str:
     """`+38 −12 · 2 files`, or `""` when git cannot say.
 
@@ -2219,7 +2233,7 @@ def _render_verify(ctx: Context) -> str:
                     + _act("Not OK", onclick=f"openEditor('feedback-{_attr(card.id)}')")
                     + _act("Open inline",
                            onclick=f"post('/api/work-feedback',{{card_id:'{_attr(card.id)}'}})",
-                           extra='title="Opens an interactive session on this card, waiting '
+                           extra='title="Resumes the session that built this card, waiting '
                                  'for you to say what was wrong before it fixes anything."')
                     + _act("Mark OK", onclick=f"markOK(this,'{_attr(card.id)}')", primary=True))
             rows.append(_row(control=control, marker="&nbsp;", acts=acts,
@@ -4442,22 +4456,39 @@ def _work_verb(root: Path, body: dict) -> str:
 
 
 def _work_feedback_verb(root: Path, body: dict) -> str:
-    """`Open inline`: the Verify page's other "not OK" tool — a session opened on
-    a card that just failed its play-through, told to wait for the maintainer's
-    own account of what was wrong before it fixes anything.
+    """`Open inline`: the Verify page's other "not OK" tool — reopen the session
+    that actually built the card, so it already has the context, told to wait for
+    the maintainer's own account of what was wrong before it fixes anything.
 
-    Built the same way `_work_verb` builds a card session — same branch, same
-    tier, same charter — because it is the same card opened the same way; only
-    the prompt differs, by design (`INTERACTIVE_CARD_FEEDBACK`'s own docstring).
-    Unlike `boardcmd rejected`, nothing here touches the board: the card stays in
-    `testing/` and the session decides, with the maintainer, whether the fix is
-    good enough to leave it there.
+    **Resumes by preference, the same way `Talk` does** (`_latest_session_for_card`
+    + `RESUMED_FOR_TALK`) — this button differs from `Talk` only in *how* the
+    session is found (by card id, since the Verify page has no row-level
+    `session_id` the way the Run page's dispatch history does), not in what
+    happens once it opens: wait for the maintainer, fix if asked, and close out
+    — merge, delete branch, land the card — only once they say it is good
+    (Karel, 2026-08-27: close-out should work "from anywhere", gated on
+    confirmation rather than on which lane the card happens to be reopened in).
+
+    **Falls back to a fresh session** (`INTERACTIVE_CARD_FEEDBACK`, same branch/
+    tier/charter `_work_verb` would use) when no recorded session survives — a
+    card never dispatched through the runner, or whose `.ai/runs/` artefacts are
+    gone (gitignored, machine-local, pruned). Unlike `boardcmd rejected`, nothing
+    here touches the board on open: the card stays where it is and the session
+    decides, with the maintainer, whether and where to land it.
     """
-    base = preflight.integration_base(root)
     card_id = str(body.get("card_id", ""))
     card = board.find(root, card_id)
     if card is None:
         raise PanelError(f"no card named {card_id!r} on the board")
+
+    session = _latest_session_for_card(root, card)
+    if session:
+        open_terminal(root, *session_argv(
+            root, name=f"{card.id} feedback", resume=session,
+            tier=effective_tier(card.tier), system_append=worker_prompt.RESUMED_FOR_TALK))
+        return f"resuming {card.id}'s own session — say what was wrong"
+
+    base = preflight.integration_base(root)
     lane = board.finished_lane(card)
     prompt = worker_prompt.INTERACTIVE_CARD_FEEDBACK.format(
         branch=branches.work_branch(card.id, card.fields.get("branch", "")), base=base,
