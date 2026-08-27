@@ -29,6 +29,7 @@ deletion are the subject. The Claude CLI is the only thing stubbed.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -188,6 +189,20 @@ def _leave_the_real_config_alone(monkeypatch):
     monkeypatch.setattr(runner, "ensure_workspace_trusted", lambda root: None)
 
 
+# `_review_context` numbers each item as `### N. title (`card_id`)`, in both the
+# criteria and intent blocks — this is what a stubbed reviewer reads to learn which
+# ids it owes a verdict for, the same way a real one would from the same numbering.
+_ITEM_ID = re.compile(r"^### \d+\..*\(`([^`]+)`\)\s*$", re.MULTILINE)
+
+
+def _prompt_item_ids(prompt: str) -> list[str]:
+    seen: list[str] = []
+    for match in _ITEM_ID.findall(prompt):
+        if match not in seen:
+            seen.append(match)
+    return seen
+
+
 class _Worker:
     """A stubbed Claude CLI: one scripted behaviour per card id, plus the reviewer.
 
@@ -200,6 +215,13 @@ class _Worker:
                  review: dict | None = None, turns: dict | None = None):
         self.edits = edits                 # card id -> (filename, contents) or None
         self.verdicts = verdicts or {}
+        # Batch review's own wire format is per-item (`_BATCH_REVIEW_PROMPT`), but most
+        # tests only care about "everyone gets this verdict" or "nobody does" — so two
+        # shorthands are accepted here and fanned out to every id the prompt names,
+        # alongside the fully explicit `{"items": [...]}` shape a mixed-verdict test
+        # needs: a flat `{"verdict": ..., ...}` applies to every item; a dict of dicts
+        # (`{"a": {"verdict": ...}, "b": {...}}`) applies per id, `ok` for any id it
+        # does not name.
         self.review = review if review is not None else {"verdict": "ok", "notes": "fine"}
         self.turns = turns or {}
         self.dispatched: list[str] = []
@@ -211,6 +233,22 @@ class _Worker:
         monkeypatch.setattr(runner, "_run_worker", self)
         return self
 
+    def _review_payload(self, prompt: str) -> dict:
+        payload = self.review
+        if not isinstance(payload, dict) or "items" in payload:
+            return payload
+        ids = _prompt_item_ids(prompt)
+        if not ids:
+            return payload
+        if "verdict" in payload:
+            return {"items": [{"id": cid, **payload} for cid in ids],
+                    "notes": payload.get("notes", "")}
+        if payload and all(isinstance(v, dict) for v in payload.values()):
+            return {"items": [{"id": cid, **payload.get(cid, {"verdict": "ok"})}
+                              for cid in ids],
+                    "notes": ""}
+        return payload
+
     def __call__(self, argv, cwd, timeout, stream_path=None, env=None, prompt=""):
         cwd = Path(cwd)
         agent = argv[argv.index("--agent") + 1]
@@ -220,7 +258,7 @@ class _Worker:
                            if line.strip().endswith(".json")))
         if agent == runner.REVIEWER_AGENT:
             self.reviews.append(str(cwd))
-            target.write_text(json.dumps(self.review), encoding="utf-8")
+            target.write_text(json.dumps(self._review_payload(prompt)), encoding="utf-8")
             return subprocess.CompletedProcess(argv, 0, json.dumps({}), "")
 
         card_id = cwd.name
@@ -557,10 +595,15 @@ def test_the_review_is_told_about_every_card_in_the_batch(tmp_path, monkeypatch)
     assert "`a`" in text and "`b`" in text
 
 
-def test_a_needs_decision_stops_the_whole_batch_from_merging(tmp_path, monkeypatch):
-    """The price of reviewing a batch as one unit, paid deliberately: merging past
-    a request for a decision is the one thing no stage may do, and splitting the
-    batch on the reviewer's say-so would mean guessing which items it meant."""
+def test_a_needs_decision_flagged_on_every_item_stops_the_whole_batch(tmp_path,
+                                                                       monkeypatch):
+    """The reviewer's verdict is per item (`_BATCH_REVIEW_PROMPT`), not per batch —
+    but when every item is flagged, nothing is left to merge, so the observable
+    result is the same as the old whole-batch block. Each flagged card is routed on
+    its *own* verdict straight to `needs-decision/` (no second review call, and not
+    `review/` — that lane means "green, unreviewed", and these two were reviewed
+    and flagged, exactly what `review-lane-has-no-drain` already fixed for the
+    per-card path)."""
     root = _repo(tmp_path, ("a", "review", "x"), ("b", "review", "x"))
     _Worker(edits={"a": _touch("a"), "b": _touch("b")},
             review={"verdict": "needs_decision", "question": "which colour?"}).install(
@@ -571,19 +614,20 @@ def test_a_needs_decision_stops_the_whole_batch_from_merging(tmp_path, monkeypat
     assert "mod_a" not in _git(root, "show", "development_team:myapp/mod_a.py").stdout
     for card_id in ("a", "b"):
         card = board.find(root, card_id)
-        assert card.lane == "review"
+        assert card.lane == "needs-decision"
         assert "which colour?" in card.text
-    # The branch survives, so the answer is a merge by hand rather than lost work.
-    branches = _git(root, "for-each-ref", "--format=%(refname:short)",
-                    "refs/heads/chores/").stdout
-    assert branches.strip()
+        assert card.fields.get("after_answer") == "tasks"
+    # Each card's own branch is untouched — nothing was merged, nothing was lost.
+    for card_id in ("a", "b"):
+        assert _git(root, "rev-parse", "--verify", f"ai/{card_id}").returncode == 0
 
 
-def test_a_needs_fix_also_stops_the_whole_batch_from_merging(tmp_path, monkeypatch):
-    """A batch diff has no single item to bounce back to `tasks/` for another
-    attempt (reviewer-needs-fix-verdict) — only the combined result — so
-    `needs_fix` gets the same block-and-hand-over treatment as `needs_decision`
-    here, not the per-item retry a single dispatched card gets."""
+def test_a_needs_fix_flagged_on_every_item_stops_the_whole_batch(tmp_path, monkeypatch):
+    """Same split as `needs_decision` above, for the other flagged verdict. A chore
+    gets exactly one dispatch attempt (`runner.CHORE_MAX_ATTEMPTS`) and it is already
+    spent here, so — like the per-card runner path once its own attempt limit is
+    exhausted — this escalates straight to `needs-decision/` rather than bouncing to
+    `tasks/` for a retry nothing is left to spend."""
     root = _repo(tmp_path, ("a", "review", "x"), ("b", "review", "x"))
     _Worker(edits={"a": _touch("a"), "b": _touch("b")},
             review={"verdict": "needs_fix", "finding": "wrong constant name"}).install(
@@ -594,11 +638,41 @@ def test_a_needs_fix_also_stops_the_whole_batch_from_merging(tmp_path, monkeypat
     assert "mod_a" not in _git(root, "show", "development_team:myapp/mod_a.py").stdout
     for card_id in ("a", "b"):
         card = board.find(root, card_id)
-        assert card.lane == "review"
+        assert card.lane == "needs-decision"
         assert "wrong constant name" in card.text
-    branches = _git(root, "for-each-ref", "--format=%(refname:short)",
-                    "refs/heads/chores/").stdout
-    assert branches.strip()
+
+
+def test_a_split_verdict_lands_the_clean_item_and_only_flags_the_other(tmp_path,
+                                                                        monkeypatch):
+    """The headline behaviour a per-item verdict exists for (Karel, 2026-08-27:
+    *"chore that passes batch review should be finished and only the one that
+    failed should go to tasks... neither should stay in need review"*).
+
+    One review call, one item flagged: the clean item merges and lands exactly as
+    if the batch had been all-`ok`, the flagged item is routed on its own verdict,
+    and neither sits in `review/` waiting on a second review nobody asked to pay
+    for again.
+    """
+    root = _repo(tmp_path, ("a", "review", "x"), ("b", "review", "x"))
+    worker = _Worker(edits={"a": _touch("a"), "b": _touch("b")},
+                     review={"a": {"verdict": "ok"},
+                             "b": {"verdict": "needs_fix", "finding": "wrong constant"}}
+                     ).install(monkeypatch)
+    code, _ = chores.execute(root)
+
+    assert code == 0, "a landed - that is a successful batch outcome, even split"
+    assert len(worker.reviews) == 1, "one review call covers the whole split"
+    listed = _git(root, "ls-tree", "-r", "--name-only", "development_team").stdout
+    assert "myapp/mod_a.py" in listed, (
+        "a was cleared on its own verdict and must land without a second review"
+    )
+    assert board.find(root, "a").lane == "done"
+    b_card = board.find(root, "b")
+    assert b_card.lane == "needs-decision"
+    assert "wrong constant" in b_card.text
+    assert _git(root, "rev-parse", "--verify", "ai/a").returncode != 0, (
+        "a's branch is deleted once it lands, same as any other landed chore"
+    )
 
 
 def test_nothing_merges_without_a_review(tmp_path, monkeypatch):

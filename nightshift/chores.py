@@ -602,11 +602,66 @@ def _land(work: Path, card: board.Card, outcome: Outcome, branch: str,
 def _hand_over(work: Path, card: board.Card, branch: str, why: str) -> str:
     """A survivor whose batch did not land. Its diff is green on its own branch and
     the batch's is not its fault, so it goes to `review/` — "gates green, waiting on
-    something else" is exactly what that lane means — with the reason on the card."""
+    something else" is exactly what that lane means — with the reason on the card.
+
+    **Never `## Merge`.** `drain.BLOCKED_SECTION` is that exact header, and its
+    presence on a `review/` card means one specific thing: reviewed `ok` already,
+    branch just won't rebase, nothing left to buy by reviewing it again — so
+    `drain.skip_reason` hides it from `drain` and the panel's per-row button. A
+    survivor handed over here was never reviewed at all (this is the combined batch
+    diff's verdict, not this card's own `ai/{card_id}`) — it is the ordinary
+    "green, unreviewed" case `review/` exists for, and `## Merge` would make it look
+    finished when nothing has looked at it yet, stranding it exactly as
+    `unplayable-cards-still-land-in-testing`/`review-lane-has-no-drain` already
+    fixed for the per-card path (Karel, reported after a chore batch failed and
+    left two survivors sitting in Under Review with no action button at all).
+    """
     card.write({"started": None, "finished": runner._now()})
-    card.write_section("Merge", why)
+    card.write_section("Summary", why)
     board.move(work, card, "review")
     return f"{card.id}: -> review/ (the batch did not land)"
+
+
+def _route_flagged(work: Path, card: board.Card, kind: str, detail: str) -> tuple[str, str]:
+    """One survivor the batch reviewer named on its own — routed on that verdict
+    directly, the same way `runner._settle_impl` routes a single-card `needs_fix`/
+    `needs_decision`, without spending a second review call to get there: the batch
+    review already produced this item's own verdict, in the one pass.
+
+    Returns `(message, record_outcome)` — the second for `_record_outcomes`, so the
+    digest calls a retried card `needs_fix` and an escalated one `needs_decision`
+    rather than folding both into one label.
+
+    A chore gets exactly one dispatch attempt (`runner.CHORE_MAX_ATTEMPTS`), and it
+    is already spent by the time a survivor reaches here — so unlike the per-card
+    runner loop, `needs_fix`'s `card.attempts < attempt_limit(card)` branch is dead
+    in practice today (attempts is 1, the limit is 1) and everything lands in
+    `needs-decision/`. Written to match `runner.py`'s own check rather than a
+    hardcoded "always needs-decision", so raising `CHORE_MAX_ATTEMPTS` in the future
+    does not silently strand a card here again.
+    """
+    card.write({"started": None, "finished": runner._now()})
+    if kind == "needs_fix" and card.attempts < runner.attempt_limit(card):
+        card.write_section("Review Finding", runner._review_finding_section(card.id, detail))
+        card.write({"last_outcome": "needs_fix"})
+        branch = card.fields.get("branch") or f"ai/{card.id}"
+        if runner._branch_exists(work, branch):
+            runner.write_handover(work, card.id, runner.Handover(review_fix=True))
+        board.move(work, card, "tasks")
+        return (f"{card.id}: -> tasks/ (batch review flagged a fixable defect, will retry)",
+                "needs_fix")
+    if kind == "needs_fix":
+        card.write_section(
+            "Question",
+            f"The batch reviewer found a fixable-looking defect on this item, and it is "
+            f"already at its attempt limit ({card.attempts}), so there is no attempt left "
+            f"to apply the fix automatically. Finding:\n\n{detail}")
+    else:
+        card.write_section("Question", detail)
+    card.write({"after_answer": board.AFTER_ANSWER_TASKS})
+    board.move(work, card, "needs-decision")
+    return (f"{card.id}: -> needs-decision/ (batch review flagged {kind.replace('_', ' ')})",
+            "needs_decision")
 
 
 # --------------------------------------------------------------------- the driver
@@ -654,20 +709,34 @@ _RECORD_OUTCOME = {
 
 def _record_outcomes(record: run_record.Record, batch: Batch,
                      cards: dict[str, board.Card], model: str, *,
-                     landed: bool = False) -> None:
+                     landed_ids: frozenset[str] = frozenset(),
+                     escalated: dict[str, str] | None = None) -> None:
     """Re-state the batch's outcomes into the record. Cheap, and safe to call often.
 
     Called at every point the batch changes rather than once at the end, so a batch
     that is killed — or that dies on a red suite — still leaves a record of what it had
     settled. See `run_record.Record.set_dispatched` for why this replaces rather than
     appends.
+
+    `landed_ids`/`escalated` replace what used to be one blanket `landed: bool` —
+    since a batch review can now clear some survivors while flagging others
+    (`_review`'s per-item verdicts), "landed" is no longer a fact about the whole
+    batch. `landed_ids` names which `done` outcomes actually merged; `escalated`
+    overrides the mapping entirely for a card `_route_flagged` sent to
+    `needs-decision/`/`tasks/` off the batch reviewer's own per-item verdict, so
+    the digest does not call a flagged card "review" (still pending) once it has
+    already been routed.
     """
+    escalated = escalated or {}
     entries = []
     for outcome in batch.outcomes:
         state = outcome.state
-        mapped = _RECORD_OUTCOME.get(state, state)
-        if landed and state == "done":
-            mapped = "reviewed"
+        if outcome.card_id in escalated:
+            mapped = escalated[outcome.card_id]
+        else:
+            mapped = _RECORD_OUTCOME.get(state, state)
+            if state == "done" and outcome.card_id in landed_ids:
+                mapped = "reviewed"
         card = cards.get(outcome.card_id)
         entries.append({
             "card": outcome.card_id,
@@ -853,6 +922,15 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
     why = ""
     total = 0
     order = list(survivors)
+    #: `_route_flagged` id -> its own record outcome (`needs_fix` / `needs_decision`),
+    #: read by the final `_record_outcomes` call so a card the batch reviewer flagged
+    #: and routed individually is not reported as still "review" (pending) in the digest.
+    escalated: dict[str, str] = {}
+    #: Set only when a reviewer-cleared subset unexpectedly fails its own
+    #: re-verification once the flagged item(s) are dropped — the one path into the
+    #: unreviewed-fallback `_hand_over` message below for cards that *were* reviewed
+    #: `ok`, so that message does not wrongly say otherwise.
+    reviewed_but_unmerged = False
     try:
         made = runner._worktree_add(work, str(tree), branch)
         if made.returncode != 0:
@@ -908,9 +986,51 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
                 why = ("the batch is green but the money rule stopped the review; "
                        "nothing merges without a review")
             else:
-                why = _review(work, base, branch, out_dir, cards, order, card_budget)
-                if not why:
+                review = _review(work, base, branch, out_dir, cards, order, card_budget)
+                if review.why:
+                    # Nothing usable came back at all - unreviewed, same as before this
+                    # file learned to split a batch. `order` is untouched, so every
+                    # survivor is handed over below exactly as it always was.
+                    why = review.why
+                elif not review.flagged:
+                    # Every item cleared - land the whole batch, unchanged from before.
                     landed, why = runner.merge_branch(work, branch, base, label=branch)
+                else:
+                    # A split verdict: route the flagged item(s) on their own verdict —
+                    # no second review call, the batch review already produced it — and
+                    # re-verify + land whatever is left without them.
+                    for card_id, (kind, detail) in review.flagged.items():
+                        message, escalated[card_id] = _route_flagged(
+                            work, cards[card_id], kind, detail)
+                        print("  " + message)
+                    if not review.ok:
+                        why = "the batch reviewer flagged every surviving item; nothing left to merge"
+                        order = []
+                    else:
+                        clean, refused = _merge_prefix(work, tree, base, review.ok)
+                        for card_id, reason in refused:
+                            _drop(work, batch, cards, card_id,
+                                  f"its branch would not re-merge onto the clean subset "
+                                  f"once the flagged item(s) were dropped: {reason}")
+                        if refused:
+                            _record_outcomes(record, batch, cards, model, escalated=escalated)
+                        if not clean:
+                            why = "no clean survivor's branch would re-merge onto the batch"
+                            order = []
+                        else:
+                            ok2, why2, total2 = _verify_tree(
+                                work, tree, out_dir, "batch-clean", batch_test_timeout)
+                            if ok2:
+                                landed, why = runner.merge_branch(
+                                    work, branch, base, label=branch)
+                                total = total2
+                                order = clean
+                            else:
+                                why = (f"the clean subset unexpectedly failed its own "
+                                       f"re-verification once the flagged item(s) were "
+                                       f"dropped: {why2}")
+                                order = clean
+                                reviewed_but_unmerged = True
     finally:
         runner._git(work, "worktree", "remove", "--force", str(tree))
         runner._git(work, "worktree", "prune")
@@ -927,15 +1047,33 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
         record.stop(why)
         print(f"the batch did not land - {why}")
         for card_id in order:
-            print("  " + _hand_over(
-                work, cards[card_id], branch,
-                f"This chore is green on `ai/{card_id}` and was merged onto the batch "
-                f"branch `{branch}`, which did not land: {why}. The batch branch still "
-                f"exists; resolve it there, or merge this card's branch by hand."))
+            if reviewed_but_unmerged:
+                detail = (
+                    f"This chore's own item was reviewed and cleared as part of the "
+                    f"batch review of `{branch}`, but re-verifying it together with the "
+                    f"batch's other clean survivors (after the flagged item was dropped) "
+                    f"unexpectedly failed: {why}. **Review it** (or `python -m "
+                    f"nightshift.drain --card {card_id}`) reviews `ai/{card_id}` on its "
+                    f"own — a fresh look, since the failure above is about the *subset*, "
+                    f"not necessarily this card. The batch branch `{branch}` still exists "
+                    f"too, if the failure is worth reading first.")
+            else:
+                detail = (
+                    f"This chore is green on its own branch (`ai/{card_id}`) and was "
+                    f"merged onto the batch branch `{branch}`, but the batch itself did "
+                    f"not land: {why}. This card was never individually reviewed — only "
+                    f"the combined batch diff was — so it rests here exactly like any "
+                    f"other green, unreviewed card: **Review it** (or `python -m "
+                    f"nightshift.drain --card {card_id}`) reviews `ai/{card_id}` on its "
+                    f"own and routes it on that verdict. The batch branch `{branch}` "
+                    f"still exists too, if the failure is worth reading first.")
+            print("  " + _hand_over(work, cards[card_id], branch, detail))
 
     # After `_land`, so a chore that reached `testing/`/`done/` records `reviewed`
     # rather than the `review` it carried while the batch review was still ahead of it.
-    _record_outcomes(record, batch, cards, model, landed=landed)
+    _record_outcomes(record, batch, cards, model,
+                     landed_ids=frozenset(order) if landed else frozenset(),
+                     escalated=escalated)
     record.finish(dispatched=len(batch.outcomes))
 
     textio.write_text_lf(work / OUT, report(batch, now, branch=branch, suite=suite_line))
@@ -968,51 +1106,100 @@ def _drop(work: Path, batch: Batch, cards: dict[str, board.Card], card_id: str,
         print("  " + runner.settle(work, card_id, runner.Dispatch("failed", detail)))
 
 
+@dataclass
+class ReviewResult:
+    """One batch review's outcome, already split per item — never a single pass/fail
+    for the whole diff.
+
+    `ok` is the ids the reviewer cleared; they land like any other reviewed-ok card.
+    `flagged` maps a flagged id to `(kind, detail)`, `kind` one of `needs_fix` /
+    `needs_decision`, `detail` that item's own finding/question — never the whole
+    batch's. `why` is set only when nothing usable came back at all (a wall, no CLI,
+    no tier, an unreadable verdict) — then `ok` and `flagged` are both empty and
+    every survivor is handed over exactly as it was before this split existed.
+    """
+    ok: list[str] = field(default_factory=list)
+    flagged: dict[str, tuple[str, str]] = field(default_factory=dict)
+    why: str = ""
+
+
 def _review(work: Path, base: str, branch: str, out_dir: Path,
             cards: dict[str, board.Card], order: list[str],
-            card_budget: float) -> str:
-    """One review over the whole batch diff. Returns why it must not merge, or `""`.
+            card_budget: float) -> ReviewResult:
+    """One review call over the whole batch diff, judging every item independently.
 
-    Once, not per item, and that is not only an economy: the reviewer's question for
-    a chore is *"did any of these do something needing a decision"*, which is
-    answerable across the set, and a reviewer holding the combined diff can see an
-    interaction between two items that per-item review structurally cannot.
+    Once, not once per item, and that is not only an economy: the reviewer's
+    question for a chore batch is *"did any of these do something needing a
+    decision"*, which is answerable across the set in one pass, and a reviewer
+    holding the combined diff can see an interaction between two items that a
+    per-item review structurally cannot.
 
-    A `needs_decision` — or `needs_fix` — about one item stops the **whole** batch.
-    That is the price of reviewing a batch as one unit and it is paid deliberately:
-    merging past a request for a decision is the one thing no stage here is allowed
-    to do, and splitting the batch on the reviewer's say-so would mean guessing which
-    items its question was about. `needs_fix` gets the same treatment here as
-    `needs_decision`, not the per-card retry `runner.review_stage` gives a single
-    dispatched card: a batch diff has no single item to bounce back to `tasks/`
-    for another attempt, only the combined result, so there is nothing to retry
-    into. The branch survives, so the answer is a merge by hand rather than lost
-    work either way.
+    **But one call, not one verdict.** `runner._BATCH_REVIEW_PROMPT` asks for a
+    verdict *per numbered item* in that one call, so a `needs_fix` about one chore
+    routes only that chore — the rest were reviewed too, in the same pass, and an
+    `ok` from that pass is exactly as authoritative as an `ok` from a solo review
+    (`review_stage`'s own contract). The previous shape collapsed all of that into
+    one whole-batch verdict and handed every survivor the same finding regardless
+    of which item it was actually about (Karel, 2026-08-27: *"chore that passes
+    batch review should be finished and only the one that failed should go to
+    tasks... a second review run pays more of both [time and tokens], not less"*)
+    — paying for per-item precision the reviewer had already produced and then
+    discarding it, then paying *again* for a second review to recover it.
     """
     try:
         model = tiers.resolve(work, "lead")
     except tiers.TierError as exc:
-        return f"the reviewer's tier could not be resolved: {exc}"
+        return ReviewResult(why=f"the reviewer's tier could not be resolved: {exc}")
     criteria, intent = _review_context(cards, order)
-    print(f"phase 3: reviewing {branch} as one diff ({model})")
+    print(f"phase 3: reviewing {branch} as one diff, {len(order)} item(s) ({model})")
+    # `review_branch` writes no heartbeat itself (`review_stage` does that for the
+    # per-card path) — without this, status.json is left on whatever phase 1's last
+    # chore dispatch set it to (`pytest`), so the panel's rail keeps showing "tests"
+    # for the whole of phase 3.
+    runner._status(work, phase="review", card=branch, model=model, since=runner._now())
     verdict, _cost, wall = runner.review_branch(
         work, f"batch-{branch.replace('/', '-')}", out_dir, model, base, branch,
-        card_budget, BATCH_TEST_TIMEOUT_S, criteria=criteria, intent=intent)
-    called = str(verdict.get("verdict", "")).lower()
-    print(f"  {called or '(no verdict)'} - {str(verdict.get('notes', ''))[:100]}")
-    if called == "ok":
-        return ""
-    if called == "needs_decision":
-        question = str(verdict.get("question", "")).strip()
-        return ("the reviewer flagged something for a decision: "
-                + (question or "it stated no question, which is itself worth a look"))
-    if called == "needs_fix":
-        finding = str(verdict.get("finding", "")).strip()
-        return ("the reviewer found a fixable defect: "
-                + (finding or "it stated no finding, which is itself worth a look"))
-    if wall is not None:
-        return "the review hit a usage limit before it reached a verdict"
-    return "the review returned no usable verdict"
+        card_budget, BATCH_TEST_TIMEOUT_S, criteria=criteria, intent=intent,
+        template=runner._BATCH_REVIEW_PROMPT)
+    items = verdict.get("items") if isinstance(verdict, dict) else None
+    if not isinstance(items, list) or not items:
+        print(f"  (no usable per-item verdict) - {str(verdict.get('notes', ''))[:100]}")
+        if wall is not None:
+            return ReviewResult(why="the review hit a usage limit before it reached a verdict")
+        return ReviewResult(why="the review returned no usable verdict")
+
+    by_id: dict[str, dict] = {}
+    for entry in items:
+        if isinstance(entry, dict) and str(entry.get("id", "")).strip():
+            by_id[str(entry["id"]).strip()] = entry
+
+    result = ReviewResult()
+    for card_id in order:
+        entry = by_id.get(card_id)
+        if entry is None:
+            result.flagged[card_id] = (
+                "needs_decision",
+                "the batch reviewer's verdict named no entry for this card — treated "
+                "as undecidable rather than guessed which of its neighbours' findings, "
+                "if any, was about it")
+            continue
+        called = str(entry.get("verdict", "")).lower()
+        if called == "ok":
+            result.ok.append(card_id)
+        elif called == "needs_fix":
+            result.flagged[card_id] = ("needs_fix", str(entry.get("finding", "")).strip()
+                or "The reviewer flagged a fixable defect on this item but recorded no finding.")
+        elif called == "needs_decision":
+            result.flagged[card_id] = ("needs_decision", str(entry.get("question", "")).strip()
+                or "The reviewer flagged this item for a decision but recorded no question.")
+        else:
+            result.flagged[card_id] = (
+                "needs_decision",
+                f"the batch reviewer wrote an unrecognised verdict ({called or '(none)'}) "
+                f"for this item")
+    print(f"  {len(result.ok)} ok, {len(result.flagged)} flagged - "
+          f"{str(verdict.get('notes', ''))[:100]}")
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:

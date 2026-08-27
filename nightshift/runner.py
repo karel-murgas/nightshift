@@ -1975,6 +1975,31 @@ whoever picks this up wants a ranking, not a tie.
 # closes that gap: it is drain.py's own principle ("'review this diff' is not a
 # decision — it is work") extended one step further — *fixing* a diff whose defect
 # has one verifiable correct answer is not a decision either.
+# The three-way rubric, shared verbatim between a single card's review and a batch's —
+# it is the definition of `ok`/`needs_fix`/`needs_decision` and nothing about *how many*
+# items are being judged, so a batch judging each item independently (`_BATCH_REVIEW_PROMPT`)
+# applies the exact same bar per item rather than a paraphrase of it. One string, quoted by
+# both templates, is what keeps a future edit to the bar from drifting the two apart.
+_REVIEW_RUBRIC = """\
+- `ok` — nothing needs the maintainer's judgment before it merges. This is the common case. \
+`ok` does not mean perfect; every `ok` card is still tested by the maintainer at testing/. \
+Style you dislike or a cleaner refactor you can imagine is neither of the other two verdicts.
+- `needs_fix` — the diff has a concrete, **objectively verifiable** defect with one correct \
+answer: a fact you can confirm yourself (check `git log`, read the code it describes, run a \
+calculation) rather than a preference. A claim the diff makes that is simply wrong; a value \
+computed incorrectly; a docstring or comment that does not match what the code does; a \
+reference to the wrong commit, date or symbol. State the defect **and** its correct fix — \
+precise enough that a worker who never saw your reasoning can apply it without re-deriving \
+it. This is not a lesser `needs_decision`: if you are choosing between the two because you \
+are unsure whether your fix is *right*, it is `needs_decision`; choose `needs_fix` only when \
+you would bet on the fix yourself.
+- `needs_decision` — merging this needs the maintainer's judgment first: an ambiguity in the \
+card the worker resolved by guessing, a design judgment call with more than one defensible \
+answer, a behaviour that may not be what they want, or a value/name/rule the card left open \
+and the worker picked. If two people could disagree about the right answer, this is it — \
+`needs_fix` is reserved for the case where nobody reasonable would.\
+"""
+
 _REVIEW_PROMPT = """\
 Review the finished diff below against the card's acceptance criteria and the surrounding \
 code, at **tier: lead** (resolved to model `{model}`).
@@ -1994,23 +2019,7 @@ once to see what that is rather than assuming, since the gate list is this proje
 grows as it earns rules. Spend your attention only on what no script can see.
 
 Your verdict is exactly three-way, and it is a routing decision:
-- `ok` — nothing needs the maintainer's judgment before it merges. This is the common case. \
-`ok` does not mean perfect; every `ok` card is still tested by the maintainer at testing/. \
-Style you dislike or a cleaner refactor you can imagine is neither of the other two verdicts.
-- `needs_fix` — the diff has a concrete, **objectively verifiable** defect with one correct \
-answer: a fact you can confirm yourself (check `git log`, read the code it describes, run a \
-calculation) rather than a preference. A claim the diff makes that is simply wrong; a value \
-computed incorrectly; a docstring or comment that does not match what the code does; a \
-reference to the wrong commit, date or symbol. State the defect **and** its correct fix — \
-precise enough that a worker who never saw your reasoning can apply it without re-deriving \
-it. This is not a lesser `needs_decision`: if you are choosing between the two because you \
-are unsure whether your fix is *right*, it is `needs_decision`; choose `needs_fix` only when \
-you would bet on the fix yourself.
-- `needs_decision` — merging this needs the maintainer's judgment first: an ambiguity in the \
-card the worker resolved by guessing, a design judgment call with more than one defensible \
-answer, a behaviour that may not be what they want, or a value/name/rule the card left open \
-and the worker picked. If two people could disagree about the right answer, this is it — \
-`needs_fix` is reserved for the case where nobody reasonable would.
+{rubric}
 
 Write your verdict to:
   {verdict_path}
@@ -2033,6 +2042,75 @@ stand alone and be answerable in fifteen seconds from a phone. You never edit, f
 {criteria}
 
 --- what the card set out to do (its intent) ---
+{intent}
+"""
+
+# The chore batch's variant (chores.py `_review`): one diff bundling several independent
+# one-prompter chores, judged **per item** in the one call rather than as a single
+# pass/fail — so a batch review keeps its whole reason to exist (one reviewer call sees
+# every item and can catch an interaction between two of them) without also making every
+# survivor pay for one item's defect. Before this template, the batch produced one verdict
+# for the combined diff and every survivor was handed the same finding regardless of which
+# item it was actually about — correct for nothing, since either the clean items were
+# wrongly told they had a defect, or the reviewer's own attribution ("only the X half needs
+# a change") was sitting right there in `finding` and simply discarded by the caller.
+_BATCH_REVIEW_PROMPT = """\
+Review the finished diff below, at **tier: lead** (resolved to model `{model}`).
+
+The diff bundles several **independent one-prompter chores**, merged onto one throwaway \
+branch so they can be reviewed and landed in a single pass. Each is listed below, numbered \
+and attributed to its own card id — the acceptance criteria and intent sections are grouped \
+the same way. Judge each one **independently**: an item's own diff, against its own criteria \
+and intent, decides its own verdict. You may certainly note an interaction *between* two \
+items — that is the one thing a combined review can see that reviewing each alone cannot — \
+but say so inside the specific item(s) it implicates rather than failing every item for one \
+item's fault.
+
+The change is on branch `{branch}`. Its diff against the integration branch — what this \
+branch added since it forked — is in:
+  {diff}
+The repository it changes is rooted at:
+  {repo}
+Read the diff, then read whatever surrounding code you need to judge whether each item does \
+what its own card asked and touched nothing it should not have.
+
+You are **not** told how any of this was made, and you must not go looking: no worker \
+prompt, no transcript, no reasoning. The gates and the full test suite have **already \
+passed** on this exact branch, with every item merged — do not re-check anything they \
+cover, and run `python -m nightshift.gates.run` once to see what that is rather than \
+assuming. Spend your attention only on what no script can see.
+
+For **each** numbered item below, apply this exact three-way verdict — it is a routing \
+decision, made once per item:
+{rubric}
+
+Write your verdict to:
+  {verdict_path}
+as JSON, exactly these keys:
+  {{"items": [
+      {{"id": "<the card id exactly as numbered below>",
+        "verdict": "ok" | "needs_fix" | "needs_decision",
+        "finding": "<if needs_fix: same contract as the rubric above, for this item alone. \
+Empty string otherwise.>",
+        "question": "<if needs_decision: same contract as the rubric above, for this item \
+alone. Empty string otherwise.>"}},
+      ...
+    ],
+    "notes": "<one or two sentences of overall reasoning the runner can log>"}}
+Include **exactly one entry per numbered item**, in any order, each carrying its exact card \
+id — an id you omit is read as "could not be judged on its own" and is treated the same as \
+`needs_decision`.
+
+On an item's `needs_fix` the `finding` goes back to a worker for another attempt, with no \
+human in the loop — so it must be self-contained enough to act on alone. On `needs_decision` \
+the `question` is put in front of the maintainer verbatim, with no human in between, so it \
+must stand alone and be answerable in fifteen seconds from a phone. You never edit, fix or \
+merge — you report, the runner routes each item on its own verdict.
+
+--- acceptance criteria, per item, verbatim from each card ---
+{criteria}
+
+--- what each item set out to do (its intent) ---
 {intent}
 """
 
@@ -2503,8 +2581,15 @@ def card_review_context(card: board.Card) -> tuple[str, str]:
 
 def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
                   branch: str, card_budget: float, timeout: int, *,
-                  criteria: str, intent: str) -> tuple[dict, float, limits.Wall | None]:
+                  criteria: str, intent: str,
+                  template: str = _REVIEW_PROMPT) -> tuple[dict, float, limits.Wall | None]:
     """Spawn the diff reviewer on a finished branch (automate-review-step).
+
+    `template` is `_REVIEW_PROMPT` (a single verdict) unless the caller passes
+    `_BATCH_REVIEW_PROMPT` (one verdict per numbered item) — the chore batch's own
+    case. Both quote `_REVIEW_RUBRIC` for the actual ok/needs_fix/needs_decision bar
+    and take the same `{model, branch, diff, repo, verdict_path, criteria, intent}`
+    substitutions, so this is the one place either is ever formatted.
 
     **The reviewer's context is constructed here, and that is the whole point** —
     the same structural blindness as `run_checker` (§16). It is given the diff
@@ -2559,11 +2644,11 @@ def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
         textio.write_text_lf(diff_path, diff.stdout)
         verdict_path = tree / ".review-verdict.json"
 
-        prompt = _REVIEW_PROMPT.format(
+        prompt = template.format(
             model=model, branch=branch, diff=diff_path.resolve().as_posix(),
             repo=tree.resolve().as_posix(),
             verdict_path=verdict_path.resolve().as_posix(),
-            criteria=criteria, intent=intent,
+            criteria=criteria, intent=intent, rubric=_REVIEW_RUBRIC,
         )
         textio.write_text_lf(out_dir / "review-prompt.md", prompt)
         textio.write_text_lf(out_dir / "review-diff.patch", diff.stdout)
