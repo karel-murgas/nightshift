@@ -2806,6 +2806,28 @@ def test_a_chore_the_batch_would_refuse_is_not_listed_as_batch_work(tmp_path):
     assert "manual-chore" in [c.card.id for c in ctx.do_now]
 
 
+def test_a_do_now_card_needing_the_gpu_box_says_so(server):
+    """`unattended: false` puts a card in `Do now` regardless of `requires:` —
+    a person is needed wherever it runs, so `elsewhere` (which also demands
+    `unattended: true`) will not take it, per its own docstring. Without a
+    label on the row, "Do now" reads as "safe to start here", which is false
+    for a card that also needs the machine with the GPU box on it — the
+    mistake Karel asked this label to prevent."""
+    base, root = server
+    path = _card(root, "tasks", "needs-gpu", unattended="false")
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        "tier: worker", "tier: worker\nrequires: gpu-box"), encoding="utf-8", newline="")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "requires")
+
+    ctx = panel.read_context(root)
+    assert [c.card.id for c in ctx.do_now] == ["needs-gpu"]
+
+    _, text = _get(base, "now")
+    head, _, rest = text.partition("Cards the night cannot take")
+    assert "needs gpu-box" in rest
+
+
 # ------------------------------------------------- answering a parked decision
 
 

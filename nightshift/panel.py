@@ -1943,10 +1943,18 @@ def _render_now(ctx: Context) -> str:
     out.append(_review_section(ctx))
 
     do_now = ctx.do_now
+    # A card can land here (a person is needed regardless of machine) while
+    # *also* declaring `requires: gpu-box` — needing a person is not the same
+    # fact as being doable on whichever machine that person is sitting at. The
+    # chip is the only thing on the row that says so; without it "Do now" reads
+    # as "safe to start here", which for one of these cards is false.
+    capabilities = host_capabilities(ctx.root)
     inline_rows = []
     for candidate in do_now:
         card = candidate.card
         meta = [_chip(candidate.reason.split(";")[0][:70])]
+        if card.requires and card.requires not in capabilities:
+            meta.append(_chip(f"needs {card.requires}", "warn"))
         if card.attempts:
             meta.append(_e(f"{card.attempts} attempt(s)"))
         inline_rows.append(_row(
