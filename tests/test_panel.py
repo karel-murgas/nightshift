@@ -2102,7 +2102,8 @@ def test_work_feedback_opens_a_session_that_waits_before_fixing_anything(
     assert status == 200, data
     prompt = opened[0][-1]
     assert prompt.startswith("This card just failed its play-through in `testing/`")
-    assert "Wait for their feedback before you touch anything" in prompt
+    assert "Read the card below for context, then wait" in prompt
+    assert "Do not touch anything" in prompt
     assert "played" in prompt
     assert "Leave the card in `testing/`" in prompt
     assert "waiting for your feedback" in data["message"]

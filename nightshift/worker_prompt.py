@@ -119,16 +119,26 @@ them what to do with what you built."""
 #: already merged and sitting in `{finished_lane}/`, so unlike `INTERACTIVE_CARD` there
 #: is no queue transition to describe: the session fixes it in place and it never
 #: leaves the lane it is already in.
+#:
+#: **This is the fresh-session fallback, used only when no session survives to
+#: resume** (`panel._latest_session_for_card` found nothing). It used to bury the
+#: wait instruction inside a paragraph that led straight into a checklist — and on
+#: a real card the session read it, then started making tool calls anyway before
+#: the maintainer had said a word (Karel, 2026-08-28). The wait now has to be the
+#: first thing said, standing alone, with the card body itself relabelled as
+#: context rather than a to-do list to start working through.
 INTERACTIVE_CARD_FEEDBACK = """\
 This card just failed its play-through in `{finished_lane}/`, and the maintainer is at \
 the keyboard to say why.
 
-**Wait for their feedback before you touch anything.** The gates, the tests and a review \
-all passed already — do not re-read `## Acceptance` and start redoing the card from \
-scratch. Something specific about it did not hold up when it was actually played; ask what \
-that was if they have not said yet, then fix precisely that.
+**Read the card below for context, then wait.** Do not touch anything — no editing, no \
+branching, no running gates or tests, no re-reading `## Acceptance` to start redoing the \
+card from scratch — until the maintainer tells you what was wrong. The gates, the tests \
+and a review already passed; something specific did not hold up when it was actually \
+played, and only they know what. If they have not said yet, your only move right now is \
+to wait for them to say it.
 
-Once you have it:
+Once you have their feedback:
 
 - Write what they told you onto the card as `## Feedback`, in their own words.
 - **Branch before you edit.** Cut `{branch}` from `{base}` and commit your work there. \
@@ -152,7 +162,7 @@ is there, not a new pass through `tasks/`.
 
 {tool_economy}
 
---- the card ---
+--- the card, for context only — do not act on any of it until they have spoken ---
 {card_body}
 """
 
