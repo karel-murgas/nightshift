@@ -1751,7 +1751,24 @@ def sweep_terminal_cards(root: Path) -> list[str]:
     one) is cleaned up too. `testing/` was missing here until
     `rescue-branches-only-swept-on-failure` (2026-08-13): a card that succeeds
     normally lands there, not in `done/`/`failed/`, and used to keep its
-    `@failed-N` rescue refs forever. Returns the card ids actually pruned."""
+    `@failed-N` rescue refs forever. Returns the card ids whose run dir was
+    actually pruned.
+
+    **The run dir (`.ai/runs/<id>/`, not the worktree or the rescue branches)
+    is pruned only for `done/`.** It carries the `worker-N.json` that the
+    Command Center's Talk/`Open inline` buttons resume from
+    (`panel._latest_session_for_card`) — deleting it the instant a card
+    landed in `testing/` meant the very button meant for "reopen this and
+    tell it what's wrong" could never resume anything: on this machine every
+    `testing/` card had already lost its session by the next runner startup
+    (Karel, 2026-08-28, after "Open inline" on a real `testing/` card fell
+    back to a fresh session it should have been able to resume). `failed/`
+    gets the same durability, for the same reason a maintainer resuming a
+    failed card wants its last session rather than a blank one — except the
+    no-progress retirement (`_settle` above) still prunes immediately on
+    purpose: that session already proved it does not converge, so there is
+    nothing there worth resuming. Worktrees and rescue branches carry no
+    session state, so both still prune eagerly for all three lanes."""
     pruned = []
     for lane in ("done", "failed", "testing"):
         for card in board.cards(root, lane):
@@ -1762,7 +1779,7 @@ def sweep_terminal_cards(root: Path) -> list[str]:
             # `prune_rescue_branches` is already a no-op when there is nothing
             # to delete.
             prune_rescue_branches(root, card.id)
-            if (root / RUNS / card.id).exists():
+            if lane == "done" and (root / RUNS / card.id).exists():
                 prune_run_dir(root, card.id)
                 pruned.append(card.id)
     return pruned
@@ -5233,14 +5250,19 @@ def _error_section(card_id: str, attempt: int, result: Dispatch, *,
     Written to be readable from a machine that did not run the card, which is the
     thing the previous version could not do. It said `Full output:
     .ai/runs/<id>/attempt-N/` and nothing else, and that pointer is empty on every
-    host but the one that ran the night (`.ai/runs/` is gitignored) — and on a
-    terminal failure it is empty there too, because `prune_run_dir` deletes the
-    directory two lines after this text is written. Karel went looking for a
-    failure reason on 2026-07-31 and there was nowhere it could have been.
+    host but the one that ran the night (`.ai/runs/` is gitignored). Karel went
+    looking for a failure reason on 2026-07-31 and there was nowhere it could have
+    been.
 
-    `retiring` is whether this attempt is the card's last, and it changes what the
-    last paragraph is allowed to promise: a directory that is about to be pruned is
-    not offered as somewhere to look.
+    `retiring` is whether this attempt is the card's last. It used to also mean
+    "and the directory is gone" — `prune_run_dir` ran two lines after this text
+    was written — but as of `resume-open-inline` (2026-08-28) a card retired via
+    the attempt limit keeps its run dir specifically so it stays there: every
+    attempt that led here did real work, so it is what Talk/`Open inline` resume
+    from when the maintainer reopens it. Only the *other* retiring path — the
+    no-progress breaker in `settle` — still prunes immediately, and writes its
+    own `## Error` text directly rather than through this function, precisely
+    because that one *is* gone the moment it is written.
     """
     head = f"Attempt {attempt} failed — {_quote_safe(result.detail)}"
     parts = [head]
@@ -5252,16 +5274,18 @@ def _error_section(card_id: str, attempt: int, result: Dispatch, *,
     where = f"`.ai/runs/{card_id}/attempt-{attempt}/` on host `{socket.gethostname()}`"
     if retiring:
         parts.append(
-            f"The full log was {where} and was deleted when this card was retired "
-            f"(`prune_run_dir`). The block above is what survives — `.ai/runs/` is "
-            f"gitignored, so it never left that machine either. Re-run the card to "
-            f"get a fresh attempt directory.")
+            f"The full log is at {where} — kept, not pruned, because this card can "
+            f"still be reopened: the Command Center's Talk/`Open inline` resume from "
+            f"exactly this directory. `.ai/runs/` is gitignored, so it is only on "
+            f"that host; it is finally pruned once this card reaches `done/`.")
     else:
         parts.append(
             f"Full output: {where} — gitignored, so it is only on that machine, and "
-            f"it is deleted if this card is retired after {MAX_ATTEMPTS} attempts. "
-            f"This attempt's commits are not lost either way: they stay on `ai/{card_id}` "
-            f"and, once this card is dispatched again, are preserved as a rescue branch "
+            f"it is deleted if this card is later filed as stuck (no working-tree "
+            f"progress across {NO_PROGRESS_STOP} resumes); reaching {MAX_ATTEMPTS} "
+            f"attempts and retiring to `failed/` no longer deletes it. This attempt's "
+            f"commits are not lost either way: they stay on `ai/{card_id}` and, once "
+            f"this card is dispatched again, are preserved as a rescue branch "
             f"(`ai/{card_id}@failed-N` — `prune_rescue_branches`) rather than deleted at "
             f"the next cold start, until the card leaves `tasks/` for good.")
     return "\n\n".join(parts)
@@ -5632,7 +5656,15 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
                                               retiring=retiring))
     if retiring:
         board.move(root, card, "failed")
-        prune_run_dir(root, card_id)
+        # **Not `prune_run_dir` here.** Unlike the no-progress retirement above,
+        # every attempt that led here did real, distinct work — review kept
+        # sending it back with a concrete finding, not looping on a stuck resume
+        # — so the last session is exactly what a maintainer picking this card
+        # back up via Talk would want, not a cold re-read of the card. Left for
+        # `sweep_terminal_cards` to judge instead, which now keeps it too
+        # (Karel, 2026-08-28: "do both" — `failed/` should get the same
+        # resume-durability `testing/` does, except for this retirement's own
+        # no-progress sibling above, which prunes immediately on purpose).
         prune_rescue_branches(root, card_id)
         return f"{card_id}: → failed/ after {card.attempts} attempts ({result.detail})"
     # `board.dispatch_order`'s back bucket — this card gets another attempt, but
