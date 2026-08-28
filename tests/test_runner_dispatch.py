@@ -1925,20 +1925,28 @@ def test_the_worktree_hash_ignores_where_the_worktree_lives_but_not_its_content(
 
 
 # --------------------------------------------------------------------------
-# Pruning (`runner-prune-run-dirs`)
+# Pruning (`runner-prune-run-dirs`, later narrowed by `resume-open-inline`)
 # --------------------------------------------------------------------------
 #
-# The rule under test: `failed/` is reached by the runner itself, so it is
-# pruned eagerly, at both of its in-run paths (MAX_ATTEMPTS and the `stuck`
-# breaker); `done/` is reached by Karel, by hand, so it is swept at the next
-# startup instead; a worktree ceiling backstops the one lifecycle a run-dir
-# rule cannot reach. No test here mirrors arithmetic — every one drives a real
-# `dispatch()`/`settle()`/`run()` call, or a real `git worktree`.
+# The rule under test, as of 2026-08-28: only the `stuck`/no-progress breaker
+# prunes `failed/` eagerly — that session already proved across
+# `NO_PROGRESS_STOP` resumes that it does not converge, so nothing about it is
+# worth keeping. The MAX_ATTEMPTS path to `failed/` does not: every attempt
+# that led there did real, distinct work, so the last session is exactly what
+# the Command Center's Talk/`Open inline` buttons resume from
+# (`panel._latest_session_for_card`) when a maintainer reopens it. `testing/`
+# gets the same durability, for the same reason — that population is
+# specifically what "Open inline" targets. Only `done/` is swept at the next
+# startup, once a card has nothing left to reopen it for. A worktree ceiling
+# backstops the one lifecycle a run-dir rule cannot reach. No test here
+# mirrors arithmetic — every one drives a real `dispatch()`/`settle()`/`run()`
+# call, or a real `git worktree`.
 
-def test_a_card_retired_via_max_attempts_has_its_run_dir_pruned_eagerly(tmp_path, monkeypatch):
-    """The pre-existing `failed/` path. The moment the third failure lands the
-    card in `failed/`, `.ai/runs/<id>/` is gone — the numbers it held now live
-    on the card's own `## Telemetry` section instead."""
+def test_a_card_retired_via_max_attempts_keeps_its_run_dir_for_resume(tmp_path, monkeypatch):
+    """Every attempt that led to `failed/` here did real work review kept
+    rejecting — not a stuck resume — so unlike the `stuck` breaker below, this
+    path leaves `.ai/runs/<id>/` alone: a maintainer reopening this card via
+    Talk should get the session that actually tried, not a blank one."""
     root = _worktree_repo(tmp_path)
     _charter(root, "code-thread")
     _card(root, "tasks", "probe")
@@ -1951,7 +1959,7 @@ def test_a_card_retired_via_max_attempts_has_its_run_dir_pruned_eagerly(tmp_path
         runner.settle(root, "probe", result)
         assert board.find(root, "probe").lane == expected_lane
 
-    assert not (root / ".ai" / "runs" / "probe").exists()
+    assert (root / ".ai" / "runs" / "probe").exists()
     assert "## Telemetry" in board.find(root, "probe").text
 
 
@@ -2027,6 +2035,41 @@ def test_a_card_in_tasks_with_attempts_keeps_its_run_dirs_through_the_sweep(tmp_
     run_dir = root / ".ai" / "runs" / "inflight" / "attempt-1"
     run_dir.mkdir(parents=True)
     (run_dir / "worker-1.json").write_text("{}", encoding="utf-8")
+
+    swept = runner.sweep_terminal_cards(root)
+
+    assert swept == []
+    assert run_dir.is_dir()
+
+
+def test_a_testing_card_keeps_its_run_dir_through_the_sweep(tmp_path):
+    """The bug this guards against: `_latest_session_for_card` (panel.py) reads
+    exactly this file to resume "Open inline" — on a real board, every
+    `testing/` card had lost it by the next runner startup, so the button
+    could never resume anything (Karel, 2026-08-28)."""
+    root = _repo(tmp_path)
+    _card(root, "testing", "played")
+    run_dir = root / ".ai" / "runs" / "played" / "attempt-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "worker-1.json").write_text('{"session_id": "s"}', encoding="utf-8")
+
+    swept = runner.sweep_terminal_cards(root)
+
+    assert swept == []
+    assert run_dir.is_dir()
+
+
+def test_a_failed_card_keeps_its_run_dir_through_the_sweep(tmp_path):
+    """Mirrors the `testing/` case above — a `failed/` card (however it got
+    there; the sweep does not distinguish MAX_ATTEMPTS from a hand move) is
+    still a card someone might Talk to, so the startup sweep leaves its run
+    dir alone. The `stuck` breaker's own eager prune, tested above, is what
+    keeps a genuinely unresumable session from ever reaching this far."""
+    root = _repo(tmp_path)
+    _card(root, "failed", "retired")
+    run_dir = root / ".ai" / "runs" / "retired" / "attempt-3"
+    run_dir.mkdir(parents=True)
+    (run_dir / "worker-1.json").write_text('{"session_id": "s"}', encoding="utf-8")
 
     swept = runner.sweep_terminal_cards(root)
 

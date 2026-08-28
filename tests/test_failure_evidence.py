@@ -8,9 +8,13 @@ direction:
 
   * `.ai/runs/` is gitignored — machine-local by design — so a night run on the
     desktop leaves nothing at all behind on the laptop the board is read from; and
-  * `runner.prune_run_dir` deletes the card's whole run directory the moment the
-    card is retired to `failed/`, two lines after the pointer to it is written — so
-    for a terminal failure the pointer was dead on the producing host too.
+  * `runner.prune_run_dir` deleted the card's whole run directory the moment the
+    card was retired to `failed/`, two lines after the pointer to it was written
+    — so for a terminal failure the pointer was dead on the producing host too.
+    (Narrowed by `resume-open-inline`, 2026-08-28: only the no-progress `stuck`
+    path still prunes that eagerly — the ordinary attempt-limit retirement now
+    keeps the directory, since it is what the Command Center's Talk/`Open
+    inline` buttons resume a reopened card's session from.)
 
 Dungeoneer's maintainer went looking on 2026-07-31 for why three cards failed
 overnight and there was nowhere the answer could have been. The fix is that the
@@ -70,13 +74,16 @@ def test_a_retrying_card_is_told_where_the_full_log_is_and_on_which_host():
     assert "gitignored" in body
 
 
-def test_a_retired_card_does_not_promise_a_directory_that_was_just_deleted():
-    """`settle` calls `prune_run_dir` immediately after writing this section when
-    the card is retired. Offering the path as somewhere to look is the original
-    bug; the section has to say it is gone instead."""
+def test_a_retired_card_promises_a_directory_that_is_still_there():
+    """As of `resume-open-inline` (2026-08-28), retiring to `failed/` via the
+    attempt limit no longer prunes the run dir — it survives so Talk/`Open
+    inline` can resume the session that actually tried. The section must not
+    claim it is gone, and must not use the old bare `Full output:` phrasing
+    that reads as "go look here" without saying whether it still can be."""
     body = runner._error_section("card-x", 3, _failed(), retiring=True)
-    assert "deleted" in body
+    assert "deleted" not in body
     assert "Full output:" not in body
+    assert "kept" in body
 
 
 def test_the_section_survives_having_no_evidence_at_all():
