@@ -1158,6 +1158,71 @@ def ensure_integration_checkout(root: Path, base: str) -> Path:
     return path
 
 
+def stranded_board_edits(ctrl: Path, base: str) -> list[str]:
+    """Board files the launch checkout holds and `base` does not.
+
+    The dedicated-checkout topology moved the board's *reader* without moving the
+    board's *editor*. The Obsidian vault is the launch checkout, and so is every
+    interactive session, while `ensure_integration_checkout` points every dispatch
+    at a second working copy of `Board/`. So an answer typed into a card while the
+    launch checkout sits on a feature branch is invisible to the very run it was
+    typed for — and invisible *quietly*: `select()` reports every card it left out,
+    but a card sitting in a lane of a board it never opened is not something it can
+    report at all.
+
+    Measured 2026-08-28: `drained-vault-graphics` was answered, reset to
+    `attempts: 0` and promoted to `tasks/` in the launch checkout on
+    `ai/minigame-timing-invariant`, uncommitted. Two chore batches then read the
+    dedicated checkout, found the card still parked in `needs-decision/` with its
+    one attempt spent, and wrote "nothing to dispatch" (Karel: *"I have
+    'drained-vault-graphics' in chores, but run chores doesn't run it"*).
+
+    Both ways a board edit strands, because both are the same mistake:
+
+    * **uncommitted** under `Board/` in the launch checkout, and
+    * **committed on the launch branch** but not reachable from `base`. Board
+      commits belong on the integration branch, so anything the launch branch
+      changed under `Board/` on its own is a board only it can see. Three-dot, so
+      this is what the launch branch did rather than what `base` moved on past it.
+
+    Scoped to `Board/` deliberately: `Board.base` and every `GENERATED_VIEWS` file
+    live at the repo root, so the rewrite Obsidian performs on `Board.base` at every
+    vault open — expected, and explicitly not a finding — cannot make this cry wolf.
+    """
+    stranded = {path for _, path in gitpaths.status(ctrl) if path.startswith("Board/")}
+    stranded.update(gitpaths.changed(ctrl, f"{base}...HEAD", "--", "Board/"))
+    return sorted(stranded)
+
+
+def stranded_board_refusal(ctrl: Path, work: Path, base: str) -> str:
+    """Why a run reading `work` must not start, or `""` — see `stranded_board_edits`.
+
+    Only ever a refusal when the board being read is not the board being edited:
+    with the launch checkout as the work root there is one copy of `Board/` and
+    nothing can strand, which is the in-place case and the common one.
+
+    A refusal rather than a warning, for the same reason `dirty_outside_board` is
+    one: the alternative is a run that dispatches from a board its maintainer cannot
+    see, and the cheapest place to notice that is before anything is spent.
+    """
+    try:
+        same = work.resolve() == ctrl.resolve()
+    except OSError:
+        same = work == ctrl
+    if same:
+        return ""
+    stranded = stranded_board_edits(ctrl, base)
+    if not stranded:
+        return ""
+    shown = ", ".join(stranded[:6]) + (f" (+{len(stranded) - 6} more)"
+                                       if len(stranded) > 6 else "")
+    return (f"the launch checkout at {ctrl} holds board edits that `{base}` does not: "
+            f"{shown}. The board for this run is read from {work}, so those edits would "
+            f"be ignored — silently, since a card in a lane that was never scanned "
+            f"cannot even be reported as skipped. Land them on `{base}` first (commit "
+            f"them there, or redo them in {work}) and re-run.")
+
+
 # --------------------------------------------------------------------------
 # Warm resume (runner-worker-handover)
 # --------------------------------------------------------------------------
@@ -5988,6 +6053,13 @@ def run(root: Path, args: argparse.Namespace) -> int:
                 _log(f"refusing to run — the dedicated `{base}` checkout is dirty outside "
                      f"Board/: {shown}. It is runner-owned; commit or discard those changes "
                      f"in {work} and re-run.")
+                return 1
+            # The mirror of the check above, one checkout over: that one guards the
+            # board the runner *writes*, this one the board Karel *edits*. Redirecting
+            # here means his `Board/` and the runner's are two files, and an answer he
+            # typed into the wrong one is the failure nothing else can see.
+            if refusal := stranded_board_refusal(ctrl, work, base):
+                _log(f"refusing to run — {refusal}")
                 return 1
 
         _CTRL_ROOT, _WORK_ROOT = ctrl, work

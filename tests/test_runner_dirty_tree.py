@@ -94,3 +94,84 @@ def test_a_new_untracked_file_outside_the_board_still_refuses(repo):
     the "HEAD is not what you left" case."""
     (repo / "pkg" / "extra.py").write_text("y = 1\n", encoding="utf-8")
     assert runner.dirty_outside_board(repo) == ["pkg/extra.py"]
+
+
+# ------------------------------------------------------------------------------
+# The other side of the same coin. `Board/` is exempt from `dirty_outside_board`
+# because it is not the maintainer's work in progress — but that exemption was
+# written for the in-place topology, where there is exactly one copy of the board.
+# Once `ensure_integration_checkout` redirects a run to a second working copy, an
+# uncommitted board edit in the launch checkout stops being "somebody looking at
+# the board" and becomes a card the run will never see.
+#
+# 2026-08-28: `drained-vault-graphics` was answered and promoted to `tasks/` in the
+# launch checkout on a feature branch, uncommitted. Two chore batches read the
+# dedicated checkout, found it still parked in `needs-decision/` with its one
+# attempt spent, and reported "nothing to dispatch" — a board disagreeing with the
+# one on screen, and nothing in either output saying they were different files.
+
+
+def _card(root: Path, lane: str, card_id: str) -> None:
+    (root / "Board" / lane / f"{card_id}.md").write_text(
+        "\n".join(["---", f"id: {card_id}", "---", ""]), encoding="utf-8")
+
+
+def _work_elsewhere(repo: Path) -> Path:
+    """A stand-in for the dedicated checkout. Only its *identity* matters here:
+    `stranded_board_refusal` reads the launch checkout and compares the two paths."""
+    return repo.parent / ".proj-integration"
+
+
+def test_an_uncommitted_board_edit_strands_when_the_run_reads_another_checkout(repo):
+    _card(repo, "tasks", "answered")
+    assert runner.stranded_board_edits(repo, "main") == ["Board/tasks/answered.md"]
+    refusal = runner.stranded_board_refusal(repo, _work_elsewhere(repo), "main")
+    assert "Board/tasks/answered.md" in refusal
+    assert str(repo) in refusal and str(_work_elsewhere(repo)) in refusal
+
+
+def test_the_same_edit_is_not_stranded_when_the_run_works_in_place(repo):
+    """The common topology: one copy of `Board/`, so nothing can be left behind in
+    it. Refusing here would break every in-place run for the ordinary act of
+    editing a card — exactly what `dirty_outside_board` exempts `Board/` for."""
+    _card(repo, "tasks", "answered")
+    assert runner.stranded_board_refusal(repo, repo, "main") == ""
+
+
+def test_a_board_commit_on_the_launch_branch_strands_too(repo):
+    """Committing it is not landing it. Board commits belong on the integration
+    branch, so one sitting on a feature branch is as invisible as an uncommitted
+    edit — and looks considerably more finished."""
+    _git(repo, "checkout", "-q", "-b", "feat")
+    _card(repo, "tasks", "b")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "board: promote b")
+    assert runner.stranded_board_edits(repo, "main") == ["Board/tasks/b.md"]
+
+
+def test_what_base_moved_on_past_the_launch_branch_is_not_stranded(repo):
+    """Three-dot, not two. A launch branch that merely lags `main` has stranded
+    nothing, and counting the lag would refuse every run made from a branch cut
+    more than one board commit ago — which is every branch by the second day."""
+    _git(repo, "checkout", "-q", "-b", "feat")
+    _git(repo, "checkout", "-q", "main")
+    _card(repo, "tasks", "later")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "board: later")
+    _git(repo, "checkout", "-q", "feat")
+    assert runner.stranded_board_edits(repo, "main") == []
+
+
+def test_a_clean_launch_checkout_strands_nothing(repo):
+    assert runner.stranded_board_edits(repo, "main") == []
+    assert runner.stranded_board_refusal(repo, _work_elsewhere(repo), "main") == ""
+
+
+def test_the_obsidian_rewrite_at_the_repo_root_does_not_cry_wolf(repo):
+    """`Board.base` and the generated views sit at the repo root, not under
+    `Board/`. Bases normalises `Board.base` on every vault open, so a check that
+    counted it would refuse practically every run — the `looking-at-it-broke-it`
+    failure this file already exists for, arriving one directory over."""
+    (repo / "Board.base").write_text("views: []\n", encoding="utf-8")
+    (repo / "Digest.md").write_text("# Digest\n\nrewritten\n", encoding="utf-8")
+    assert runner.stranded_board_edits(repo, "main") == []

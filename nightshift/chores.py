@@ -685,6 +685,13 @@ def _workspace(root: Path, base: str) -> tuple[Path, str]:
         return root, (f"the dedicated `{base}` checkout is dirty outside the board: "
                       f"{shown}. It is runner-owned; commit or discard those changes "
                       f"in {work} and re-run.")
+    # And the same question asked of the *other* checkout: this redirect means the
+    # board `select()` is about to scan is not the board Karel has been editing, so a
+    # promoted card left behind in the launch checkout would make this batch report
+    # "nothing to dispatch" about a chore that is plainly sitting in `tasks/` on his
+    # screen. That is the failure `stranded_board_edits` was written for.
+    if refusal := runner.stranded_board_refusal(root, work, base):
+        return root, refusal
     return work, ""
 
 
@@ -1202,6 +1209,39 @@ def _review(work: Path, base: str, branch: str, out_dir: Path,
     return result
 
 
+def _plan_root(root: Path, base: str) -> Path:
+    """Which checkout `--plan` reads, mirroring `runner.run`'s `--dry-run` topology.
+
+    `--plan` used to read and write `root` unconditionally while `execute()` went
+    through `_workspace`, so the two could describe different boards with nothing in
+    either output saying so: a plan listing a chore off the launch checkout, and a
+    batch minutes later reporting "nothing to dispatch" — the 2026-08-28 confusion
+    that `runner.stranded_board_edits` documents, arriving by a second route.
+
+    It does **not** cut a worktree the way `_workspace` does, and does not refuse on a
+    dirty one. A plan writes nothing but its own view and dispatches nothing; the
+    command meant for "show me the batch" must stay usable exactly when the tree is
+    mid-edit. So: in place when the launch checkout is on `base`, the dedicated
+    checkout when one already exists, and otherwise `root` with the caveat said out
+    loud rather than left to be inferred from a batch that behaves differently later.
+    """
+    if runner.current_branch(root) == base:
+        return root
+    existing = runner.integration_checkout_path(root)
+    if runner._worktree_registered(root, existing):
+        if stranded := runner.stranded_board_edits(root, base):
+            shown = ", ".join(stranded[:6]) + (
+                f" (+{len(stranded) - 6} more)" if len(stranded) > 6 else "")
+            print(f"  note - the board below is {existing}'s, not this checkout's, and "
+                  f"this checkout holds board edits `{base}` does not: {shown}. "
+                  f"A real batch will refuse until they are landed on `{base}`.")
+        return existing
+    print(f"  note - no dedicated `{base}` checkout exists yet, so this reads the board "
+          f"from the launch checkout on `{runner.current_branch(root)}`, which may lag "
+          f"`{base}`")
+    return root
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Dispatch and verify the next batch of chores.")
@@ -1225,7 +1265,17 @@ def main(argv: list[str] | None = None) -> int:
                        test_timeout=args.test_timeout)[0]
 
     root = args.root or repo_root()
-    chosen, skipped = select(root, limit=args.limit)
+    # `--plan` must describe the batch `execute()` would run, which means reading the
+    # board `execute()` would read. See `_plan_root`. A repo with no integration
+    # branch declared falls through to `root` rather than refusing: `execute()` is
+    # where that has to be an error, and a read-only view of the board is exactly
+    # what you want working while a repo is still being set up.
+    try:
+        base = runner.default_base(root)
+    except manifest.ManifestError:
+        base = ""
+    work = _plan_root(root, base) if base else root
+    chosen, skipped = select(work, limit=args.limit)
     print(f"chores: {len(chosen)} selected, {len(skipped)} left out")
     for card in chosen:
         print(f"  + {card.id}")
@@ -1233,7 +1283,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  - {entry.card_id}: {entry.reason}")
 
     batch = Batch(skipped=list(skipped))
-    textio.write_text_lf(root / OUT, report(batch, dt.datetime.now()))
+    textio.write_text_lf(work / OUT, report(batch, dt.datetime.now()))
     print(f"  wrote {OUT}")
     return 0
 

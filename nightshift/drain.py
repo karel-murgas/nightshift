@@ -394,6 +394,12 @@ def main(argv: list[str] | None = None) -> int:
               f"{shown}. A review merges into it; commit or discard those first.",
               file=sys.stderr)
         return 1
+    # A drain moves cards out of `review/`, so it is as much a board writer as a
+    # night is, and the redirect above gives it the same blind spot: board edits
+    # sitting in the launch checkout are not in the board it is about to rewrite.
+    if refusal := runner.stranded_board_refusal(root, work, base):
+        print(f"refusing to drain — {refusal}", file=sys.stderr)
+        return 1
 
     # The lock, not politeness: this merges into `base` and moves cards, and a
     # night doing the same thing at the same time is the one way a drain could
