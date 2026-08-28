@@ -339,6 +339,58 @@ def test_an_inline_note_is_carded_without_a_scribe_dispatch(
     assert "## Open questions" in card and "## Acceptance" in card
 
 
+def test_an_inline_card_defaults_to_play_so_it_lands_where_karel_sees_it(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """`verify:` was hardcoded `review` here, which routes a finished card straight
+    to `done/` past `testing/`.
+
+    The premise was that an inline card is work Karel did himself, so `testing/`
+    would ask him to verify himself. It is not: `inline` means the work happens in a
+    live session at the keyboard rather than overnight, and in practice a session
+    does it. Three player-visible Dungeoneer features reached `done/` unplayed before
+    Karel caught it (2026-08-29). The default now falls toward his desk, which is what
+    `03_board.md` says every `verify:` default must do.
+    """
+    root = _repo(tmp_path, alpha="a")
+    _routes(monkeypatch, {"alpha.md": "inline"})
+    assert ingest.main(["--root", str(root)]) == 0
+    card = (root / "Board" / "tasks" / "alpha.md").read_text(encoding="utf-8")
+    assert board.parse_fields(card)["verify"] == "play"
+
+
+def test_an_inline_nightshift_note_is_review_because_karel_cannot_play_tooling(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The one signal this step already has, reused rather than a new field asked of
+    the classifier: a note it judged to be nightshift's own tooling surface has no
+    surface in the consuming project to exercise, so `review` is honest there.
+
+    The asymmetry is the point. A tooling note the classifier failed to flag gets
+    `play` and costs one drag out of `testing/`; the reverse loses a verification
+    silently, because nothing looks at `done/` again.
+    """
+    root = _repo(tmp_path, alpha="a", beta="b")
+    _routes(monkeypatch, {"alpha.md": "inline", "beta.md": "inline"},
+            nightshift=frozenset({"alpha.md"}))
+    assert ingest.main(["--root", str(root)]) == 0
+    tooling = (root / "Board" / "tasks" / "alpha.md").read_text(encoding="utf-8")
+    game = (root / "Board" / "tasks" / "beta.md").read_text(encoding="utf-8")
+    assert board.parse_fields(tooling)["verify"] == "review"
+    assert board.parse_fields(game)["verify"] == "play"
+    assert card_schema.check(root) == []
+
+
+def test_a_route_corrected_to_inline_gets_the_same_verify_rule(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """`set_route` cards the note through the same `card_inline`, so a hand
+    correction must not be the one path that still hardcodes a value."""
+    root = _repo(tmp_path, alpha="a")
+    _routes(monkeypatch, {"alpha.md": "triage"})
+    assert ingest.main(["--root", str(root)]) == 0
+    assert ingest.set_route(root, "alpha.md", "inline", "I will just do it", _healthy())
+    card = (root / "Board" / "tasks" / "alpha.md").read_text(encoding="utf-8")
+    assert board.parse_fields(card)["verify"] == "play"
+
+
 def test_the_inline_card_satisfies_the_schema_it_lands_in(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A card in `tasks/` is checked by `card_schema`, and this one is generated —

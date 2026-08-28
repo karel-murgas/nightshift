@@ -431,8 +431,33 @@ def classify(found: list[Note], root: Path, *, model: str = CLASSIFIER_MODEL,
 #: * `tier: worker` — `_TIERS` is `{worker, lead}` and neither describes a human. The
 #:   lower is the honest choice: a tier is what a dispatcher would resolve to a
 #:   model, and nothing here will ever resolve it.
-#: * `verify: review` — the person who did the work is the person who would have
-#:   played it, so `testing/` would be asking Karel to verify himself.
+#: * `verify: {verify}` — the one field here that is *not* a constant, and the
+#:   reason is a bug this template shipped for a month. It was hardcoded
+#:   `review` on the premise that "the person who did the work is the person who
+#:   would have played it, so `testing/` would be asking Karel to verify
+#:   himself." That premise conflates two different things. `inline` means the
+#:   work is handled in a live session at the keyboard rather than dispatched
+#:   overnight — it does **not** mean Karel typed it. In practice a session does
+#:   the work and Karel only agreed the shape of it beforehand, so `verify:
+#:   review` routed finished, player-visible features straight to `done/` with
+#:   nobody ever having seen them run: three of them on the Dungeoneer board
+#:   (`alarm-ice`, `self-kill-stats`, `clean-getaway-rework`) before Karel caught
+#:   it on 2026-08-29 — *"I think the card went straight to done instead of to
+#:   the testing"*.
+#:
+#:   So the value is derived rather than assumed, off the one signal this step
+#:   already has: `nightshift=True` means the classifier judged the note to be
+#:   nightshift's own tooling surface, which by construction has no surface in
+#:   the consuming project that Karel could play — that gets `review`. Everything
+#:   else gets `play`.
+#:
+#:   **The asymmetry is deliberate and it is the same one `03_board.md` §`verify:`
+#:   already states** ("the default must fall toward Karel's desk"). Guessing
+#:   `play` for a card with nothing to play costs one glance and one drag out of
+#:   `testing/`. Guessing `review` for a card with something to play loses the
+#:   verification entirely and silently — `done/` is the archive, and nothing
+#:   ever looks again. A tooling note the classifier failed to flag lands in
+#:   `testing/`, which is the cheap error on purpose.
 #:
 #: `## Acceptance` says who decides rather than inventing criteria. A note is routed
 #: `inline` *because* it has no machine-checkable brief; writing one here would
@@ -453,7 +478,7 @@ worker: none
 recipe: none
 unattended: false
 kind: inline
-verify: review
+verify: {verify}
 created: {today}
 {tags}---
 
@@ -498,6 +523,12 @@ def card_inline(root: Path, note: Note, *, nightshift: bool = False) -> str:
     flag the classifier attached to the routing decision — the note said "this is
     the command center / the runner / boardcmd" in `why`, and that has to survive
     onto the card itself or the board stops saying it too.
+
+    It now carries a second consequence: it is also what picks `verify:`. A
+    nightshift-tooling note has no surface in the consuming project for Karel to
+    exercise, so its card is `verify: review` and lands in `done/`; every other
+    inline card is `verify: play` and lands in `testing/`, where he sees it. See
+    `_INLINE_CARD` for why the default falls that way.
     """
     ident = board.slug(note.path.stem)
     target = board.board_dir(root) / "tasks" / f"{ident}.md"
@@ -509,6 +540,7 @@ def card_inline(root: Path, note: Note, *, nightshift: bool = False) -> str:
         ident=ident, title=note.path.stem.replace('"', "'"),
         today=dt.date.today().isoformat(), body=body or "(the note was empty)",
         lane="inbox", filename=note.name,
+        verify="review" if nightshift else "play",
         tags="tags:\n  - nightshift\n" if nightshift else ""))
     note.path.unlink()
     return ident
