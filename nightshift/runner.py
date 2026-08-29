@@ -4972,6 +4972,101 @@ def _delete_remote_branch(root: Path, remote: str, branch: str, *,
              f"{detail[-1][:150] if detail else 'see git output'}")
 
 
+def _reconcile_dirty_bookkeeping(root: Path) -> tuple[bool, str]:
+    """Fold `root`'s own uncommitted changes into a commit before anything merges
+    into it — but only when every one of them is board or memory bookkeeping.
+
+    **Why this exists** (aim-crit-display-desync, 2026-08-29). `merge_branch` and
+    `_merge_with_resolver`'s final `--ff-only` both update `root`'s working tree
+    directly, and git refuses either outright — `"error: Your local changes to
+    the following files would be overwritten by merge"` — the instant a path it
+    needs to touch already carries an uncommitted diff, *before* it ever attempts
+    a real three-way resolution. That refusal leaves no unmerged paths at all
+    (`_unmerged_paths` reads empty), so it is textually indistinguishable from a
+    genuinely broken checkout — and on this card it merged a rebase that had just
+    replayed and re-verified clean (51 gates, 2243 tests), only to have the *next*
+    step fail on `root` carrying an uncommitted edit to the card's own board file.
+
+    `root` is the runner's dedicated integration checkout; nothing else writes to
+    it between dispatches. A stray uncommitted change sitting there is the
+    runner's own prior write, not caught up in a commit yet — folding it in
+    before the merge is what would already be true had that step committed it
+    itself, and carries no more judgment than that. A dirty path that is *not*
+    bookkeeping is left exactly as found: that could be real, uncommitted work
+    (Karel's own checkout, in the in-place-fallback topology) and this function
+    has no business deciding what to do with it (§12).
+
+    Returns `(reconciled, detail)`. `False` and `root` untouched when there was
+    nothing to do (already clean) or a dirty path fell outside board/memory —
+    the caller proceeds exactly as it did before this existed, so a real problem
+    still surfaces at the merge step it always did. `detail` carries a commit
+    failure's reason, for the caller's own log.
+    """
+    dirty = gitpaths.changed(root, "HEAD")
+    if not dirty:
+        return False, ""
+    frag_prefix = memoryfold.fragment_dir(root).relative_to(root).as_posix() + "/"
+
+    def _is_bookkeeping(rel: str) -> bool:
+        norm = rel.replace("\\", "/")
+        if norm.startswith(frag_prefix) or norm.startswith(_MEMORY_PREFIX):
+            return True
+        return suite.classify(norm, root) in _BOOKKEEPING_CLASSES
+
+    if not all(_is_bookkeeping(p) for p in dirty):
+        return False, ""
+    committed = _git(root, "commit", "-am",
+                     "board: fold a pending bookkeeping write before merging "
+                     "(runner recovery)")
+    if committed.returncode != 0:
+        detail = (committed.stderr or committed.stdout or "").strip()[:150]
+        _log(f"  ! root had uncommitted bookkeeping changes ({', '.join(dirty)}) that "
+             f"could not be committed — {detail}")
+        return False, detail
+    _log(f"    root had uncommitted bookkeeping changes ({', '.join(dirty)}) — folded "
+         f"them into a commit before merging")
+    return True, ""
+
+
+def _bookkeeping_merge_fallback(root: Path, card: board.Card, branch: str, base: str,
+                                out_dir: Path, *, why: str, test_timeout: int,
+                                remote: str) -> tuple[bool, str]:
+    """If `base`'s own divergence since the merge-base is provably confined to
+    board/memory bookkeeping, retry landing `branch` as a plain merge
+    (`_merge_with_resolver`) instead of giving up on it.
+
+    Shared by every place `rebase_and_merge` can fail without a human actually
+    needing to weigh in: a rebase conflict the resolver declined (the original
+    `stun-animation` case, 2026-08-27), a rebase that refused before producing any
+    conflict markers at all (git's "local changes would be overwritten"), and
+    `merge_branch`'s own failure landing an already-reverified rebase result
+    (both aim-crit-display-desync, 2026-08-29). All three are the same
+    underlying situation surfacing through a different git error: `base` moved in
+    bookkeeping only, so nothing about the card's actual work disagrees with it.
+
+    Returns `(landed, detail)`. `landed=False` with `detail=""` means `base` has
+    moved in real production code since the fork — the narrow-scope guard holds
+    and the fallback is not even attempted, exactly as before this existed.
+    `landed=False` with a non-empty `detail` means the plain-merge attempt was
+    tried and failed too; `why` (the caller's own original failure reason) is
+    still the right thing to report alongside it.
+    """
+    merge_base = _git(root, "merge-base", branch, base).stdout.strip()
+    production = (_bookkeeping_divergence(root, base, merge_base)
+                 if merge_base else ["(no merge-base found)"])
+    if production:
+        return False, ""
+    _log(f"    {branch} did not land against {base} ({why}), but {base} has only "
+         f"moved in board/memory bookkeeping since it forked — retrying as a "
+         f"plain merge")
+    landed, why2 = _merge_with_resolver(
+        root, card, branch, base, out_dir, rebase_reason=why,
+        test_timeout=test_timeout, remote=remote)
+    if landed:
+        _log(f"    landed as a plain merge — {why2}")
+    return landed, why2
+
+
 def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
                      test_timeout: int = 600, remote: str = "") -> tuple[bool, str]:
     """Rebase a reviewed-ok card's branch onto the current integration tip,
@@ -5007,6 +5102,21 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
     second chance at a genuine production-code conflict, which still goes straight
     to a human exactly as before.
 
+    **The same fallback (`_bookkeeping_merge_fallback`) now covers two more
+    shapes of "no real disagreement" that used to go straight to a human**
+    (aim-crit-display-desync, 2026-08-29): a rebase that refuses before
+    producing any conflict markers at all — git's "your local changes... would
+    be overwritten," textually indistinguishable from a genuinely broken
+    checkout — and `merge_branch`'s own failure landing a rebase that had
+    already replayed and re-verified clean. Both were previously dead ends with
+    no retry whatsoever, even when `base` had moved in bookkeeping only.
+    `_reconcile_dirty_bookkeeping` additionally folds a stray uncommitted
+    bookkeeping write already sitting in `root` into a commit *before* either
+    merge attempt runs, since that is what actually produces the first shape on
+    `root`'s own dedicated checkout — nothing else writes there between
+    dispatches, so an uncommitted diff found there is the runner's own, not a
+    disagreement to adjudicate.
+
     Done entirely in a throwaway detached worktree, so the real `ai/<id>` branch is
     never rewritten while this runs, and `base` is untouched until the verified,
     rebased result merges. Reuses `merge_check`'s worktree discipline. §12 holds
@@ -5041,6 +5151,8 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
     if _git(root, "rev-parse", "--verify", branch).returncode != 0:
         return False, f"`{branch}` no longer exists"
 
+    _reconcile_dirty_bookkeeping(root)
+
     tree = worktree_root(root) / f"_rebase-{card.id}"
     if tree.exists() or _worktree_registered(root, tree):
         _git(root, "worktree", "remove", "--force", str(tree))
@@ -5061,30 +5173,36 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
             conflicts = _unmerged_paths(tree)
             why = gitmerge.failure_detail(rebased)
             if not conflicts:
-                # A rebase that failed without leaving unmerged paths is not a
-                # content conflict at all — a dirty tree, a missing base, a hook
-                # refusal. There is nothing for a resolver to resolve.
+                # A rebase that failed without leaving unmerged paths carries no
+                # content conflict for a resolver to look at — but it is not
+                # necessarily a dead end either. Git's merge backend can refuse a
+                # replay outright ("your local changes... would be overwritten",
+                # rather than a CONFLICT marker) the instant a path it needs to
+                # touch already differs from HEAD, and `base` having only moved
+                # in board/memory bookkeeping since the fork is exactly the
+                # `_bookkeeping_merge_fallback` case below — it just surfaced
+                # here instead of past `_resolve_conflict`. Abort first: the tree
+                # must be clean before anything else touches it.
                 _git(tree, "rebase", "--abort")
-                return False, f"rebasing {branch} onto {base} failed: {why}"
+                landed, why2 = _bookkeeping_merge_fallback(
+                    root, card, branch, base, out_dir, why=why,
+                    test_timeout=test_timeout, remote=remote)
+                if landed:
+                    return True, why2
+                detail = f"; retried as a plain merge and {why2}" if why2 else ""
+                return False, f"rebasing {branch} onto {base} failed: {why}{detail}"
             _log(f"    {len(conflicts)} conflict(s) rebasing {branch} onto {base} — "
                  f"handing them to {RESOLVER_AGENT}")
             resolved, detail = _resolve_conflict(
                 root, tree, card, branch, base, out_dir,
                 timeout=test_timeout, card_budget=0.0)
             if not resolved:
-                merge_base = _git(root, "merge-base", branch, base).stdout.strip()
-                production = (_bookkeeping_divergence(root, base, merge_base)
-                             if merge_base else ["(no merge-base found)"])
-                if not production:
-                    _log(f"    rebase conflict on {branch} was not settled, but {base} "
-                         f"has only moved in board/memory bookkeeping since it forked — "
-                         f"retrying as a plain merge")
-                    landed, why2 = _merge_with_resolver(
-                        root, card, branch, base, out_dir, rebase_reason=detail,
-                        test_timeout=test_timeout, remote=remote)
-                    if landed:
-                        _log(f"    landed as a plain merge — {why2}")
-                        return True, why2
+                landed, why2 = _bookkeeping_merge_fallback(
+                    root, card, branch, base, out_dir, why=detail,
+                    test_timeout=test_timeout, remote=remote)
+                if landed:
+                    return True, why2
+                if why2:
                     detail = f"{detail}; retried as a plain merge and {why2}"
                 return False, (f"rebasing {branch} onto {base} conflicts in "
                                f"{', '.join(conflicts)} and {detail} — a human needs to "
@@ -5116,25 +5234,42 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
         # HEAD at `rebased_sha`, which keeps it referenced across the merge; the
         # `finally` drops the worktree only after.
         merged, why = merge_branch(root, rebased_sha, base, label=branch)
-        if merged:
-            # The card's memory record goes into the shared logs *here*, on `base`,
-            # one card at a time — which is the whole point of the fragment
-            # (`nightshift.memoryfold`). Every card wants to prepend to the same
-            # list, so doing it on the branch made two same-night cards conflict by
-            # construction; doing it after the merge serialises the insertion.
-            _fold_memory(root, card, base)
-            # The remote copy goes first, while `branch` still resolves: its
-            # guard is an ancestry test against this ref, which `-D` would take
-            # away. A refusal or a failure there is logged and swallowed, so the
-            # local delete below happens either way.
-            _delete_remote_branch(root, remote, branch)
-            # The dispatch worktree that had `branch` checked out is already gone
-            # by this point (dropped at the end of `dispatch`, well before review
-            # and settle run), so the ref is never checked out anywhere here.
-            deleted = _git(root, "branch", "-D", branch)
-            if deleted.returncode != 0:
-                _log(f"  ! merged {branch} but could not delete it — "
-                     f"{(deleted.stderr or deleted.stdout or '').strip()[:150]}")
+        if not merged:
+            # aim-crit-display-desync (2026-08-29): the rebase replayed cleanly
+            # and re-verified green (gates + the affected tests, above) — the
+            # failure is `merge_branch`'s own, landing the result onto `root`.
+            # Unlike the two conflict shapes above, this one had no fallback at
+            # all: `merge_branch` just aborts and reports, and this returned
+            # straight to a human even when `base` had only moved in board/
+            # memory bookkeeping since the fork — the same narrow-scope case
+            # `_bookkeeping_merge_fallback` already exists for.
+            landed, why2 = _bookkeeping_merge_fallback(
+                root, card, branch, base, out_dir, why=why,
+                test_timeout=test_timeout, remote=remote)
+            if landed:
+                return True, why2
+            if why2:
+                why = f"{why}; retried as a plain merge and {why2}"
+            return False, (f"rebasing {branch} onto {base} replayed and verified "
+                           f"cleanly, but landing it failed: {why}")
+        # The card's memory record goes into the shared logs *here*, on `base`,
+        # one card at a time — which is the whole point of the fragment
+        # (`nightshift.memoryfold`). Every card wants to prepend to the same
+        # list, so doing it on the branch made two same-night cards conflict by
+        # construction; doing it after the merge serialises the insertion.
+        _fold_memory(root, card, base)
+        # The remote copy goes first, while `branch` still resolves: its
+        # guard is an ancestry test against this ref, which `-D` would take
+        # away. A refusal or a failure there is logged and swallowed, so the
+        # local delete below happens either way.
+        _delete_remote_branch(root, remote, branch)
+        # The dispatch worktree that had `branch` checked out is already gone
+        # by this point (dropped at the end of `dispatch`, well before review
+        # and settle run), so the ref is never checked out anywhere here.
+        deleted = _git(root, "branch", "-D", branch)
+        if deleted.returncode != 0:
+            _log(f"  ! merged {branch} but could not delete it — "
+                 f"{(deleted.stderr or deleted.stdout or '').strip()[:150]}")
         return merged, why
     finally:
         _git(root, "worktree", "remove", "--force", str(tree))
@@ -5180,9 +5315,12 @@ def _bookkeeping_divergence(root: Path, base: str, merge_base: str) -> list[str]
 def _merge_with_resolver(root: Path, card: board.Card, branch: str, base: str,
                          out_dir: Path, *, rebase_reason: str = "",
                          test_timeout: int = 600, remote: str = "") -> tuple[bool, str]:
-    """The narrow-scope escalation `rebase_and_merge` reaches for when a
-    *rebase*-based resolution of `branch` onto `base` could not be settled, but
-    `base` has only moved in board/memory bookkeeping since `branch` forked
+    """The narrow-scope escalation `rebase_and_merge` reaches for — via
+    `_bookkeeping_merge_fallback` — whenever a rebase-based landing of `branch`
+    onto `base` did not settle (a conflict the resolver declined, a rebase that
+    refused before producing conflict markers at all, or the final merge onto
+    `root` failing after a clean, re-verified replay), provided `base` has only
+    moved in board/memory bookkeeping since `branch` forked
     (`_bookkeeping_divergence` empty). Retries as a plain `git merge --no-ff
     branch` instead of a rebase replay.
 
@@ -5259,8 +5397,9 @@ def _merge_with_resolver(root: Path, card: board.Card, branch: str, base: str,
             _log(f"    {RESOLVER_AGENT} resolved it — {detail}")
 
         committed = _git(tree, "commit", "-m",
-                         f"merge {branch}: reviewed ok by the runner (rebase conflicted "
-                         f"on bookkeeping-only paths; resolved as a plain merge)")
+                         f"merge {branch}: reviewed ok by the runner (a rebase-based "
+                         f"landing did not settle on bookkeeping-only paths of {base}; "
+                         f"resolved as a plain merge)")
         if committed.returncode != 0:
             _git(tree, "merge", "--abort")
             return False, (f"could not commit the resolved merge of {branch}: "
@@ -5293,8 +5432,8 @@ def _merge_with_resolver(root: Path, card: board.Card, branch: str, base: str,
         if deleted.returncode != 0:
             _log(f"  ! merged {branch} but could not delete it — "
                  f"{(deleted.stderr or deleted.stdout or '').strip()[:150]}")
-        return True, ("resolved as a plain merge — the rebase conflicted on "
-                      "bookkeeping-only paths")
+        return True, ("resolved as a plain merge — a rebase-based landing did not "
+                      "settle on bookkeeping-only paths")
     finally:
         _git(root, "worktree", "remove", "--force", str(tree))
         _git(root, "worktree", "prune")

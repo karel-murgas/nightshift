@@ -236,6 +236,216 @@ def test_rebase_and_merge_leaves_development_team_untouched_when_the_merge_also_
 
 
 # --------------------------------------------------------------------------
+# aim-crit-display-desync (2026-08-29): the rebase itself can replay and
+# re-verify clean, yet the final `merge_branch` step onto `development_team`
+# still fails — and until now that failure had no fallback at all, unlike the
+# two conflict shapes above. `_bookkeeping_merge_fallback` closes that gap.
+# --------------------------------------------------------------------------
+
+def test_rebase_and_merge_escalates_when_merge_branch_itself_fails(
+        tmp_path, monkeypatch):
+    """The exact shape that hit aim-crit-display-desync: the rebase replays and
+    re-verifies cleanly (no conflict at all), but landing it onto
+    `development_team` (`merge_branch`) fails on its own — git's "local changes
+    would be overwritten" is one real cause, but any `merge_branch` failure
+    belongs to this class. Since `development_team` has only moved in board
+    bookkeeping since the fork, the plain-merge fallback gets a shot and lands
+    the card even though `merge_branch` itself never recovers."""
+    root = _worktree_repo(tmp_path)
+    _branch_with_file(root, tmp_path, "ai/probe", "feature.py", "x = 1\n")
+    (root / "Board" / "blocked").mkdir(parents=True, exist_ok=True)
+    _commit_on_base(root, tmp_path, "Board/blocked/probe.md", "board bookkeeping only\n")
+
+    monkeypatch.setattr(runner, "merge_branch",
+                        lambda *a, **k: (False, "your local changes to the following "
+                                        "files would be overwritten by merge"))
+
+    card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
+    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+
+    assert merged, why
+    assert "plain merge" in why
+    assert (root / "feature.py").read_text(encoding="utf-8") == "x = 1\n"
+    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode != 0
+
+
+def test_rebase_and_merge_does_not_escalate_merge_branch_failure_on_production_divergence(
+        tmp_path, monkeypatch):
+    """The narrow-scope guard applies here too: `merge_branch` failing is not a
+    blank cheque to retry as a plain merge when `development_team` has moved in
+    real production code, not just bookkeeping."""
+    root = _worktree_repo(tmp_path)
+    _branch_with_file(root, tmp_path, "ai/probe", "feature.py", "x = 1\n")
+    _commit_on_base(root, tmp_path, "shared.py", "value = 'B'\n")
+    base_before = runner._git(root, "rev-parse", "development_team").stdout.strip()
+
+    monkeypatch.setattr(runner, "merge_branch",
+                        lambda *a, **k: (False, "some merge_branch failure"))
+    escalated = []
+    monkeypatch.setattr(runner, "_merge_with_resolver",
+                        lambda *a, **k: escalated.append(1) or (True, "should not run"))
+
+    card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
+    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+
+    assert not merged
+    assert "some merge_branch failure" in why
+    assert not escalated, "the merge fallback must not run for a production-code divergence"
+    assert runner._git(root, "rev-parse", "development_team").stdout.strip() == base_before
+
+
+def test_rebase_and_merge_escalates_a_rebase_failure_with_no_conflict_markers(
+        tmp_path, monkeypatch):
+    """The other half of the same gap: a rebase that fails without leaving any
+    unmerged path (git's dirty-tree-style refusal, rather than a CONFLICT
+    marker) used to be treated as an unconditional dead end — `there is nothing
+    for a resolver to resolve` — even when `development_team` had only moved in
+    bookkeeping. A real conflicting rebase is built here (mirroring the
+    bookkeeping-only-conflict test above) and `_unmerged_paths` is stubbed to
+    report none *for the rebase worktree only*, standing in for git's no-marker
+    refusal; the merge fallback's own conflict detection is untouched, so
+    `_resolve_merge_conflict` still does real work resolving it."""
+    root = _worktree_repo(tmp_path)
+    (root / "Board" / "tasks").mkdir(parents=True, exist_ok=True)
+    (root / "Board" / "tasks" / "probe.md").write_text(
+        "line one\nline two\nline three\nline four\nline five\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "board: probe -> tasks")
+
+    _branch_with_file(root, tmp_path, "ai/probe", "feature.py", "x = 1\n")
+    wt = tmp_path / "seed-branch-edit"
+    subprocess.run(["git", "worktree", "add", str(wt), "ai/probe"], cwd=root, check=True)
+    (wt / "Board" / "tasks" / "probe.md").write_text(
+        "line one CHANGED\nline two CHANGED\nline three CHANGED\nline four CHANGED\n"
+        "line five CHANGED\nbranch-only tail\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+    subprocess.run(["git", "commit", "-qm", "ai/probe: edit the stale card"],
+                   cwd=wt, check=True)
+    subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=root, check=True)
+
+    (root / "Board" / "tasks" / "probe.md").unlink()
+    (root / "Board" / "blocked").mkdir(exist_ok=True)
+    (root / "Board" / "blocked" / "probe.md").write_text(
+        "totally different content\nnothing shared\nreview findings go here\n"
+        "merge notes go here\nunrelated text block\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "board: probe -> blocked")
+
+    real_unmerged = runner._unmerged_paths
+    rebase_tree = worktree_root_(root) / "_rebase-probe"
+
+    def fake_unmerged(tree):
+        if Path(tree).resolve() == rebase_tree.resolve():
+            return []
+        return real_unmerged(tree)
+
+    monkeypatch.setattr(runner, "_unmerged_paths", fake_unmerged)
+
+    def settle_merge(root_, tree, card_, branch, base, out_dir, **kwargs):
+        _git(tree, "rm", "Board/tasks/probe.md")
+        return True, "kept development_team's deletion — the card already moved lanes"
+
+    monkeypatch.setattr(runner, "_resolve_merge_conflict", settle_merge)
+
+    card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
+    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+
+    assert merged, why
+    assert "plain merge" in why
+    assert (root / "feature.py").read_text(encoding="utf-8") == "x = 1\n"
+    assert not (root / "Board" / "tasks" / "probe.md").exists()
+    assert (root / "Board" / "blocked" / "probe.md").exists()
+
+
+# --------------------------------------------------------------------------
+# `_reconcile_dirty_bookkeeping` (aim-crit-display-desync, 2026-08-29): the
+# proactive half — fold a stray uncommitted bookkeeping write already sitting
+# in `root` into a commit before any merge touches it, since that dirtiness is
+# indistinguishable, once a merge refuses over it, from a genuinely broken
+# checkout.
+# --------------------------------------------------------------------------
+
+def worktree_root_(root: Path) -> Path:
+    return runner.worktree_root(root)
+
+
+def test_reconcile_dirty_bookkeeping_is_a_noop_on_a_clean_tree(tmp_path):
+    root = _worktree_repo(tmp_path)
+    reconciled, detail = runner._reconcile_dirty_bookkeeping(root)
+    assert not reconciled
+    assert detail == ""
+
+
+def test_reconcile_dirty_bookkeeping_folds_a_stray_board_write(tmp_path):
+    root = _worktree_repo(tmp_path)
+    (root / "Board" / "tasks").mkdir(parents=True, exist_ok=True)
+    (root / "Board" / "tasks" / "probe.md").write_text("card\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "board: probe -> tasks")
+
+    # A stray, uncommitted write to the card's own board file — exactly what a
+    # runner step that writes-then-forgets-to-commit leaves behind.
+    (root / "Board" / "tasks" / "probe.md").write_text(
+        "card\nan uncommitted telemetry line\n", encoding="utf-8")
+
+    reconciled, detail = runner._reconcile_dirty_bookkeeping(root)
+
+    assert reconciled, detail
+    assert runner._git(root, "status", "--porcelain").stdout.strip() == ""
+    assert "an uncommitted telemetry line" in (
+        root / "Board" / "tasks" / "probe.md").read_text(encoding="utf-8")
+
+
+def test_reconcile_dirty_bookkeeping_leaves_production_code_alone(tmp_path):
+    """A real, uncommitted production-code change is not this function's to
+    touch (§12) — Karel's own in-place checkout could be mid-edit on it."""
+    root = _worktree_repo(tmp_path)
+    (root / "dungeoneer").mkdir(exist_ok=True)
+    (root / "dungeoneer" / "combat.py").write_text("x = 1\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "combat: add a module")
+    (root / "dungeoneer" / "combat.py").write_text("x = 2  # uncommitted\n", encoding="utf-8")
+
+    reconciled, detail = runner._reconcile_dirty_bookkeeping(root)
+
+    assert not reconciled
+    assert detail == ""
+    assert "uncommitted" in (root / "dungeoneer" / "combat.py").read_text(encoding="utf-8")
+
+
+def test_rebase_and_merge_folds_roots_own_stray_bookkeeping_write_before_merging(
+        tmp_path):
+    """End to end: `development_team` carries an uncommitted edit to the card's
+    own board file — the runner's own prior write, never committed — when
+    `rebase_and_merge` starts. Before this fix, whatever merge attempt reached
+    that path would refuse outright with git's dirty-tree message and no
+    unmerged paths, reading as an unresolvable conflict. Now it is folded into
+    a commit before either merge attempt runs, so the ordinary rebase path
+    lands without ever tripping over it."""
+    root = _worktree_repo(tmp_path)
+    (root / "Board" / "tasks").mkdir(parents=True, exist_ok=True)
+    (root / "Board" / "tasks" / "probe.md").write_text("card\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "board: probe -> tasks")
+
+    _branch_with_file(root, tmp_path, "ai/probe", "feature.py", "x = 1\n")
+
+    # A stray, uncommitted write to the same board file the branch never
+    # touches — root is dirty, but not on a path the merge itself needs.
+    (root / "Board" / "tasks" / "probe.md").write_text(
+        "card\nan uncommitted telemetry line\n", encoding="utf-8")
+
+    card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
+    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+
+    assert merged, why
+    assert (root / "feature.py").read_text(encoding="utf-8") == "x = 1\n"
+    assert "an uncommitted telemetry line" in (
+        root / "Board" / "tasks" / "probe.md").read_text(encoding="utf-8")
+    assert runner._git(root, "status", "--porcelain").stdout.strip() == ""
+
+
+# --------------------------------------------------------------------------
 # _resolve_merge_conflict's own guardrails (the merge-conflict variant of
 # `_resolve_conflict` — a subset of `test_runner_resolve_conflict.py`'s matrix,
 # just enough to pin the one thing that differs: the abort command).
