@@ -997,3 +997,24 @@ def _host_mode(root: Path, mode: str) -> None:
     (root / ".ai").mkdir(parents=True, exist_ok=True)
     (root / ".ai" / "hosts.json").write_text(
         json.dumps({socket.gethostname(): {"permission_mode": mode}}), encoding="utf-8")
+
+
+def _seed_orphaned_branch(root: Path, tmp_path: Path, card_id: str, content: str) -> None:
+    """The `taser-cyberware` state, measured 2026-08-29: branch `ai/<id>` carries
+    real, finished-looking commits, the worktree is gone, and **no handover exists**.
+
+    The distinction from `_seed_wip_branch` is the whole point and is deliberately
+    two things at once: no handover marker is written (so `warm` is False and every
+    path gated on it is skipped), and the commit is an ordinary one rather than a
+    `wip:` placeholder (so nothing about it says "interrupted"). That is what a
+    walled attempt leaves when the run directory did not survive — a reboot, a
+    cleaned `.ai/runs/`, or a runner killed before it could write the handover.
+    """
+    seed = tmp_path / f"seed-orphan-{card_id}"
+    subprocess.run(["git", "worktree", "add", "-b", f"ai/{card_id}", str(seed),
+                    "development_team"], cwd=root, check=True)
+    (seed / "feature.txt").write_text(content, encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=seed, check=True)
+    subprocess.run(["git", "commit", "-qm", f"{card_id}: implement the thing"],
+                   cwd=seed, check=True)
+    subprocess.run(["git", "worktree", "remove", "--force", str(seed)], cwd=root, check=True)

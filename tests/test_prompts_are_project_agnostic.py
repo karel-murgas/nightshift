@@ -128,16 +128,30 @@ def test_a_dispatched_prompt_is_project_agnostic(name):
     assert not DESIGN_NOTE.search(prompt), f"{name} cites a design note that does not ship"
 
 
-def test_the_review_prompt_does_not_hand_over_a_game_s_gate_list():
+def test_the_review_prompt_does_not_hand_over_a_game_s_gate_list(tmp_path):
     """It used to name parity, imports, help-catalog overflow and asset hygiene as
-    the things already covered — four gates a consuming project will not have. The
-    replacement tells the reviewer to *run the suite* and read the list, which is
-    correct in every repo and stays correct as the list grows."""
+    the things already covered — four gates a consuming project will not have.
+
+    The rule is about where the list comes from, not which sentence delivers it.
+    This asserted "the prompt says to run `nightshift.gates.run`" while that was
+    the only correct-in-every-repo answer; since `_gates_block` the reviewer is
+    handed the report the runner *already* produced for this branch, which is the
+    same list from a better source — the real run, not a name someone typed. So
+    the two things to pin are that the template still bakes in no project's
+    gates, and that the reviewer learns the list either way.
+    """
     from nightshift import runner
 
     for gate in ("parity", "help-catalog", "asset hygiene"):
         assert gate not in runner._REVIEW_PROMPT
-    assert "nightshift.gates.run" in runner._REVIEW_PROMPT
+    # Delivered at format time from the project's own report, never hardcoded.
+    assert "{gates}" in runner._REVIEW_PROMPT
+    assert "{gates}" in runner._BATCH_REVIEW_PROMPT
+    # And when there is no report to hand over, the old discovery instruction is
+    # still what the reviewer gets — the degradation must not be "assume".
+    assert "nightshift.gates.run" in runner._gates_block(tmp_path)
+    (tmp_path / "gates.txt").write_text("7 gates, 0 violations", encoding="utf-8")
+    assert "7 gates, 0 violations" in runner._gates_block(tmp_path)
 
 
 def test_the_worker_prompt_still_states_the_rules_it_stopped_citing():

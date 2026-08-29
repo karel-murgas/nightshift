@@ -1250,7 +1250,37 @@ def stranded_board_refusal(ctrl: Path, work: Path, base: str) -> str:
 #             reviewer returned `needs_fix`. Its commits are on `ai/<id>` and the
 #             only work left is the finding. A checkout is cut from the branch,
 #             exactly like FROM_WIP, and the worker is handed `_REVIEW_FIX_NOTE`.
-FRESH, REENTER, FROM_WIP, FROM_REVIEW = "fresh", "reenter", "from-wip", "from-review"
+#   FROM_BRANCH — no handover survived, but `ai/<id>` carries commits ahead of the
+#             base. The work is real and durable even though the run directory
+#             forgot it; a checkout is cut from the branch and the worker is handed
+#             a `## Progress` note, exactly like FROM_WIP. The catch-all that stops
+#             committed work falling through to a cold start.
+FRESH, REENTER, FROM_WIP, FROM_REVIEW, FROM_BRANCH = (
+    "fresh", "reenter", "from-wip", "from-review", "from-branch")
+
+
+def _branch_has_work(root: Path, branch: str, base: str) -> bool:
+    """Does `branch` exist and carry at least one commit `base` does not?
+
+    The durable half of "was anything built for this card". Deliberately asks git
+    rather than the run directory: `.ai/runs/` is gitignored and machine-local, so
+    a handover is the first thing to go missing, while a commit on a branch
+    survives a reboot, a killed runner and a cleaned run tree.
+
+    False on any git failure — a missing branch, an unreadable base, a repo in a
+    state `rev-list` will not answer for. That is the safe direction here: the
+    caller's fallback is the cold start, which is merely expensive, whereas
+    wrongly claiming work exists would hand a worker an unrelated tree.
+    """
+    if not _branch_exists(root, branch):
+        return False
+    counted = _git(root, "rev-list", "--count", f"{base}..{branch}")
+    if counted.returncode != 0:
+        return False
+    try:
+        return int(counted.stdout.strip() or "0") > 0
+    except ValueError:
+        return False
 
 
 @dataclass
@@ -1580,6 +1610,45 @@ def prepare_worktree(root: Path, card: board.Card,
         # needs-decision/ under "a reviewer-flagged fix recurred across 3
         # attempts". Nothing recurred. The fix was never applied once.
         return from_branch(FROM_REVIEW, "from review")
+    if str(card.fields.get("last_outcome", "")) != "failed" and \
+            _branch_has_work(root, branch, base):
+        # The branch carries commits, nothing above claimed it, and the last
+        # attempt did not *fail*.
+        #
+        # **That last condition is the boundary, and it is not cosmetic.** A failed
+        # attempt is one whose gates or tests went red, and its commits are a broken
+        # tree — resuming onto them builds the next attempt on the defect instead of
+        # giving it the clean slate the cold start below exists to provide. A walled
+        # attempt is the opposite: it was going fine and ran out of window. Only a
+        # failure writes `last_outcome: failed` (a wall writes nothing), so the card
+        # already records the distinction and nothing new has to be stored.
+        #
+        # Caught by `test_rescue_branches_are_reaped_when_a_card_retires_to_failed`
+        # and its siblings, which is the right way round: without the guard this
+        # swallowed the rescue-ref path whole, and a card that failed three times
+        # would have kept re-entering its own broken branch forever.
+        #
+        # **The hole this closes, found by measurement on 2026-08-29.** Every warm
+        # path above is gated on `warm` — a handover file. `taser-cyberware` walled
+        # after spending $10.13 and left none, but its branch held five real
+        # commits: the implementation, 22 tests, its i18n catalog entries and its
+        # memory records. With no handover, `warm` was False, `review_fix` was
+        # False, and the card fell straight through to the cold start below — which
+        # renames the branch to a rescue ref and cuts a fresh worktree from `base`.
+        # Nothing ever checks out a rescue ref. `ai/skills-tinkering@failed-1` shows
+        # it had already happened once before anyone counted.
+        #
+        # So `failed-attempt-work-is-deleted-not-resumed` was only half fixed: the
+        # rename stopped the commits being *destroyed*, and stopped there. Work that
+        # survives but is never read again costs exactly what deleted work costs;
+        # the rescue ref made the loss silent rather than smaller.
+        #
+        # The handover is machine-local and gitignored, so it is the *fragile* half
+        # of the record by construction — a reboot, a `.ai/runs/` clean, a run
+        # killed before it could write. The branch is the durable half and is the
+        # better thing to key on: commits ahead of `base` are the work, whatever
+        # the run directory does or does not remember about how they got there.
+        return from_branch(FROM_BRANCH, "from branch")
 
     # Cold start — the empty case and every non-interrupted card.
     if path.exists() or _worktree_registered(root, path):
@@ -1909,6 +1978,8 @@ The runner will run `nightshift.gates.run` and the test slice your change touche
 branch (in parallel, judged by its JUnit report). Do not \
 weaken a gate or a test to make it pass.
 
+{doc_truth}
+
 {tool_economy}
 
 --- the card ---
@@ -1944,6 +2015,27 @@ A previous attempt at this card was interrupted by a usage limit before it finis
 session could not be resumed, but **its uncommitted work is still in this worktree** — run \
 `git status` and `git diff` to see exactly where it left off, then continue from there \
 rather than starting over. Its work may be incomplete or mid-edit; read it before building on it.
+"""
+
+# FROM_BRANCH's note. Deliberately *not* `_WIP_NOTE`, which was the obvious reuse
+# and is wrong in the one way that matters: it tells the worker its branch tip is a
+# `wip:` commit to be replaced (`git reset --soft HEAD~1`), and here the commits are
+# ordinary, finished ones. A worker following that advice would soft-reset real work
+# it did not write and could not see the reason for.
+_FROM_BRANCH_NOTE = """\
+
+--- continuing a card whose earlier attempt left committed work ---
+A previous attempt at this card ran out of its usage window. Its worktree and session are \
+gone, but **the commits it made are real and are already checked out on your branch** — \
+they are ordinary commits, not a `wip:` placeholder, and nothing needs undoing.
+
+Start by reading what is there: `git log {base}..HEAD` and `git diff {base}...HEAD`. Treat \
+it as work you did and have forgotten, not as someone else's draft to redo — it was written \
+against this same card. Then finish the card from that point.
+
+**Do not re-implement what is already committed.** If part of it looks wrong, fix that part; \
+if it looks done, verify it and move on to what is missing. The gates and the test suite \
+have not necessarily been run over this tree, so run them before you write your verdict.\
 """
 
 _WIP_NOTE = """\
@@ -2103,7 +2195,28 @@ you would bet on the fix yourself.
 card the worker resolved by guessing, a design judgment call with more than one defensible \
 answer, a behaviour that may not be what they want, or a value/name/rule the card left open \
 and the worker picked. If two people could disagree about the right answer, this is it — \
-`needs_fix` is reserved for the case where nobody reasonable would.\
+`needs_fix` is reserved for the case where nobody reasonable would.
+
+**The one case where you fix it yourself: prose.** If every defect you found is in \
+text — a wrong number or name in a doc, comment, docstring, memory entry or recipe; a \
+symbol this diff deleted still cited somewhere; a sentence describing the design the \
+card asked for rather than the one that landed — then **apply the correction, commit it, \
+and return `ok`** with `fixed` listing the files and `finding` still stating what was \
+wrong. You have already read the tree and established the right answer; sending that back \
+for someone else to type is the most expensive way to change a sentence.
+
+The boundary is strict, and it is about *what you may edit*, not about how confident you \
+feel:
+
+- **Never change executable content.** No constant, no condition, no call, no test \
+assertion, no docstring (a docstring is compiled into the module and is checked as code \
+here). Comments and Markdown only. The runner verifies this by compiling every `.py` you \
+touched before and after and requiring identical bytecode — a behavioural edit is refused \
+and the card round-trips as `needs_fix` anyway, so there is nothing to gain by trying.
+- **Commit on top of what you reviewed.** An ordinary commit; never amend, reset or \
+rebase — the worker's commits must stay exactly as they are underneath yours.
+- **If any defect is not prose, the whole verdict is `needs_fix`.** Do not fix the text \
+half and report the code half; one card, one route.\
 """
 
 #: The re-review addendum (`review-reviews-only-the-fix`): only ever non-empty
@@ -2134,9 +2247,9 @@ does what the card asked and touched nothing it should not have.
 {prior_review}
 You are **not** told how this was made, and you must not go looking: no worker prompt, no \
 transcript, no reasoning. The gates and the full test suite have **already passed** on this \
-exact branch — do not re-check anything they cover, and run `python -m nightshift.gates.run` \
-once to see what that is rather than assuming, since the gate list is this project's and \
-grows as it earns rules. Spend your attention only on what no script can see.
+exact branch — do not re-check anything they cover. {gates}Spend your attention only on what \
+no script can see: whether the change does what the card asked, whether it touched what it \
+should not have, and whether any acceptance criterion no test covers actually holds.
 
 Your verdict is exactly three-way, and it is a routing decision:
 {rubric}
@@ -2145,8 +2258,10 @@ Write your verdict to:
   {verdict_path}
 as JSON, exactly these keys:
   {{"verdict": "ok" | "needs_fix" | "needs_decision",
+    "fixed": ["<paths you corrected and committed yourself, prose only. [] otherwise.>"],
     "finding": "<if needs_fix: the defect, verified, and its correct fix, precise enough to \
-apply without re-deriving it. Empty string otherwise.>",
+apply without re-deriving it. If you fixed prose yourself: what was wrong and what you \
+changed, so it can be checked after the fact. Empty string otherwise.>",
     "question": "<if needs_decision: what was attempted, what is ambiguous, the candidate \
 answers, and what each would imply — those four parts are what makes the question \
 answerable. Empty string otherwise.>",
@@ -2197,8 +2312,7 @@ what its own card asked and touched nothing it should not have.
 You are **not** told how any of this was made, and you must not go looking: no worker \
 prompt, no transcript, no reasoning. The gates and the full test suite have **already \
 passed** on this exact branch, with every item merged — do not re-check anything they \
-cover, and run `python -m nightshift.gates.run` once to see what that is rather than \
-assuming. Spend your attention only on what no script can see.
+cover. {gates}Spend your attention only on what no script can see.
 
 For **each** numbered item below, apply this exact three-way verdict — it is a routing \
 decision, made once per item:
@@ -2322,6 +2436,37 @@ def _budget_argv(card_budget: float) -> list[str]:
 # else functionally here — every event still lands in the tee and only the
 # terminal one is read back (`_terminal_result`).
 _STREAM_ARGV = ["--output-format", "stream-json", "--verbose"]
+
+
+# `--strict-mcp-config` says "use only the MCP servers given by `--mcp-config`",
+# and no caller here passes one — so a dispatched worker or reviewer gets none at
+# all, regardless of what the human's user-level config happens to hold that
+# week.
+#
+# **This is determinism, not a saving, and the difference was measured.** The
+# guess it replaces was that workers were carrying a pile of MCP tool schemas;
+# the `system`/`init` event of Dungeoneer's `tile-layer-surface-cache` attempt
+# says otherwise — exactly one server was present ("claude.ai Google Drive",
+# status `needs-auth`), contributing zero tools, and the browser server the guess
+# named was never in the session at all. Trimming that is worth approximately
+# nothing in tokens.
+#
+# What it is worth is that an unattended run's tool surface stops depending on
+# the launching human's personal config. A server added for interactive work
+# appears in every worker on that box the same night, unreviewed and unlogged —
+# and an authenticated one would have brought real schemas and a real network
+# reach into a `bypassPermissions` agent nobody is watching. A worker's context
+# should be a property of the project and the card, which is the same argument
+# `review_branch` already makes for the reviewer's blindness.
+#
+# If a card ever genuinely needs an MCP server, this is the line that has to
+# grow a `--mcp-config` beside it — deliberately, in the repo, rather than by
+# inheriting whatever was configured.
+#
+# Confirmed against the installed CLI rather than assumed, the same way
+# `_STREAM_ARGV` was: a `-p` run carrying this flag and no `--mcp-config` reports
+# `mcp_servers: []` in its `init` event, on a box whose user config declares one.
+_STRICT_MCP_ARGV = ["--strict-mcp-config"]
 
 
 def _terminal_result(stdout: str) -> dict:
@@ -2663,6 +2808,7 @@ def run_checker(root: Path, card: board.Card, out_dir: Path, round_no: int,
         "--model", model,
         *_STREAM_ARGV,
         *_budget_argv(card_budget),
+        *_STRICT_MCP_ARGV,
         "--permission-mode", str(host_setting(root, "permission_mode", "acceptEdits")),
         "--add-dir", str(artefacts.resolve()),
         *(("--add-dir", str(neighbours.resolve())) if neighbours else ()),
@@ -2697,6 +2843,192 @@ def card_review_context(card: board.Card) -> tuple[str, str]:
     criteria = board.section(card.text, "Acceptance") or \
         board.section(card.text, "Acceptance criteria") or "(none stated on the card)"
     return criteria, board.section(card.text, "Intent") or "(none stated on the card)"
+
+
+def _behaviour_is_unchanged(root: Path, tree: Path, old: str, new: str) -> tuple[bool, str]:
+    """Did the reviewer's commits change only prose — no executable behaviour?
+
+    The check that makes a reviewer allowed to edit at all. For every `.py` file
+    the reviewer touched, compile the old blob and the new one and require the
+    **code objects to be equal**. Comments, blank lines and reflow do not survive
+    into bytecode, so they compare equal; a changed literal, a moved call or a
+    flipped condition does not. Every other file — Markdown, JSON, recipes — is
+    prose by construction and passes.
+
+    Docstrings *do* reach the code object (as `co_consts`), so rewording one reads
+    as a change here and is refused. That is the conservative direction and it is
+    the right one: this guard's job is to be boringly certain, and a docstring
+    correction that has to go back to a worker costs a round-trip, while a wrong
+    "unchanged" verdict costs a silently altered program nobody reviewed.
+
+    Returns `(ok, why)`; `why` is empty when ok. Any failure to read or compile is
+    **not** ok — a file this cannot check is a file it cannot vouch for.
+    """
+    # `gitpaths.git`, not `gitpaths.changed`: that helper flattens "git refused"
+    # and "nothing changed" into the same empty list, and here they must not be the
+    # same answer — a diff this cannot read is a diff it cannot vouch for, while an
+    # empty one is genuinely harmless. `-z` because a path git would quote or
+    # C-escape in the newline-separated form is exactly what `git_path_lists`
+    # exists to stop callers parsing by hand.
+    listed = gitpaths.git(root, "diff", "--name-only", "-z", f"{old}..{new}")
+    if listed.returncode != 0:
+        return False, "could not list what the reviewer changed"
+    for rel in gitpaths.split(listed.stdout):
+        if not rel.endswith(".py"):
+            continue
+        before = _git(root, "show", f"{old}:{rel}")
+        after = _git(root, "show", f"{new}:{rel}")
+        if before.returncode != 0 or after.returncode != 0:
+            return False, f"could not read both versions of {rel}"
+        try:
+            a = compile(before.stdout, rel, "exec")
+            b = compile(after.stdout, rel, "exec")
+        except SyntaxError as exc:
+            return False, f"{rel} would not compile ({exc.msg})"
+        if a.co_code != b.co_code or a.co_consts != b.co_consts:
+            return False, f"{rel} changed executable content, not only prose"
+    return True, ""
+
+
+def _checkout_holding(root: Path, branch: str) -> Path | None:
+    """The worktree that currently has `branch` checked out, if any.
+
+    `git branch --force` refuses to move a branch a worktree is sitting on, and at
+    review time the card's own worktree usually still is — the review runs in a
+    *second*, detached checkout, it does not replace the first. Caught by
+    `test_a_markdown_only_fix_lands_on_the_branch` before it could ever reach a
+    real run: "fatal: cannot force update the branch 'ai/probe' used by worktree".
+    """
+    listed = _git(root, "worktree", "list", "--porcelain").stdout
+    where: Path | None = None
+    for line in listed.splitlines():
+        if line.startswith("worktree "):
+            where = Path(line[len("worktree "):].strip())
+        elif line.strip() == f"branch refs/heads/{branch}" and where is not None:
+            return where
+    return None
+
+
+def _fast_forward(root: Path, branch: str, head: str) -> str:
+    """Move `branch` forward to `head`. Returns "" on success, else why not.
+
+    Two routes, because the branch may or may not be checked out somewhere. When a
+    worktree holds it, the move has to happen *there* (`merge --ff-only`) so that
+    checkout's HEAD, index and files stay consistent with the ref — updating the
+    ref behind a live worktree's back would leave it reporting a dirty tree full of
+    reversions it never made. Otherwise the plain `branch --force` is enough.
+    """
+    holder = _checkout_holding(root, branch)
+    if holder is not None and holder.exists():
+        done = _git(root, "-C", str(holder), "merge", "--ff-only", head)
+    else:
+        done = _git(root, "branch", "--force", branch, head)
+    return "" if done.returncode == 0 else \
+        f"the branch would not move ({done.stderr.strip()[:80]})"
+
+
+def _land_review_fix(root: Path, tree: Path, branch: str,
+                     verdict: dict, tip: str) -> dict:
+    """Move `branch` onto a prose-only fix the reviewer applied itself.
+
+    **Why the reviewer is allowed to edit here, having been forbidden to
+    everywhere else.** A census of every `needs_fix` on Dungeoneer's record
+    (2026-08-29) found 11 of 14 were not defective code but false prose — a number
+    re-tuned after the sentence was written, a symbol the diff deleted still cited
+    in a recipe, a comment naming a mechanism the change replaced. The reviewer had
+    already read the tree, verified the defect and written the correct replacement
+    out in full; the finding then went back to a fresh worker attempt whose entire
+    job was to type it in. That round-trip is roughly 44% of everything the board
+    has ever spent.
+
+    The independence being protected by "the reviewer never edits" is real, but it
+    is about *judgment of the work*, and it is not what a text correction consumes.
+    Three things keep it honest:
+
+      * **The reviewer still declares the defect.** `finding` is required even when
+        it fixes, so the fix is reviewable after the fact rather than silent.
+      * **The runner, not the reviewer, decides the fix may land.** The reviewer
+        commits in its own detached checkout and can move nothing; this function
+        checks the result and fast-forwards the branch, or does not.
+      * **Nothing behavioural gets through** (`_behaviour_is_unchanged`), and
+        `rebase_and_merge` re-runs the gates and the full suite over the result
+        before it reaches the integration branch regardless.
+
+    A refused fix is not lost: the verdict is rewritten to `needs_fix` carrying the
+    reviewer's own finding, which is exactly the path it would have taken before.
+    Degrading to the ordinary round-trip is always available, which is what makes
+    this safe to attempt.
+    """
+    if str(verdict.get("verdict", "")).lower() != "ok" or not verdict.get("fixed"):
+        return verdict
+
+    def refuse(why: str) -> dict:
+        _log(f"    reviewer's prose fix refused ({why}) — routing as needs_fix")
+        out = dict(verdict)
+        out["verdict"] = "needs_fix"
+        out["fixed"] = []
+        out["notes"] = (str(verdict.get("notes", "")) +
+                        f" [runner refused the reviewer's own fix: {why}]").strip()
+        return out
+
+    if not str(verdict.get("finding", "")).strip():
+        return refuse("it described no finding, so nothing could be re-checked")
+    head = _git(root, "-C", str(tree), "rev-parse", "HEAD").stdout.strip()
+    if not head or head == tip:
+        return refuse("it reported a fix but committed nothing")
+    # It must have built *on* the reviewed tip, never rewritten it: an amend or a
+    # reset would carry the worker's own commits away with the correction.
+    if _git(root, "merge-base", "--is-ancestor", tip, head).returncode != 0:
+        return refuse("its commit does not descend from the branch it reviewed")
+    ok, why = _behaviour_is_unchanged(root, tree, tip, head)
+    if not ok:
+        return refuse(why)
+
+    moved = _fast_forward(root, branch, head)
+    if moved:
+        return refuse(moved)
+    files = ", ".join(str(f) for f in verdict.get("fixed", [])[:4])
+    _log(f"    reviewer fixed prose itself and it landed on {branch} — {files}")
+    return verdict
+
+
+def _gates_block(out_dir: Path) -> str:
+    """The gate report the runner *already produced*, quoted into the reviewer's
+    prompt — instead of the sentence that used to tell it to run the suite again.
+
+    Both review templates carried "run `python -m nightshift.gates.run` once to
+    see what that is rather than assuming", and the reasoning was sound: the
+    reviewer must not guess at which rules are already enforced, because the gate
+    list is the project's and grows. But the runner has just run that exact suite
+    over this exact branch and written the report to `gates.txt` in `out_dir`
+    (`_gate_report`), so the instruction bought a subprocess, a wait, and a
+    lead-tier turn to re-derive a file sitting on disk. Handing it over closes
+    that: same knowledge, no round-trip, and it arrives inside the cached prompt
+    prefix rather than as a tool result the reviewer pays to carry forward.
+
+    Not a licence to trust less. The reviewer is still told not to re-check what
+    the gates cover — this only makes "what they cover" cheap to know, which is
+    the half that was expensive.
+
+    Degrades to the old behaviour if the report is missing or unreadable: a
+    reviewer that cannot see the list is better off re-running it than assuming,
+    and this must not be the thing that turns an unreadable file into a skipped
+    check. Returns a block ending in a space, so the template reads correctly
+    either way.
+    """
+    report = out_dir / "gates.txt"
+    try:
+        text = report.read_text(encoding="utf-8").strip()
+    except OSError:
+        text = ""
+    if not text:
+        return ("Run `python -m nightshift.gates.run` once to see what they cover, "
+                "rather than assuming — the gate list is this project's and grows "
+                "as it earns rules. ")
+    return (
+        "Here is that gate run's own report, so you need not re-run it:\n\n"
+        f"```\n{text}\n```\n\n"
+    )
 
 
 def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
@@ -2760,6 +3092,9 @@ def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
         _git(root, "worktree", "remove", "--force", str(tree))
     _git(root, "worktree", "prune")
     tree.parent.mkdir(parents=True, exist_ok=True)
+    # The branch tip as it stood before the reviewer saw it — the parent every
+    # reviewer-applied prose fix must build on (`_land_review_fix`).
+    tip = _git(root, "rev-parse", branch).stdout.strip()
     try:
         made = _worktree_add(root, "--detach", str(tree), branch)
     except WorktreePathTooLong as exc:
@@ -2799,6 +3134,7 @@ def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
             verdict_path=verdict_path.resolve().as_posix(),
             criteria=criteria, intent=intent, rubric=_REVIEW_RUBRIC,
             diff_desc=diff_desc, prior_review=prior_review,
+            gates=_gates_block(out_dir),
         )
         textio.write_text_lf(out_dir / "review-prompt.md", prompt)
         textio.write_text_lf(out_dir / "review-diff.patch", diff.stdout)
@@ -2807,24 +3143,35 @@ def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
             binary, "-p",
             "--agent", REVIEWER_AGENT,
             "--model", model,
-            "--output-format", "json",
+            # Streamed, like the worker's, so a review is auditable after the
+            # fact. It was `--output-format json`, which leaves `review.log`
+            # holding exactly one line — the terminal result — and that is the
+            # reason a 2026-08-29 attempt to work out what the reviewer had spent
+            # its 34 turns on could measure the worker turn-by-turn and the
+            # reviewer not at all. Narrowing a reviewer you cannot watch is
+            # guesswork; `_terminal_result` already reads either shape, so this
+            # costs nothing but disk.
+            *_STREAM_ARGV,
             *_budget_argv(card_budget),
+            *_STRICT_MCP_ARGV,
             "--permission-mode", str(host_setting(root, "permission_mode", "acceptEdits")),
             "--add-dir", str(tree.resolve()),
         ]
         cost = 0.0
         try:
-            proc = _run_worker(argv, tree, timeout, prompt=prompt)
+            proc = _run_worker(argv, tree, timeout,
+                               out_dir / "review-stream.jsonl", prompt=prompt)
             textio.write_text_lf(out_dir / "review.log", proc.stdout + proc.stderr)
             try:
-                cost = float(json.loads(proc.stdout).get("total_cost_usd", 0.0))
-            except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
+                cost = float(_terminal_result(proc.stdout).get("total_cost_usd", 0.0))
+            except (ValueError, AttributeError, TypeError):
                 pass
             wall = limits.detect(proc.returncode, proc.stdout, proc.stderr)
         except subprocess.TimeoutExpired:
             return {}, cost, None
         verdict = _read_verdict(verdict_path)
         if verdict:
+            verdict = _land_review_fix(root, tree, branch, verdict, tip)
             textio.write_text_lf(out_dir / "review-verdict.json", json.dumps(verdict, indent=2))
         return verdict, cost, wall
     finally:
@@ -2931,6 +3278,7 @@ def run_stale_check(root: Path, doc_rel: str, out_dir: Path, model: str,
         "--model", model,
         *_STREAM_ARGV,
         *_budget_argv(card_budget),
+        *_STRICT_MCP_ARGV,
         "--permission-mode", str(host_setting(root, "permission_mode", "acceptEdits")),
         "--add-dir", str(root.resolve()),
     ]
@@ -3666,6 +4014,7 @@ def run_producer(root: Path, card: board.Card, tree: Path, out_dir: Path, branch
             card_path=(board.board_dir(root) / "tasks" / card.path.name).resolve().as_posix(),
             verdict_path=verdict_path.resolve().as_posix(),
             tool_economy=worker_prompt.TOOL_ECONOMY,
+            doc_truth=worker_prompt.DOC_TRUTH.format(base=base),
             fold=_fold_instruction(root, card),
             card_body=card.text,
         ) + (_CHORE_NOTE if card.kind == board.KIND_CHORE else "") \
@@ -3680,6 +4029,7 @@ def run_producer(root: Path, card: board.Card, tree: Path, out_dir: Path, branch
             *_STREAM_ARGV,
             *(["--resume", session] if session else []),
             *_budget_argv(card_budget),
+            *_STRICT_MCP_ARGV,
             "--permission-mode", str(host_setting(root, "permission_mode", "acceptEdits")),
             "--add-dir", str((board.board_dir(root)).resolve()),
             "--add-dir", str(out_dir.resolve()),
@@ -3858,6 +4208,11 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
         resume_session = ""
         continue_note = _WIP_NOTE.format(card_id=card.id)
         _log(f"  {card.id} worktree was lost — continuing from its `wip:` commit")
+    elif mode == FROM_BRANCH:
+        resume_session = ""
+        continue_note = _FROM_BRANCH_NOTE.format(base=base)
+        _log(f"  {card.id} left no handover but its branch carries work — "
+             f"continuing from {branch} rather than starting over")
     elif mode == FROM_REVIEW:
         resume_session = ""
         continue_note = _REVIEW_FIX_NOTE.format(base=base)
@@ -4325,6 +4680,7 @@ def _resolve_conflict(root: Path, tree: Path, card: board.Card, branch: str,
             "--model", model,
             "--output-format", "json",
             *_budget_argv(card_budget),
+            *_STRICT_MCP_ARGV,
             "--permission-mode", str(host_setting(root, "permission_mode", "acceptEdits")),
             "--add-dir", str(tree.resolve()),
         ]
@@ -4488,6 +4844,7 @@ def _resolve_merge_conflict(root: Path, tree: Path, card: board.Card, branch: st
         "--model", model,
         "--output-format", "json",
         *_budget_argv(card_budget),
+        *_STRICT_MCP_ARGV,
         "--permission-mode", str(host_setting(root, "permission_mode", "acceptEdits")),
         "--add-dir", str(tree.resolve()),
     ]

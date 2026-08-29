@@ -22,8 +22,57 @@ of good practice, so guidance that has to be found first is the weaker of the tw
 """
 from __future__ import annotations
 
-__all__ = ["TOOL_ECONOMY", "INTERACTIVE_CARD", "INTERACTIVE_CARD_FEEDBACK", "INTERACTIVE_NOTE",
-           "HOW_TO_TEST_STEP", "INTERACTIVE_TRIAGE", "INTERACTIVE_RETRIAGE"]
+__all__ = ["TOOL_ECONOMY", "DOC_TRUTH", "INTERACTIVE_CARD", "INTERACTIVE_CARD_FEEDBACK",
+           "INTERACTIVE_NOTE", "HOW_TO_TEST_STEP", "INTERACTIVE_TRIAGE", "INTERACTIVE_RETRIAGE"]
+
+#: The second such block, and it is here for the same reason as the first: the rule was
+#: stated, generalised, and then lived somewhere the worker never reads.
+#:
+#: Dungeoneer's `.ai/corrections.log`, 2026-08-08,
+#: `memory-recorded-the-acceptance-not-the-delivery`: *"WRITE THE MEMORY DOC FROM THE DIFF,
+#: NOT FROM THE CARD -- and when a card ships partially, the doc sentence about the
+#: unshipped half is the first one to check."* The entry ends by conceding that nothing can
+#: catch it: *"No gate can see it: `doc_signature_drift` checks signatures and
+#: `source_reference_liveness` checks that paths resolve; neither can tell that a described
+#: data path does not exist."*
+#:
+#: Three weeks later, a census of every reviewer `needs_fix` on record found **11 of 14 were
+#: this exact defect** -- prose asserting something false about the tree the same diff had
+#: just changed, with the production code correct. The reviewer's own words on
+#: `melee-crit-too-easy`: *"The code is correct; four documentation claims in this diff are
+#: factually wrong."* On `grid-distance-metric`: *"two wrong facts in the memory files. The
+#: production code itself is correct."* That is roughly 44% of all spend going to round-trips
+#: over sentences.
+#:
+#: **Why the worker and not a gate.** The claims are semantic -- a formula that is now wrong,
+#: a mechanism that was renamed, a described data path that never existed. A literal-matching
+#: gate (`coreference_sweep`) catches the subset where a *removed literal* survives elsewhere,
+#: measured at two of four. The rest need someone who can read a sentence and check it, and
+#: the worker is the actor holding the diff.
+DOC_TRUTH = """\
+**Every sentence you write about the code must be checked against the code, not against \
+the card.** The card says what was *asked for*; your diff is what was *delivered*, and \
+where a card ships partially those two disagree exactly at the sentence you are most \
+likely to get wrong.
+
+This is the single most common reason a finished card is sent back. Not broken code — \
+prose. Numbers that were re-tuned after the doc line was written, a symbol the same diff \
+deleted still cited in a recipe or a docstring, a comment naming a mechanism this change \
+replaced, a memory entry describing the design you started with rather than the one you \
+landed.
+
+So before you write your verdict, for **every** doc, comment, docstring, memory entry or \
+recipe line your diff adds or touches:
+
+- **Re-read it against `git diff {base}...HEAD`**, not from memory of what you set out to do.
+- **Any number, name or path in it — go look.** A constant you changed twice ends up quoted \
+at its first value. A count you took before the last commit is stale.
+- **Anything your diff renamed or deleted: search the tree for the old name.** Docstrings, \
+recipes and comments are where it survives, because nothing compiles them.
+
+A sentence you are not willing to check is better deleted than shipped. This is cheaper for \
+you to do now, holding the diff, than for anyone else to do later.\
+"""
 
 TOOL_ECONOMY = """\
 **Tool calls cost wall time, not just tokens.** Each one is a round-trip, and any \

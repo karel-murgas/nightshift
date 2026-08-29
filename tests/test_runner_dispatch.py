@@ -47,6 +47,7 @@ from _runner_helpers import (  # noqa: F401  (fixtures register by name)
     _remote_tip,
     _repo,
     _rev,
+    _seed_orphaned_branch,
     _seed_wip_branch,
     _select,
     _wall,
@@ -849,7 +850,18 @@ def test_a_card_forced_past_max_attempts_by_name_still_caps_rescue_branches(
         result = runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
         # Give the attempt back by hand instead of retiring, so the card stays
         # in tasks/ across every one of these forced re-dispatches.
-        board.find(root, "probe").write({"attempts": None, "started": None, "finished": None})
+        #
+        # `last_outcome` is part of that hand-restore because the worker here
+        # returns 1 — these are *failed* attempts, and in a real run the routing
+        # layer records that on the card before the next dispatch reads it
+        # (`runner.py`'s "attempt N failed, will retry" path). Driving `dispatch`
+        # directly skips that layer, so without this line the fixture describes a
+        # card state the runner cannot actually produce: an attempt that failed and
+        # left no trace of failing. FROM_BRANCH reads exactly this field to tell a
+        # walled attempt (resume its commits) from a failed one (cold start, rescue
+        # the branch), so the omission changed which path this test exercised.
+        board.find(root, "probe").write({"attempts": None, "started": None,
+                                         "finished": None, "last_outcome": "failed"})
 
     runner.cap_rescue_branches_in_flight(root)
     listed = subprocess.run(["git", "branch", "--list", "ai/probe@failed-*"], cwd=root,
@@ -2301,3 +2313,92 @@ def test_enforce_worktree_ceiling_is_a_noop_when_at_or_under_it(tmp_path, monkey
 
     assert demoted == []
     assert (runner.worktree_root(root) / "onlyone").exists()
+
+
+def test_a_walled_attempt_that_left_commits_but_no_handover_is_resumed_from_its_branch(tmp_path):
+    """The hole `failed-attempt-work-is-deleted-not-resumed` left open, measured on
+    2026-08-29 and worth about $10 the day it was found.
+
+    Every warm path in `prepare_worktree` is gated on `warm` — a handover file
+    under `.ai/runs/`, which is gitignored and machine-local and is therefore the
+    *first* thing to go missing. `taser-cyberware` walled after spending $10.13 and
+    left none, while its branch carried five real commits: the implementation, 22
+    tests, its i18n entries and its memory records. With no handover the card fell
+    through to the cold start, which renames the branch to a rescue ref nothing ever
+    reads and cuts a fresh worktree from base.
+
+    The rename means the commits are not destroyed — that much the earlier fix did
+    buy. But work that survives and is never read again costs what deleted work
+    costs; the rescue ref only made the loss quiet. Key on the branch, which is
+    durable, rather than on the handover, which is not.
+    """
+    root = _worktree_repo(tmp_path)
+    _card(root, "tasks", "orphan")
+    _seed_orphaned_branch(root, tmp_path, "orphan", "the finished feature")
+    assert not runner.read_handover(root, "orphan").session_id
+
+    tree, branch, mode = runner.prepare_worktree(
+        root, board.find(root, "orphan"), "development_team")
+
+    assert mode == runner.FROM_BRANCH
+    assert branch == "ai/orphan"
+    # The commits are there to continue from, not renamed away to a rescue ref.
+    assert (tree / "feature.txt").read_text(encoding="utf-8") == "the finished feature"
+    rescues = subprocess.run(["git", "branch", "--list", "ai/orphan@failed-*"],
+                             cwd=root, capture_output=True, text=True).stdout
+    assert rescues.strip() == "", f"branch was renamed away instead of resumed: {rescues!r}"
+
+
+def test_an_empty_branch_still_cold_starts(tmp_path):
+    """The boundary the new mode must not cross. A branch that exists but carries
+    nothing ahead of base is not work — resuming from it would hand a worker an
+    empty tree and a note claiming there is something in it."""
+    root = _worktree_repo(tmp_path)
+    _card(root, "tasks", "emptybr")
+    subprocess.run(["git", "branch", "ai/emptybr", "development_team"], cwd=root, check=True)
+
+    _, _, mode = runner.prepare_worktree(
+        root, board.find(root, "emptybr"), "development_team")
+
+    assert mode == runner.FRESH
+
+
+def test_the_from_branch_note_does_not_tell_the_worker_to_undo_a_real_commit(tmp_path):
+    """`_WIP_NOTE` was the obvious reuse and is wrong here in the one way that
+    matters: it says the branch tip is a `wip:` placeholder to be replaced with
+    `git reset --soft HEAD~1`. FROM_BRANCH's commits are ordinary and finished, so
+    a worker following that advice would soft-reset real work it never wrote."""
+    note = runner._FROM_BRANCH_NOTE.format(base="test")
+    assert "reset --soft" not in note
+    assert "HEAD~1" not in note
+    # It may *mention* `wip:` — it does, to say this is not one — but it must say so
+    # in the direction that stops the undo, never asks for it.
+    assert "not a `wip:` placeholder" in note
+    assert "nothing needs undoing" in note
+    assert "Do not re-implement what is already committed." in note
+
+
+def test_a_failed_attempts_branch_is_rescued_not_resumed(tmp_path):
+    """The boundary between the two kinds of leftover branch, and the reason
+    FROM_BRANCH reads `last_outcome` at all.
+
+    A *walled* attempt was going fine and ran out of window, so its commits are
+    the thing to continue from. A *failed* attempt's gates or tests went red, so
+    its commits are a broken tree — resuming onto them would build the next
+    attempt on the defect, and a card that failed three times would re-enter its
+    own broken branch forever instead of ever getting the clean slate the cold
+    start exists to give it. Only a failure writes `last_outcome: failed`, so the
+    card already carries the distinction.
+    """
+    root = _worktree_repo(tmp_path)
+    _card(root, "tasks", "brokecard")
+    _seed_orphaned_branch(root, tmp_path, "brokecard", "half-broken work")
+    board.find(root, "brokecard").write({"last_outcome": "failed"})
+
+    _, _, mode = runner.prepare_worktree(
+        root, board.find(root, "brokecard"), "development_team")
+
+    assert mode == runner.FRESH
+    rescues = subprocess.run(["git", "branch", "--list", "ai/brokecard@failed-*"],
+                             cwd=root, capture_output=True, text=True).stdout.split()
+    assert rescues, "a failed attempt's branch must still be preserved as a rescue ref"
