@@ -2283,7 +2283,7 @@ _ROUTE_GROUPS: tuple[tuple[str, str, str], ...] = (
     ("", "Not yet classified", "warn"),
     ("triage", "Waiting on triage — the expensive route", "warn"),
     ("chore", "Chores — batched overnight", "ok"),
-    ("scribe", "Scribe — needs the envelope only", "ok"),
+    ("scribe", "Scribe — full cards, reviewed on their own", "ok"),
     # A routing pass cards an inline note into `tasks/` on the spot, so this group is
     # empty on every ordinary path and the Do now page is where such work appears.
     # It is kept because `route:` is a field in a file somebody edits in Obsidian: a
@@ -2363,8 +2363,10 @@ def _render_inbox(ctx: Context) -> str:
     # the only route the "opt-in" step was ever protecting.** The
     # look-before-you-spend caution in `ingest`'s own docstring is about
     # *triage* — the expensive route, never dispatched from here whatever this
-    # button does — not about a chore or scribe card, which is cheap by
-    # definition (a thin card, an envelope over an already-elaborated note).
+    # button does — not about a chore or scribe card, whose *writing* is cheap
+    # either way: both are the note turned into a card, with no codebase read.
+    # What the two routes differ in is how the finished card is later run, which
+    # this button does not pay for.
     # Splitting those two into a second manual click bought no real safety and
     # cost a step Karel asked to have back (2026-08-22: chore-routed notes
     # from a still-earlier classify pass were still sitting in `inbox/`,

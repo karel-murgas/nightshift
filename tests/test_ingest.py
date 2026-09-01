@@ -670,8 +670,12 @@ def test_report_lists_every_bucket_even_when_empty(tmp_path: Path, calls):
     root = _repo(tmp_path, alpha="a", beta="b")
     ingest.main(["--root", str(root)])
     text = (root / ingest.OUT).read_text(encoding="utf-8")
-    for heading in ("Do now - inline", "Chores - batch overnight",
-                    "Scribe - needs the envelope only", "Waiting on triage"):
+    # Read off the constant, not copied from it. This assertion is about every
+    # bucket being present, never about its wording — a transcribed heading makes
+    # a copy edit fail a test that has no opinion on copy, which is what happened
+    # when the `scribe` blurb stopped describing the route it heads.
+    assert set(ingest.ROUTE_HEADINGS) == set(board.ROUTES)
+    for heading, _blurb in ingest.ROUTE_HEADINGS.values():
         assert heading in text
     assert "_none_" in text                      # inline and scribe were empty
 

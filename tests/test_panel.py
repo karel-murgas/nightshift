@@ -2625,9 +2625,9 @@ _none_
 
 _none_
 
-## Scribe - needs the envelope only (1)
+## Scribe - full cards (1)
 
-Already elaborated.
+One card each, dispatched and reviewed on its own.
 
 - **ready.md** - already worked out, only the envelope is missing
 

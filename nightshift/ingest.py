@@ -6,10 +6,10 @@ notes into two cards, because one agent both *investigated what the work is* and
 not need it at all — so the routing decision is made here, by an agent that reads the
 notes and nothing else, and the expensive route is spent only where a note earns it.
 
-**Four routes**, defined in the project's own `classifier` charter: `chore` (a thin card
-that runs in a batch), `inline` (a person at the keyboard), `scribe` (the note is already
-elaborated and needs only the envelope), `triage` (there is a fork that cannot be posed
-without reading the code).
+**Four routes**, whose *criteria* are the project's own `classifier` charter and whose
+mechanics are here: `chore` (a `kind: chore` card, batched and reviewed as a set), `inline`
+(a person at the keyboard), `scribe` (a full card, dispatched and reviewed on its own),
+`triage` (the expensive route, never dispatched from here).
 
 **The decision is written onto the note**, as `route:` in its frontmatter, by the
 deterministic step that follows the dispatch (`apply_routing`). Everything else in this
@@ -814,7 +814,12 @@ ROUTE_HEADINGS: dict[str, tuple[str, str]] = {
     "inline": ("Do now - inline", "Carded straight into tasks/ as `unattended: false`; "
                                   "the lane is empty of these by the time you read it."),
     "chore": ("Chores - batch overnight", "Thin cards, verified as one batch."),
-    "scribe": ("Scribe - needs the envelope only", "Already elaborated; no investigation."),
+    # Mechanism, not criterion. *Why* a note lands here is the consuming project's
+    # classifier charter to define, and it moves: this blurb read "Already
+    # elaborated; no investigation" until a project redefined the route as the one
+    # for work too interlocked to batch, at which point the view described a rule
+    # nobody was applying any more. What does not move is what the route *does*.
+    "scribe": ("Scribe - full cards", "One card each, dispatched and reviewed on its own."),
     "triage": ("Waiting on triage", "The expensive route. Launch it deliberately, "
                                     "on the account you meant."),
 }
