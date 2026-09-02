@@ -827,6 +827,12 @@ class Context:
     rail: Rail
     base: str
     candidates: list[Candidate] = field(default_factory=list)
+    #: Every audio artefact any run has harvested, newest run first within each
+    #: card. Gathered here for the same reason the five lane counts are: the Run
+    #: page needs it on every load, and `scan_audio_candidates` is cheap enough
+    #: (a directory walk under `.ai/runs/`, no subprocess) to pay unconditionally
+    #: rather than behind a second read path.
+    audio: list[AudioGroup] = field(default_factory=list)
     decisions: list[board.Card] = field(default_factory=list)
     testing: list[board.Card] = field(default_factory=list)
     review: list[board.Card] = field(default_factory=list)
@@ -999,6 +1005,7 @@ def read_context(root: Path, *, fetch_freshness: bool = False) -> Context:
         ideas=read_ideas(root),
         routing=ingest.read_view(root),
         jobs=jobs.read_all(root, limit=JOBS_READ),
+        audio=scan_audio_candidates(root),
     )
 
 
@@ -1053,6 +1060,156 @@ def _latest_session_for_card(root: Path, card: board.Card) -> str:
     if not card.attempts:
         return ""
     return session_id(attempt_dir(root, card.id, card.attempts))
+
+
+# --------------------------------------------------------------------------
+# Audio candidates — what a run harvested but did not adopt. `audio-asset/
+# SKILL.md` §4b is explicit that a text checker cannot hear a clip, so there is
+# deliberately no `audio-reviewer` the way `art-reviewer` judges a sprite: the
+# ear stays Karel's, and everything here is read-and-serve, never a verdict.
+# --------------------------------------------------------------------------
+
+#: The three kinds `audio-asset/SKILL.md` §5 actually produces — `.wav` for
+#: SFX, `.mp3` for music loops, `.ogg` for voice lines — not an open-ended
+#: sniff of whatever a harvest dir happens to hold.
+AUDIO_EXTS = frozenset({".wav", ".mp3", ".ogg"})
+
+_AUDIO_CONTENT_TYPES = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".ogg": "audio/ogg"}
+
+#: Where a pick survives a reload and a panel restart. Machine-local and
+#: gitignored — the same category as the preflight receipt and `.ai/host.json`,
+#: not a decision the repo itself carries.
+AUDIO_PICKS_FILE = Path(".ai") / "audio_picks.json"  # gate-ok(source_reference_liveness):
+# written the first time `write_audio_pick` runs, in a consuming project; this repo dispatches
+# nothing and has picked nothing, so the file does not exist here.
+
+
+@dataclass
+class AudioTake:
+    """One harvested file — a generated candidate, a synth fallback, or
+    whatever else a run left beside a `candidates.json`."""
+
+    id: str
+    rel: str  # posix path relative to `root`; `/audio/<rel>` is what serves it
+    meta: dict = field(default_factory=dict)  # this take's row in candidates.json, or {}
+
+
+@dataclass
+class AudioGroup:
+    """One `candidates.json` (or its absence) worth of takes, from one
+    attempt's harvested artefacts."""
+
+    card: str
+    attempt: int
+    rel_dir: str  # the directory holding the takes, relative to `root`
+    sound: str
+    generated: str
+    adopted_id: str
+    mtime: float
+    takes: list[AudioTake] = field(default_factory=list)
+
+    def pick_key(self) -> str:
+        """What a pick for this group files under. The sound name when the
+        manifest names one; the directory otherwise — still stable across a
+        reload, just not shared with a same-named sound from a run whose
+        manifest never said so."""
+        return self.sound or self.rel_dir
+
+
+def scan_audio_candidates(root: Path) -> list[AudioGroup]:
+    """Every audio artefact any run has harvested — newest run first within
+    each card, cards ordered by their own newest run.
+
+    Reads `.ai/runs/*/attempt-*/artefacts/` — `runner.harvest`'s own layout,
+    read here rather than reimplemented as a second guess at it (`RUNS`,
+    imported from `nightshift.runner`). Nothing here is Dungeoneer-specific:
+    the harvest dir's name and the `candidates.json` shape both come from
+    whatever the project's own worker wrote, so a project that harvests no
+    audio — or none at all — gets an empty list rather than an error.
+    """
+    runs_dir = root / RUNS
+    if not runs_dir.is_dir():
+        return []
+    groups: list[AudioGroup] = []
+    for card_dir in runs_dir.iterdir():
+        if not card_dir.is_dir():
+            continue
+        for attempt in sorted(card_dir.glob("attempt-*")):
+            match = re.fullmatch(r"attempt-(\d+)", attempt.name)
+            artefacts = attempt / "artefacts"
+            if not match or not artefacts.is_dir():
+                continue
+            by_dir: dict[Path, list[Path]] = {}
+            for item in artefacts.rglob("*"):
+                if item.is_file() and item.suffix.lower() in AUDIO_EXTS:
+                    by_dir.setdefault(item.parent, []).append(item)
+            for directory, files in by_dir.items():
+                sound_manifest = _read_json(directory / "candidates.json")
+                entries = {str(c.get("id")): c for c in sound_manifest.get("candidates", [])
+                          if isinstance(c, dict)}
+                adopted = sound_manifest.get("adopted")
+                takes = [AudioTake(id=f.stem, rel=f.relative_to(root).as_posix(),
+                                   meta=entries.get(f.stem, {}))
+                        for f in sorted(files)]
+                groups.append(AudioGroup(
+                    card=card_dir.name, attempt=int(match.group(1)),
+                    rel_dir=directory.relative_to(root).as_posix(),
+                    sound=str(sound_manifest.get("sound") or ""),
+                    generated=str(sound_manifest.get("generated") or ""),
+                    adopted_id=str(adopted.get("id") or "") if isinstance(adopted, dict) else "",
+                    mtime=directory.stat().st_mtime, takes=takes,
+                ))
+    by_card: dict[str, list[AudioGroup]] = {}
+    for group in groups:
+        by_card.setdefault(group.card, []).append(group)
+    ordered: list[AudioGroup] = []
+    for card in sorted(by_card, key=lambda c: max(g.mtime for g in by_card[c]), reverse=True):
+        ordered.extend(sorted(by_card[card], key=lambda g: g.mtime, reverse=True))
+    return ordered
+
+
+def read_audio_picks(root: Path) -> dict[str, str]:
+    """`{pick key: chosen take's rel path}`, read from disk rather than kept in
+    a process-wide variable — a pick is the opposite of `_ACCOUNT`/`_TIER`: a
+    decision that should outlive the click that made it, not one that must not.
+    """
+    data = _read_json(root / AUDIO_PICKS_FILE)
+    return {str(key): str(value.get("rel", "")) for key, value in data.items()
+            if isinstance(value, dict) and value.get("rel")}
+
+
+def write_audio_pick(root: Path, key: str, rel: str) -> None:
+    """Record `rel` as the pick for `key`. `rel` must already have been proven
+    to point at a real, harvested audio file — callers pass it through
+    `resolve_audio_path` first, exactly as `_route`'s own POST handler does."""
+    if not key:
+        raise PanelError("no sound to record the pick against")
+    path = root / AUDIO_PICKS_FILE
+    data = _read_json(path)
+    if not isinstance(data, dict):
+        data = {}
+    data[key] = {"rel": rel,
+                 "picked_at": dt.datetime.now().replace(microsecond=0).isoformat()}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    textio.write_text_lf(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+
+def resolve_audio_path(root: Path, rel: str) -> Path:
+    """Confine `rel` to `.ai/runs/` — the harvest root, and the one place a
+    request for "an audio file" is allowed to reach. Raises `PanelError`
+    rather than ever serving or recording a path a URL or a POST body pointed
+    outside it, the same discipline `read_body` holds for the board.
+    """
+    candidate = Path(rel)
+    candidate = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    runs_root = (root / RUNS).resolve()
+    if candidate != runs_root and runs_root not in candidate.parents:
+        raise PanelError(f"{rel} is not inside {RUNS.as_posix()}")
+    if candidate.suffix.lower() not in AUDIO_EXTS:
+        raise PanelError(f"{rel} is not an audio file")
+    if not candidate.is_file():
+        raise PanelError(f"{rel} does not exist")
+    return candidate
 
 
 def diff_stat(root: Path, base: str, branch: str) -> str:
@@ -2926,9 +3083,80 @@ def _chores_phase_rows(record: dict) -> str:
     return "".join(rows)
 
 
+def _audio_section(ctx: Context) -> str:
+    """Every audio artefact a run harvested, with a player and the
+    `candidates.json` facts beside each take — the review surface the card's
+    own note says everything before this stopped short of
+    (`audio-asset/SKILL.md` §5: an unattended run generates and validates, but
+    "never adopts unheard").
+
+    **Absent entirely, not merely empty, when nothing has been harvested** —
+    `ctx.audio` is `[]` in every repo that has never generated audio, and a
+    permanent "Audio candidates" heading with nothing under it is exactly the
+    UI the acceptance criteria rule out for that case.
+
+    A take whose validator verdict failed is shown with its `problems`, not
+    filtered out — "the generator put almost nothing in the window" is
+    information Karel needs when deciding whether to re-roll, and hiding it
+    would be this page making that call for him.
+    """
+    groups = ctx.audio
+    if not groups:
+        return ""
+    picks = read_audio_picks(ctx.root)
+    blocks = []
+    total = 0
+    for group in groups:
+        picked_rel = picks.get(group.pick_key(), "")
+        rows = []
+        for take in group.takes:
+            total += 1
+            meta = take.meta
+            chips = []
+            if meta:
+                if meta.get("seconds") is not None:
+                    chips.append(_e(f"{float(meta['seconds']):.2f}s"))
+                if meta.get("seed") is not None:
+                    chips.append(_e(f"seed {meta['seed']}"))
+                if meta.get("generator"):
+                    chips.append(_e(str(meta["generator"])))
+                if meta.get("post_flags"):
+                    chips.append(_e(str(meta["post_flags"])))
+                if "ok" in meta:
+                    chips.append(_chip("failed validation", "warn") if meta.get("ok") is False
+                                 else _chip("ok", "ok"))
+            else:
+                # Degrades honestly rather than pretending to know: the player
+                # still works, the facts beside it read as unknown.
+                chips.append(_chip("no candidates.json — metadata unknown", "mute"))
+            if take.rel == picked_rel:
+                chips.append(_chip("picked", "ok"))
+            body = [f'<b>{_e(take.id)}</b>']
+            if meta.get("prompt"):
+                body.append(f'<p class="why">{_e(meta["prompt"])}</p>')
+            problems = meta.get("problems") or []
+            if problems:
+                body.append(f'<p class="why">{_e("; ".join(str(p) for p in problems))}</p>')
+            body.append(_meta(chips))
+            body.append(f'<audio controls preload="none" '
+                        f'src="/audio/{quote(take.rel, safe="/")}"></audio>')
+            acts = (_act("Picked", disabled=True) if take.rel == picked_rel else
+                    _act("Pick", onclick=f"post('/api/audio/pick',"
+                                         f"{{key:'{_attr(group.pick_key())}',"
+                                         f"rel:'{_attr(take.rel)}'}})"))
+            rows.append(_row(marker="&#9835;", body="".join(body), acts=acts))
+        heading = group.sound or group.rel_dir
+        when = f" · {group.generated}" if group.generated else ""
+        blocks.append(_group(f"{heading} — {group.card} attempt {group.attempt}{when}")
+                     + "".join(rows))
+    return _section("Audio candidates", total, "".join(blocks),
+                    note="What a run generated but nobody has heard yet.",
+                    sec_id="audio")
+
+
 def _render_run(ctx: Context) -> str:
     record = _latest_record(ctx.root)
-    out = [_running_section(ctx)]
+    out = [_running_section(ctx), _audio_section(ctx)]
 
     # When the newest thing that ran wrote no record — an `ingest` pass, a preflight —
     # it goes above the newest record rather than only into the history at the foot of
@@ -3988,6 +4216,20 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("log/"):
             self._send(200, render_job(self.root, path[len("log/"):]).encode("utf-8"))
             return
+        if path.startswith("audio/"):
+            # Unquoted like `body/`: the rel path is generated by this module's
+            # own scanner, never typed by a person, but the browser still
+            # percent-encodes it in the `<audio src>` this section wrote.
+            rel = unquote(path[len("audio/"):])
+            try:
+                resolved = resolve_audio_path(self.root, rel)
+            except PanelError as exc:
+                self._send_text(400, str(exc))
+                return
+            content_type = _AUDIO_CONTENT_TYPES.get(resolved.suffix.lower(),
+                                                     "application/octet-stream")
+            self._send(200, resolved.read_bytes(), content_type)
+            return
         if path.startswith("diff/"):
             card = board.find(self.root, path[len("diff/"):])
             if card is None:
@@ -4404,6 +4646,16 @@ class Handler(BaseHTTPRequestHandler):
                     if note else "")))
             return (f"opened a terminal running triage on {note}" if note else
                     "opened a terminal running the triage charter")
+
+        if path == "api/audio/pick":
+            # No dispatch guard and no `paid`: this spends nothing and calls no
+            # model — the same posture as `api/answer`, a person recording a
+            # decision, not the panel starting anything.
+            key = str(body.get("key", ""))
+            rel = str(body.get("rel", ""))
+            resolve_audio_path(root, rel)  # raises PanelError on anything bogus
+            write_audio_pick(root, key, rel)
+            return f"picked {rel!r} for {key!r}"
 
         return None
 

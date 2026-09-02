@@ -43,6 +43,7 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -140,6 +141,25 @@ def _card(root: Path, lane: str, card_id: str, *, unattended: str = "true",
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", f"card {card_id}")
     return path
+
+
+def _harvest_audio(root: Path, card: str, attempt: int, *, sound: str = "", generated: str = "",
+                   takes: list[dict] | None = None, manifest: bool = True,
+                   subdir: str = "audio_final") -> Path:
+    """Stand in for what `runner.harvest` leaves an audio card: a directory of
+    takes under `.ai/runs/<card>/attempt-N/artefacts/.tmp/<subdir>/`, with
+    (unless `manifest=False`) a `candidates.json` describing them the way
+    `audio-asset/SKILL.md` §5 does — each dict in `takes` is both a file to
+    write (by its `id`) and, verbatim, that file's manifest row."""
+    directory = root / panel.RUNS / card / f"attempt-{attempt}" / "artefacts" / ".tmp" / subdir
+    directory.mkdir(parents=True, exist_ok=True)
+    takes = takes if takes is not None else [{"id": "take_a"}]
+    for take in takes:
+        (directory / f"{take['id']}.wav").write_bytes(b"RIFF....WAVEfmt not-really-audio")
+    if manifest:
+        payload = {"sound": sound, "card": card, "generated": generated, "candidates": takes}
+        (directory / "candidates.json").write_text(json.dumps(payload), encoding="utf-8")
+    return directory
 
 
 @pytest.fixture(autouse=True)
@@ -4067,3 +4087,269 @@ def test_the_tier_tick_is_not_carried_across_a_swap(server):
     assert 'data-server="1"' in tick, tick
     assert "checked" in tick, "the server must render the choice it is holding"
     assert 'input[type=checkbox]:not([data-server])' in _app()
+
+
+# --------------------------------------------------------- audio candidates
+#
+# `audio-audition-review-in-command-center`: the Run page's listen-and-pick
+# surface over `.ai/runs/*/attempt-*/artefacts/` — `runner.harvest`'s own
+# layout, read here rather than reimplemented, and `audio-asset/SKILL.md` §5's
+# `candidates.json` shape (`id`, `seconds`, `seed`, `generator`, `post_flags`,
+# `ok`, `problems`).
+
+
+def test_scan_audio_candidates_is_empty_with_no_runs_dir(tmp_path):
+    root = _repo(tmp_path)
+    assert panel.scan_audio_candidates(root) == []
+
+
+def test_scan_finds_a_harvested_take_and_its_manifest_row(tmp_path):
+    root = _repo(tmp_path)
+    _harvest_audio(root, "ad-sound-for-recharge", 1, sound="recharge", generated="2026-09-02",
+                   takes=[{"id": "recharge_a", "seconds": 2.0, "seed": 11, "ok": True,
+                           "problems": [], "prompt": "a hum", "generator": "MOSS",
+                           "post_flags": "(defaults)"}])
+
+    groups = panel.scan_audio_candidates(root)
+
+    assert len(groups) == 1
+    group = groups[0]
+    assert group.card == "ad-sound-for-recharge"
+    assert group.attempt == 1
+    assert group.sound == "recharge"
+    assert group.generated == "2026-09-02"
+    assert len(group.takes) == 1
+    take = group.takes[0]
+    assert take.id == "recharge_a"
+    assert take.meta["seconds"] == 2.0
+    assert take.meta["seed"] == 11
+    assert take.rel.endswith("recharge_a.wav")
+
+
+def test_scan_ignores_non_audio_files_in_the_artefacts_dir(tmp_path):
+    root = _repo(tmp_path)
+    directory = _harvest_audio(root, "card-x", 1, takes=[{"id": "take_a"}])
+    (directory / "notes.txt").write_text("not audio", encoding="utf-8")
+
+    groups = panel.scan_audio_candidates(root)
+
+    assert len(groups) == 1
+    assert [t.id for t in groups[0].takes] == ["take_a"]
+
+
+def test_scan_degrades_honestly_with_no_candidates_json(tmp_path):
+    root = _repo(tmp_path)
+    _harvest_audio(root, "card-x", 1, manifest=False, takes=[{"id": "raw_take"}])
+
+    groups = panel.scan_audio_candidates(root)
+
+    assert len(groups) == 1
+    assert groups[0].sound == ""
+    assert groups[0].takes[0].meta == {}
+
+
+def test_scan_orders_newest_run_first_within_a_card(tmp_path):
+    root = _repo(tmp_path)
+    older = _harvest_audio(root, "card-x", 1, sound="a", takes=[{"id": "t1"}])
+    newer = _harvest_audio(root, "card-x", 2, sound="b", takes=[{"id": "t2"}])
+    os.utime(older, (1_000_000, 1_000_000))
+    os.utime(newer, (2_000_000, 2_000_000))
+
+    groups = panel.scan_audio_candidates(root)
+
+    assert [g.attempt for g in groups] == [2, 1]
+
+
+def test_scan_orders_cards_by_their_own_newest_run(tmp_path):
+    root = _repo(tmp_path)
+    old_card = _harvest_audio(root, "old-card", 1, sound="a", takes=[{"id": "t1"}])
+    new_card = _harvest_audio(root, "new-card", 1, sound="b", takes=[{"id": "t2"}])
+    os.utime(old_card, (1_000_000, 1_000_000))
+    os.utime(new_card, (2_000_000, 2_000_000))
+
+    groups = panel.scan_audio_candidates(root)
+
+    assert [g.card for g in groups] == ["new-card", "old-card"]
+
+
+def test_pick_key_falls_back_to_the_directory_without_a_sound_name(tmp_path):
+    root = _repo(tmp_path)
+    _harvest_audio(root, "card-x", 1, manifest=False, takes=[{"id": "t1"}])
+    group = panel.scan_audio_candidates(root)[0]
+    assert group.pick_key() == group.rel_dir
+
+
+def test_audio_pick_round_trips_through_disk_not_memory(tmp_path):
+    """Persisted state, not `_ACCOUNT`/`_TIER`'s process-wide shape — a fresh
+    read (standing in for "a panel restart") must see what an earlier one wrote."""
+    root = _repo(tmp_path)
+    assert panel.read_audio_picks(root) == {}
+    panel.write_audio_pick(root, "recharge", ".ai/runs/x/attempt-1/artefacts/take.wav")
+    assert panel.read_audio_picks(root) == {"recharge": ".ai/runs/x/attempt-1/artefacts/take.wav"}
+
+
+def test_writing_a_pick_requires_a_key(tmp_path):
+    root = _repo(tmp_path)
+    with pytest.raises(panel.PanelError, match="sound"):
+        panel.write_audio_pick(root, "", "some/path.wav")
+
+
+def test_resolve_audio_path_confines_to_runs(tmp_path):
+    root = _repo(tmp_path)
+    (root / "secret.wav").write_bytes(b"nope")
+    with pytest.raises(panel.PanelError, match="not inside"):
+        panel.resolve_audio_path(root, "secret.wav")
+
+
+def test_resolve_audio_path_refuses_traversal_out_of_runs(tmp_path):
+    root = _repo(tmp_path)
+    directory = _harvest_audio(root, "card-x", 1, takes=[{"id": "t1"}])
+    (root / "secret.wav").write_bytes(b"nope")
+    escaping = f"{directory.relative_to(root).as_posix()}/../../../../../../secret.wav"
+    with pytest.raises(panel.PanelError, match="not inside"):
+        panel.resolve_audio_path(root, escaping)
+
+
+def test_resolve_audio_path_refuses_a_non_audio_extension(tmp_path):
+    root = _repo(tmp_path)
+    directory = _harvest_audio(root, "card-x", 1, takes=[{"id": "t1"}])
+    (directory / "not-audio.txt").write_text("x", encoding="utf-8")
+    rel = (directory / "not-audio.txt").relative_to(root).as_posix()
+    with pytest.raises(panel.PanelError, match="not an audio file"):
+        panel.resolve_audio_path(root, rel)
+
+
+def test_resolve_audio_path_refuses_a_missing_file(tmp_path):
+    root = _repo(tmp_path)
+    _harvest_audio(root, "card-x", 1, takes=[{"id": "t1"}])
+    ghost = ".ai/runs/card-x/attempt-1/artefacts/.tmp/audio_final/ghost.wav"
+    with pytest.raises(panel.PanelError, match="does not exist"):
+        panel.resolve_audio_path(root, ghost)
+
+
+def test_audio_section_is_absent_with_nothing_harvested(tmp_path):
+    """The acceptance's own wording: no harvested audio means no section at
+    all, not an empty one — unlike `_chores_section` and its neighbours."""
+    root = _repo(tmp_path)
+    ctx = panel.read_context(root)
+    assert panel._audio_section(ctx) == ""
+
+
+def test_audio_section_lists_a_take_with_its_metadata(tmp_path):
+    root = _repo(tmp_path)
+    _harvest_audio(root, "card-x", 1, sound="recharge",
+                   takes=[{"id": "take_a", "seconds": 1.5, "seed": 7, "ok": True,
+                           "problems": [], "prompt": "a hum", "generator": "MOSS",
+                           "post_flags": "(defaults)"}])
+    ctx = panel.read_context(root)
+
+    html = panel._audio_section(ctx)
+
+    assert "Audio candidates" in html
+    assert "take_a" in html
+    assert "1.50s" in html
+    assert "seed 7" in html
+    assert "a hum" in html
+    assert '<audio controls' in html
+
+
+def test_a_failed_take_is_shown_with_its_reason_not_filtered_out(tmp_path):
+    root = _repo(tmp_path)
+    _harvest_audio(root, "card-x", 1, sound="recharge",
+                   takes=[{"id": "take_bad", "seconds": 4.0, "seed": 1, "ok": False,
+                           "problems": ["ends mid-sound at -16 dB below peak"], "prompt": "p"}])
+    ctx = panel.read_context(root)
+
+    html = panel._audio_section(ctx)
+
+    assert "take_bad" in html
+    assert "ends mid-sound at -16 dB below peak" in html
+    assert "failed validation" in html
+
+
+def test_a_take_with_no_manifest_reads_as_unknown(tmp_path):
+    root = _repo(tmp_path)
+    _harvest_audio(root, "card-x", 1, manifest=False, takes=[{"id": "raw"}])
+    ctx = panel.read_context(root)
+
+    html = panel._audio_section(ctx)
+
+    assert "raw" in html
+    assert "metadata unknown" in html
+
+
+def test_a_picked_take_is_marked_in_the_section(tmp_path):
+    root = _repo(tmp_path)
+    _harvest_audio(root, "card-x", 1, sound="recharge",
+                   takes=[{"id": "take_a"}, {"id": "take_b"}])
+    group = panel.scan_audio_candidates(root)[0]
+    picked = next(t for t in group.takes if t.id == "take_a")
+    panel.write_audio_pick(root, group.pick_key(), picked.rel)
+
+    ctx = panel.read_context(root)
+    html = panel._audio_section(ctx)
+
+    assert '>Picked<' in html
+
+
+def test_the_run_page_shows_no_audio_section_with_nothing_harvested(server):
+    base, _ = server
+    _, text = _get(base, "run")
+    assert "Audio candidates" not in text
+
+
+def test_the_run_page_lists_a_harvested_take(server):
+    base, root = server
+    _harvest_audio(root, "card-x", 1, sound="recharge", takes=[{"id": "take_a"}])
+    _, text = _get(base, "run")
+    assert "Audio candidates" in text
+    assert "take_a" in text
+
+
+def test_the_audio_route_serves_the_actual_bytes(server):
+    base, root = server
+    directory = _harvest_audio(root, "card-x", 1, takes=[{"id": "take_a"}])
+    target = directory / "take_a.wav"
+    rel = target.relative_to(root).as_posix()
+
+    with urllib.request.urlopen(f"{base}/audio/{quote(rel, safe='/')}", timeout=5) as resp:
+        assert resp.status == 200
+        assert resp.headers["Content-Type"] == "audio/wav"
+        assert resp.read() == target.read_bytes()
+
+
+def test_the_audio_route_refuses_a_path_outside_runs(server):
+    """The traversal rides as one percent-encoded segment (`quote(..., safe="")`,
+    matching how `unquote()` on the server's side reads it) rather than literal
+    `../` in the request line — a raw `../` risks the HTTP client normalising
+    the URL before it is ever sent, which would test the client, not the
+    server's own confinement check."""
+    base, root = server
+    (root / "secret.wav").write_bytes(b"nope")
+    request = urllib.request.Request(f"{base}/audio/{quote('../secret.wav', safe='')}")
+    try:
+        with urllib.request.urlopen(request, timeout=5):
+            status = 200
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+    assert status == 400
+
+
+def test_picking_a_candidate_over_http_persists_across_a_fresh_read(server):
+    base, root = server
+    directory = _harvest_audio(root, "card-x", 1, sound="recharge", takes=[{"id": "take_a"}])
+    rel = (directory / "take_a.wav").relative_to(root).as_posix()
+
+    status, data = _post(base, "api/audio/pick", {"key": "recharge", "rel": rel})
+
+    assert status == 200, data
+    # Stands in for "survives a panel restart": a fresh read off disk, not the
+    # HTTP server process's own memory, sees exactly what the POST wrote.
+    assert panel.read_audio_picks(root) == {"recharge": rel}
+
+
+def test_picking_a_bogus_path_is_refused(server):
+    base, _ = server
+    status, data = _post(base, "api/audio/pick", {"key": "recharge", "rel": "../secret.wav"})
+    assert status == 400
+    assert "not inside" in data["message"]

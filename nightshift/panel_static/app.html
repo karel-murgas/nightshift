@@ -401,6 +401,11 @@
   }
   .why { margin: 0.28rem 0 0; color: var(--ink-dim); max-width: 62ch; }
 
+  /* One player per take, under its metadata rather than beside it — a row
+     wide enough for a dozen takes' controls side by side would be a row
+     nobody can scan. */
+  .body audio { display: block; width: 100%; max-width: 22rem; margin-top: 0.35rem; height: 2rem; }
+
   .acts { display: flex; gap: 0.4rem; flex-wrap: wrap; justify-content: flex-end; }
 
   .act {
