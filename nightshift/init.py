@@ -386,161 +386,6 @@ def merge_hooks(existing: dict, fragment: dict) -> tuple[dict, int]:
     return merged, added
 
 
-# --- the Obsidian vault ------------------------------------------------------
-#
-# Writing `{{board}}.base` is not the same as being able to see it. The Kanban view
-# type comes from the **Base Board** community plugin and the tables from **Bases**,
-# a core one, and both are switched on in `.obsidian/` — so an install that produces
-# the view and not the toggles hands the operator `Unknown view type: kanban` and a
-# fifty-fifty guess about which of the two is missing (2026-08-04,
-# `kanban-needed-a-plugin-nobody-named`).
-#
-# **Merged, never written.** `.obsidian/` is the operator's, it long predates us in
-# any vault that has been opened once, and its files carry window layouts, themes,
-# hotkeys and every other plugin they run. So: read, add what is missing, keep the
-# rest verbatim.
-#
-# The asymmetry between the two files is deliberate and is the interesting part:
-#
-#   community-plugins.json  a flat list of *enabled* ids. An absent file means "none
-#                           enabled", so creating it with our one id adds and removes
-#                           nothing. Safe to create.
-#   core-plugins.json       a map of EVERY core plugin to a boolean. Obsidian writes
-#                           it in full on first launch. Creating a partial one is not
-#                           an append — it is a claim about plugins we never asked
-#                           about, and the failure mode is somebody's file explorer
-#                           silently turning off. Merged if present, never created.
-#
-# Enabling `base-board` does not *install* it: the id names a directory under
-# `.obsidian/plugins/` that only Obsidian's Browse can fetch. Doing it anyway is
-# still right — it means the plugin works the moment it is installed instead of
-# needing a second trip through settings — but it is reported honestly rather than
-# as "the board is ready".
-
-BASES_CORE_PLUGIN = "bases"
-BOARD_KANBAN_PLUGIN = "base-board"
-
-
-def merge_community_plugins(existing: list, plugin: str = BOARD_KANBAN_PLUGIN
-                            ) -> tuple[list, bool]:
-    """Append `plugin` to the enabled-community-plugins list. Returns (merged, added)."""
-    merged = [p for p in existing if isinstance(p, str)]
-    if plugin in merged:
-        return merged, False
-    return merged + [plugin], True
-
-
-def merge_core_plugins(existing: dict, plugin: str = BASES_CORE_PLUGIN
-                       ) -> tuple[dict, bool]:
-    """Switch `plugin` on in the core-plugin map, leaving every other key alone.
-
-    Only ever flips a `False`/missing key to `True`. There is no path here that
-    disables anything: this function's whole job is to add one capability to a file
-    describing a dozen the operator chose.
-    """
-    if existing.get(plugin) is True:
-        return dict(existing), False
-    return {**existing, plugin: True}, True
-
-
-def _plan_obsidian(plan: Plan, root: Path) -> None:
-    """Wire the two plugins the board view needs, if this repo is a vault."""
-    vault = root / ".obsidian"
-    if not vault.is_dir():
-        # Never created. An absent `.obsidian/` means the repo has not been opened in
-        # Obsidian, and manufacturing a vault for someone who may not use it — or may
-        # keep their vault rooted elsewhere — is deciding something that is theirs.
-        plan.notes.append(
-            "no .obsidian/ here, so the board view's plugins were not wired. Open the "
-            "repo as an Obsidian vault, then install Base Board (Settings → Community "
-            "plugins → Browse) and enable the core Bases plugin; or re-run `nightshift "
-            "init` afterwards and it will do both.")
-        return
-
-    # A `workspace.json` that is already tracked cannot be fixed by a `.gitignore`
-    # rule, and it is the file that quietly stops a project dead: Obsidian rewrites
-    # it on nearly every interaction, so the tree is dirty again seconds after any
-    # commit. The runner now skips `.obsidian/` when judging dirtiness, so this is
-    # no longer blocking — but a file that changes every time you look at the board
-    # is noise in every diff forever, and untracking it is two commands.
-    # gate-ok(source_reference_liveness): both paths are queried against `root`, the
-    # project being initialised, at check time — not this framework's own checkout,
-    # which carries no .obsidian/workspace-mobile.json of its own.
-    tracked = gitpaths.tracked(root, "--", ".obsidian/workspace.json",
-                               ".obsidian/workspace-mobile.json")
-    if tracked:
-        names = " ".join(tracked)
-        plan.notes.append(
-            f"{names} is tracked by git. Obsidian rewrites it whenever you open a "
-            f"pane or scroll, so it will show as modified in every diff from now on. "
-            f"Untrack it and keep the file: `git rm --cached {names}` then commit — "
-            f"the .gitignore entry init writes stops it coming back.")
-
-    # gate-ok(source_reference_liveness): every `.obsidian/community-plugins.json`
-    # below names a file under `vault` (the project being initialised), read and
-    # written at check time — this framework's own checkout has no such file, so
-    # each of the four mentions below resolves to nothing here by construction.
-    community = vault / "community-plugins.json"
-    enabled: list = []
-    if community.is_file():
-        try:
-            loaded = json.loads(community.read_text(encoding="utf-8"))
-            enabled = loaded if isinstance(loaded, list) else []
-        except (OSError, json.JSONDecodeError) as exc:
-            plan.notes.append(
-                f".obsidian/community-plugins.json is unreadable ({exc}) — Base Board "  # gate-ok(source_reference_liveness): see the block comment above
-                f"NOT enabled. Fix the file and re-run; rewriting it would take your "
-                f"other plugins with it.")
-            enabled = None  # type: ignore[assignment]
-    if enabled is not None:
-        merged_list, added = merge_community_plugins(enabled)
-        if added:
-            plan.writes[".obsidian/community-plugins.json"] = (  # gate-ok(source_reference_liveness): see the block comment above
-                json.dumps(merged_list, indent=2) + "\n")
-            installed = (vault / "plugins" / BOARD_KANBAN_PLUGIN).is_dir()
-            plan.info.append(
-                f"{BOARD_KANBAN_PLUGIN} enabled in .obsidian/community-plugins.json"  # gate-ok(source_reference_liveness): see the block comment above
-                + ("" if installed else
-                   " — but NOT installed: the plugin's code is not in .obsidian/plugins/, "
-                   "so fetch it from Settings → Community plugins → Browse and the Kanban "
-                   "appears. Until then Obsidian reports it as failed to load"))
-        else:
-            plan.kept.append(".obsidian/community-plugins.json")  # gate-ok(source_reference_liveness): see the block comment above
-
-    # gate-ok(source_reference_liveness): every `.obsidian/core-plugins.json` below
-    # names a file under `vault` (the project being initialised), read and written at
-    # check time — this framework's own checkout has no such file, so each of the five
-    # mentions below resolves to nothing here by construction. Same case as the
-    # community-plugins block above, and as `.obsidian/workspace.json` above that.
-    core = vault / "core-plugins.json"
-    if core.is_file():
-        try:
-            loaded = json.loads(core.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            plan.notes.append(
-                f".obsidian/core-plugins.json is unreadable ({exc}) — the core Bases "  # gate-ok(source_reference_liveness): see the block comment above
-                f"plugin was NOT enabled. Fix the file and re-run.")
-            return
-        if not isinstance(loaded, dict):
-            return
-        merged_map, added = merge_core_plugins(loaded)
-        if added:
-            plan.writes[".obsidian/core-plugins.json"] = (  # gate-ok(source_reference_liveness): see the block comment above
-                json.dumps(merged_map, indent=2) + "\n")
-            plan.info.append("the core Bases plugin enabled in "  # gate-ok(source_reference_liveness): see the block comment above
-                             ".obsidian/core-plugins.json (every other key untouched)")
-        else:
-            plan.kept.append(".obsidian/core-plugins.json")  # gate-ok(source_reference_liveness): see the block comment above
-    else:
-        # Present vault, absent core map: Obsidian has not written one yet. Say so
-        # rather than inventing the file — see the module comment above.
-        plan.notes.append(
-            "no .obsidian/core-plugins.json yet, so the core Bases plugin was left "  # gate-ok(source_reference_liveness): see the block comment above
-            "alone — writing a partial one would assert a state for every core plugin "
-            "you never chose. Obsidian writes it on launch; re-run `nightshift init` "
-            "after that, or enable Bases in Settings → Core plugins.")
-
-
 # --- planning ----------------------------------------------------------------
 
 
@@ -721,19 +566,16 @@ def stage_templates(plan: Plan, root: Path, tables: dict[str, dict], *,
     # directory finds no notes, which reads exactly like having none.
     stage(f"{board_root}/{PRIVATE_LANE}/.gitkeep", "")
 
-    # The board as something you can look at. The lanes are directories, which is the
-    # whole design — but a directory tree is not a board, and the origin project has had
-    # an Obsidian Bases view of it since long before the extraction, so no run there
-    # could notice that `init` never produced one. Reported by the maintainer, who opened
-    # a freshly installed repo in Obsidian and found no kanban.
-    board_view = f"{board_root}.base"
-    stage(board_view, render((TEMPLATES / "board.base").read_text(encoding="utf-8"), values))
-    _plan_obsidian(plan, root)
-    if board_view in plan.kept:
-        plan.notes.append(
-            f"{board_view} already exists, so it was left alone. Check its "
-            f"`boardColumns` still lists every lane — a column missing there makes the "
-            f"cards in it invisible rather than obviously absent.")
+    # No board *view* is installed, and that is the design rather than an omission.
+    # The lanes are directories; Command Center reads them and is the board surface
+    # (`python -m nightshift.panel`, or the launcher `init` prints at the end). `init`
+    # used to also write a `<board>.base` Obsidian Bases view and switch two Obsidian
+    # plugins on under the project's `.obsidian/` — removed by `remove-obsidian`
+    # (2026-09-02, Karel: *"Obsidian should no longer be expected, every input /
+    # output should be doable via Command Center"*), because provisioning one editor
+    # for every consuming project is a choice the framework has no business making.
+    # An operator who wants to read the board files in an editor needs nothing from
+    # us: they are plain Markdown in plain directories.
 
     # Memory stubs, so `CLAUDE.md`'s table points at files that exist. A table naming
     # four missing files is the first thing a session learns to ignore.
@@ -1068,15 +910,8 @@ def receipt_text(plan: Plan) -> str:
     that did write it, which is the reading `update` needs.
     """
     settings = SETTINGS
-    # `.obsidian/` is excluded for the same reason as `settings.json`, one step
-    # further: those two files are merges into the operator's vault config, and
-    # unlike a hook entry there is nothing here worth taking back. A plugin toggle
-    # is not our artefact — by the time anyone uninstalls, "did nightshift enable
-    # Bases or did they" is unanswerable, and switching off a plugin somebody has
-    # been using for months to tidy up after ourselves is the worse error. So
-    # uninstall leaves the vault exactly as it found it.
     created = {rel: content_hash(body) for rel, body in plan.writes.items()
-               if rel != settings and not rel.startswith(".obsidian/")}
+               if rel != settings}
     appended = set(plan.appends)
     settings_created = settings in plan.writes and plan.settings_created
     declined: dict[str, str] = {}
@@ -1462,17 +1297,6 @@ def next_steps(plan: Plan, *, integration: str | None, permission_mode: str) -> 
     print("  maintenance you would otherwise have to remember: `nightshift update`")
     print("  (this repo's nightshift files, as the framework moves on), the doctor,")
     print("  the gates, preflight and the fix pass.\n")
-
-    # Deliberately not a third numbered step: the two commands above are the
-    # install, and this is the one piece neither of them can do, because it is a
-    # click in another application. Called out anyway because the failure is
-    # silent-looking and self-inflicted — you open the board you were just told
-    # you have, and Obsidian says `Unknown view type: kanban`.
-    print("  For the board in Obsidian instead: open this repo as a vault, then install")
-    print("  the Base Board community plugin (Settings → Community plugins → Browse).")
-    print("  Bases is core and gives the tables; the Kanban view type is Base Board's,")
-    print("  and without it Obsidian reports `Unknown view type: kanban`. Nothing in")
-    print("  the framework reads that view, so this is for you, not for it.\n")
 
     print("  A first install is usually red in a place or two; that is what step 2")
     print("  is for. If you would rather have an agent drive the whole thing next")

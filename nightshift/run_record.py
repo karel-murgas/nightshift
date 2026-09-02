@@ -26,7 +26,7 @@ naming, because each fixes a specific failure of the old approach:
   they are "what is waiting on you", not "what happened".
 - **An abandoned run still testifies.** The record is flushed after every event,
   so the night that was killed mid-sweep and never reached its own digest is
-  still there to be reported by the *next* run's digest.
+  still there to be read by the next thing that looks.
 
 **No LLM anywhere in here** — same rule as the gates and the digest
 (`00_architecture.md` §12). Every field is something the runner observed.
@@ -89,7 +89,7 @@ def _now() -> str:
 def _stamp(iso: str) -> str:
     """A filename-safe form of an ISO timestamp: `2026-07-30T02:14:08` →
     `20260730-021408`. Sorts lexicographically in time order, which is what
-    `records_since` relies on instead of reading every file to sort them."""
+    `read_all` relies on instead of reading every file to sort them."""
     return iso.replace("-", "").replace(":", "").replace("T", "-")
 
 
@@ -183,7 +183,7 @@ class Record:
         Numbers, not the sentence the run log prints. The record holds what the
         runner observed and the digest decides how it reads in the morning — and
         the two surfaces phrase it differently on purpose: one line per card in
-        the log, N cards under one shared remedy in the digest.
+        the log, N cards under one shared remedy on the panel.
         """
         self.data["oversized"] = [{"card": cid, "bytes": size, "threshold": limit}
                                   for cid, size, limit in entries]
@@ -191,11 +191,12 @@ class Record:
 
     def stale(self, *, selected: int, checked: int, verified: int, carded: int,
               incomplete: int = 0, cards: list[str] | None = None) -> None:
-        """The sweep's real yield. `selected` and `incomplete` are the two the
-        old `stale_status.json` never carried, and they are the two that
-        distinguish "swept, nothing had drifted" from "swept 58 docs and every
-        single verdict came back unusable" — which is what actually happened on
-        2026-07-30 and which the digest reported as silence."""
+        """The sweep's real yield, and since `.ai/stale_status.json` went with the
+        digest, the only record of it. `selected` and `incomplete` are the two that
+        status file never carried, and they are the two that distinguish "swept,
+        nothing had drifted" from "swept 58 docs and every single verdict came back
+        unusable" — which is what actually happened on 2026-07-30 and which the
+        digest reported as silence."""
         self.data["stale"] = {
             "selected": selected, "checked": checked, "verified": verified,
             "carded": carded, "incomplete": incomplete, "cards": cards or [],
@@ -308,31 +309,6 @@ def read_all(root: Path) -> list[dict]:
             out.append(data)
     return out
 
-
-def records_since(root: Path, since: str | None) -> list[dict]:
-    """Records that started after `since` (an ISO timestamp), newest first.
-
-    `since` is the previous digest commit's timestamp, so the window is exactly
-    "runs Karel has not been shown yet" — which is normally one, and was two on
-    2026-07-30 (an aborted night plus a manual midday run) precisely because the
-    aborted one never rendered a digest of its own. `None` (no digest has ever
-    been committed) returns everything.
-
-    Derived from the commit rather than from a marker file the digest writes, so
-    that re-rendering the digest is idempotent: running the digest twice in a row
-    must not make the second one claim nothing happened.
-    """
-    records = read_all(root)
-    if since is None:
-        return records
-    return [r for r in records if str(r.get("started", "")) > since]
-
-
-# --- reading one record ------------------------------------------------------
-#
-# Small accessors rather than the digest reaching into raw dicts. The point is
-# that the *record* owns what "failed" means, so a new outcome string added in
-# `runner.Dispatch` is classified in one place instead of in every report.
 
 
 def failures(record: dict) -> list[dict]:

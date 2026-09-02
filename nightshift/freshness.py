@@ -188,7 +188,7 @@ def run_is_live(project_root: Path) -> bool:
     (`live-pid-is-not-a-live-run`, logged in this repo's own corrections).
 
     `runner` is imported here rather than at module scope on purpose. It pulls in the
-    board, the digest, the merge machinery and half the package; this module is
+    board, the panel, the merge machinery and half the package; this module is
     consulted on the way to a push and on every panel page load, and neither should pay
     for that import to answer a question they will usually not ask.
     """
@@ -200,7 +200,7 @@ def run_is_live(project_root: Path) -> bool:
         return False
     if not isinstance(status, dict):
         return False
-    if str(status.get("phase") or "") in ("finished", "digest", ""):
+    if str(status.get("phase") or "") in ("finished", "wrapup", ""):
         return False
     try:
         pid = int(status.get("pid") or 0)

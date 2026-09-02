@@ -11,50 +11,28 @@ ideas/ → inbox/ → tasks/ → review/ → testing/ → done/
 
 ## Seeing it
 
-Open this repository as an **Obsidian vault** (Obsidian → *Open folder as vault*, and
-point it at the repo root). `{{board}}.base` — written by `nightshift init` — gives you
-three views of these directories:
+**Command Center is the board.** Run it and the lanes above become pages:
 
-| View | What it shows |
-|---|---|
-| **Kanban** | one column per lane, cards draggable between them |
-| **Live** | everything except `done/` and `failed/`, grouped by lane |
-| **Archive** | only `done/` and `failed/` |
+```
+python -m nightshift.panel
+```
 
-**Two plugins, and the Kanban needs the second one.** *Bases* is core (ships with Obsidian
-1.9+) and gives you the two tables. The Kanban view type is **not** core — it comes from
-the **Base Board** community plugin.
+(or the `command-center` launcher script `nightshift init` prints at the end). *Now*
+carries what needs you tonight — decisions, blocked work, the chore batch, the run in
+flight; *Verify* the cards waiting to be played or read; *Inbox* and *Ideas* the two
+intake lanes; *Run* the dispatch controls; *System* the install, update, doctor, gates
+and preflight. Cards are edited in place, reordered by drag, and answered through a
+picker that writes the answer into the card's own `## Thread`.
 
-`nightshift init` switches both on for you, by *appending* to `.obsidian/core-plugins.json`
-and `.obsidian/community-plugins.json` — your themes, hotkeys and other plugins are read
-and written back untouched. What it cannot do is **fetch** Base Board: the id it enables
-names a directory only Obsidian's *Settings → Community plugins → Browse* can install. So
-one trip through Browse and the toggle is already flipped.
+Nothing else is installed to look at the board, and that is deliberate. `nightshift
+init` used to also write a `{{board}}.base` Obsidian Bases view and switch two Obsidian
+plugins on under your `.obsidian/`; both were removed in 2026-09 — provisioning one
+editor for every consuming project is a choice the framework has no business making,
+and Command Center does the job on every machine without one.
 
-If you see **`Unknown view type: kanban`** when you open `{{board}}.base`, that is exactly
-this: Bases is on, Base Board is enabled but not downloaded. Install it and the column view
-appears; the Live and Archive tables render either way.
-
-If the repo was not yet an Obsidian vault when you installed, none of that happened — open
-it as a vault and re-run `nightshift init`, which will wire both.
-
-Neither is required for anything to *work* — nothing in the framework reads this file, so
-on an older Obsidian, or with no plugins at all, the board behaves identically and you
-read it as directories.
-
-**Obsidian rewrites `{{board}}.base`, and that is fine.** Bases normalises the file every
-time the vault opens, which reorders keys and drops the comment header `init` wrote into
-it. Nothing is lost — this README is the durable copy of what that header said, which is
-why the header itself says so. Treat the resulting diff as ordinary: **commit it with
-whatever else you are committing.** It is not damage, it does not need investigating, and
-a session that finds `{{board}}.base` modified should not stop to explain it.
-
-**The directory is the state, not the view.** Dragging a card in the Kanban rewrites its
-`state:` field, and the reconciler moves the file to match — see the mismatch table
-below. Nothing in the framework reads `{{board}}.base`, so you can restyle it freely.
-`{{board}}/{{private_lane}}` is filtered out of every view, with one exception: a note
-you have flagged with a `state:` appears, because that flag is how a note asks to leave
-the lane.
+**You need nothing to read the files directly.** A card is plain Markdown in a plain
+directory, so any editor opens one — Obsidian included, if that is what you use. It is
+just not expected, not configured, and not required by anything here.
 
 ## The three input lanes, and who owns each
 
@@ -64,28 +42,31 @@ the lane.
 | `inbox/` | shared | "I've decided I want this. Help me refine it." Raw is fine — {{maintainer}} never writes frontmatter; triage fits it. |
 | `tasks/` | the system | actionable, dispatchable, no further human input needed |
 
-**Readying an idea: set `state: inbox` on the note.** It appears on the Kanban at once,
+**Readying an idea: set `state: inbox` on the note** (or click it over in Command
+Center's *Ideas* page, which writes the same field). It appears in the inbox at once,
 and the next reconcile run moves the file. A note with no `state:` is invisible to
 everything — not on the board, not read by any agent, not scanned for staleness.
 
 ## Two copies of one fact, and the script that keeps them honest
 
-The lane directory is the truth. `state:` is a denormalised copy, needed because Base
-Board groups on a property and because the gate uses their disagreement as a crash check.
-**Base Board never moves files** — a drag writes `state:` and stops — so
+The lane directory is the truth. `state:` is a denormalised copy — worth keeping
+because it is the one thing that tells you a card's lane when you open the raw file,
+and because the schema gate uses the two disagreeing as a crash check. Anything that
+writes `state:` without moving the file leaves that disagreement behind, so
 `python -m nightshift.reconcile` makes the folder catch up:
 
 | Situation | Signal | What reconcile does |
 |---|---|---|
 | a note you just placed | no `state:` | folder wins → stamp `state:` |
-| a card you dragged in the Kanban | `state:` ≠ folder | state wins → move the file |
+| a card something re-lane'd by field | `state:` ≠ folder | state wins → move the file |
 | an idea you flagged ready | `state:` on an `ideas/` note | move it out to that lane |
 
 It reports by default and changes nothing; `--apply` performs, `--commit` commits.
 
-**One habit this asks of you:** once a card is on the board, move it by dragging in the
-Kanban, not by dragging the file in the sidebar. A manual file move leaves the old
-`state:` behind, which reads as a drag, and the card gets pulled back.
+**One habit this asks of you:** once a card is on the board, move it through Command
+Center rather than by dragging the file in a file manager — the panel writes both halves
+through `board.move`. A manual file move leaves the old `state:` behind, which reads as
+a re-lane request, and the next reconcile pulls the card back.
 
 ## The rest
 
@@ -106,8 +87,8 @@ Kanban, not by dragging the file in the sidebar. A manual file move leaves the o
   where finished work read as outstanding Claude work.
 - **`testing/`** — merged to the session branch, awaiting {{maintainer}} at the keyboard.
 - **`done/` and `failed/`** are the archive. **Nothing is deleted** — Session H's
-  self-improvement loop reads them as its evidence. Filter them out of the Bases view
-  rather than deleting the files.
+  self-improvement loop reads them as its evidence, and Command Center does not show
+  them outside its own archive views.
 
 ## The runner
 
@@ -145,7 +126,7 @@ any time you wonder whether the board is in a fit state.
 
 A real run takes cards from `tasks/` only, one worktree and branch (`ai/<id>`) each, and
 files the result: gates green → `review/`, worker parked it → `needs-decision/`, gates red
-→ retried up to three times, then `failed/`. It writes `Digest.md` at the end.
+→ retried up to three times, then `failed/`. It commits the board at the end.
 
 - **Stop a run: create `.ai/STOP`.** The runner exits at the top of the loop, mid-run
   included — and while it is sleeping out a usage limit, which it checks for every minute
@@ -160,7 +141,7 @@ files the result: gates green → `review/`, worker parked it → `needs-decisio
   card keeps the current `## Error` — and since 2026-07-31 that section quotes the failing
   tests and their assertions inline, because `.ai/runs/` is gitignored (so it says nothing
   on any other machine) and is deleted when the card is retired (so it says nothing on that
-  one either). The `## Error` block, and the same excerpt in `Digest.md`, are the copies
+  one either). The `## Error` block, and the same excerpt on the panel, are the copies
   that sync; the run directory is the unabridged one, on one host, until it is pruned.
 - **Do not move a card by hand while a run is in progress.** The runner rescans, but a move
   mid-dispatch is the one race the file-move design does not cover.
@@ -199,49 +180,30 @@ of what it did, written by `settle()` from the mandatory `summary` field in its 
 This happens whether or not the worker also wrote a `## Thread` entry, so it is the thing to
 read first at `testing/`; `## Thread`, when present, is the fuller log.
 
-`Digest.md` in the vault root is **generated and overwritten on every run** by
-`python -m nightshift.digest`. Never write an answer there; it will be gone. Answers go in the
-card's `## Thread`.
+**Command Center reports the runs, and it is the only thing that does.** There was a
+generated `Digest.md` at the repo root until 2026-09 — a morning report rendered at the
+end of every run, windowed by its own commit subject. The panel replaced it, so it and
+everything that fed it were removed; nothing writes a report file any more, and there is
+no file to be told not to write an answer into. Answers go in a card's `## Thread`, via
+the *Decide* page or by hand.
 
-<!-- stale-ok: `.ai/stale_status.json` is created at runtime by the first `--stale` run on a
-     machine (committed once it exists, unlike the gitignored ledger) and legitimately does
-     not exist in a fresh clone. -->
-`Digest.md` reports **the runs**, not the board (restructured 2026-07-30). It opens with a
-one-line banner — "N run(s) since the <date> digest: X landed · Y failed · Z for you to
-decide" — and then has two halves that must not be confused:
+What the panel shows instead, live rather than at dawn:
 
-**1. What happened, one block per run, newest first.** Every run since the last digest gets
-its own block, headed with its clock window and a one-glance verdict — `finished`, `cut short`
-(ran out of the budget it was given), `aborted` (something was *wrong*), or `killed` (died
-without writing a digest of its own). Inside, your questions in your order:
+- ***Now*** — the run in flight or the last one, one row per card it dispatched with the
+  worker's own outcome, cost and wall time; open decisions; the `blocked/` and `failed/`
+  lanes with each card's `## Merge` or `## Error`; the chore batch; and everything
+  tonight will *not* take, read off `tasks/` as it stands rather than off a stale run
+  record.
+- ***Verify*** — `testing/` and `review/`, each card with its `## Summary`.
+- ***System*** — the corrections backlog, alongside install, update, doctor, gates and
+  preflight.
 
-- **Failed** — every failed attempt, whether or not the card changed lane. When several
-  failures share one root cause they are collapsed: one broken gate is one problem to fix,
-  not N unrelated cards;
-- **Needs your decision** — what the run parked, question and options inline;
-- **Passed** — what landed, tagged `play` / `look` / `review`, with the worker's
-  `## Summary` and `model · $cost · time`;
-- **Stale hunter** — docs selected vs. verified vs. carded, and a loud line when a sweep
-  produced nothing at all (that is a broken sweep, not a quiet one);
-- **Skipped** — the cards that could not be dispatched, grouped by reason.
+Every run still keeps its own durable record under `.ai/runs/records/`, which is what
+those pages read; a run that dies without finishing leaves one too, and reads as
+`ended without finishing` rather than vanishing. Work you did yourself during the day is
+in no run's record, so nothing reports it as unattended work — it still shows wherever it
+is waiting on you.
 
-**2. Still waiting on you** — standing board state, labelled as carry-over and deliberately
-terse. Open decisions from earlier runs (the one thing here that keeps its options inline,
-because it is what you *answer* from), the `failed/` lane with each `## Error`, a **count**
-for `testing/` + `review/` (the Kanban lanes are the list — this used to be six paragraphs
-duplicating them), the queue with never-dispatched cards and a starving warning once one has
-waited a week, and the two advisories that explain why work is *not* happening.
-
-Work you did yourself during the day never appears in half 1 — it is in no run's record, so
-nothing can report it as unattended work. It still shows in half 2 if it is waiting on you.
-
-**A stretch of unattended runs never loses one.** Every run keeps its own record regardless,
-but whether the *report* window resets is separate: a normal run's digest commit advances the
-"you've seen this" baseline, while `runner.py --append-digest` — `night.py`'s default for its
-unattended path — writes its digest without advancing it, so the run after it still reports
-back to the last time the baseline *did* move. A weekend of scheduled nights with nobody
-reading them stacks up rather than each overwriting the last; running the runner yourself
-resets it, on the assumption that if you started it, you're about to look.
 Note the consequence: `triage` runs at the lead tier in an interactive session, not inside the
 runner, so its new cards are daytime work and get no section. The stale sweep's fix-cards *are*
 run output and appear under their run's **Stale hunter**. Each card's prose is inlined so you

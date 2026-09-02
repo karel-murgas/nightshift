@@ -75,9 +75,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import urlopen
 
-from nightshift import (board, branches, chores, decide, drain, freshness, ingest,
-                        init, jobs, manifest, preflight, run_record, textio, tiers,
-                        update, usage, worker_prompt)
+from nightshift import (board, branches, chores, corrections, decide, drain, freshness,
+                        ingest, init, jobs, manifest, preflight, run_record, textio,
+                        tiers, update, usage, worker_prompt)
 from nightshift.manifest import ManifestError, find_root
 from nightshift.runner import (
     RUNS,
@@ -86,11 +86,13 @@ from nightshift.runner import (
     Candidate,
     attempt_limit,
     branch_has_commits,
+    card_bytes,
     claude_binary,
     current_branch,
     default_base,
     host_capabilities,
     host_setting,
+    oversize_note,
     read_telemetry,
     schema_violations,
 )
@@ -118,8 +120,10 @@ PHASE_STEPS: tuple[tuple[str, str], ...] = (
     ("review", "review"), ("merge", "merge"),
 )
 _PHASE_ALIASES = {"starting": "worker", "checker": "worker"}
-#: Phases that mean the run is past every step above.
-_PHASE_DONE = frozenset({"digest", "finished"})
+#: Phases that mean the run is past every step above. `wrapup` is the board commit
+#: and the push; it was called `digest` until the digest was removed, and the token is
+#: written by `runner._status` and also read by `freshness`, so all three moved together.
+_PHASE_DONE = frozenset({"wrapup", "finished"})
 
 
 # --------------------------------------------------------------------------
@@ -1364,6 +1368,37 @@ def _tag_chips(card: board.Card) -> list[str]:
     return [_chip(tag, "warn" if tag == "nightshift" else "mute") for tag in card.tags]
 
 
+def _size_chip(card: board.Card) -> str:
+    """**Too big** on a `tasks/` card grown past the worker-input threshold, else "".
+
+    Replaces the mark this had until 2026-09, which was an Obsidian Bases formula in
+    `Board.base` over `file.size`. The view went when Obsidian did, so the mark moved
+    here — and it is strictly better placed: the formula had to restate
+    `runner.CARD_COMFORT_BYTES` and the lane name in YAML where no import could reach
+    them, which is why a whole gate (`board_view_sync`) existed to catch the two
+    drifting apart. Here the threshold *is* the runner's, because `oversize_note` is
+    the runner's own function — the same one `select()` folds into a candidate's
+    reason and `run()` uses as its predicate — so there is nothing left to disagree.
+
+    Everything that made the original choice right still holds. Nothing is written to
+    the card, so there is no frontmatter field to maintain and none to go stale between
+    writers; compacting a card by hand clears the mark the moment the page next renders,
+    with no session running and nothing to re-run. And `tasks/` only: `oversize_note`
+    owns that rule, because a `done/` card legitimately reaches 20 KB once the runner has
+    appended `## Summary`, `## Thread`, `## Telemetry` and `## Error` after dispatch.
+
+    Advisory, never blocking — the same severity the note itself carries. A card over the
+    threshold still dispatches; this is the line that stops it doing so silently.
+    """
+    note = oversize_note(card)
+    if not note:
+        return ""
+    # Not through `_chip`: the advisory is the whole explanation and belongs in a
+    # tooltip, which `_chip` has no room for.
+    return (f'<span class="chip warn" title="{_attr(note)}">too big &middot; '
+            f'{card_bytes(card) / 1024:.1f} KB</span>')
+
+
 def _tier_chip(card: board.Card) -> str:
     """What tier a session opened on this card *right now* would run at.
 
@@ -1408,7 +1443,8 @@ def _card_body(card: board.Card, *, meta: list[str] | None = None, why: str = ""
     # `Work on this` beside them. A card in `review/` or `needs-decision/` is one
     # click from a session too — `/decide/` carries the button — and a fact that
     # appears on some rows and not others reads as a property of the card.
-    out.append(_meta(_tag_chips(card) + [_tier_chip(card)] + (meta or [])))
+    out.append(_meta(_tag_chips(card) + [_tier_chip(card)]
+                     + [c for c in [_size_chip(card)] if c] + (meta or [])))
     return "".join(out)
 
 
@@ -3246,7 +3282,7 @@ def _render_run(ctx: Context) -> str:
     out.append(_section(heading, len(dispatched),
                         f'<div class="roster"><table><tbody>{"".join(body)}</tbody></table></div>'
                         if body else "", note=note, bar=bar,
-                        sub="What the morning digest would have told you, except now.",
+                        sub="Every card this run dispatched, and what came of it.",
                         empty="No run has been recorded on this machine yet.",
                         sec_id="lastrun"))
 
@@ -3340,7 +3376,15 @@ def system_attention(root: Path) -> int:
         found = update.survey(root)
     except (update.UpdateError, OSError):
         return 0
-    return found.changes + len(found.by(update.CONFLICT))
+    attention = found.changes + len(found.by(update.CONFLICT))
+    # The harvest nudge counts as one thing to look at, not as N corrections: the rail
+    # number is "how many things on this page want you", and a backlog is one of them.
+    try:
+        if corrections.harvest_due(*corrections.backlog(root))[0]:
+            attention += 1
+    except OSError:
+        pass
+    return attention
 
 
 def _system_setup(ctx: Context) -> str:
@@ -3463,6 +3507,41 @@ SYSTEM_VERBS = (
 )
 
 
+def _system_corrections(ctx: Context) -> str:
+    """The harvest nudge: corrections written down and never acted on.
+
+    The one thing the morning digest said that nothing else did. A correction with no
+    `[[disposition: ...]]` is a lesson nobody has turned into a gate, a rule or a card
+    yet, and the pile is invisible unless you go and run `python -m nightshift.corrections`
+    — which is exactly the trip nobody makes. So it is stated here, where the rest of the
+    maintenance lives, on the same two thresholds the digest used (`corrections`
+    owns them now).
+
+    Silent below both thresholds rather than reporting a healthy number. A backlog is
+    normal — corrections are *supposed* to accumulate between harvests — so a permanent
+    count on the page would train the eye past it, and the count that matters is the one
+    that only appears when it is time to do something.
+    """
+    if not installed(ctx.root):
+        return ""
+    try:
+        count, oldest = corrections.backlog(ctx.root)
+    except OSError:
+        return ""
+    due, age = corrections.harvest_due(count, oldest)
+    if not due:
+        return ""
+    age_clause = (f", oldest from {oldest} ({age} days ago)" if age is not None else "")
+    body = (f"<b>{count} correction(s) carry no disposition</b>"
+            f"<p class='note'>Written down in {_e(str(corrections.LOG))} and never acted "
+            f"on{_e(age_clause)}. A learn-now pass reads them clustered and turns each into "
+            f"a gate, a rule or a card &mdash; or dispositions it as understood.</p>")
+    acts = _act("Read them clustered", onclick="post('/api/system/corrections')")
+    return _section("Corrections to harvest", count, _row(marker="!", body=body, acts=acts),
+                    note="Lessons logged and not yet turned into anything.",
+                    sec_id="corrections")
+
+
 def _system_verbs(ctx: Context) -> str:
     if not installed(ctx.root):
         return ""
@@ -3516,6 +3595,10 @@ def _system_verb(name: str, root: Path, *, waived: bool, body: dict) -> str:
     """
     if name == "doctor":
         return _verb(run_command("doctor", [], root, timeout=180))
+    if name == "corrections":
+        # Read-only and fast: it parses one log and prints the clusters. Captured for
+        # the same reason `doctor` is — its output *is* the answer.
+        return _verb(run_command("corrections", [], root, timeout=180))
     if name == "gates":
         return _verb(run_command("gates.run", [], root, timeout=300))
     if name == "preflight":
@@ -3538,6 +3621,7 @@ def _render_system(ctx: Context) -> str:
         _system_setup(ctx),
         _system_files(ctx),
         _system_outgoing(ctx),
+        _system_corrections(ctx),
         _system_verbs(ctx),
         _system_danger(ctx),
     ])

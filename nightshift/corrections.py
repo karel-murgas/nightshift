@@ -28,6 +28,7 @@ import re
 import sys
 from collections import Counter
 from dataclasses import dataclass
+import datetime as dt
 from pathlib import Path
 
 from nightshift import textio  # both logs are committed; write_text would CRLF them on Windows
@@ -153,6 +154,40 @@ def validate(entries: list[Entry], vocab: dict[str, dict[str, str]]) -> list[tup
             elif not pointer:
                 problems.append((e.line_no, f"disposition {e.disposition!r} has no pointer after the kind"))
     return problems
+
+
+# A correction with no `[[disposition: ...]]` is a lesson nobody has acted on yet
+# (12_corrections_lifecycle.md). Either signal alone is enough to nudge: a pile that is
+# merely BIG should get harvested before it grows further; a pile that is merely OLD
+# should get harvested before the maintainer forgets writing it. 20 is comfortably more
+# than one session's worth of fresh corrections; 30 days is a month of mornings the
+# nudge never fired.
+#
+# Owned here rather than by the reader, which is the correction the digest's copy
+# invited: the thresholds lived inside `digest.py` beside the one line that rendered
+# them, so when the digest went there was nowhere for them to be but here — next to
+# `backlog()`, whose answer they judge.
+HARVEST_BACKLOG_COUNT = 20
+HARVEST_BACKLOG_DAYS = 30
+
+
+def harvest_due(count: int, oldest: str | None, *, today: dt.date | None = None
+                ) -> tuple[bool, int | None]:
+    """Whether an open backlog is big enough or old enough to nudge about.
+
+    Returns `(due, age_in_days)`; `age` is `None` when `oldest` is absent or not a
+    date, which disables the age half rather than guessing one. Takes `today` as a
+    parameter so this stays deterministically testable.
+    """
+    day = today or dt.date.today()
+    age = None
+    if oldest:
+        try:
+            age = (day - dt.date.fromisoformat(oldest)).days
+        except ValueError:
+            age = None
+    due = count >= HARVEST_BACKLOG_COUNT or (age is not None and age >= HARVEST_BACKLOG_DAYS)
+    return due, age
 
 
 def backlog(root: Path) -> tuple[int, str | None]:

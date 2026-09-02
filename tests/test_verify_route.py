@@ -29,7 +29,7 @@ _GATES = Path(_nightshift_gates.__file__).resolve().parent
 if str(_GATES) not in sys.path:
     sys.path.insert(0, str(_GATES))
 
-from nightshift import board, digest, runner  # noqa: E402
+from nightshift import board, runner  # noqa: E402
 from nightshift.gates import card_schema  # noqa: E402
 
 import _fixtures  # noqa: E402
@@ -172,27 +172,17 @@ def test_an_unrecognised_value_reads_as_play_too(tmp_path):
     assert board.Card.load(path, "testing").verify == "play"
 
 
-def test_the_digest_reads_the_declared_field_instead_of_the_lane(tmp_path):
-    """It used to infer the label from the lane, which could only repeat the
-    lane's own assumption back at him."""
+def test_the_finished_lane_reads_the_declared_field(tmp_path):
+    """`verify:` used to be inferred from the lane, which could only repeat the
+    lane's own assumption back at him. `board.finished_lane` is the one place that
+    acts on it now — the runner and the panel both route a landed card through it —
+    so the declared field is what decides where finished work lands."""
     repo = _repo(tmp_path)
     path = _card(repo, "testing", extra="verify: review\n")
-    card = digest.Card.load(path, "testing")
-    assert digest._landed_tag({"outcome": "reviewed"}, card, "testing") == "review"
+    assert board.finished_lane(board.Card.load(path, "testing")) == "done"
 
     path = _card(repo, "testing", extra="verify: play\n")
-    card = digest.Card.load(path, "testing")
-    assert digest._landed_tag({"outcome": "reviewed"}, card, "testing") == "play"
-
-
-def test_a_card_in_review_is_still_tagged_review_whatever_it_declares(tmp_path):
-    """`review/` means the branch did not merge — a human has to resolve a rebase —
-    so there is nothing to play yet however the card declares itself. The field
-    answers what a *landed* card wants from him, not whether it landed."""
-    repo = _repo(tmp_path)
-    path = _card(repo, "review", extra="verify: play\n")
-    card = digest.Card.load(path, "review")
-    assert digest._landed_tag({"outcome": "review"}, card, "review") == "review"
+    assert board.finished_lane(board.Card.load(path, "testing")) == "testing"
 
 
 # --- the routing -------------------------------------------------------------

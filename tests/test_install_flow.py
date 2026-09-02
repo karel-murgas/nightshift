@@ -683,237 +683,39 @@ def test_no_shipped_template_disagrees_with_its_own_they():
                     f" — {word!r} {nxt!r}")
     assert offenders == []
 
-def test_every_doc_that_offers_the_kanban_names_the_plugin_that_provides_it():
-    """`type: kanban` is not a core Bases view type — it comes from the **Base Board**
-    community plugin, and with only Bases installed Obsidian says `Unknown view type:
-    kanban` on a file `init` just told the operator it wrote.
+def test_the_install_plan_provisions_no_editor(tmp_path):
+    """**The rendered install plan writes nothing under any editor's config, and no
+    board *view* file.** Asserted on the plan rather than remembered, so a re-add is
+    caught by a test rather than by whoever notices.
 
-    Reported by the origin project's maintainer, 2026-08-04, on their second install:
-    they enabled Bases, opened the board, and got exactly that. The shipped README had
-    said "It needs the **Bases** core plugin", which is true and not sufficient — the
-    origin checkout has had Base Board enabled since before the extraction, so the doc
-    written from it recorded only the half its author had to think about. Fourth
-    instance of `origin-repo-had-it-by-hand`, and the second one about this same view.
+    `init` used to write a `<board>.base` Obsidian Bases view of the lanes and merge two
+    plugin toggles into the project's `.obsidian/` — five `origin-repo-had-it-by-hand`
+    corrections' worth of deliberate work, removed in 2026-09 (Karel: *"Obsidian should
+    no longer be expected, every input / output should be doable via Command Center"*).
+    The reason it must stay removed is not taste: `init` runs against *every* consuming
+    project, so provisioning one editor is a choice made on behalf of operators who may
+    use another, or none. Command Center is the board surface and needs nothing
+    installed.
 
-    Asserted on the error string too, because that is what someone pastes into a search
-    box, and a doc that explains the fix without naming the symptom is not found by the
-    person who has the symptom.
+    Checked against the plan's `writes` **and** `appends`, because those are the two
+    ways a file reaches disk, and against `.gitignore`'s content for the widened rule
+    that replaced the runner's old `.obsidian/` dirty-tree exemption: with nothing
+    provisioning the directory there is no shared config in it to keep tracked, and an
+    untracked directory git never reports cannot refuse a dispatch.
     """
-    docs = {
-        "board README": init.TEMPLATES / "board" / "README.md",
-        "the install skill": init.TEMPLATES / "skills" / "install-nightshift" / "SKILL.md",
-    }
-    for label, path in docs.items():
-        text = path.read_text(encoding="utf-8")
-        assert "Base Board" in text, f"{label} offers the Kanban without naming Base Board"
-        assert "Unknown view type: kanban" in text, (
-            f"{label} does not name the error the operator actually sees")
-
-
-def test_the_base_file_is_not_counted_on_to_explain_itself():
-    """`board.base` carries the same explanation and is **not** in the list above, because
-    its comments do not reach the reader.
-
-    Bases rewrites the file every time the vault opens and its normalisation drops YAML
-    comments — measured 2026-08-04 in the origin project, whose live `Board.base` has 0
-    comment lines against this template's 12. So a test asserting the template explains
-    itself would be green while the delivered artifact explains nothing: the wrong
-    artifact verified.
-
-    The header is kept anyway (it is free, and true until first launch), and it now says
-    outright that it is expendable and names the durable copy — which is the only claim
-    worth pinning here.
-    """
-    text = (init.TEMPLATES / "board.base").read_text(encoding="utf-8")
-    assert "DO NOT SURVIVE" in text, "the header must warn that it is about to vanish"
-    assert "README.md" in text, "and name where the durable copy lives"
-
-
-# --- the Obsidian vault: merged, never overwritten -----------------------------
-
-
-def _vault(repo: Path, *, community=None, core=None, plugin_installed=False) -> Path:
-    vault = repo / ".obsidian"
-    vault.mkdir(parents=True, exist_ok=True)
-    if community is not None:
-        (vault / "community-plugins.json").write_text(
-            json.dumps(community, indent=2) + chr(10), encoding="utf-8")
-    if core is not None:
-        (vault / "core-plugins.json").write_text(
-            json.dumps(core, indent=2) + chr(10), encoding="utf-8")
-    if plugin_installed:
-        (vault / "plugins" / init.BOARD_KANBAN_PLUGIN).mkdir(parents=True)
-    return vault
-
-
-def test_the_kanban_plugin_is_appended_and_the_operators_plugins_survive(tmp_path):
-    """The whole ask, in one assertion: *"a user can already have Obsidian over the
-    folder, so we can't just overwrite, we need to append during install"* (the origin
-    project's maintainer, 2026-08-04)."""
     repo = _repo(tmp_path)
-    _vault(repo, community=["dataview", "templater"])
-
     plan = _install(repo)
 
-    written = json.loads(plan.writes[".obsidian/community-plugins.json"])
-    assert written == ["dataview", "templater", init.BOARD_KANBAN_PLUGIN]
+    staged = list(plan.writes) + list(plan.appends) + list(plan.kept)
+    assert not [rel for rel in staged if rel.split("/")[0].startswith(".")
+                and "obsidian" in rel.lower()], staged
+    assert not [rel for rel in staged if rel.endswith(".base")], staged
+    assert not any(p.suffix == ".base" for p in repo.rglob("*")), "no view file on disk"
 
-
-def test_enabling_it_twice_is_not_a_write_at_all(tmp_path):
-    """A second `init`, or a vault that already had it, must not churn the file."""
-    repo = _repo(tmp_path)
-    _vault(repo, community=[init.BOARD_KANBAN_PLUGIN])
-
-    plan = _install(repo)
-
-    assert ".obsidian/community-plugins.json" not in plan.writes
-    assert ".obsidian/community-plugins.json" in plan.kept
-
-
-def test_the_core_bases_plugin_is_switched_on_without_touching_the_others(tmp_path):
-    """`core-plugins.json` maps EVERY core plugin to a boolean, so a merge that is not
-    surgical here turns somebody's file explorer off."""
-    repo = _repo(tmp_path)
-    _vault(repo, core={"file-explorer": True, "graph": False, "bases": False})
-
-    plan = _install(repo)
-
-    written = json.loads(plan.writes[".obsidian/core-plugins.json"])
-    assert written == {"file-explorer": True, "graph": False, "bases": True}
-
-
-def test_a_core_plugin_map_is_never_invented(tmp_path):
-    """An absent `core-plugins.json` means Obsidian has not written one yet. Creating a
-    partial one is not an append — it asserts a state for every core plugin nobody asked
-    about — so it is refused, out loud."""
-    repo = _repo(tmp_path)
-    _vault(repo, community=[])
-
-    plan = _install(repo)
-
-    assert ".obsidian/core-plugins.json" not in plan.writes
-    assert any("core-plugins.json" in note for note in plan.notes), plan.notes
-
-
-def test_an_empty_community_list_is_safe_to_create(tmp_path):
-    """The asymmetry with `core-plugins.json`: this file is a list of what is ENABLED, so
-    an absent one means "none", and writing our single id adds without claiming anything
-    about plugins that are not named."""
-    repo = _repo(tmp_path)
-    _vault(repo)  # a vault, but no plugin files at all
-
-    plan = _install(repo)
-
-    assert json.loads(plan.writes[".obsidian/community-plugins.json"]) == [
-        init.BOARD_KANBAN_PLUGIN]
-
-
-def test_enabled_but_not_installed_is_reported_as_such(tmp_path):
-    """Enabling an id whose code is absent is still worth doing — it works the moment
-    they fetch it — but calling that "the board is ready" would be the lie."""
-    repo = _repo(tmp_path)
-    _vault(repo, community=[])
-
-    plan = _install(repo)
-
-    line = next(i for i in plan.info if init.BOARD_KANBAN_PLUGIN in i)
-    assert "NOT installed" in line and "Browse" in line
-
-
-def test_an_installed_plugin_is_enabled_without_the_scolding(tmp_path):
-    repo = _repo(tmp_path)
-    _vault(repo, community=[], plugin_installed=True)
-
-    plan = _install(repo)
-
-    line = next(i for i in plan.info if init.BOARD_KANBAN_PLUGIN in i)
-    assert "NOT installed" not in line
-
-
-def test_no_vault_means_no_vault_files_and_one_note(tmp_path):
-    """Manufacturing `.obsidian/` for someone who may keep their vault elsewhere — or may
-    not use Obsidian — is deciding something that is theirs."""
-    repo = _repo(tmp_path)
-
-    plan = _install(repo)
-
-    assert not [rel for rel in plan.writes if rel.startswith(".obsidian/")]
-    assert any(".obsidian/" in note for note in plan.notes), plan.notes
-
-
-def test_unreadable_vault_config_is_never_rewritten(tmp_path):
-    """Same rule as `settings.json`: overwriting a file we cannot parse would take the
-    operator's other plugins with it."""
-    repo = _repo(tmp_path)
-    vault = _vault(repo)
-    (vault / "community-plugins.json").write_text("{not json", encoding="utf-8")
-
-    plan = _install(repo)
-
-    assert ".obsidian/community-plugins.json" not in plan.writes
-    assert any("unreadable" in note for note in plan.notes), plan.notes
-
-
-def test_uninstall_never_touches_the_vault(tmp_path):
-    """By the time anyone uninstalls, "did nightshift enable Bases or did they" is
-    unanswerable — and switching off a plugin somebody has used for months to tidy up
-    after ourselves is the worse error. So the receipt does not claim these."""
-    repo = _repo(tmp_path)
-    _vault(repo, community=["dataview"], core={"bases": False})
-
-    plan = _install(repo)
-    receipt = json.loads(init.receipt_text(plan))
-
-    assert not [rel for rel in receipt["created"] if rel.startswith(".obsidian/")]
-
-
-def test_obsidian_window_state_is_gitignored_but_the_plugin_config_is_not():
-    """The volatile files only, never `.obsidian/` wholesale.
-
-    `workspace.json` records which panes are open and where each is scrolled, and is
-    rewritten on nearly every interaction — so a tracked one is dirty again seconds
-    after you commit it, and the runner refuses to dispatch on a dirty tree. Reported
-    from a real install on 2026-08-04, three times in one day: opening the board to
-    read it is what stopped the board being worked.
-
-    The other half matters just as much. `init` writes community-plugins.json and
-    core-plugins.json precisely so a second machine does not redo the plugin setup by
-    hand; ignoring the whole directory would throw that away to fix the noisy file.
-    """
-    ignored = (init.TEMPLATES / "gitignore").read_text(encoding="utf-8")
-    lines = {line.strip() for line in ignored.splitlines()
-             if line.strip() and not line.strip().startswith("#")}
-
-    assert ".obsidian/workspace.json" in lines
-    assert ".obsidian/workspace-mobile.json" in lines
-    assert ".obsidian/" not in lines, "the plugin config must stay committable"
-    assert not any(l.startswith(".obsidian/") and "plugins" in l for l in lines)
-
-
-def test_a_tracked_workspace_file_is_reported_with_the_command_to_untrack_it(tmp_path):
-    """A `.gitignore` rule cannot untrack what is already tracked, and this is the
-    file a project most likely committed before that rule shipped — `init` itself
-    says `git add -A`, and it writes into `.obsidian/`, so the sweep was ours."""
-    repo = _repo(tmp_path)
-    _vault(repo, community=[])
-    (repo / ".obsidian" / "workspace.json").write_text("{}", encoding="utf-8")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "swept the vault in")
-
-    plan = _install(repo)
-
-    note = next(n for n in plan.notes if "workspace.json" in n)
-    assert "git rm --cached" in note
-
-
-def test_a_repo_that_never_tracked_it_is_not_nagged(tmp_path):
-    repo = _repo(tmp_path)
-    _vault(repo, community=[])
-    (repo / ".obsidian" / "workspace.json").write_text("{}", encoding="utf-8")
-
-    plan = _install(repo)
-
-    assert not [n for n in plan.notes if "workspace.json" in n]
+    ignored = (repo / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert ".obsidian/" in ignored, (
+        "the directory must be ignored wholesale — the narrow workspace-only form "
+        "existed only because init wrote shared plugin config in there")
 
 
 # --- taking a block back out ---------------------------------------------------
@@ -954,84 +756,6 @@ def test_the_board_readme_names_the_lanes_that_exist(tmp_path):
 
     for lane in (*board.LANES, board.PRIVATE_LANE):
         assert f"{lane}/" in readme, f"{lane}/ exists on disk but the README never says so"
-
-
-def test_init_writes_an_obsidian_view_of_the_board(tmp_path):
-    """The lanes are directories, which is the whole design — but a directory tree is
-    not a board. The origin project has had an Obsidian Bases view since long before the
-    extraction, so no run there could notice `init` never produced one. Reported by the
-    maintainer, 2026-08-03, who opened a freshly installed repo in Obsidian and found no
-    kanban."""
-    repo = _repo(tmp_path)
-    _install(repo)
-
-    view = repo / "Board.base"
-    assert view.is_file()
-    text = view.read_text(encoding="utf-8")
-    assert "{{" not in text, "an unrendered token"
-    assert "type: kanban" in text
-
-
-def test_the_board_view_columns_are_generated_from_the_lane_list(tmp_path):
-    """A hand-written column list is a second copy of the lane set that nothing checks,
-    and a view silently missing a lane is worse than no view: a card in the missing
-    column is invisible rather than obviously absent."""
-    repo = _repo(tmp_path)
-    _install(repo)
-
-    lines = (repo / "Board.base").read_text(encoding="utf-8").splitlines()
-    start = lines.index("    boardColumns:") + 1
-    columns = []
-    for line in lines[start:]:
-        if not line.startswith("      - "):
-            break
-        columns.append(line.removeprefix("      - "))
-    assert tuple(columns) == board.LANES
-
-
-def test_the_board_view_hides_the_private_lane_unless_a_note_is_flagged(tmp_path):
-    """Filtered out, with one exception: a note carrying a `state:` is asking to leave
-    the lane, and seeing that on the board is the whole point of flagging it."""
-    repo = _repo(tmp_path)
-    _install(repo)
-
-    text = (repo / "Board.base").read_text(encoding="utf-8")
-    assert f'!file.inFolder("Board/{board.PRIVATE_LANE}")' in text
-    assert "!state.isEmpty()" in text
-
-
-def test_the_board_view_follows_a_relocated_board(tmp_path):
-    """`[board].root` is configurable, so every path inside the view is rendered rather
-    than assumed — including the private-lane exclusion, which is the one that fails
-    silently if it goes stale."""
-    values = init.tokens(tmp_path, {"board": {"root": "kanban"}})
-    rendered = init.render(
-        (init.TEMPLATES / "board.base").read_text(encoding="utf-8"), values)
-
-    assert 'file.inFolder("kanban")' in rendered
-    assert f'!file.inFolder("kanban/{board.PRIVATE_LANE}")' in rendered
-
-    # Scoped to the YAML body, not the whole file: the header comment names the
-    # **Base Board** plugin, and that `Board` is a product name rather than a path.
-    # Asserting over the comments too would make the file's prose unwritable — and
-    # this test is about *paths* that were hardcoded to the default root.
-    config = "\n".join(line for line in rendered.splitlines()
-                       if not line.lstrip().startswith("#"))
-    assert "Board" not in config, "no path hardcoded to the default"
-
-
-def test_an_existing_board_view_is_kept_and_reported(tmp_path):
-    """Not a merge: a `.base` is YAML config, and appending a marked block to it would
-    corrupt the file. So it is kept — and said out loud, because "kept, untouched" with
-    no note is how a stale column list survives an install."""
-    repo = _repo(tmp_path)
-    (repo / "Board.base").write_text("views: []\n", encoding="utf-8")
-
-    plan = _install(repo)
-
-    assert "Board.base" in plan.kept
-    assert (repo / "Board.base").read_text(encoding="utf-8") == "views: []\n"
-    assert any("boardColumns" in note for note in plan.notes)
 
 
 def test_a_fresh_install_ignores_its_own_runtime_output(tmp_path):

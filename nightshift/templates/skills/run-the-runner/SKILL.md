@@ -41,8 +41,8 @@ takes budget from cards. Drop it (or pass `--stale 0`) if a night must stay card
 `--dry-run` is the default move when {{maintainer}} is vague. It prints every card in `tasks/` with
 `YES`/`no` and the reason, costs nothing, and does not mind a dirty tree.
 
-A night takes cards in **{{maintainer}}'s Kanban column order** (`kanban_order`, written by Base
-Board on every drag); cards they never dragged sort last, alphabetically — with one override on
+A night takes cards in **the order {{maintainer}} put them in** (`kanban_order`, written by
+Command Center on every drag); cards never dragged sort last, alphabetically — with one override on
 each edge: a card the reviewer just sent back `needs_fix` jumps to the *front*, ahead of even a
 dragged-to-top card, because the fix is already scoped and is the cheapest thing the run can do
 next; a card whose most recent attempt plain-`failed` sinks to the *back*, behind every card that
@@ -95,11 +95,9 @@ guaranteed to time out and leave a night running with nobody reading it. Launch 
 | `--card-budget N` | `0` (none) | USD cap handed to each worker process. `0` passes no cap flag at all |
 | `--test-timeout N` | `600` | Seconds for the test suite (~2 min today). Also sets the worker (×6) and checker (×2) timeouts |
 | `--stale [N]` | `0` (skip) | After the cards, spend leftover window on the Tier-2 staleness sweep. Bare `--stale` = every doc that changed since last verified; `--stale 3` caps it |
-| `--append-digest` | off | Write the digest without advancing the read baseline — the next run's window still reaches back past this one. `night.py`'s unattended default carries it; a session you drive by hand should not, since running it yourself is the signal you are about to look |
 
 Nothing else is needed for a normal request. `--budget`/`--card-budget` exist for API
-billing and are off here on purpose. Leave `--append-digest` off too, for the same reason —
-you invoking the runner means you are here to read `Digest.md` right after, so let it reset.
+billing and are off here on purpose.
 
 ## Before you spend money
 
@@ -182,10 +180,10 @@ Where to look:
 - `.ai/runs/YYYY-MM-DD.log` — the whole night, tee'd from stdout. The first thing to read.
 - `.ai/runs/records/<stamp>.json` — the same run as structured data: every dispatch with its
   outcome and landing, every skip with its reason, the sweep's yield, why it stopped. This is
-  what `Digest.md` is built from, so it is the file to check if the digest looks wrong. Written
+  what Command Center's run pages are built from, so it is the file to check if a page looks
+  wrong. Written
   as the run goes, so it is readable *while* a night is in flight and survives one that dies.
 - The card's own `## Telemetry` / `## Error` / `## Question` — committed, so these sync.
-- `Digest.md` — rewritten at the end of every run. Never edit it by hand.
 
 Report back which lane the card landed in and, if it did not pass, the one-line reason from
 the log — not a paraphrase of the transcript.

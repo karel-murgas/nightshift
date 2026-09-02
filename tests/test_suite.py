@@ -817,7 +817,7 @@ def test_detail_lines_fall_back_to_the_tail_when_nothing_is_marked():
 
 
 def test_failure_excerpt_indents_every_line(tmp_path):
-    """Four spaces does three jobs: renders as a code block in Obsidian with no
+    """Four spaces does three jobs: renders as a code block in any Markdown reader with no
     fence, keeps `doc_scan._HEADING` (anchored at column 0) from matching a `#`
     pytest printed — which would end the `stale-ok` exemption early and expose the
     rest of the card to the liveness gate — and marks the quoted region in the raw

@@ -267,8 +267,12 @@ def test_findings_are_committed_before_the_doc_is_ledgered(tmp_path, monkeypatch
 
 
 def test_a_swept_doc_records_progress_even_if_the_run_never_finishes(tmp_path, monkeypatch):
-    """`stale_status.json` is the committed "a sweep ran" fact the digest reads.
-    Written per carded doc, not only after the loop, so a killed run still says so.
+    """A carded finding is committed per doc, not only after the loop, so a run killed
+    mid-sweep still leaves its findings on the board.
+
+    This used to assert the same thing through `.ai/stale_status.json`, a committed file
+    whose only reader was the digest; it went with the digest, and the durable fact it
+    was standing in for is the card itself being in git.
     """
     from nightshift import stale_sweep
 
@@ -288,12 +292,12 @@ def test_a_swept_doc_records_progress_even_if_the_run_never_finishes(tmp_path, m
 
     runner.stale_phase(root, 1, "m", None, 0.0, 600)
 
-    status = stale_sweep.read_status(root)
-    assert status is not None and status["carded"] == 1
     tracked = subprocess.run(
-        ["git", "-C", str(root), "ls-files", str(stale_sweep.STATUS).replace("\\", "/")],
+        ["git", "-C", str(root), "ls-files", "Board/tasks"],
         capture_output=True, text=True, encoding="utf-8", errors="replace")
-    assert tracked.stdout.strip(), "status must be committed, not left dirty"
+    assert "fix-stale" in tracked.stdout, (
+        "the drift card must be committed by the sweep itself, not left dirty for a "
+        f"wrap-up the run may never reach — git knows only: {tracked.stdout!r}")
 
 
 def test_a_stale_checker_that_walls_after_a_complete_verdict_is_honoured(

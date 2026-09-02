@@ -2,7 +2,7 @@
 """The overnight runner — a dumb orchestrator (`09_runner.md`).
 
 Rescan the board, pick what is dispatchable, dispatch it, run the gates over the
-result, move the card, commit, write the digest. **Zero LLM calls in the runner
+result, move the card, commit the board. **Zero LLM calls in the runner
 itself** (`00_architecture.md` §5, §12): every branch below is a file-state
 lookup or a subprocess exit code.
 
@@ -56,7 +56,6 @@ from pathlib import Path
 from nightshift import board          # the card model
 from nightshift import branches       # branch roles
 from nightshift import conflictmarkers  # what a hand-resolved conflict must not leave
-from nightshift import digest
 from nightshift import gitmerge       # merge strategy + failure reporting, one home
 from nightshift import gitpaths       # git's path lists, read NUL-separated
 from nightshift import limits
@@ -584,31 +583,22 @@ def dirty_outside_board(root: Path) -> list[str]:
     maintainer thinks they left. Refusing is cheaper than explaining it in the
     morning.
 
-    **Every `board.GENERATED_VIEWS` file is exempt, not just the digest.** Each is
-    rewritten by the command that owns it, often moments before a dispatch — the
-    inbox is routed and a batch is planned right before it runs — so treating one
-    as somebody's work in progress refuses the very run that produced it. Measured
-    2026-08-14: `Routing.md` and `Chores.md` at the repo root blocked `chores`
-    outright, because each shipped a new view and joined neither this list nor
-    `commit_board`'s.
+    **Every `board.GENERATED_VIEWS` file is exempt.** Each is rewritten by the
+    command that owns it, often moments before a dispatch — the inbox is routed and a
+    batch is planned right before it runs — so treating one as somebody's work in
+    progress refuses the very run that produced it. Measured 2026-08-14: `Routing.md`
+    and `Chores.md` at the repo root blocked `chores` outright, because each shipped a
+    new view and joined neither this list nor `commit_board`'s.
+
+    Nothing is exempt outside that list. An editor's own per-machine state used to be
+    (`.obsidian/`, while `init` provisioned a vault), which is now a `.gitignore` line
+    in `templates/gitignore` instead — an untracked directory git never reports cannot
+    make this cry wolf, and an exemption is the wrong tool for a file that should not
+    have been in git in the first place.
     """
     dirty = []
     for _, path in gitpaths.status(root):
         if path.startswith("Board/") or path in board.GENERATED_VIEWS:
-            continue
-        if path.startswith(".obsidian/"):
-            # The editor's own state, and the same phenomenon as the `Board/`
-            # exemption one directory over: somebody looking at the board while a
-            # session runs. `workspace.json` in particular is rewritten on nearly
-            # every interaction, so a repo that committed it once is dirty forever
-            # and can never dispatch again — reported from a real install,
-            # 2026-08-04, three times in one day.
-            #
-            # Safe to skip because the reason for refusing does not apply: this is
-            # never "a half-finished change means HEAD is not what you left". No
-            # worktree, gate, test or card reads a byte of it. `templates/gitignore`
-            # keeps the volatile files out of git in the first place; this is what
-            # rescues a repo that tracked one before that shipped.
             continue
         dirty.append(path)
     return dirty
@@ -3397,7 +3387,7 @@ def stale_phase(root: Path, count: int, model: str, deadline, card_budget: float
     the deadline or kill switch cuts short re-checks that doc next time — Karel's
     rule. Findings become one fix-card per doc; the runner never edits a doc.
 
-    Returns (checked, verified, carded) — the three numbers `stale_status.json`
+    Returns (checked, verified, carded) — the three numbers `record.stale()`
     has always carried. `record`, when given, additionally receives the two this
     triple cannot express and that Karel's morning needs: how many docs were
     *selected* (58, against 0 verified, is a broken sweep; 1 against 1 is a quiet
@@ -3473,12 +3463,9 @@ def stale_phase(root: Path, count: int, model: str, deadline, card_budget: float
                 card_path, _stale_card_text(cand.doc, verdict, out_dir.relative_to(root)))
             carded += 1
             carded_cards.append(card_path.stem)
-            # Status rides along in the same commit so "a sweep got this far" is a
-            # committed fact even if the run never reaches the digest.
-            stale_sweep.write_status(root, dt.date.today().isoformat(),
-                                     checked, verified + 1, carded)
-            board.commit_board(root, f"stale: {cand.doc} — {len(findings)} drift(s) carded",
-                               extra_paths=(str(stale_sweep.STATUS),))
+            # Committed per doc rather than at the end of the sweep, so "a sweep got
+            # this far" survives a run that never reaches its wrap-up commit.
+            board.commit_board(root, f"stale: {cand.doc} — {len(findings)} drift(s) carded")
             _log(f"  {cand.doc}: {len(findings)} drift(s) — carded {card_path.name}")
         else:
             _log(f"  {cand.doc}: {verdict.get('summary', 'no drift')} — verified")
@@ -6402,15 +6389,15 @@ def _deadline(until: str | None, max_minutes: int | None) -> dt.datetime | None:
 
 
 def _invocation_label(args: argparse.Namespace) -> str:
-    """How this run was asked for, in the few words the digest heads a run block
+    """How this run was asked for, in the few words Command Center heads a run
     with — `night, up to 8 cards, staleness sweep` or `card ice-damage`.
 
     Reconstructed from the parsed args rather than `sys.argv`, so it says the
     same thing whether the run came from `night.py`'s defaults, Task Scheduler or
     Karel's own command line. It exists because two runs in one night are not
     interchangeable: on 2026-07-30 an aborted 8-card night and a deliberate
-    one-card rerun both landed between two digests, and a report that cannot
-    name which was which cannot explain either.
+    one-card rerun both landed in the same window, and a report that cannot name
+    which was which cannot explain either.
     """
     parts: list[str] = [f"card {args.card}"] if args.card else []
     if not args.card:
@@ -6423,11 +6410,6 @@ def _invocation_label(args: argparse.Namespace) -> str:
             parts.append("staleness sweep")
         if args.budget:
             parts.append(f"${args.budget:.2f} budget")
-    if args.append_digest:
-        # Visible on the run block itself, not only in the commit log — Karel
-        # reads this label to know why a run's report is stacked on top of an
-        # earlier one instead of standing alone.
-        parts.append("append mode")
     return ", ".join(parts)
 
 
@@ -7076,7 +7058,6 @@ def run(root: Path, args: argparse.Namespace) -> int:
         # before, so a card that produces real work always wins the budget over
         # a maintenance check. Only if a window remains: a run that already hit a
         # wall or the deadline has nothing left to give the sweep.
-        ran_stale_sweep = False
         if args.stale and not (deadline and dt.datetime.now() >= deadline) \
                 and not _stop_requested():
             try:
@@ -7085,44 +7066,33 @@ def run(root: Path, args: argparse.Namespace) -> int:
                     work, args.stale, model, deadline, args.card_budget,
                     args.test_timeout, record)
                 _log(f"stale sweep: {checked} checked, {verified} verified, {carded} carded")
-                # Written even when `checked` is 0 — "ran, nothing changed enough to
-                # check" and "never run" are different facts, and Digest.md needs to
-                # be able to tell them apart (menu-summary-on-card follow-up).
-                stale_sweep.write_status(work, dt.date.today().isoformat(),
-                                         checked, verified, carded)
-                ran_stale_sweep = True
             except tiers.TierError as exc:
                 _log(f"stale sweep skipped — {exc}")
                 record.note(f"stale sweep skipped — {exc}")
 
-        # Closed *before* the digest renders, never after: the digest reports on
-        # every record since the last one, and this run's own record is the most
-        # important of them. Rendering first would publish a report of a night
-        # that had not yet admitted how it ended.
+        # Closed before the wrap-up commit, never after, so the record on disk
+        # already says how the night ended by the time anything reads it —
+        # Command Center reads these records live, and a record still open while
+        # its run commits and pushes reads as a night in flight.
         record.finish(cost_usd=spent, walls=walls, dispatched=done)
 
-        _status(work, phase="digest", since=_now())
-        text = digest.render(work)
-        textio.write_text_lf(work / digest.OUT, text + "\n")
-        extra = (str(stale_sweep.STATUS),) if ran_stale_sweep else ()
-        # `--append-digest` (2026-07-30, Karel: "for when I don't have time to
-        # read or use a scheduler over weekend") writes a commit `digest.py`'s
-        # `_previous_digest` does not recognise, so the read baseline does not
-        # move — the *next* run's window still reaches back to the last real
-        # `digest:` commit, and keeps reaching back across any number of append
-        # runs, until one is invoked without the flag. See `digest.py`'s "Two
-        # commit shapes, one baseline" for the mechanics.
-        digest_prefix = digest.APPEND_COMMIT_PREFIX if args.append_digest else "digest"
-        board.commit_board(work, f"{digest_prefix}: {dt.date.today().isoformat()}",
-                           extra_paths=extra)
-        # The final sweep: carries the just-written digest (the per-card publish
-        # above cannot, since the digest is only rendered here) and is the one
-        # publish reached by every early `break` above — `blocked`, a wall, the
-        # deadline, the kill switch, all fall through to here.
+        # `wrapup` covers the board commit and the push below. It is a real phase,
+        # not a formality: `publish` is a network round-trip, and a status that
+        # said `finished` before it returned would show the panel a run that had
+        # not yet pushed. (Was `digest` until the digest was removed — the token is
+        # read by `panel._PHASE_DONE` and `freshness`, so all three moved together.)
+        _status(work, phase="wrapup", since=_now())
+        # The board's own commit, and its only job: the lane moves under `Board/`
+        # and every `board.GENERATED_VIEWS` file. The subject is plain prose —
+        # nothing parses it back. It used to double as the digest's read-window
+        # marker, which is what `--append-digest` existed to suppress; with the
+        # digest gone there is no baseline to advance or withhold, so both went.
+        board.commit_board(work, f"board: {dt.date.today().isoformat()} run")
+        # The final sweep, and the one publish reached by every early `break` above
+        # — `blocked`, a wall, the deadline, the kill switch all fall through here.
         publish(work, publish_remote, base)
-        _log(f"digest written to {digest.OUT.as_posix()} — {done} card(s) dispatched, "
-             f"{walls} session limit(s) hit, ${spent:.2f} equivalent"
-             + (" (append mode — read baseline not advanced)" if args.append_digest else ""))
+        _log(f"run complete — {done} card(s) dispatched, "
+             f"{walls} session limit(s) hit, ${spent:.2f} equivalent")
         _status(work, phase="finished", cards_dispatched=done, session_limits=walls,
                 spent_usd=round(spent, 2), since=_now())
         return 0
@@ -7189,14 +7159,6 @@ def _parser(root: Path | None = None) -> argparse.ArgumentParser:
                              "verified); --stale 3 caps it at three; 0 (default) skips it. "
                              "A doc is ledgered only on a complete verdict, and findings "
                              "become one fix-card per doc — the runner never edits a doc")
-    parser.add_argument("--append-digest", action="store_true",
-                        help="write this run's digest without advancing the read baseline, "
-                             "so the next run's digest still reaches back to the last one "
-                             "written *without* this flag — for a stretch of runs (a "
-                             "scheduled weekend) nobody is there to read each one. "
-                             "night.py's unattended path defaults to this; a run started "
-                             "by hand defaults to the opposite (baseline advances) on the "
-                             "assumption someone is about to look")
     return parser
 
 

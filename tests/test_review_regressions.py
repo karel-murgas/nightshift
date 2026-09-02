@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import digest, discover, init, manifest as _manifest, reconcile, stale_sweep
+from nightshift import discover, init, manifest as _manifest, reconcile, stale_sweep
 from nightshift.gates import import_layering, memory_freshness, orientation_budget
 
 import _fixtures
@@ -52,9 +52,12 @@ def _project(tmp_path: Path, manifest: str = "", *, board: bool = True) -> Path:
 # project's `.ai/`; installed as a package it is a directory inside the framework's
 # own checkout. `reconcile` then reported "Board is consistent" from inside every
 # consuming project — it fails *open*, no board found, no actions, exit 0 — and
-# `digest` wrote `Digest.md` into the framework repo. `manifest.find_root`'s own
-# docstring is the standing warning; these three were missed by the sweep that
-# wrote it.
+# and `digest` (since removed) wrote its report into the framework repo.
+# `manifest.find_root`'s own docstring is the standing warning; these were missed by
+# the sweep that wrote it. The digest's two cases went with the digest — the property
+# they asserted is `find_root`'s, covered directly in `test_manifest.py`, and the
+# "reads the working directory's repo" half is still asserted here through
+# `reconcile` and `stale_sweep`.
 
 
 CARD = """---
@@ -90,27 +93,6 @@ def test_reconcile_help_does_not_die_on_its_own_docstring():
                           encoding="utf-8", errors="replace")
     assert done.returncode == 0, done.stderr
     assert "--apply" in done.stdout
-
-
-def test_digest_writes_into_the_project_not_the_framework(tmp_path, monkeypatch):
-    repo = _project(tmp_path)
-    monkeypatch.chdir(repo)
-
-    assert digest.main([]) == 0
-
-    assert (repo / digest.OUT).is_file(), "the digest belongs to the project"
-    assert not (REPO / digest.OUT).exists(), "and never to the framework checkout"
-
-
-def test_digest_help_writes_nothing():
-    """It had no argparse at all, so `--help` was parsed as "no arguments" and
-    *wrote the file* — which is how the wrong-root bug was caught."""
-    done = subprocess.run([sys.executable, "-m", "nightshift.digest", "--help"],
-                          cwd=REPO, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace")
-    assert done.returncode == 0
-    assert "--stdout" in done.stdout
-    assert not (REPO / digest.OUT).exists()
 
 
 def test_stale_sweep_has_a_working_entry_point(tmp_path, monkeypatch):

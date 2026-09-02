@@ -1,4 +1,4 @@
-"""What counts as a dirty tree, and the two things that deliberately do not.
+"""What counts as a dirty tree, and what deliberately does not.
 
 `dirty_outside_board` is the runner's preflight refusal: uncommitted work outside
 `Board/` means HEAD is not what the maintainer left, and a worktree branched off it
@@ -6,16 +6,22 @@ would carry a half-finished change into a card. Right rule, and it had a hole sh
 like the editor.
 
 **The failure this exists to prevent (2026-08-04, `looking-at-it-broke-it`.)** A real
-install committed `.obsidian/workspace.json` — which is what happens when `init`
-writes into `.obsidian/` and then closes by telling you `git add -A`. Obsidian
-rewrites that file when you open a pane, switch tabs or scroll, so the tree was dirty
-again within seconds of every commit and the runner refused to dispatch. Reported
-three times in one day by the same project. Opening the board to read it was what
-stopped the board being worked.
+install committed `.obsidian/workspace.json` — which is what happened when `init`
+wrote into `.obsidian/` and then closed by telling you `git add -A`. That file is
+rewritten when you open a pane, switch tabs or scroll, so the tree was dirty again
+within seconds of every commit and the runner refused to dispatch. Reported three
+times in one day by the same project. Opening the board to read it was what stopped
+the board being worked.
 
-Two fixes, and both are needed because they cover different repos:
-`templates/gitignore` keeps the volatile files out of git at all in a fresh install,
-and this exemption rescues a repo that tracked one before that shipped.
+**The fix is now one mechanism rather than two, and the surviving one is the better
+half.** `dirty_outside_board` carried a hardcoded `.obsidian/` exemption alongside
+`templates/gitignore`'s narrow `workspace*.json` rules — narrow because `init` wrote
+real shared config into that directory and it had to stay tracked. Nothing provisions
+any editor since `remove-obsidian` (2026-09), so the template ignores `.obsidian/`
+wholesale and the exemption went: a gitignored directory never appears in
+`gitpaths.status` at all, so it cannot make a tree dirty, and there is no list of
+blessed paths here to keep in step with anybody's choice of editor. The tests below
+assert the property through the ignore rule, which is where it now lives.
 """
 from __future__ import annotations
 
@@ -40,7 +46,9 @@ def _build(r: Path) -> None:
     (r / "pkg").mkdir()
     (r / "pkg" / "core.py").write_text("x = 1\n", encoding="utf-8")
     (r / "Board" / "tasks" / "a.md").write_text("---\nid: a\n---\n", encoding="utf-8")
-    (r / "Digest.md").write_text("# Digest\n", encoding="utf-8")
+    (r / "Routing.md").write_text("# Routing\n", encoding="utf-8")
+    # As `templates/gitignore` writes it: the directory wholesale.
+    (r / ".gitignore").write_text(".obsidian/\n", encoding="utf-8")
     (r / ".obsidian" / "workspace.json").write_text('{"active": "a"}\n', encoding="utf-8")
     _fixtures.git_init(r, branch="main", autocrlf="false")
     _git(r, "add", "-A")
@@ -49,7 +57,7 @@ def _build(r: Path) -> None:
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
-    return _fixtures.repo_copy("board-and-obsidian", tmp_path / "proj", _build)
+    return _fixtures.repo_copy("board-and-editor-state", tmp_path / "proj", _build)
 
 
 def test_a_clean_tree_is_clean(repo):
@@ -63,26 +71,34 @@ def test_real_uncommitted_work_still_refuses(repo):
     assert runner.dirty_outside_board(repo) == ["pkg/core.py"]
 
 
-def test_the_board_and_the_digest_are_exempt(repo):
+def test_the_board_and_its_generated_views_are_exempt(repo):
     """Long-standing: the runner commits these itself, and the maintainer edits cards
-    while it runs."""
+    while it runs. The exemption is `board.GENERATED_VIEWS`, whichever views that is —
+    it named `Digest.md` alone once, and two views that shipped later joined neither
+    this list nor `commit_board`'s and blocked `chores` outright."""
     (repo / "Board" / "tasks" / "a.md").write_text("---\nid: a\nstate: tasks\n---\n",
                                                    encoding="utf-8")
-    (repo / "Digest.md").write_text("# Digest\n\nchanged\n", encoding="utf-8")
+    (repo / "Routing.md").write_text("# Routing\n\nchanged\n", encoding="utf-8")
     assert runner.dirty_outside_board(repo) == []
 
 
-def test_obsidian_window_state_does_not_block_a_dispatch(repo):
-    """The regression. A tracked `workspace.json` changes every time somebody looks at
-    the board, and before this it meant the runner could never dispatch again."""
+def test_editor_state_does_not_block_a_dispatch(repo):
+    """The regression, asserted through the mechanism that now prevents it. Editor
+    state changes every time somebody looks at a file; the ignore rule the installer
+    writes is what keeps that out of `git status`, and therefore out of this answer.
+
+    Deliberately *not* asserted against a hardcoded path list in `runner.py`: that was
+    the old shape, and a list of blessed editor directories is a list somebody has to
+    extend for every editor anyone ever uses."""
     (repo / ".obsidian" / "workspace.json").write_text('{"active": "b"}\n',
                                                        encoding="utf-8")
     assert runner.dirty_outside_board(repo) == []
 
 
-def test_obsidian_state_is_skipped_without_hiding_real_work(repo):
-    """Skipping a path must not swallow the reason the check exists — a vault rewrite
-    and a source edit in the same tree still refuses, and names the source edit."""
+def test_editor_state_is_skipped_without_hiding_real_work(repo):
+    """Skipping a path must not swallow the reason the check exists — an editor-state
+    rewrite and a source edit in the same tree still refuses, and names the source
+    edit."""
     (repo / ".obsidian" / "workspace.json").write_text('{"active": "c"}\n',
                                                        encoding="utf-8")
     (repo / "pkg" / "core.py").write_text("x = 3\n", encoding="utf-8")

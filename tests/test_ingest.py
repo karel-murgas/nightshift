@@ -1501,7 +1501,7 @@ def test_what_a_board_write_produces_and_what_it_never_does(tmp_path):
     work = _clone_with_origin(tmp_path)
 
     assert ingest.not_board(work, ["Board/tasks/one.md", "Board/inbox/two.md",
-                                   board.ROUTING_VIEW, board.DIGEST_VIEW]) == ""
+                                   board.ROUTING_VIEW, board.CHORES_VIEW]) == ""
     assert ingest.not_board(work, ["Board/tasks/one.md",
                                    "myapp/app.py"]) == "myapp/app.py"
     assert ingest.not_board(work, [".ai/manifest.toml"]) == ".ai/manifest.toml"

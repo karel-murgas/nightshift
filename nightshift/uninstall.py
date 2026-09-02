@@ -67,8 +67,6 @@ RUNTIME_PATHS = (
     f"{AI_DIR}/runs",
     f"{AI_DIR}/host.json",
     f"{AI_DIR}/STOP",
-    f"{AI_DIR}/stale_status.json",
-    "Digest.md",
     init.RECEIPT,          # ours by definition, and removed last of all
 )
 

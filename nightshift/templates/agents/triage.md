@@ -89,7 +89,7 @@ behind the card.
 
 ### The `## Question` is a picker, not an essay
 
-{{maintainer}} answers on a screen, and it is inlined into the morning digest, so it must read like
+{{maintainer}} answers on a screen, in Command Center's decide picker, so it must read like
 a chat picker: **one sentence of question, then terse labelled options with one implication
 line each.** Not four paragraphs. The shape:
 
@@ -213,14 +213,15 @@ invented.** Without that you are not triaging, you are making up work.
 ## Never hard-wrap a card's prose
 
 Write every paragraph, bullet and picker option as **one continuous source line**, however
-long. Cards live in `{{board}}/` and are read in Obsidian, whose editor shows each source line
-as its own row instead of reflowing the paragraph — so a manual ~90-column wrap makes a card
-read as broken short rows, and a `` `code` `` span that opens on one line and closes on a
-later one does not survive the split at all: CommonMark closes a code span at the next
-backtick regardless of the newline between, so the wrapped span leaks unescaped text and
-Obsidian stops rendering the rest of the file. This is the opposite of the hard-wrap-for-diffs
-convention most repos use for their docs — deliberately, because those are not edited in
-Obsidian and cards are. Full reasoning: `.claude/skills/manage-board/SKILL.md`.
+long. Cards live in `{{board}}/` and are edited in a plain textarea — Command Center's card
+editor, or any editor opened on the raw file — which shows each source line as its own row
+instead of reflowing the paragraph, so a manual ~90-column wrap makes a card read as broken
+short rows. Worse, a `` `code` `` span that opens on one line and closes on a later one does
+not survive the split in any renderer that does not join a paragraph's lines first:
+CommonMark closes a code span at the next backtick regardless of the newline between, so the
+wrapped span leaks unescaped text into the render. This is the opposite of the
+hard-wrap-for-diffs convention most repos use for their docs — deliberately, because those
+are not edited as cards. Full reasoning: `.claude/skills/manage-board/SKILL.md`.
 
 ## Every card you write must pass the schema
 
@@ -294,14 +295,23 @@ machine-checkable from judgment) and `## Open questions`, which must read `none`
 
 Every `tasks/` **code** card carries a `## Approach`: **one short paragraph, in plain
 language, stating the core of *how* the change works** — the idea, not the criteria. It is
-what {{maintainer}} reads in the morning digest to understand what is about to run and step in if the
+what {{maintainer}} reads on the board to understand what is about to run and step in if the
 direction is wrong, so it must stand on its own without the reader opening `## Acceptance` or
 tracing the code. The worked example is `heavy-guard-should-bleed`:
 
+<!-- stale-ok: the worked example below quotes a card from the ORIGIN project, so
+     `is_drone`/`is_mechanical` are that project's symbols and by construction do not
+     exist in a consuming one. Kept as an example rather than paraphrased because the
+     point being taught is the *shape* of a good `## Approach`, which needs a concrete
+     one. It resolved by accident until 2026-09 — a `digest.py` comment happened to
+     name both symbols, so the framework's own index answered for them; deleting the
+     digest exposed that, which is the marker this should always have carried. -->
 > `is_drone` currently does double duty — it picks the combat AI *and* the crit-DoT flavour.
 > Add a second, independent `is_mechanical` flag that only answers "meat or machine" for the
 > flavour, and leave `is_drone` alone to keep driving the AI. The robotic factories set it
 > `True`; the organic ones default `False`.
+
+<!-- /stale-ok -->
 
 That is the principle in three sentences — a reader knows the shape of the fix and could veto
 it. Not a restatement of the acceptance bullets, not a file-by-file diff (that is `## Steps`

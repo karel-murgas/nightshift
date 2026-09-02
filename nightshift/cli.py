@@ -40,7 +40,6 @@ Everything else is a module, and stays one:
   python -m nightshift.preflight       mandatory before push/merge
   python -m nightshift.runner          dispatch cards from the board
   python -m nightshift.reconcile       inbox notes -> cards
-  python -m nightshift.digest          the morning report
   python -m nightshift.merge_check     does this branch merge clean, gated, tested?
   python -m nightshift.corrections     read and cluster the corrections log
 """

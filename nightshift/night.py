@@ -16,7 +16,7 @@ same thing on both.
   1. **Dependencies.** The laptop has them; a fresh cloud clone does not. An
      unknown host installs the project's own first — `requirements.txt` if it has
      one, else `pip install -e .` — and it must happen here, before anything
-     imports `runner`, because `runner` pulls in `board`/`digest`/… which pull in
+     imports `runner`, because `runner` pulls in `board`/`suite`/… which pull in
      the project's deps. A project that declares neither has nothing to install
      and is not failed for it.
 
@@ -90,13 +90,7 @@ REQUIREMENTS = ROOT / "requirements.txt"
 # eight cards in one session window, then the Tier-2 staleness sweep on whatever
 # window is left. Any explicit argument replaces this wholesale.
 #
-# `--append-digest` (2026-07-30, Karel: "for when I don't have time to read or
-# use a scheduler over weekend") — this is specifically the unattended path, so
-# nobody is necessarily reading tonight's `Digest.md` before tomorrow night's run
-# writes over it. Appending means a run Karel does not get to for a few nights
-# still shows every one of them, newest first, when he finally does look; the
-# read baseline only advances again once *he* runs the runner by hand.
-DEFAULT_ARGS = ["--sessions", "1", "--max-cards", "8", "--stale", "--append-digest"]
+DEFAULT_ARGS = ["--sessions", "1", "--max-cards", "8", "--stale"]
 
 
 def _log(msg: str) -> None:

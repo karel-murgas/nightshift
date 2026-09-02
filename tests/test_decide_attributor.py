@@ -1,13 +1,20 @@
-"""The digest's answered-but-not-moved nudge, and the literal name that broke it.
+"""Recognising a maintainer's recorded answer, and the literal name that broke it.
 
-The defect (2026-08-04): `digest._KAREL_ANSWER` matched the literal token `karel`
-after the `·` in a `## Thread` heading. That is the origin maintainer's handle, so
-in every other repo the advisory ran, matched nothing, and reported a clean board
-— `silent-noop`, and the quietest possible kind, because a nudge that never fires
-is indistinguishable from a board with nothing to nudge about.
+`decide.has_maintainer_answer` is what tells a card you have already settled from a
+card still waiting: Command Center's decide page reads it to say *"answered · ready
+to dispatch"* rather than asking again. The rule it applies — a dated `## Thread`
+heading signed with the project's declared handle — is `compose`'s own output shape
+read back, which is why it lives beside it.
 
-Nothing tested the advisory at all, which is why the literal survived the
-extraction. These are that coverage.
+The defect (2026-08-04): the check matched the literal token `karel` after the `·`.
+That is the origin maintainer's handle, so in every other repo it ran, matched
+nothing, and reported a clean board — `silent-noop`, and the quietest possible kind,
+because a check that never fires is indistinguishable from nothing to report.
+
+Nothing tested it at all, which is why the literal survived the extraction. These are
+that coverage. (They lived in `test_digest_attributor.py` and reached the helper
+through the digest's copy of it until the digest was removed; the behaviour under test
+never moved.)
 
 **Why the token could not be replaced by a shape rule**, and why the fix is a
 declared field rather than a cleverer regex: counted over the origin project's 62
@@ -23,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import board, digest
+from nightshift import board, decide
 
 
 def _card(thread: str) -> board.Card:
@@ -55,7 +62,7 @@ def _card(thread: str) -> board.Card:
 def test_only_a_decision_signed_by_the_declared_handle_counts(heading, expected):
     """Every one of these shapes is in the origin project's real board corpus."""
     card = _card(heading + "\nbody\n")
-    assert digest._has_maintainer_answer(card, "karel") is expected
+    assert decide.has_maintainer_answer(card.text, "karel") is expected
 
 
 def test_the_handle_is_the_projects_own_not_a_baked_in_name():
@@ -63,8 +70,8 @@ def test_the_handle_is_the_projects_own_not_a_baked_in_name():
     handle, and the advisory has to see it. Before 2026-08-04 this returned False
     for every repo but one."""
     card = _card("### 2026-08-04 · alex — go with B\n")
-    assert digest._has_maintainer_answer(card, "alex") is True
-    assert digest._has_maintainer_answer(card, "karel") is False
+    assert decide.has_maintainer_answer(card.text, "alex") is True
+    assert decide.has_maintainer_answer(card.text, "karel") is False
 
 
 def test_no_declared_handle_disables_the_nudge_rather_than_guessing():
@@ -72,9 +79,9 @@ def test_no_declared_handle_disables_the_nudge_rather_than_guessing():
     no token, and silence is the honest answer — a guessed token would restore
     exactly the silent no-op this fix removed, while looking configured."""
     card = _card("### 2026-08-04 · karel — go with B\n")
-    assert digest._has_maintainer_answer(card, "") is False
-    assert digest._has_maintainer_answer(card, "   ") is False
-    assert digest._answer_pattern("") is None
+    assert decide.has_maintainer_answer(card.text, "") is False
+    assert decide.has_maintainer_answer(card.text, "   ") is False
+    assert decide.answer_pattern("") is None
 
 
 def test_a_handle_with_regex_metacharacters_is_matched_literally():
@@ -82,8 +89,8 @@ def test_a_handle_with_regex_metacharacters_is_matched_literally():
     file, not a pattern — and `a.b` matching `axb` is the kind of wrong nobody
     would ever look for here."""
     card = _card("### 2026-08-04 · a.b — yes\n")
-    assert digest._has_maintainer_answer(card, "a.b") is True
-    assert digest._has_maintainer_answer(_card("### 2026-08-04 · axb — yes\n"), "a.b") is False
+    assert decide.has_maintainer_answer(card.text, "a.b") is True
+    assert decide.has_maintainer_answer(_card("### 2026-08-04 · axb — yes\n").text, "a.b") is False
 
 
 def test_the_question_section_is_never_read_as_an_answer():
@@ -91,4 +98,4 @@ def test_the_question_section_is_never_read_as_an_answer():
     card *asking*. Scoping to `## Thread` is what keeps a picker from reading as a
     resolution."""
     card = _card("nothing recorded yet\n")
-    assert digest._has_maintainer_answer(card, "karel") is False
+    assert decide.has_maintainer_answer(card.text, "karel") is False

@@ -261,17 +261,11 @@ is what keeps the files just written current as the framework changes. Say that 
 explicitly: `init` never overwrites, so without `update` this repo keeps today's charters
 and skills for as long as it exists.
 
-**The one thing to tell them to do by hand**, because it is a download in another
-application and no command you can run will do it: install the **Base Board** community
-plugin, from *Settings → Community plugins → Browse*. `init` has already *enabled* it
-and the core *Bases* plugin by appending to their `.obsidian/` config, so the toggle is
-flipped and only the fetch is missing — until it lands, Obsidian reports
-**`Unknown view type: kanban`** on `Board.base`. Say the error string; it is what they
-will otherwise search for.
-
-Two caveats to pass on only if they apply, which `init`'s own output will have told you:
-if the repo was not an Obsidian vault at install time nothing was wired at all, and
-re-running `init` after opening it as one fixes that; and nothing in the framework reads
-the view, so a project that never installs the plugin loses the picture and nothing else.
+**There is nothing for them to install by hand to see the board.** Command Center is the
+board surface and it is already there. Earlier versions of `init` also wrote an Obsidian
+Bases view of the lanes and switched two Obsidian plugins on under the project's
+`.obsidian/`, which left one manual plugin download in the install; both were removed in
+2026-09, so do not tell them to go to any editor's plugin settings. Reading a card in an
+editor needs nothing configured — it is plain Markdown in a plain directory.
 
 Do not close by listing commands for them to run. If something needs running, run it.

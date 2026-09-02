@@ -150,10 +150,9 @@ AFTER_ANSWER: tuple[str, ...] = (AFTER_ANSWER_TRIAGE, AFTER_ANSWER_TASKS)
 # `CLAUDE.md` and `reconcile` all named it as the first step of the flow.
 PRIVATE_LANE = "ideas"
 
-# The reports the tooling writes at the repo root — which is the vault root, so these
-# are what the maintainer actually reads. Owned here beside `LANES` because they are
-# board vocabulary: three modules write one each (`digest`, `ingest`, `chores`) and
-# three more have to recognise the whole set.
+# The reports the tooling writes at the repo root. Owned here beside `LANES` because
+# they are board vocabulary: two modules write one each (`ingest`, `chores`) and three
+# more have to recognise the whole set.
 #
 # **They are committed, and that is the point of the tuple.** Board state that exists
 # on one machine only is a decision the other machine cannot see, and a generated file
@@ -163,14 +162,14 @@ PRIVATE_LANE = "ideas"
 # run, and a dirty tree refuses a dispatch), and `hooks.correction_prompt` ignores them.
 #
 # Written down once because it was written down once before, wrong: the exemption and
-# the commit list each named `Digest.md` alone, so `ingest` and `chores` shipped a new
-# view each and joined neither list — and two untracked reports at the root made the
-# tree dirty and refused every batch outright. The commit list and the exemption list
-# are the same list; a view on one and not the other breaks in one of those two ways.
-DIGEST_VIEW = "Digest.md"
+# the commit list each named the then-only view (`Digest.md`, since removed with the
+# digest) alone, so `ingest` and `chores` shipped a new view each and joined neither
+# list — and two untracked reports at the root made the tree dirty and refused every
+# batch outright. The commit list and the exemption list are the same list; a view on
+# one and not the other breaks in one of those two ways.
 ROUTING_VIEW = "Routing.md"
 CHORES_VIEW = "Chores.md"
-GENERATED_VIEWS: tuple[str, ...] = (DIGEST_VIEW, ROUTING_VIEW, CHORES_VIEW)
+GENERATED_VIEWS: tuple[str, ...] = (ROUTING_VIEW, CHORES_VIEW)
 
 # 03_board.md §2. Appended in this order when absent.
 RUNNER_FIELDS: tuple[str, ...] = ("attempts", "branch", "started", "finished")

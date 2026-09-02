@@ -1,5 +1,5 @@
 """Tests for the failure-evidence path — `runner._error_section`, the record field
-and the digest block (2026-07-31).
+and the run record's own field (2026-07-31).
 
 The hole these close. When a card failed, the only thing written anywhere the
 maintainer could read was `check_junit`'s count string plus `Full output:
@@ -185,7 +185,7 @@ def test_worker_evidence_lines_are_indented_like_every_other_excerpt(tmp_path):
 
 
 def test_worker_evidence_is_bounded(tmp_path):
-    """A worker can die printing a very long message; the card is read in Obsidian."""
+    """A worker can die printing a very long message; the card is read as prose."""
     _worker_json(tmp_path, is_error=True,
                  result="\n".join(f"line {i}" for i in range(200)))
     body = [ln for ln in runner.worker_exit_evidence(tmp_path).splitlines()
@@ -240,7 +240,7 @@ def test_a_hash_in_pytest_output_cannot_end_the_exemption_early():
     assert offending and all(i in exempt for i in offending)
 
 
-# --- the record and the digest ------------------------------------------------
+# --- the record ------------------------------------------------
 
 
 def test_the_record_stores_the_evidence(tmp_path):
@@ -260,68 +260,3 @@ def test_a_record_written_without_evidence_still_reads(tmp_path):
                       outcome="failed", detail="pytest: 1 failure(s)")
     stored = run_record.failures(run_record.read_all(tmp_path)[0])
     assert stored and stored[0]["evidence"] == ""
-
-
-@pytest.mark.parametrize("evidence, expected", [
-    (_EVIDENCE, True),
-    ("", False),
-    ("   \n  \n", False),
-])
-def test_the_digest_quotes_the_evidence_when_there_is_any(evidence, expected):
-    from nightshift import digest
-    lines = digest._evidence_lines({"evidence": evidence})
-    assert bool(lines) is expected
-    # Eight spaces total: four from `failure_excerpt`, four more to nest the block
-    # inside its list item, which is what makes it render as code rather than as
-    # mangled prose running into the bullet above.
-    assert all(line.startswith("        ") for line in lines)
-
-
-def test_the_digest_caps_how_much_it_quotes():
-    """The card is where one failure is worked; the digest is a morning scan of a
-    whole night, and forty lines of traceback at the top is one Karel stops
-    reading."""
-    from nightshift import digest
-    long_block = "\n".join(f"    E  line {i}" for i in range(40))
-    assert len(digest._evidence_lines({"evidence": long_block})) == digest._EVIDENCE_LINES
-
-
-def test_the_digest_tolerates_a_record_with_no_evidence_key():
-    from nightshift import digest
-    assert digest._evidence_lines({}) == []
-
-
-# --- the failure signature (grouping) -----------------------------------------
-
-
-def test_a_pytest_signature_is_the_failing_test_not_the_slice_size():
-    """`pytest: 2 failure(s) … across 1860 test(s)` describes the slice that ran.
-    Two cards that broke the same test get different totals from the selector, so
-    grouping on the counts groups on noise — and the 110-char clip used to land on
-    `— first:…`, cutting the string off exactly where it became useful."""
-    from nightshift import digest
-    detail = ("pytest: 2 failure(s), 0 error(s) across 1860 test(s) — first: "
-              "tests/test_stairs.py::test_cleared: AssertionError: assert 3 == 0")
-    signature = digest._failure_signature(detail)
-    assert signature.startswith("tests/test_stairs.py::test_cleared")
-    assert "1860" not in signature and "first:" not in signature
-
-
-def test_two_cards_that_broke_the_same_test_group_together():
-    """The payoff: 'one cause, N casualties' now fires for pytest, not just gates."""
-    from nightshift import digest
-    same = "tests/test_stairs.py::test_cleared: AssertionError: assert 3 == 0"
-    a = f"pytest: 1 failure(s), 0 error(s) across 40 test(s) — first: {same}"
-    b = f"pytest: 3 failure(s), 0 error(s) across 1860 test(s) — first: {same}"
-    assert digest._failure_signature(a) == digest._failure_signature(b)
-
-
-def test_a_gate_violation_signature_is_unchanged():
-    """Gate details are `;`-joined with a `file:line — ` prefix and must keep the
-    original normalisation — that is the 2026-07-30 'three cards, one broken gate'
-    case this function was written for."""
-    from nightshift import digest
-    detail = ("Board/tasks/x.md:145 — doc_reference_liveness: symbol LICENSE does not "
-              "exist; 1 violation(s) across 26 gate(s): asset_hygiene")
-    assert (digest._failure_signature(detail)
-            == "doc_reference_liveness: symbol LICENSE does not exist")

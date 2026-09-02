@@ -1,10 +1,10 @@
 """Tests for `nightshift/run_record.py` — the run's own account of itself.
 
 The record exists because board state cannot describe a run (see the module
-docstring, and `test_board_digest.py`'s first test). What has to be true of it:
+docstring). What has to be true of it:
 
 - it survives a run that dies, because the run that dies is the one worth
-  reporting — the 2026-07-30 night was killed mid-sweep and never wrote a digest;
+  reporting — the 2026-07-30 night was killed mid-sweep and reported nothing;
 - it never takes a run down with it, so every write is best-effort;
 - its window is "runs Karel has not been shown", derived idempotently.
 """
@@ -44,8 +44,8 @@ def test_each_event_is_flushed_rather_than_buffered(tmp_path):
     assert on_disk["complete"] is False   # still not finished, and still readable
 
 
-def test_an_unfinished_record_reads_as_killed_by_the_digest(tmp_path):
-    """The property the digest's `killed` header depends on."""
+def test_an_unfinished_record_reads_as_killed(tmp_path):
+    """The property a reader's `killed` verdict depends on."""
     record = run_record.start(tmp_path, kind="run")
     record.dispatched("probe", worker="code-thread", model="sonnet", attempt=1,
                       outcome="failed")
@@ -112,31 +112,6 @@ def test_the_sweep_records_selected_and_incomplete_not_just_the_old_triple(tmp_p
     assert stale["verified"] == 0
 
 
-# --- the window ---------------------------------------------------------------
-
-def test_records_since_returns_only_the_unreported_ones(tmp_path):
-    for stamp in ("2026-07-28T02:00:00", "2026-07-30T02:00:00", "2026-07-30T12:00:00"):
-        run_record.Record(tmp_path, tmp_path / run_record.DIR / f"{run_record._stamp(stamp)}.json",
-                          {"started": stamp}).save()
-    since = "2026-07-29T00:00:00"
-    got = [r["started"] for r in run_record.records_since(tmp_path, since)]
-    assert got == ["2026-07-30T12:00:00", "2026-07-30T02:00:00"]   # newest first
-
-
-def test_no_baseline_returns_everything(tmp_path):
-    run_record.start(tmp_path, kind="run")
-    assert len(run_record.records_since(tmp_path, None)) == 1
-
-
-def test_records_since_is_idempotent(tmp_path):
-    """Re-rendering the digest must not make the second render claim nothing
-    happened — which is why the window comes from the digest commit rather than
-    from a marker the reader writes."""
-    run_record.start(tmp_path, kind="run")
-    first = run_record.records_since(tmp_path, None)
-    second = run_record.records_since(tmp_path, None)
-    assert first == second
-
 
 # --- it must never be the thing that ends a night ---------------------------
 
@@ -173,7 +148,7 @@ def test_an_oversized_card_that_ran_is_recorded_apart_from_the_skipped_ones(tmp_
     """Round 2 of `oversized-cards-are-bad-worker-input`, and the separation is
     the fix. An oversized card is dispatchable by design, so it is never in
     `skipped` — which left `Digest.md` silent about exactly the case the signal
-    exists for. Putting it in `skipped` instead would have made the digest's own
+    exists for. Putting it in `skipped` instead would have made a reader's own
     `### Skipped — N` heading and its "Every card on the board was dispatchable"
     fallback describe a card that ran, so the two lists have to stay disjoint at
     the record, not just at the render."""
@@ -188,7 +163,7 @@ def test_an_oversized_card_that_ran_is_recorded_apart_from_the_skipped_ones(tmp_
 
 def test_a_record_carries_the_field_before_any_card_is_measured(tmp_path):
     """`start()` seeds it like `skipped` and `dispatched`, so a run killed before
-    selection has the same shape as one that finished — the digest reads records
+    selection has the same shape as one that finished — a reader reads records
     from runs it did not write, including older ones."""
     run_record.start(tmp_path, kind="run")
     assert run_record.read_all(tmp_path)[0]["oversized"] == []
@@ -196,7 +171,6 @@ def test_a_record_carries_the_field_before_any_card_is_measured(tmp_path):
 
 def test_reading_a_root_with_no_records_directory_is_empty_not_an_error(tmp_path):
     assert run_record.read_all(tmp_path) == []
-    assert run_record.records_since(tmp_path, "2026-01-01T00:00:00") == []
 
 
 # --- the null record for a dry run -------------------------------------------

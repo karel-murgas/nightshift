@@ -9,7 +9,7 @@ sub-question and listed where the real options should have been. Both directions
 tested against the exact shapes that produced them.
 
 **The recorded answer is verbatim and machine-recognisable.** The convention only works
-if the digest can tell the maintainer's answer from an agent's note — that is what
+whether a reader can tell the maintainer's answer from an agent's note — that is what
 `[board].decision_attributor` is for — and if the words the worker reads at 3 AM are the
 words that were chosen. A paraphrase here is worse than no feature.
 """
@@ -91,9 +91,9 @@ def test_bullet_options_are_found_with_their_consequence_attached():
 
 
 def test_numbered_options_are_found_too():
-    """The failure this module was extracted for. `digest._LIST_ITEM` matched only
+    """The failure this module was extracted for. The digest's `_LIST_ITEM` matched only
     `-`/`*`, so a worker that parked a card with `1.` / `2.` options — the natural way
-    to enumerate two choices — produced a card the digest reported as having none, and
+    to enumerate two choices — produced a card the reader reported as having none, and
     a picker built on it would have offered nothing to pick."""
     subs = decide.parse(_question(
         "1. File it in the other repo\n2. Relax the fence for this one\n"))
@@ -146,7 +146,7 @@ def test_the_recommended_marker_is_read_without_eating_the_option_label():
     assert not a.recommended and b.recommended
     assert b.text == "**B — split it**"
     assert b.text.count("**") % 2 == 0
-    # The digest quotes the card, so it keeps the mark the form strips.
+    # A reader quotes the card, so it keeps the mark the form strips.
     assert "recommended" in b.raw
 
 
@@ -173,15 +173,14 @@ def test_the_answer_is_recorded_verbatim_dated_and_attributed(tmp_path):
     assert "> **B** — later" in text
 
 
-def test_the_recorded_answer_is_what_the_digest_looks_for(tmp_path):
+def test_the_recorded_answer_is_what_the_reader_looks_for(tmp_path):
     """The convention is only worth following if the answered-but-not-moved nudge fires
     on it — that is the thing standing between an answered card and a card that sits
     parked forever because everyone assumed someone had moved it."""
-    from nightshift import digest
     root = _repo(tmp_path, "- A\n- B\n")
     decide.write_answer(root, "parked", ["B"], "", today=dt.date(2026, 8, 18))
     card = board.find(root, "parked")
-    assert digest._has_maintainer_answer(card, "karel")
+    assert decide.has_maintainer_answer(card.text, "karel")
 
 
 def test_a_free_text_note_is_quoted_as_the_maintainers_own_words(tmp_path):
@@ -237,7 +236,7 @@ def test_the_card_keeps_lf_endings(tmp_path):
 
 
 def test_an_undeclared_attributor_refuses_rather_than_guessing(tmp_path):
-    """A guessed token makes the digest's nudge silently never fire while reporting a
+    """A guessed token makes the recognition silently never fire while reporting a
     clean board — worse than not having the check at all."""
     root = _repo(tmp_path, "- A\n- B\n", attributor="")
     with pytest.raises(decide.DecideError, match="decision_attributor"):

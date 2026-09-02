@@ -2044,37 +2044,6 @@ def test_publish_remote_is_read_from_host_config(tmp_path):
     assert runner.host_setting(tmp_path, "publish_remote", "") == "origin"
 
 
-# --- the durable staleness-sweep record (digest's "Staleness" section) -----
-
-
-def test_stale_status_round_trips(tmp_path):
-    assert stale_sweep.read_status(tmp_path) is None
-    stale_sweep.write_status(tmp_path, "2026-07-26", checked=5, verified=4, carded=1)
-    status = stale_sweep.read_status(tmp_path)
-    assert status == {"last_run": "2026-07-26", "checked": 5, "verified": 4, "carded": 1}
-
-
-def test_stale_status_survives_a_zero_checked_run(tmp_path):
-    """'Ran, nothing to check' must read differently from 'never ran' — writing
-    unconditionally on any completed sweep attempt is what makes that true."""
-    stale_sweep.write_status(tmp_path, "2026-07-26", checked=0, verified=0, carded=0)
-    assert stale_sweep.read_status(tmp_path)["last_run"] == "2026-07-26"
-
-
-def test_stale_status_is_not_gitignored(tmp_path):
-    """Unlike the ledger, this file has to survive on every machine and sync
-    through git — a gitignored status would make `digest.py` lie about staleness
-    the moment someone clones fresh or the ignored file gets cleaned up."""
-    assert not str(stale_sweep.STATUS).endswith("stale_ledger.json")
-    root = _repo(tmp_path)
-    stale_sweep.write_status(root, "2026-07-26", checked=1, verified=1, carded=0)
-    status = subprocess.run(["git", "status", "--porcelain", str(stale_sweep.STATUS)],
-                            cwd=root, capture_output=True, text=True, check=True)
-    assert "??" in status.stdout  # untracked, i.e. NOT ignored (ignored files don't show at all
-                                  # under plain `git status`, but `--porcelain` without `-uall`
-                                  # still lists them as untracked unless .gitignore excludes them)
-
-
 # --- commit_board's extra_paths ---------------------------------------------
 
 
@@ -2200,123 +2169,61 @@ def test_a_dry_run_writes_no_record(tmp_path, monkeypatch):
     assert not (root / run_record.DIR).exists()
 
 
-def test_the_record_is_closed_before_the_digest_reads_it(tmp_path, monkeypatch):
-    """Ordering matters: rendering first would publish a report of a night that
-    had not yet admitted how it ended."""
+def test_the_record_is_closed_before_the_board_is_committed(tmp_path, monkeypatch):
+    """Ordering matters: Command Center reads these records live, so a record still
+    open while its own run commits and pushes reads as a night in flight. It used to
+    be the digest that must not render before the record closed; the same ordering
+    now protects the same fact for a different reader."""
     root = _loaded_board(tmp_path, "a")
     seen: list[bool] = []
-    real_render = runner.digest.render
+    real_commit = runner.board.commit_board
 
-    def spy_render(work):
-        seen.append(_only_record(work)["complete"])
-        return real_render(work)
+    def spy_commit(work, message, **kw):
+        if message.startswith("board: "):
+            seen.append(_only_record(work)["complete"])
+        return real_commit(work, message, **kw)
 
-    monkeypatch.setattr(runner.digest, "render", spy_render)
+    monkeypatch.setattr(runner.board, "commit_board", spy_commit)
     _night(monkeypatch, root, [runner.Dispatch("review", "ok")])
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     assert seen == [True]
 
 
-def test_append_digest_writes_the_non_advancing_commit_message(tmp_path, monkeypatch):
+def test_the_wrapup_commit_subject_is_prose_nothing_parses_back(tmp_path, monkeypatch):
+    """The board still gets committed at the end of a run — that never changed. What
+    changed is that the subject is only a subject. It used to be `digest: <date>`, a
+    marker the digest walked back out of `git log` to find its read window, which is
+    why `--append-digest` existed to write a *different* prefix and withhold it. With
+    the digest gone there is no baseline to advance, so nothing reads this string and
+    it is free to be plain."""
     root = _loaded_board(tmp_path, "a")
-    _night(monkeypatch, root, [runner.Dispatch("review", "ok")])
-    runner.run(root, runner._parser(root).parse_args(
-        ["--base", "development_team", "--append-digest"]))
-
-    subject = _last_commit_subject(root)
-    assert subject == f"{runner.digest.APPEND_COMMIT_PREFIX}: {dt.date.today().isoformat()}"
-    assert not subject.startswith("digest: ")   # must not accidentally match _DIGEST_COMMIT
-
-
-def test_without_the_flag_the_commit_message_is_unchanged(tmp_path, monkeypatch):
-    """Regression guard: the default path must still write exactly what it wrote
-    before this feature existed — every test and skill that greps `digest: ` in
-    git log depends on this string."""
-    root = _loaded_board(tmp_path, "a")
+    # A leftover generated view, so the wrap-up commit has something to commit. Without
+    # one it is correctly a no-op: `settle` already committed the card's own lane move,
+    # and the digest's `Digest.md` write used to be the thing that guaranteed the
+    # wrap-up always had a file of its own to stage.
+    (root / board.ROUTING_VIEW).write_text("# Routing\n", encoding="utf-8")
     _night(monkeypatch, root, [runner.Dispatch("review", "ok")])
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
-    assert _last_commit_subject(root) == f"digest: {dt.date.today().isoformat()}"
+    assert _last_commit_subject(root) == f"board: {dt.date.today().isoformat()} run"
+
+    subjects = subprocess.run(
+        ["git", "-C", str(root), "log", "--format=%s"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
+    assert not re.search(r"^digest:", subjects, re.M), (
+        "the old read-window marker must be gone from the log shape entirely — "
+        f"got: {subjects!r}")
 
 
-def test_an_append_run_does_not_close_the_window_for_the_next_run(tmp_path, monkeypatch):
-    """End-to-end version of the digest-level windowing test: two real `runner.run()`
-    calls, first with `--append-digest`, second without — the second run's own
-    rendered `Digest.md` must still carry the first run's dispatch.
-
-    Each run targets a specific card via `--card` rather than relying on
-    `select()`'s ordering, and lands it for real (see `_fake_review_run`) so the
-    card is genuinely out of `tasks/` and any later appearance in the digest can
-    only come from the per-run report, not the queue.
-    """
-    root = _loaded_board(tmp_path, "a", "b")
-    _fake_review_run(monkeypatch, root, "a")
-    runner.run(root, runner._parser(root).parse_args(
-        ["--base", "development_team", "--card", "a", "--append-digest"]))
-
-    # `_previous_digest`/`records_since` compare at second precision, and these
-    # two `run()` calls otherwise land in the same wall-clock second — a purely
-    # test-speed artefact (real runs are minutes apart), but without the gap the
-    # second run's own record can tie its commit's timestamp and get excluded
-    # from its own report by the strict `>` comparison.
-    time.sleep(1.1)
-    _fake_review_run(monkeypatch, root, "b")
-    runner.run(root, runner._parser(root).parse_args(
-        ["--base", "development_team", "--card", "b"]))
-
-    text = (root / "Digest.md").read_text(encoding="utf-8")
-    assert "[[a|" in text   # first run's dispatch, still visible in a per-run block
-    assert "[[b|" in text   # second run's own dispatch
-
-
-def test_a_normal_run_after_an_append_run_closes_the_backlog(tmp_path, monkeypatch):
-    """A third run, after the non-append run above, must report only itself —
-    otherwise the backlog never actually closes and the digest grows forever.
-
-    All three land in `testing/` for real, so a card already reported cannot
-    reappear via the standing Queue section (it is no longer in `tasks/`) or the
-    standing testing/review section (which only counts, never names). `[[<id>|`
-    appearing anywhere is specifically evidence of a per-run block.
-    """
-    root = _loaded_board(tmp_path, "a", "b", "c")
-    _fake_review_run(monkeypatch, root, "a")
-    runner.run(root, runner._parser(root).parse_args(
-        ["--base", "development_team", "--card", "a", "--append-digest"]))
-
-    # See the sibling test above for why the gap is needed: second-precision
-    # window comparisons otherwise race against three `run()` calls landing in
-    # the same wall-clock second.
-    time.sleep(1.1)
-    _fake_review_run(monkeypatch, root, "b")
-    runner.run(root, runner._parser(root).parse_args(
-        ["--base", "development_team", "--card", "b"]))   # closes the backlog
-
-    time.sleep(1.1)
-    _fake_review_run(monkeypatch, root, "c")
-    runner.run(root, runner._parser(root).parse_args(
-        ["--base", "development_team", "--card", "c"]))
-
-    text = (root / "Digest.md").read_text(encoding="utf-8")
-    assert "[[c|" in text                              # this run's own dispatch
-    assert "[[a|" not in text and "[[b|" not in text   # already closed out two runs ago
-
-
-def test_the_run_label_names_append_mode(tmp_path, monkeypatch):
-    """So Karel can tell from the rendered block itself why a run's report is
-    stacked on an earlier one instead of standing alone."""
+def test_the_append_flag_is_gone_rather_than_accepted_and_ignored(tmp_path):
+    """`--append-digest` existed only to withhold the digest's read baseline, and
+    `night.py`'s unattended path passed it by default. A flag that outlives its
+    mechanism is a flag that silently does nothing, so the parser must reject it."""
     root = _loaded_board(tmp_path, "a")
-    _night(monkeypatch, root, [runner.Dispatch("review", "ok")])
-    runner.run(root, runner._parser(root).parse_args(
-        ["--base", "development_team", "--append-digest"]))
-
-    assert "append mode" in _only_record(root)["label"]
-
-
-def test_night_defaults_to_append_digest(tmp_path):
-    """The unattended path — nobody at the keyboard to read tonight's report
-    before tomorrow night's run overwrites it."""
-    assert "--append-digest" in night.DEFAULT_ARGS
+    with pytest.raises(SystemExit):
+        runner._parser(root).parse_args(["--base", "development_team", "--append-digest"])
+    assert not [a for a in night.DEFAULT_ARGS if "digest" in a]
 
 
 def test_a_crashed_dispatch_fails_that_card_and_the_queue_carries_on(tmp_path, monkeypatch):

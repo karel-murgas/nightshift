@@ -266,7 +266,7 @@ for, having read this paragraph.
 - [The runner, in full](#the-runner-in-full)
 - [`hosts.json`](#hostsjson)
 - [Budgets and stop conditions](#budgets-and-stop-conditions)
-- [The digest](#the-digest)
+- [Reading a run](#reading-a-run)
 - [The corrections log](#the-corrections-log)
 - [Gates: the shipped set, writing your own, and appeals](#gates-the-shipped-set-writing-your-own-and-appeals)
 - [The manifest](#the-manifest)
@@ -286,7 +286,6 @@ nightshift/
   runner.py         # the overnight dispatcher
   night.py          # the unattended entry point around it
   reconcile.py      # inbox notes -> cards
-  digest.py         # the morning report
   stale_sweep.py    # which docs are due a staleness check
   preflight.py      # the mandatory pre-merge check
   merge_check.py    # does this card's branch merge clean, gated, tested?
@@ -352,27 +351,19 @@ how it moves on. `review/` and `testing/` are gates-green work waiting on a
 person. `done/` and `failed/` are the archive — nothing is deleted, because the
 self-improvement loop reads them as evidence.
 
-Move a card by dragging it in whatever Kanban view you point at `Board/`, not by
-moving the file — a manual move leaves the old `state:` frontmatter behind,
-which reads as a drag-in-progress and gets pulled back. `python -m
-nightshift.reconcile` is what makes the folder catch up with a `state:` edit;
-it reports by default, `--apply` performs, `--commit` commits.
+Move a card through Command Center rather than by moving the file — the panel
+writes both halves of the fact, while a manual move leaves the old `state:`
+frontmatter behind, which reads as a re-lane request and gets pulled back.
+`python -m nightshift.reconcile` is what makes the folder catch up with a
+`state:` edit; it reports by default, `--apply` performs, `--commit` commits.
 
-`init` writes `Board.base`, an Obsidian view of those lanes: a Kanban plus a
-Live and an Archive table. It needs **two** plugins and the split trips people
-up — *Bases* is core (Obsidian 1.9+) and renders the tables, while the Kanban
-view type comes from the **Base Board** community plugin. `init` enables both by
-appending to the two plugin lists under your vault's .obsidian directory, reading
-and writing back everything else you have in there; what it cannot do is
-download Base Board, so one trip through *Settings → Community plugins → Browse*
-finishes it. Until then Obsidian reports `Unknown view type: kanban`.
-
-Obsidian rewrites `Board.base` on every vault open and its normalisation drops
-YAML comments, so the header `init` puts there is gone after first launch. That
-is expected — commit the diff. The board's own README, which `init` also writes,
-is the durable copy.
-
-Nothing in the framework reads that file; it is purely so a human can see the board.
+**Command Center is the only board surface installed, and that is deliberate.**
+`init` used to also write a `Board.base` Obsidian Bases view of these lanes and
+switch two Obsidian plugins on under the project's `.obsidian/`; both were
+removed in 2026-09, because provisioning one editor for every consuming project
+is a choice a framework has no business making. Nothing replaced them and
+nothing needs to: a card is plain Markdown in a plain directory, so any editor
+opens one — it is simply not expected, configured or required.
 
 ### Triage by hand
 
@@ -385,9 +376,9 @@ an explicit question. It never invents an answer to resolve an ambiguity itself
 shortfall.
 
 <!-- stale-ok: this section documents a CONSUMING project's runtime artefacts —
-     `.ai/runs/status.json`, `.ai/STOP`, `Digest.md`. They are written by a run, in
-     the repo being run against, and by construction none of them exists in this
-     package's own checkout. Naming them is what the section is for. -->
+     `.ai/runs/status.json`, `.ai/STOP`. They are written by a run, in the repo
+     being run against, and by construction neither exists in this package's own
+     checkout. Naming them is what the section is for. -->
 ### The runner, in full
 
 <!-- generated:runner-flags -->
@@ -406,7 +397,6 @@ shortfall.
 | `--test-timeout` | seconds allowed for the test suite (~2 min today) |
 | `--no-drain` | skip the end-of-night pass that concludes any review this run left owed (up to 4 cards, from whatever window is left after the cards). |
 | `--stale` | after the cards, run the Tier-2 staleness sweep on the N highest-churn docs, spending only leftover window. |
-| `--append-digest` | write this run's digest without advancing the read baseline, so the next run's digest still reaches back to the last one written *without* this flag — for a stretch of runs (a scheduled weekend) nobody is there to read each one. |
 <!-- /generated:runner-flags -->
 
 Naming a card with `--card` is an explicit human request, so `unattended:
@@ -417,7 +407,7 @@ always says why and exits non-zero rather than doing nothing quietly.
 A real run takes cards from `tasks/` only, one worktree and branch per card,
 and files the result: gates green → `review/`, worker parked it →
 `needs-decision/`, gates red → retried up to the failure limit, then
-`failed/`. It writes `Digest.md` at the end. **Stop a run: create `.ai/STOP`**
+`failed/`. It commits the board at the end. **Stop a run: create `.ai/STOP`**
 — the runner checks for it every minute, mid-run included, even while sleeping
 out a usage limit.
 
@@ -457,21 +447,27 @@ Three more stops, each a fact about the run rather than a dial: a card that
 fails several attempts in a row goes to `failed/`; a card that resumes with no
 change to the working tree twice in a row is judged stuck and given back
 rather than retried forever; and `.ai/STOP`, checked every minute, is the
-manual kill switch — gitignored, so it works from a synced vault on your
-phone.
+manual kill switch — gitignored, so it works from any synced copy of the repo,
+your phone included.
 
-<!-- stale-ok: `Digest.md` is written into a consuming project by a run; it does not
-     and should not exist in this package's checkout. -->
-### The digest
+### Reading a run
 
-`python -m nightshift.digest` writes `Digest.md` — generated and overwritten on
-every run, never a place to leave an answer by hand. It opens with a one-line
-banner (runs since last read, landed / failed / decide counts), then one block
-per run since the last digest — failed, needs-your-decision, passed, stale-hunter
-findings, skipped — followed by standing board state: open decisions, the
-`failed/` lane, counts for `testing/` and `review/`, and the dispatch queue.
-Answer a `needs-decision/` card in its own `## Thread` section, on the board —
-the digest is regenerated and any answer written there is gone.
+Every run writes its own durable record to `.ai/runs/records/<stamp>.json` as it
+goes: every dispatch with its outcome and landing, every skip with its reason,
+the staleness sweep's yield, and why the run stopped. It is written *while* the
+night is in flight, so it is readable live and survives a run that dies without
+finishing.
+
+**Command Center reads those records, and nothing renders a report file.** A
+generated morning report used to sit at the repo root, rendered at the end of
+every run and windowed by its own commit subject; the panel replaced it in
+2026-09 and it was removed, so there is no report file to read, regenerate, or
+mistakenly answer in. `/now` shows the run in flight or the last one, a row per
+card it dispatched;
+`/verify` the work waiting on you; `/system` the corrections backlog. Answer a
+`needs-decision/` card in its own `## Thread` section — through the panel's
+decide picker, or by hand — because that is the only place anything reads an
+answer from.
 
 ### The corrections log
 
@@ -505,7 +501,6 @@ project's one.
 <!-- generated:gate-list -->
 | Gate | What it checks |
 |---|---|
-| `board_view_sync` | the board view's oversize formula must agree with runner.CARD_COMFORT_BYTES |
 | `branch_role_prose` | docs naming the integration branch must agree with .ai/manifest.toml [branches] |
 | `card_schema` | cards on the board match the card schema, and `state:` agrees with the lane |
 | `conflict_markers` | no tracked text file carries a git conflict marker |

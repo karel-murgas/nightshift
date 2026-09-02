@@ -41,15 +41,17 @@ __pycache__/
 *.nightshift-old
 *.nightshift-new
 
-# Obsidian's window state: which panes are open, which tab is active, where each
-# one is scrolled. Rewritten on almost every interaction, including just looking at
-# the board -- so a tracked one is dirty again seconds after you commit it, and the
-# runner refuses to dispatch on a dirty tree. That is the whole failure: opening the
-# board to read it is what stops the board being worked.
+# Editor state, per machine and none of git's business. Named here rather than left
+# to each operator because the failure it prevents is specific and silent: an editor
+# rewrites its own state on almost every interaction, including just looking at a
+# file, so a tracked one is dirty again seconds after you commit it -- and the runner
+# refuses to dispatch on a dirty tree. Opening the board to read it is then what
+# stops the board being worked.
 #
-# Deliberately NOT `.obsidian/` wholesale. `init` writes community-plugins.json and
-# core-plugins.json, and those are real shared config -- ignoring the directory would
-# mean every machine re-does the plugin setup by hand, which is the thing wiring them
-# was for. Only the volatile files are named.
-.obsidian/workspace.json
-.obsidian/workspace-mobile.json
+# The directory wholesale, unlike the two volatile files this used to name. The narrow
+# form existed because `init` wrote real shared config into `.obsidian/` (the plugin
+# lists for the board view); nothing does any more -- Command Center is the board
+# surface -- so the whole directory is per-machine and none of it should be committed.
+.obsidian/
+.vscode/
+.idea/

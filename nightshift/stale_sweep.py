@@ -41,15 +41,14 @@ from nightshift.manifest import AI_DIR
 LEDGER = Path(".ai") / "stale_ledger.json"
 
 # The ledger above is gitignored (per-machine, rebuildable) and answers "is this
-# doc verified against current source". This file answers a different question
-# — "did a sweep run at all, and when" — which Digest.md needs to be able to
-# show truthfully on any machine, so it must be a real, committed fact rather
-# than something that goes silent the moment the ledger is missing or cleared.
-# gate-ok(source_reference_liveness): committed once a `--stale` sweep writes
-# it (write_status below), not before -- this repo has never run one against
-# itself yet, and read_status()'s own contract treats that absence as "never
-# run", the correct current fact, not staleness to paper over with a stub.
-STATUS = Path(".ai") / "stale_status.json"
+# doc verified against current source".
+#
+# There was a second, committed file beside it — `.ai/stale_status.json`, written by
+# `write_status()` — answering "did a sweep run at all, and when". It existed for one
+# reader, `Digest.md`, and went with the digest: a committed file nothing reads is not
+# a durable fact, it is residue. `run_record.stale()` already records every sweep in
+# the run's own account, with `selected` and `incomplete` on top of what the status
+# file carried, so nothing was lost but the second copy.
 
 
 def _package_prefixes(repo_root: Path) -> tuple[str, ...]:
@@ -153,35 +152,6 @@ def load_ledger(repo_root: Path) -> dict[str, str]:
 def save_ledger(repo_root: Path, ledger: dict[str, str]) -> None:
     textio.write_text_lf(repo_root / LEDGER,
                          json.dumps(ledger, indent=2, sort_keys=True) + "\n")
-
-
-def write_status(repo_root: Path, date_iso: str, checked: int, verified: int, carded: int) -> None:
-    """Record that a sweep ran, for `digest.py` to read back (`.ai/stale_status.json`,
-    committed — see `STATUS` above). Called once per `--stale` invocation that got far
-    enough to resolve a model, regardless of whether it found anything to check:
-    "ran, nothing to do" and "never run" are different facts, and only writing this on
-    a nonzero `checked` would collapse them back into the same silence this exists to
-    fix. Takes the date as a parameter rather than reading the clock itself, so this
-    stays a plain, deterministically testable function."""
-    path = repo_root / STATUS
-    path.parent.mkdir(parents=True, exist_ok=True)
-    textio.write_text_lf(
-        path,
-        json.dumps({"last_run": date_iso, "checked": checked, "verified": verified,
-                    "carded": carded}, indent=2, sort_keys=True) + "\n")
-
-
-def read_status(repo_root: Path) -> dict | None:
-    """The last-written sweep record, or `None` if a sweep has never run here (or the
-    file is unreadable — treated the same as never run, not as an error)."""
-    path = repo_root / STATUS
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else None
-    except (json.JSONDecodeError, OSError):
-        return None
 
 
 def head_sha(repo_root: Path) -> str:

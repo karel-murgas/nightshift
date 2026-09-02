@@ -11,7 +11,7 @@ command-center.bat                    # the Command Center (./command-center.sh 
 python -m nightshift.gates.run        # the gate suite (also runs on save, via a hook)
 python -m nightshift.preflight        # MANDATORY before push/merge — writes a receipt
 python -m nightshift.runner           # dispatch cards from Board/tasks/; run backgrounded
-python -m nightshift.reconcile        # inbox notes -> cards; digest: nightshift.digest
+python -m nightshift.reconcile        # inbox notes -> cards (state: vs. folder)
 python -m nightshift.doctor           # the per-machine preconditions git cannot carry
 python -m nightshift.update           # bring this repo's nightshift files up to date
 pytest                                # the test suite
