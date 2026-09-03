@@ -31,6 +31,7 @@ from _runner_helpers import (  # noqa: F401  (fixtures register by name)
     _branch_with_file,
     _card,
     _charter,
+    _commit_on_base,
     _fake_loop,
     _fake_worker,
     _finishing_worker,
@@ -2402,3 +2403,162 @@ def test_a_failed_attempts_branch_is_rescued_not_resumed(tmp_path):
     rescues = subprocess.run(["git", "branch", "--list", "ai/brokecard@failed-*"],
                              cwd=root, capture_output=True, text=True).stdout.split()
     assert rescues, "a failed attempt's branch must still be preserved as a rescue ref"
+
+
+# --- outside-the-diff is not the same thing as drift (`menu-art-start-run`) ---
+#
+# `_is_repo_drift` asks one question: does every violating path lie outside this
+# attempt's diff? Yes to that is true of a genuinely drifted repo, and equally true
+# of an attempt whose *own tree is behind* — the gate is unhappy about a file the
+# card never touched, but only because that file is an old copy and the integration
+# branch is green.
+#
+# Both used to stop the night with "fix it on `base` and re-run", which for the
+# second is unfollowable. On 2026-09-03 `menu-art-start-run` resumed a branch forked
+# 989 commits earlier, ran that branch's August gate suite (42 gates, against the 50
+# on `test` that morning) over its August memory docs, and produced nine violations
+# naming framework files that had since been deleted. The night ended 23 minutes into
+# the window that had just reopened, pointing at a branch with nothing wrong with it.
+#
+# `prepare_worktree` now replays a resumed branch onto base, which removes the cause.
+# These pin the other half: the diagnosis is confirmed by measurement before the
+# night is stopped on it.
+
+_TREE_SENSITIVE_GATE = """
+import json, pathlib, sys
+# Green on the baseline checkout, red in the attempt's own worktree — a stale tree,
+# rather than a repo whose integration branch is actually broken.
+if pathlib.Path.cwd().name.startswith("_gatebase"):
+    print("All clear")
+    sys.exit(0)
+if "--json" in sys.argv:
+    print(json.dumps({"violations": [{"gate": "stub", "file": "Board/other.md",
+                                      "line": 1, "rule": "stale"}],
+                      "total": 1, "gates": ["stub"]}))
+else:
+    print("Board/other.md:1 - stale")
+sys.exit(1)
+"""
+
+
+def test_a_violation_outside_the_diff_that_base_is_clean_of_fails_the_card(
+        tmp_path, monkeypatch):
+    """The `menu-art-start-run` regression. Every violating path is outside the
+    attempt's diff, so `_is_repo_drift` says yes — and `base` is green, so the tree
+    that produced them is this attempt's, not the repo's. That is `failed`, and it
+    must not stop the night on a promise that fixing `base` will help."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+    _gate_stub(monkeypatch, tmp_path, _TREE_SENSITIVE_GATE)
+    _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
+
+    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+                             "sonnet", 5.0, 120)
+
+    assert result.outcome == "failed"
+    assert result.repo_drift is False, "base was clean — this is the attempt's own tree"
+    assert "gates" in result.detail
+
+
+def test_gates_failing_on_base_names_what_reproduced(tmp_path, monkeypatch):
+    """The reason string, which is what lands on the card and in the run record. It
+    has to say the violations were *confirmed* somewhere else, or the note reads
+    exactly like the misdiagnosis it replaces."""
+    root = _worktree_repo(tmp_path)
+    _gate_stub(monkeypatch, tmp_path,
+               _JSON_AWARE_GATE.format(file="Board/other.md", rule="stale"))
+
+    why = runner._gates_failing_on_base(
+        root, "development_team",
+        [{"file": "Board/other.md", "line": 1, "rule": "stale"}], "probe")
+
+    assert "Board/other.md" in why
+    assert "development_team" in why
+    # And the baseline checkout is cleaned up behind it, the same as the pytest half.
+    assert not (runner.worktree_root(root) / "_gatebase-probe").exists()
+
+
+def test_gates_failing_on_base_matches_the_rule_not_just_the_path(tmp_path, monkeypatch):
+    """A gate suite that has grown since the branch forked can report a *different*
+    rule against the same file. Calling that the same violation is what would let a
+    stale tree keep passing itself off as repo drift, so the pair has to match."""
+    root = _worktree_repo(tmp_path)
+    _gate_stub(monkeypatch, tmp_path,
+               _JSON_AWARE_GATE.format(file="Board/other.md", rule="a-newer-rule"))
+
+    why = runner._gates_failing_on_base(
+        root, "development_team",
+        [{"file": "Board/other.md", "line": 1, "rule": "the-branchs-old-rule"}], "probe")
+
+    assert why == ""
+
+
+def test_gates_failing_on_base_blames_nobody_when_it_cannot_answer(tmp_path, monkeypatch):
+    """A harness that does not understand `--json` leaves nothing to compare.
+    Guessing "drift" would hand out a free attempt, so the answer is `""` and the
+    card goes down the ordinary failed path — the same choice the pytest half makes.
+    """
+    root = _worktree_repo(tmp_path)
+    _gate_stub(monkeypatch, tmp_path,
+               "print('Board/other.md:1 - stale'); raise SystemExit(1)\n")
+
+    why = runner._gates_failing_on_base(
+        root, "development_team",
+        [{"file": "Board/other.md", "line": 1, "rule": "stale"}], "probe")
+
+    assert why == ""
+
+
+# --- a resumed branch is judged against today's tree, not its fork's ---------
+
+def test_a_resumed_branch_is_replayed_onto_base_before_it_is_judged(tmp_path):
+    """The cause behind `menu-art-start-run`'s stop, fixed where it starts.
+
+    A resumed branch is gated and tested *in its own tree*, so a branch that is
+    behind is gated and tested by an old copy of the gate suite over old files. The
+    replay is what makes the attempt's verdict a statement about the repo as it is.
+    """
+    root = _worktree_repo(tmp_path)
+    _card(root, "tasks", "orphan")
+    _seed_orphaned_branch(root, tmp_path, "orphan", "the finished feature")
+    # base moves on afterwards, exactly as it does while a card waits in `tasks/`.
+    _commit_on_base(root, tmp_path, "moved_on.txt", "a sibling card landed")
+
+    tree, branch, mode = runner.prepare_worktree(
+        root, board.find(root, "orphan"), "development_team")
+
+    assert mode == runner.FROM_BRANCH
+    assert branch == "ai/orphan"
+    # Its own commits survived the replay...
+    assert (tree / "feature.txt").read_text(encoding="utf-8") == "the finished feature"
+    # ...and it is no longer behind, so the gates see what `development_team` sees.
+    assert (tree / "moved_on.txt").exists(), "the branch was judged against a stale tree"
+    assert runner._commits_behind(root, branch, "development_team") == 0
+
+
+def test_a_resumed_branch_that_will_not_replay_cold_starts_and_keeps_its_commits(
+        tmp_path):
+    """The boundary. A replay that conflicts is real disagreement between the branch
+    and `base`, and `prepare_worktree` has no agent, no gates and no way to judge a
+    resolution — so it declines rather than guessing.
+
+    Falling through to the cold start is also the safe answer: that path renames the
+    branch to a rescue ref instead of deleting it, so the work stays reachable while
+    the attempt starts from a tree that matches the repo.
+    """
+    root = _worktree_repo(tmp_path)
+    _card(root, "tasks", "clash")
+    _seed_orphaned_branch(root, tmp_path, "clash", "the branch's answer")
+    # The same path, a different answer: nothing can replay this without a judgment.
+    _commit_on_base(root, tmp_path, "feature.txt", "base's answer")
+
+    _tree, _branch, mode = runner.prepare_worktree(
+        root, board.find(root, "clash"), "development_team")
+
+    assert mode == runner.FRESH
+    rescues = subprocess.run(["git", "branch", "--list", "ai/clash@failed-*"],
+                             cwd=root, capture_output=True, text=True).stdout.split()
+    assert rescues, "the branch's commits must be preserved, not discarded"
+    # And no rebase was left paused in the worktree the fall-through discarded.
+    assert not runner._rebase_in_progress(runner.worktree_root(root) / "clash")

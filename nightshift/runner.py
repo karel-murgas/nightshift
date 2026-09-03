@@ -1541,6 +1541,15 @@ def _normalize_worktree(path: Path) -> None:
         _log(f"    normalized {path.name}'s line endings before dispatch")
 
 
+def _commits_behind(root: Path, branch: str, base: str) -> int:
+    """How many commits `base` carries that `branch` does not."""
+    out = _git(root, "rev-list", "--count", f"{branch}..{base}")
+    try:
+        return int(out.stdout.strip())
+    except ValueError:
+        return 0
+
+
 def prepare_worktree(root: Path, card: board.Card,
                      base: str) -> tuple[Path, str, str]:
     """The worktree for this attempt, plus how it continues.
@@ -1554,14 +1563,47 @@ def prepare_worktree(root: Path, card: board.Card,
     Every path out of here normalizes the worktree's line endings first
     (`_normalize_worktree`) — a freshly cut worktree is a fresh checkout, which
     is precisely the state that needs it.
+
+    **Every resumed branch is replayed onto `base` first, and a branch that will not
+    replay is not resumed** (`from_branch`). Reading a resumed branch as-is is what
+    ended the night of 2026-09-03 — see that function.
     """
     branch = branches.work_branch(card.id, card.fields.get("branch", ""))
     path = worktree_root(root) / card.id
     handover = read_handover(root, card.id)
     warm = bool(handover.session_id or handover.diff_hash)
 
-    def from_branch(mode: str, why: str) -> tuple[Path, str, str]:
-        """A fresh checkout of the existing `branch`, keeping its commits."""
+    def from_branch(mode: str, why: str) -> tuple[Path, str, str] | None:
+        """A fresh checkout of the existing `branch`, keeping its commits — brought
+        up to `base` first, or `None` if it cannot be.
+
+        **The replay is the point, not housekeeping.** A resumed branch is judged by
+        the gates and the test slice *in its own tree*, so a branch that is behind is
+        judged by an old copy of both. `menu-art-start-run` was resumed on 2026-09-03
+        from a branch forked 989 commits earlier; it ran that branch's August gate
+        suite — 42 gates, against the 50 on `test` that morning — over its August
+        memory docs, which still cited two framework files nightshift had deleted in
+        the meantime. Nine violations, none of them in the card's diff, so
+        `_is_repo_drift` said drift and the night stopped with 23 minutes of its
+        usage-limit window left, telling Karel to fix an integration branch that was
+        already green. The card was blameless and so was `test`; the tree in between
+        was three weeks old and nothing had asked.
+
+        `None` rather than a raise or a merge: a replay that conflicts is real
+        disagreement between this branch and `base`, and resolving it is not this
+        function's job — it has no agent, no gates and no way to judge a resolution.
+        Falling through to the cold start below is the honest answer, and it is
+        already the safe one, because that path renames the branch to a rescue ref
+        instead of deleting it. The work survives, reachable, and the attempt starts
+        from a tree that matches the repo.
+
+        `REENTER` is deliberately not replayed. That path reuses a *live* worktree
+        mid-session, whose uncommitted edits are the resume's whole subject; a rebase
+        there would either refuse on the dirty tree or rewrite the ground under a
+        session that is still running. Its exposure is also much smaller — a warm
+        resume happens inside one night, so its branch is at most a few merges
+        behind, not three weeks.
+        """
         if path.exists() or _worktree_registered(root, path):
             _git(root, "worktree", "remove", "--force", str(path))
         _git(root, "worktree", "prune")
@@ -1569,6 +1611,27 @@ def prepare_worktree(root: Path, card: board.Card,
         made = _worktree_add(root, str(path), branch)
         if made.returncode != 0:
             raise RuntimeError(f"git worktree add ({why}) failed: {made.stderr.strip()}")
+        behind = _commits_behind(root, branch, base)
+        if behind:
+            # `gitmerge.STRATEGY_ARGS` so this replay renormalizes line endings the
+            # same way `rebase_and_merge`'s does — the one place that policy lives.
+            # Normalizing the checkout is deliberately left until *after*: it rewrites
+            # files in the working tree, and a dirty tree is one git refuses to rebase.
+            #
+            # `GIT_EDITOR=true` for the same reason `_resolve_conflict` sets it: this
+            # process has no terminal for an editor git might want to open.
+            done = subprocess.run(
+                ["git", "rebase", *gitmerge.STRATEGY_ARGS, base], cwd=path,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                env={**os.environ, "GIT_EDITOR": "true"},
+            )
+            if done.returncode != 0:
+                _git(path, "rebase", "--abort")
+                _log(f"    {branch} is {behind} commit(s) behind {base} and will not "
+                     f"replay onto it — starting {card.id} cold, its commits kept as a "
+                     f"rescue branch")
+                return None
+            _log(f"    replayed {branch} onto {base} ({behind} commit(s) behind)")
         _normalize_worktree(path)
         return path, branch, mode
 
@@ -1577,7 +1640,8 @@ def prepare_worktree(root: Path, card: board.Card,
         return path, branch, REENTER
     if warm and _branch_exists(root, branch):
         # The worktree was lost but the branch (with its `wip:` commit) was not.
-        return from_branch(FROM_WIP, "from wip")
+        if (resumed := from_branch(FROM_WIP, "from wip")) is not None:
+            return resumed
     if handover.review_fix and _branch_exists(root, branch):
         # The reviewer sent a *finished* attempt back with a concrete finding.
         #
@@ -1599,7 +1663,8 @@ def prepare_worktree(root: Path, card: board.Card,
         # stale citation because each started from nothing — and was then filed to
         # needs-decision/ under "a reviewer-flagged fix recurred across 3
         # attempts". Nothing recurred. The fix was never applied once.
-        return from_branch(FROM_REVIEW, "from review")
+        if (resumed := from_branch(FROM_REVIEW, "from review")) is not None:
+            return resumed
     if str(card.fields.get("last_outcome", "")) != "failed" and \
             _branch_has_work(root, branch, base):
         # The branch carries commits, nothing above claimed it, and the last
@@ -1638,7 +1703,8 @@ def prepare_worktree(root: Path, card: board.Card,
         # killed before it could write. The branch is the durable half and is the
         # better thing to key on: commits ahead of `base` are the work, whatever
         # the run directory does or does not remember about how they got there.
-        return from_branch(FROM_BRANCH, "from branch")
+        if (resumed := from_branch(FROM_BRANCH, "from branch")) is not None:
+            return resumed
 
     # Cold start — the empty case and every non-interrupted card.
     if path.exists() or _worktree_registered(root, path):
@@ -3655,6 +3721,77 @@ def _failing_test_ids(junit: Path) -> list[str]:
     return seen
 
 
+def _gates_failing_on_base(root: Path, base: str, violations: list[dict],
+                           label: str) -> str:
+    """Do this attempt's gate violations reproduce on `base`? The reason, or `""`.
+
+    The other half of the symmetry `_already_failing_on_base` began. `_is_repo_drift`
+    asks only whether a violating path lies outside the attempt's diff, and answers
+    yes in two situations that are not the same thing:
+
+    * the repo really has drifted — someone's merge, or a sibling checkout's change,
+      broke a gate on the integration branch itself; and
+    * **the attempt's own tree is behind.** The gate is unhappy about a file the card
+      never touched, but only because that file is an old copy. `base` is green.
+
+    Both used to stop the night with "fix it on `base` and re-run", and for the second
+    that instruction is unfollowable — there is nothing on `base` to fix. On
+    2026-09-03 `menu-art-start-run` resumed a branch forked 989 commits earlier, ran
+    that branch's August copy of the gate suite (42 gates, against today's 50) over
+    its August memory docs, and produced nine violations naming files nightshift had
+    since deleted. The night stopped 23 minutes after the usage-limit window reopened,
+    pointing at an integration branch that was clean.
+
+    `prepare_worktree` now replays a resumed branch onto `base` before the attempt
+    runs, which removes the cause; this removes the *misdiagnosis*, and does it by
+    measurement rather than by trusting that fix to be complete. Same shape as the
+    pytest half: cut a detached worktree at `base`, run the gates there, and compare.
+    Only violations that reproduce make it drift.
+
+    Returns the reason when they reproduce — so the caller keeps today's behaviour of
+    giving the attempt back and stopping the night — and `""` when `base` is clean,
+    which sends the card down the ordinary `failed` path with its own gate output on
+    it. `""` on any inability to answer (no worktree, unparseable payload): guessing
+    "drift" would hand out a free attempt, and the pytest half made the same choice.
+    """
+    want = {(str(v.get("file", "")).strip(), str(v.get("rule", "")).strip())
+            for v in violations if str(v.get("file", "")).strip()}
+    if not want:
+        return ""
+    tree = worktree_root(root) / f"_gatebase-{label}"
+    if tree.exists() or _worktree_registered(root, tree):
+        _git(root, "worktree", "remove", "--force", str(tree))
+    _git(root, "worktree", "prune")
+    tree.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        made = _worktree_add(root, "--detach", str(tree), base)
+    except WorktreePathTooLong:
+        return ""
+    if made.returncode != 0:
+        return ""
+    try:
+        on_base = _gate_violations_json(tree)
+        if on_base is None:
+            return ""
+        got = {(str(v.get("file", "")).strip(), str(v.get("rule", "")).strip())
+               for v in on_base if str(v.get("file", "")).strip()}
+        # Rule as well as path. A gate suite that has grown since the branch forked
+        # can report a *different* rule against the same file, and calling that the
+        # same violation is what would let a genuinely stale tree keep passing itself
+        # off as repo drift.
+        shared = sorted(want & got)
+        if not shared:
+            return ""
+        shown = ", ".join(f"{path} ({rule})" if rule else path
+                          for path, rule in shared[:3])
+        more = f" (+{len(shared) - 3} more)" if len(shared) > 3 else ""
+        return (f"{len(shared)} of the {len(want)} violation(s) fail on `{base}` "
+                f"too: {shown}{more}")
+    finally:
+        _git(root, "worktree", "remove", "--force", str(tree))
+        _git(root, "worktree", "prune")
+
+
 def _already_failing_on_base(root: Path, base: str, junit: Path, label: str,
                              timeout: int) -> str:
     """Do this attempt's failing tests fail on `base` too? The reason, or `""`.
@@ -4438,10 +4575,18 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
         # with no usable path, or one that touches a changed file, is never
         # drift: `_is_repo_drift` returns False and this falls through to the
         # ordinary `failed` below.
-        if _is_repo_drift(_gate_violations_json(tree), changed):
+        #
+        # Outside-the-diff is necessary but not sufficient (`menu-art-start-run`,
+        # 2026-09-03). It is equally true of a tree that is merely *behind*, and
+        # stopping the night on that sends Karel to fix an integration branch
+        # that is green. So the hypothesis is confirmed against `base` before it
+        # is acted on, exactly as the pytest half below does — and only then is
+        # this drift rather than this attempt's own red gates.
+        payload = _gate_violations_json(tree)
+        if _is_repo_drift(payload, changed) and                 (drifted := _gates_failing_on_base(root, base, payload or [], card.id)):
             drop_worktree(root, tree)
-            return Dispatch("blocked", why, cost, round_no, honoured_wall,
-                            repo_drift=True, evidence=evidence)
+            return Dispatch("blocked", f"{why} — {drifted}", cost, round_no,
+                            honoured_wall, repo_drift=True, evidence=evidence)
 
     ok = status == GATE_PASS
     if ok:
@@ -4565,23 +4710,22 @@ with your reading of it attached. Never guess between two intents.
 """
 
 
-def _dirty_outside(tree: Path, allowed: set[str]) -> list[str]:
-    """Tracked paths the resolver touched that were not its to touch.
+def _porcelain_paths(tree: Path) -> list[str]:
+    """Every tracked path `git status` reports as dirty in `tree`, in its order.
 
-    The agent is told which files it may edit; this is the check that it did. An
-    unattended resolver with write access to a whole worktree is exactly the shape
-    that needs its blast radius asserted rather than requested — the gates and tests
-    that follow would catch a *broken* stray edit, but not a plausible one.
+    Split out of `_dirty_outside` so the before-and-after snapshots that function now
+    compares are parsed by one piece of code rather than by two that could disagree.
+
+    `-z` is NOT the NUL-for-newline swap it looks like: a rename or copy emits **two**
+    records, `R  <new>NUL<old>NUL`, where the second carries no `XY ` prefix at all.
+    (Only the non-`-z` form uses the single `R  old -> new` line.) Slicing every
+    record at [3:] therefore turns the bare `a.md` into `.md` and reports a stray
+    edit that does not exist — verified against git before this was written, which
+    is the only reason it is not still here.
     """
     out = _git(tree, "status", "--porcelain", "-z")
-    # `-z` is NOT the `\0`-for-`\n` swap it looks like: a rename or copy emits **two**
-    # records, `R  <new>\0<old>\0`, where the second carries no `XY ` prefix at all.
-    # (Only the non-`-z` form uses the single `R  old -> new` line.) Slicing every
-    # record at [3:] therefore turns the bare `a.md` into `.md` and reports a stray
-    # edit that does not exist — verified against git before this was written, which
-    # is the only reason it is not still here.
     records = [r for r in (out.stdout or "").split("\0") if r]
-    touched: list[str] = []
+    paths: list[str] = []
     index = 0
     while index < len(records):
         record = records[index]
@@ -4590,15 +4734,103 @@ def _dirty_outside(tree: Path, allowed: set[str]) -> list[str]:
             continue
         status, rel = record[:2], record[3:].strip()
         if status[0] in ("R", "C") or status[1] in ("R", "C"):
-            # Consume the source path; it is a path this resolver moved *from*, so
-            # it counts too, and it must not be re-read as a status record.
+            # Consume the source path; it is a path something moved *from*, so it
+            # counts too, and it must not be re-read as a status record.
             if index < len(records):
                 source = records[index].strip()
                 index += 1
-                if source and source not in allowed and source not in touched:
-                    touched.append(source)
-        if rel and rel not in allowed and rel not in touched:
-            touched.append(rel)
+                if source and source not in paths:
+                    paths.append(source)
+        if rel and rel not in paths:
+            paths.append(rel)
+    return paths
+
+
+def _blob_digest(path: Path) -> str:
+    """A digest of `path`'s content, or `"<gone>"` if it is not there.
+
+    Bytes, not `st_mtime` or `st_size`: an agent that rewrites a file to the same
+    length inside one filesystem timestamp tick is exactly the case a cheap stat
+    comparison would wave through, and this digest is the whole basis on which an
+    auto-merged file is later called untouched.
+
+    **A directory is digested recursively**, because `git status --porcelain` collapses
+    an untracked directory to a single `?? dir/` record. Digesting only the name would
+    make that record identical before and after — so a resolver could drop a file into
+    a directory that was already untracked and the comparison would call it unchanged.
+    The pre-baseline check reported every untracked path as a stray unconditionally,
+    and the baseline must narrow that by *evidence*, never by blind spot.
+    """
+    if path.is_dir():
+        digest = hashlib.sha256()
+        for item in sorted(path.rglob("*")):
+            if item.is_file():
+                digest.update(item.relative_to(path).as_posix().encode("utf-8"))
+                digest.update(_blob_digest(item).encode("utf-8"))
+        return digest.hexdigest()
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return "<gone>"
+
+
+def _dirty_fingerprint(tree: Path) -> dict[str, str]:
+    """What `tree`'s dirty paths hold *before* the resolver is let near them.
+
+    Taken while a rebase or merge is paused, which is the only moment it is true.
+    See `_dirty_outside` for why the comparison cannot be made without it.
+    """
+    return {rel: _blob_digest(tree / rel) for rel in _porcelain_paths(tree)}
+
+
+def _dirty_outside(tree: Path, allowed: set[str],
+                   baseline: dict[str, str] | None = None) -> list[str]:
+    """Tracked paths the resolver touched that were not its to touch.
+
+    The agent is told which files it may edit; this is the check that it did. An
+    unattended resolver with write access to a whole worktree is exactly the shape
+    that needs its blast radius asserted rather than requested — the gates and tests
+    that follow would catch a *broken* stray edit, but not a plausible one.
+
+    **`baseline` is not an optimisation; without it this function is wrong.** It used
+    to read `git status` alone and call every dirty path outside `allowed` a stray,
+    on the assumption that a paused rebase leaves only its conflicts dirty. It does
+    not. Git stops on the *commit*, not on the file: everything else in that commit
+    which it could merge by itself is already **staged**, and so reported as modified
+    against HEAD. `taser-cyberware` (2026-09-03) died of exactly this — it stopped on
+    a four-file commit, one of which conflicted:
+
+        e61b8f6  Pin the taser's tempo against the real TurnManager
+          .ai/memory-fragments/taser-cyberware.md | 2 +-
+          docs/catalog_report.md                  | 3 +-   <- the conflict
+          dungeoneer/core/settings.py             | 2 +-
+          tests/test_taser_perk.py                | 58 +++++
+
+    The resolver read the conflict, judged it correctly and staged that one file. It
+    was told it had edited the other three, the rebase was aborted, and a card that
+    had already passed gates, tests and review landed in `blocked/` with a merge note
+    accusing it of something git had done. Every conflict on a multi-file commit hit
+    this, so the guard was strictest exactly where it was least entitled to be.
+
+    So a path is a stray only if it is outside `allowed` **and** its bytes are not
+    what they were when the pause began. A path git itself staged and the resolver
+    left alone matches its baseline and is not reported; one the resolver edited,
+    deleted or newly dirtied does not match — or is absent from the baseline — and
+    still is. Comparing content rather than merely allowing the baseline's *paths* is
+    the point: an auto-merged file quietly rewritten is the plausible stray edit this
+    guard exists for, and it stays caught.
+
+    `baseline` omitted means "nothing was dirty when we started" — the behaviour
+    before 2026-09-03, correct only for a caller that truly begins from a clean tree.
+    """
+    baseline = baseline or {}
+    touched: list[str] = []
+    for rel in _porcelain_paths(tree):
+        if rel in allowed or rel in touched:
+            continue
+        if rel in baseline and baseline[rel] == _blob_digest(tree / rel):
+            continue
+        touched.append(rel)
     return touched
 
 
@@ -4651,6 +4883,10 @@ def _resolve_conflict(root: Path, tree: Path, card: board.Card, branch: str,
         if not conflicts:
             break
         rounds += 1
+        # Per round, not once for the function: `rebase --continue` below advances to
+        # the next commit, whose own auto-merged files are staged fresh, so a baseline
+        # from a previous round would describe a tree that no longer exists.
+        baseline = _dirty_fingerprint(tree)
         verdict_path = tree / ".resolve-verdict.json"
         verdict_path.unlink(missing_ok=True)
         prompt = _RESOLVE_PROMPT.format(
@@ -4704,7 +4940,7 @@ def _resolve_conflict(root: Path, tree: Path, card: board.Card, branch: str,
             _git(tree, "rebase", "--abort")
             return False, ("the resolution left a conflict marker behind — "
                            + "; ".join(markers[:3]))
-        strays = _dirty_outside(tree, set(conflicts))
+        strays = _dirty_outside(tree, set(conflicts), baseline)
         if strays:
             _git(tree, "rebase", "--abort")
             return False, (f"the {RESOLVER_AGENT} edited {', '.join(strays[:5])}, which "
@@ -4814,6 +5050,9 @@ def _resolve_merge_conflict(root: Path, tree: Path, card: board.Card, branch: st
     conflicts = _unmerged_paths(tree)
     if not conflicts:
         return True, "no conflicts to resolve"
+    # A conflicted `git merge` stages everything it could merge alone, exactly as a
+    # paused rebase does, so the stray-edit check below needs the same baseline.
+    baseline = _dirty_fingerprint(tree)
     verdict_path = tree / ".resolve-verdict.json"
     verdict_path.unlink(missing_ok=True)
     prompt = _MERGE_RESOLVE_PROMPT.format(
@@ -4861,7 +5100,7 @@ def _resolve_merge_conflict(root: Path, tree: Path, card: board.Card, branch: st
         _git(tree, "merge", "--abort")
         return False, ("the resolution left a conflict marker behind — "
                        + "; ".join(markers[:3]))
-    strays = _dirty_outside(tree, set(conflicts))
+    strays = _dirty_outside(tree, set(conflicts), baseline)
     if strays:
         _git(tree, "merge", "--abort")
         return False, (f"the {RESOLVER_AGENT} edited {', '.join(strays[:5])}, which "

@@ -2315,6 +2315,12 @@ def _blocked_section(ctx: Context) -> str:
     the panel, same as any other lane). For a failed row the branch is gone, so the
     session cuts a fresh one from the integration base, same as any other first click on
     a card nothing has touched yet.
+
+    Both rows lead with `Read card`, like every other lane's row (Karel, 2026-09-03).
+    A row's `why` is a 400-character excerpt of `## Merge` or `## Error`, which is
+    enough to see *that* the merge would not land but not the criteria, the approach or
+    the attempt history — and this is the one section where the card is finished, so
+    the excerpt is all there was. Reading it should not require opening a session.
     """
     rows = []
     for card in ctx.blocked:
@@ -2322,7 +2328,8 @@ def _blocked_section(ctx: Context) -> str:
         why = (board.section(card.text, "Merge") or "").strip()
         meta = [_e(stat) for stat in [diff_stat(ctx.root, ctx.base, branch)] if stat]
         meta.append(_chip("reviewed ok", "ok"))
-        acts = (_act("Diff", href=f"/diff/{card.id}")
+        acts = (_act("Read card", href=f"/card/{card.id}")
+                + _act("Diff", href=f"/diff/{card.id}")
                 + _work_act(card=card.id, tier=card.tier, worker=card.worker,
                            lane=board.finished_lane(card), primary=True))
         rows.append(_row(marker="!", acts=acts,
@@ -2331,8 +2338,9 @@ def _blocked_section(ctx: Context) -> str:
         why = (board.section(card.text, "Error") or "").strip()
         meta = [_chip(f"failed · {card.attempts} attempt(s)"
                       if card.attempts else "failed", "bad")]
-        acts = _work_act(card=card.id, tier=card.tier, worker=card.worker,
-                         lane=board.finished_lane(card), primary=True)
+        acts = (_act("Read card", href=f"/card/{card.id}")
+                + _work_act(card=card.id, tier=card.tier, worker=card.worker,
+                            lane=board.finished_lane(card), primary=True))
         rows.append(_row(marker="!", acts=acts,
                          body=_card_body(card, meta=meta, why=why[:400])))
     flag = ""

@@ -236,3 +236,138 @@ def test_the_resolver_is_bounded(tmp_path, monkeypatch):
 
     assert not replayed
     assert len(calls) <= runner.MAX_RESOLVE_ROUNDS
+
+
+# --- git's own auto-merge is not the resolver's edit (`taser-cyberware`) -------
+#
+# The guard above asserts the resolver's blast radius by asking `git status` which
+# tracked paths are dirty. That question has a wrong premise: a paused rebase does
+# not leave only its conflicts dirty. Git stops on the *commit*, and everything else
+# in that commit which it could merge by itself is already staged — reported as
+# modified against HEAD, and indistinguishable from an agent's edit unless somebody
+# looked before the agent ran.
+#
+# On 2026-09-03 `taser-cyberware` stopped on a four-file commit with one conflict.
+# The resolver read that conflict, judged it correctly and staged that one file, and
+# was told it had edited the other three. The rebase was aborted and a card that had
+# already passed gates, tests and review landed in `blocked/` with a merge note
+# accusing it of something git had done. Every conflict on a multi-file commit hit
+# this, so the check was strictest exactly where it was least entitled to be.
+
+BASE_SETTINGS = "TEMPO = 1\n"
+OURS_SETTINGS = "TEMPO = 2\n"
+BASE_TESTS = "def test_old(): pass\n"
+OURS_TESTS = "def test_old(): pass\ndef test_new(): pass\n"
+
+
+def _conflicted_multifile(tmp_path: Path) -> tuple[Path, str, str]:
+    """`taser-cyberware`'s shape: the commit that conflicts touches four files, and
+    only one of them is the conflict.
+
+    The other three are ordinary changes git merges without help — which is what
+    puts them in `git status` with the conflict, and what the baseline has to tell
+    apart from an agent's stray edit.
+    """
+    repo = _fixtures.git_init(tmp_path / "repo", branch="main")
+    (repo / "log.md").write_bytes(BASE_LOG.encode("utf-8"))
+    (repo / "settings.py").write_bytes(BASE_SETTINGS.encode("utf-8"))
+    (repo / "tests.py").write_bytes(BASE_TESTS.encode("utf-8"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "log.md").write_bytes(OURS_LOG.encode("utf-8"))
+    (repo / "settings.py").write_bytes(OURS_SETTINGS.encode("utf-8"))
+    (repo / "tests.py").write_bytes(OURS_TESTS.encode("utf-8"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "the card: four files, one of them contested")
+
+    # The sibling touches only the log, so only the log can conflict.
+    _git(repo, "checkout", "-q", "main")
+    (repo / "log.md").write_bytes(THEIRS_LOG.encode("utf-8"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "the sibling")
+
+    _git(repo, "checkout", "-q", "feature")
+    return repo, "feature", "main"
+
+
+def test_git_s_own_auto_merged_files_are_not_called_stray_edits(tmp_path, monkeypatch):
+    """The `taser-cyberware` regression, end to end through a real rebase.
+
+    The resolver touches nothing but the conflict, and the three files git staged by
+    itself must not be read as its doing. Before the baseline this returned
+    `False` with a note naming all three, and the card was blocked for it.
+    """
+    repo, branch, base = _conflicted_multifile(tmp_path)
+    _pause_rebase(repo, base)
+    # The premise the old check got wrong: git has these dirty already, before any
+    # agent has run. If this ever stops being true the test below proves nothing.
+    dirty = set(runner._porcelain_paths(repo))
+    assert {"settings.py", "tests.py"} <= dirty, dirty
+
+    _resolver(monkeypatch, write=BOTH_LOG,
+              verdict={"resolved": True, "summary": "kept both entries"})
+
+    replayed, detail = _run(repo, tmp_path, branch, base)
+
+    assert replayed, detail
+    assert not runner._unmerged_paths(repo)
+    # The replayed commit still carries all four files' changes — the point of not
+    # aborting is that the card's own work survives intact.
+    assert (repo / "log.md").read_text(encoding="utf-8") == BOTH_LOG
+    assert (repo / "settings.py").read_text(encoding="utf-8") == OURS_SETTINGS
+    assert (repo / "tests.py").read_text(encoding="utf-8") == OURS_TESTS
+
+
+def test_an_auto_merged_file_the_resolver_rewrites_is_still_a_stray_edit(tmp_path,
+                                                                        monkeypatch):
+    """The other half, and why the baseline compares content rather than just
+    allowing the paths git had already staged.
+
+    A resolver quietly rewriting an auto-merged file is the plausible stray edit this
+    guard exists for — the gates and tests that follow would not catch it if it
+    happened to be valid. Being in the baseline buys a path nothing; being *unchanged
+    since* the baseline is what buys it.
+    """
+    repo, branch, base = _conflicted_multifile(tmp_path)
+    _pause_rebase(repo, base)
+    assert "settings.py" in runner._porcelain_paths(repo)
+
+    _resolver(monkeypatch, write=BOTH_LOG, also_touch="settings.py",
+              verdict={"resolved": True, "summary": "kept both, and retuned the tempo"})
+
+    replayed, detail = _run(repo, tmp_path, branch, base)
+
+    assert not replayed
+    assert "settings.py" in detail
+    assert "not part of the conflict" in detail
+    assert not runner._unmerged_paths(repo), "the rebase must have been aborted"
+
+
+def test_a_file_dropped_into_an_already_untracked_directory_is_still_a_stray(
+        tmp_path, monkeypatch):
+    """The blind spot the baseline could have opened, closed before it shipped.
+
+    `git status --porcelain` collapses an untracked directory to one `?? dir/` record,
+    so a baseline that digested only the record — or only the directory's name — would
+    read identically before and after a resolver dropped a file inside it. Before the
+    baseline existed, every untracked path was a stray unconditionally; narrowing that
+    by evidence is the intent, narrowing it by blind spot is not.
+    """
+    repo, branch, base = _conflicted(tmp_path)
+    scratch = repo / "scratch"
+    scratch.mkdir()
+    (scratch / "already-here.txt").write_bytes(b"present before the resolver ran\n")
+    _pause_rebase(repo, base)
+    # git really does collapse it, so the digest is the only thing that can tell.
+    assert "scratch/" in runner._porcelain_paths(repo)
+
+    _resolver(monkeypatch, write=BOTH_LOG, also_touch="scratch/snuck-in.txt",
+              verdict={"resolved": True, "summary": "kept both"})
+
+    replayed, detail = _run(repo, tmp_path, branch, base)
+
+    assert not replayed
+    assert "scratch" in detail
+    assert "not part of the conflict" in detail

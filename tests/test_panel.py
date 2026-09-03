@@ -559,6 +559,9 @@ def test_blocked_card_offers_work_on_this(server, monkeypatch):
     assert "Blocked on you" in html
     assert "Work on this" in html
     assert "post('/api/work',{card:'b-card'})" in html
+    # The `## Merge` excerpt is truncated and says nothing about the criteria or the
+    # attempt history, so reading the card must not require opening a session.
+    assert 'href="/card/b-card"' in html
 
     opened = []
     monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
@@ -590,6 +593,7 @@ def test_failed_card_joins_the_blocked_section(server, monkeypatch):
     assert "f-card" in html
     assert "3 attempt(s)" in html
     assert "pytest: 2 failed" in html
+    assert 'href="/card/f-card"' in html
 
     opened = []
     monkeypatch.setattr(panel, "open_terminal", lambda r, *cmd: opened.append(list(cmd)))
