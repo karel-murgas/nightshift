@@ -34,6 +34,7 @@ from _runner_helpers import (  # noqa: F401  (fixtures register by name)
     _commit_on_base,
     _fake_loop,
     _fake_worker,
+    _stub_repair,
     _finishing_worker,
     _functions_calling,
     _functions_spawning,
@@ -163,6 +164,34 @@ def test_a_limited_card_gets_its_attempt_back_and_stays_in_tasks(tmp_path, monke
     assert "attempts" not in card.fields          # pristine, not "attempts: 0"
     assert not card.fields.get("started") and not card.fields.get("finished")
     assert "## Error" not in card.text            # nothing to answer for
+
+
+def test_unrepairable_drift_files_the_card_as_blocked_not_back_in_tasks(
+        tmp_path, monkeypatch):
+    """Karel, 2026-09-04: *"it either can be finished (and should be in the same
+    run) or can't (and should stay in blocked)"*.
+
+    `tasks/` said both at once. The attempt is still given back — drift is nobody's
+    fault and this costs the card nothing — but a card the runner has just stopped
+    the night over must not advertise itself as ready to pick up."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+    _gate_stub(monkeypatch, tmp_path,
+               _JSON_AWARE_GATE.format(file="Board/other.md", rule="stale"))
+    _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
+    _stub_repair(monkeypatch, fixed=False, note="could not clear it")
+
+    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+                             "sonnet", 5.0, 120)
+    runner.settle(root, "probe", result)
+
+    card = board.find(root, "probe")
+    assert card.lane == board.BLOCKED_LANE
+    assert card.attempts == 0, "the attempt is still given back — drift is not blame"
+    assert "## Blocked" in card.text
+    assert "nightshift.gates.run" in card.text, (
+        "the card must carry the command that unsticks it, not just the complaint")
 
 
 def test_a_second_attempt_stopped_by_a_wall_rewinds_to_the_first(tmp_path, monkeypatch):
@@ -1029,21 +1058,113 @@ def test_a_violation_entirely_outside_this_attempts_diff_is_blocked_not_failed(
         tmp_path, monkeypatch):
     """The repo-drift case: `Board/other.md` was never touched by this attempt,
     so whatever the gate is unhappy about is not this card's doing. Same give-
-    back as a crashed harness, not an attempt spent."""
+    back as a crashed harness, not an attempt spent.
+
+    The repair is stubbed *failing* here (drift-should-not-end-the-night): a drift
+    the runner cannot fix is exactly the case this outcome still exists for, and
+    it is the one that still stops the night."""
     root = _worktree_repo(tmp_path)
     _charter(root, "code-thread")
     _card(root, "tasks", "probe")
     _gate_stub(monkeypatch, tmp_path,
                _JSON_AWARE_GATE.format(file="Board/other.md", rule="stale"))
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
+    tried = _stub_repair(monkeypatch, fixed=False, note="could not clear it")
 
     result = runner.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "blocked"
     assert result.repo_drift is True
+    assert tried, "a repair must be attempted before drift is allowed to end the night"
+    assert "could not clear it" in result.detail
     branches = subprocess.run(["git", "branch", "--list", "ai/probe"], cwd=root,
                               capture_output=True, text=True).stdout
     assert "ai/probe" in branches, "the branch is preserved state, same as a crashed harness"
+
+
+#: A gate stub that is red until a flag file appears beside the repo, and green
+#: once it does — the shape a drift repair actually has. `{flag}` is substituted
+#: with the flag's path; the repair stub touches it to stand in for an agent that
+#: fixed the drifted doc.
+_REPAIRABLE_GATE = '''
+import json, os, sys
+if os.path.exists(r"{flag}"):
+    if "--json" in sys.argv:
+        print(json.dumps({{"violations": [], "total": 0, "gates": ["stub"]}}))
+    sys.exit(0)
+if "--json" in sys.argv:
+    print(json.dumps({{"violations": [{{"gate": "orientation_budget",
+                                       "file": "Board/other.md", "line": 1,
+                                       "rule": "over budget"}}], "total": 1,
+                       "gates": ["orientation_budget"]}}))
+else:
+    print("Board/other.md:1 - over budget")
+sys.exit(1)
+'''
+
+
+def test_a_repairable_drift_is_repaired_and_the_card_carries_on(tmp_path, monkeypatch):
+    """The whole point of drift-should-not-end-the-night: drift that a repair can
+    clear must not cost the night, the card, or a human's morning.
+
+    2026-09-04 is the case this reproduces — the orientation set was 506 bytes over
+    its budget, `needle-speed-leak` was never attempted, and the run stopped with a
+    healthy queue behind it. Here the gate goes green once the repair has run, and
+    the card goes on to review as if the drift had never been in the way."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+    flag = tmp_path.parent / f"{tmp_path.name}-repaired.flag"
+    _gate_stub(monkeypatch, tmp_path, _REPAIRABLE_GATE.format(flag=flag))
+    _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
+
+    def repaired(root_, tree, card_id, branch, base, drifted, why, out_dir, model,
+                 budget, timeout):
+        flag.write_text("fixed", encoding="utf-8")
+        return True, 0.4, f"repaired on {branch} (abc1234)", None
+
+    monkeypatch.setattr(runner, "repair_drift", repaired)
+
+    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+                             "sonnet", 5.0, 120)
+    assert result.outcome == "review", result.detail
+    assert result.repo_drift is False
+    assert "repaired on ai/probe" in result.repaired, (
+        "the repair note must ride out on the Dispatch — the reviewer is about to "
+        "meet a commit that matches none of the card's criteria")
+    assert result.cost_usd >= 0.4, "the repair's cost is the card's cost"
+
+
+def test_a_walled_repair_gives_the_attempt_back_rather_than_blaming_the_drift(
+        tmp_path, monkeypatch):
+    """A repair that runs out of *window* has not failed on merit, and reporting it
+    as unfixable drift would stop the night over a clock — the exact inversion the
+    repair exists to prevent. It becomes `limited`, which is the night's own
+    arithmetic for a closed window."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+    _gate_stub(monkeypatch, tmp_path,
+               _JSON_AWARE_GATE.format(file="Board/other.md", rule="stale"))
+    _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
+    _stub_repair(monkeypatch, fixed=False, note="hit a usage wall",
+                 wall=limits.Wall(limits.SESSION, None, "usage limit reached"))
+
+    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+                             "sonnet", 5.0, 120)
+    assert result.outcome == "limited"
+    assert result.repo_drift is False, (
+        "a walled repair is not a verdict on the drift, so it must not stop the night")
+    assert result.wall is not None
+
+
+def test_a_repair_that_walls_but_leaves_green_gates_is_honoured(tmp_path, monkeypatch):
+    """`verdict_survives_a_wall`'s newest stage. The repair's terminal artefact is
+    not a file it wrote but the gate suite's own answer, so a repair that made the
+    tree green and *then* walled on its wrap-up call has demonstrably finished."""
+    assert runner.verdict_survives_a_wall(runner.REPAIR_STAGE, {"gates_clean": True})
+    assert not runner.verdict_survives_a_wall(runner.REPAIR_STAGE, {"gates_clean": False})
+    assert not runner.verdict_survives_a_wall(runner.REPAIR_STAGE, {})
 
 
 def test_a_violation_inside_this_attempts_diff_still_fails_the_card(tmp_path, monkeypatch):
@@ -1473,7 +1594,7 @@ def test_only_the_spawn_functions_may_execute_the_claude_cli():
     source = _RUNNER_SOURCE.read_text(encoding="utf-8")
     assert _functions_spawning(source, "binary") == {
         "run_producer", "run_checker", "run_stale_check", "review_branch",
-        "_resolve_conflict", "_resolve_merge_conflict"}
+        "_resolve_conflict", "_resolve_merge_conflict", "repair_drift"}
 
 
 def test_every_spawn_sites_wall_path_routes_through_the_shared_helper():
@@ -1519,9 +1640,17 @@ def test_every_spawn_sites_wall_path_routes_through_the_shared_helper():
         )
         for caller, spawned in callers.items():
             handled = helper_calls.get(caller, 0)
+            # A site that answers for itself is excluded from its caller's tally,
+            # not just skipped as a subject. Counting it both ways demanded one
+            # `verdict_survives_a_wall` call in the caller for a wall the caller
+            # never sees — which is what `dispatch` hit when `repair_drift`
+            # (drift-should-not-end-the-night) became its third spawn site while
+            # handling its own wall in its own body, exactly as `_resolve_conflict`
+            # does. `_resolve_conflict` never exposed this because `settle`, its
+            # caller, spawns nothing else.
             total_spawned = sum(
                 _functions_calling(source, other).get(caller, 0)
-                for other in spawn_sites)
+                for other in spawn_sites if other not in helper_calls)
             assert handled >= total_spawned, (
                 f"{caller} calls {total_spawned} spawn function(s) ({site} among "
                 f"them, {spawned}x) but consults verdict_survives_a_wall only "

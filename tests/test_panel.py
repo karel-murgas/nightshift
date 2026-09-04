@@ -1479,6 +1479,35 @@ def test_an_old_record_is_not_presented_as_this_run(server):
     assert "2026-08-01" in text, "the date is what stops it reading as today"
 
 
+def test_the_run_table_shows_where_the_reviewer_actually_left_the_card(server):
+    """Karel, 2026-09-04: *"when reviewer decides, it should be displayed in the
+    result section"*.
+
+    The run record is written when the dispatch returns; the review stage runs
+    afterwards. `enemy-position-knowledge` was recorded `review` at 01:33, escalated
+    to `needs-decision/` at 05:59 — and the run table went on saying `review`, with
+    a green tick, next to an answer section already showing the reviewer's question.
+    A tick is the mark a reader is least likely to look at twice, on the one row
+    that most needed them to."""
+    base, root = server
+    _card(root, "needs-decision", "escalated")
+    _record(root, "20260904-002159",
+            started="2026-09-04T00:21:59", finished="2026-09-04T05:59:37",
+            kind="run", host="somebox", cost_usd=2.8,
+            dispatched=[{"card": "escalated", "outcome": "review",
+                         "landed": "escalated: → review/ (did the thing)",
+                         "detail": "did the thing", "attempt": 1}])
+
+    _, text = _get(base, "run")
+
+    assert "needs-decision" in text, "the lane column must name where the card is now"
+    assert "was review" in text, (
+        "the dispatch's own answer is history worth keeping, not worth hiding")
+    row = text[text.index("escalated") - 400:text.index("escalated")]
+    assert "m-now" in row and "m-ok" not in row.split("m-now")[-1], (
+        "a card waiting on Karel must not wear the mark that means it landed")
+
+
 def test_refresh_returns_the_same_page_the_browser_is_looking_at(server, monkeypatch):
     """One rendering path, deliberately. A purpose-built refresh payload is a second
     thing to keep in step with every section added, and the first time it fell behind

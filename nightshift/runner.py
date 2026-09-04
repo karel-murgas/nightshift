@@ -2466,6 +2466,13 @@ class Dispatch:
     # reason. Both give the attempt back and stop the night; only the reason
     # text differs, and `settle` needs to know which one it is telling.
     repo_drift: bool = False
+    # Set when a drift repair landed on this card's branch inside its own attempt
+    # (drift-should-not-end-the-night): the drifted gate names and the repair
+    # commit. It reaches the reviewer, which is judging the diff against the
+    # card's criteria and would otherwise be right to object to a change that
+    # meets none of them; and it reaches the card, so a diff carrying someone
+    # else's fix says so where a human will read it.
+    repaired: str = ""
     # The worker's scenario for Karel, written onto a `verify: play` card as
     # `## How to test` when it merges. It rides from the worker's verdict through
     # the review stage rather than being asked for at the end: only the worker
@@ -2579,6 +2586,12 @@ def _read_verdict(path: Path) -> dict:
 # spawn site says which predicate it means rather than inlining a set of strings.
 PRODUCER_STAGE, CHECKER_STAGE = "producer", "checker"
 REVIEWER_STAGE, STALE_STAGE = "reviewer", "stale-hunter"
+#: The drift repair (drift-should-not-end-the-night). Unlike every other stage its
+#: "verdict" is not a file the agent wrote — it is the gate suite's own answer,
+#: re-run over the repaired tree. That makes its wall predicate the strongest of
+#: the five: a walled repair whose gates come back clean has *demonstrably* done
+#: its job, whatever the wrap-up call did afterwards.
+REPAIR_STAGE = "repair"
 #: The rebase-conflict resolver (`_resolve_conflict`), the fifth judge stage.
 RESOLVER_STAGE = "merge-resolver"
 
@@ -2639,6 +2652,12 @@ def verdict_survives_a_wall(stage: str, verdict: dict, *, rounds_left: int = 0) 
         return str(verdict.get("verdict", "")).lower() in ("ok", "needs_fix", "needs_decision")
     if stage == STALE_STAGE:
         return bool(verdict.get("complete"))
+    if stage == REPAIR_STAGE:
+        # Not the agent's account of itself — the gates', re-run after it. A repair
+        # that walled on its wrap-up but left a tree the whole suite passes is
+        # finished by the only measure this stage has, and discarding it would end
+        # the night over drift that is no longer there.
+        return bool(verdict.get("gates_clean"))
     if stage == RESOLVER_STAGE:
         # Either answer is terminal for this stage — `resolved: false` is a real,
         # useful decline that lands on the card in `blocked/`, not a non-result. The
@@ -3087,9 +3106,30 @@ def _gates_block(out_dir: Path) -> str:
     )
 
 
+#: Appended to the reviewer's `intent` block when a drift repair rode along in the
+#: diff (drift-should-not-end-the-night). Without it the reviewer meets a change
+#: that matches none of the card's criteria and is *right* to object — the whole
+#: point of `_REVIEW_RUBRIC` is that unexplained scope is a finding. This does not
+#: exempt the repair from review: it says what the commit is for and asks for it to
+#: be judged on its own terms, which is a narrower question than the card's.
+_REPAIRED_BLOCK = """
+
+--- a drift repair rode along in this diff, and it is sanctioned ---
+The gates were red on the integration branch before this card's work existed, for a
+reason outside its diff, so the runner had the drift fixed on this same branch rather
+than losing the night to it: {repaired}
+
+Judge that commit — it is a change like any other and may be wrong — but judge it
+against *making the drifted gate honest*, not against the card's criteria, which it
+was never meant to meet. Do not treat it as out-of-scope work by the card's worker. A
+repair that instead loosened a gate, raised a budget to fit what was already there, or
+allowlisted its way to green is exactly the defect worth a `needs_fix`."""
+
+
 def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
                   branch: str, card_budget: float, timeout: int, *,
                   criteria: str, intent: str, since: str = "", prior_finding: str = "",
+                  repaired: str = "",
                   template: str = _REVIEW_PROMPT) -> tuple[dict, float, limits.Wall | None]:
     """Spawn the diff reviewer on a finished branch (automate-review-step).
 
@@ -3184,11 +3224,15 @@ def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
             diff_desc = "against the integration branch — what this branch added since it forked"
             prior_review = ""
 
+        # Appended to `intent` rather than given its own `{repaired}` slot, so
+        # `_BATCH_REVIEW_PROMPT` — which never carries one — needs no change and
+        # cannot raise a KeyError on a template that does not mention it.
+        told = intent + (_REPAIRED_BLOCK.format(repaired=repaired) if repaired else "")
         prompt = template.format(
             model=model, branch=branch, diff=diff_path.resolve().as_posix(),
             repo=tree.resolve().as_posix(),
             verdict_path=verdict_path.resolve().as_posix(),
-            criteria=criteria, intent=intent, rubric=_REVIEW_RUBRIC,
+            criteria=criteria, intent=told, rubric=_REVIEW_RUBRIC,
             diff_desc=diff_desc, prior_review=prior_review,
             gates=_gates_block(out_dir),
         )
@@ -4267,6 +4311,150 @@ def _limit_reached(root: Path, card: board.Card, tree: Path, branch: str,
                     kept=True, progressed=progressed, stuck=stuck)
 
 
+# --------------------------------------------------------------------------
+# Drift repair (drift-should-not-end-the-night)
+# --------------------------------------------------------------------------
+#
+# Repo drift used to end the night. Twice it ended one over something no human
+# needed to see: 2026-09-03 stopped with 23 minutes of usage window left because
+# a resumed branch ran August's gate suite over August's docs, and 2026-09-04
+# stopped because the orientation set was 506 bytes over its budget. Both times
+# the queue behind it was healthy and every remaining card went undispatched.
+#
+# So the runner now tries to fix it before it gives up. The repair runs **inside
+# the card's own live worktree, on the card's own branch** (Karel, 2026-09-04:
+# *"Repair and finish the card — the merge will be done with it"*), which is what
+# makes this cheap: no synthetic card, no second review cycle, no separate merge.
+# The repair commit rides along in the diff the card was already going to land,
+# and if the card merges, the drift is fixed on `base` for everyone.
+#
+# The cost of that choice, stated plainly: a card that never merges takes its
+# repair with it, and the next card meets the same drift and repairs it again.
+# That is the right trade while drift is rare — paying for a repair twice is
+# cheaper than losing a night — but it is the thing to watch if it stops being
+# rare.
+REPAIR_AGENT = "code-thread"
+
+#: Gates whose repair is prose and whose blast radius is a doc. Not a whitelist —
+#: `repair_drift` will attempt any gate that reproduces on `base` (Karel's call,
+#: 2026-09-04) — but a repair that stays inside this set is reported as routine,
+#: and one that leaves it is called out in the morning log so a code-touching
+#: repair is never something you find out about by reading a diff.
+PROSE_GATES: frozenset[str] = frozenset({
+    "orientation_budget", "orientation_shape", "memory_freshness",
+    "doc_reference_liveness", "source_reference_liveness", "line_endings",
+    "write_newline", "readme_generated", "coreference_sweep",
+})
+
+_REPAIR_PROMPT = """The gates are red on this repo's integration branch, and it is **not** because of the change in this worktree. Your whole job is to make them green again, and nothing else.
+
+You are in a live worktree on branch `{branch}`, which already carries another card's finished work. That work is correct and already verified — **do not revise it, do not "improve" it, do not touch its files** except where a drifted gate names them.
+
+The drift, confirmed to reproduce on `{base}` independently of this branch:
+
+{drifted}
+
+The full gate output:
+
+{gates}
+
+What to do:
+
+1. Read the violation. The gate's own message says what it wants — these messages are    written to be actionable and usually name the fix.
+2. Make the smallest change that makes the gate honest. **Fix the thing the gate is    pointing at, never the gate.** Raising a budget to fit what is already there, adding    an allowlist entry, deleting a test, or loosening a threshold is the failure this    whole mechanism exists to prevent — if that genuinely is the only correct fix, do    NOT do it: stop and say so in your summary instead.
+3. Run `python -m nightshift.gates.run` and confirm it comes back clean.
+4. Commit, on this branch, with a message starting `drift:` and a body naming the gate    and why it drifted. One commit, separate from the card's own work.
+
+If you cannot fix it — the fix needs a judgment call only a human should make, or it would take a change far outside the drifted gate's own subject — leave the tree untouched, commit nothing, and say so. Stopping is a correct outcome here and costs the card nothing; a wrong "fix" committed onto someone else's branch costs a lot.
+
+Write a one-paragraph summary of what you changed (or why you stopped) as the last thing in your final message.
+"""
+
+
+def repair_drift(root: Path, tree: Path, card_id: str, branch: str, base: str,
+                 drifted: str, gates_why: str, out_dir: Path, model: str,
+                 card_budget: float, timeout: int
+                 ) -> tuple[bool, float, str, "limits.Wall | None"]:
+    """Try to fix drift in the card's own worktree.
+
+    Returns `(fixed, cost, note, wall)`, where a non-`None` `wall` means the repair
+    ran out of window rather than out of ideas — the caller gives the attempt back
+    as `limited` instead of blaming the drift.
+
+    `fixed` is the *gates'* answer, never the agent's: the gate suite is re-run in
+    `tree` afterwards and only a clean result counts. An agent that reports success
+    over red gates is simply wrong, and an agent that stops honestly still gets its
+    gates re-run — sometimes a sibling card's merge fixed the drift while this one
+    was working.
+
+    A repair that fails leaves the branch as it found it *only* if the agent kept
+    its side of the bargain. It may not have, so the caller treats a failed repair
+    exactly like the old unrepaired drift — attempt given back, card blocked, night
+    stopped — and the branch is preserved as a rescue ref either way.
+    """
+    binary = claude_binary()
+    if not binary:
+        return False, 0.0, "no CLI on this machine to run a repair with", None
+
+    prompt = _REPAIR_PROMPT.format(branch=branch, base=base, drifted=drifted,
+                                   gates=_gates_block(out_dir) or gates_why)
+    textio.write_text_lf(out_dir / "repair-prompt.md", prompt)
+
+    argv = [
+        binary, "-p",
+        "--agent", REPAIR_AGENT,
+        "--model", model,
+        *_STREAM_ARGV,
+        *_budget_argv(card_budget),
+        *_STRICT_MCP_ARGV,
+        "--permission-mode", str(host_setting(root, "permission_mode", "acceptEdits")),
+        "--add-dir", str(tree.resolve()),
+    ]
+    cost = 0.0
+    wall: limits.Wall | None = None
+    before = _git(root, "rev-parse", branch).stdout.strip()
+    try:
+        proc = _run_worker(argv, tree, timeout, out_dir / "repair-stream.jsonl",
+                           prompt=prompt)
+        textio.write_text_lf(out_dir / "repair.log", proc.stdout + proc.stderr)
+        try:
+            cost = float(_terminal_result(proc.stdout).get("total_cost_usd", 0.0))
+        except (ValueError, AttributeError, TypeError):
+            pass
+        wall = limits.detect(proc.returncode, proc.stdout, proc.stderr)
+    except subprocess.TimeoutExpired:
+        return False, cost, f"the repair timed out after {timeout}s", None
+
+    # Bank an uncommitted repair for the same reason `dispatch` banks an
+    # uncommitted worker diff: edits made and never committed are work, and
+    # dropping the worktree would drop them.
+    commit_wip(root, tree, f"{card_id}-drift-repair")
+
+    status, why = _run_gates(root, tree, out_dir / "gates-after-repair.txt")
+    after = _git(root, "rev-parse", branch).stdout.strip()
+
+    # The gates' answer is asked BEFORE the process's exit, which is the ordering
+    # `wall-on-review-wrapup-discards-a-verdict` exists to enforce. A repair that
+    # made the tree green and *then* walled on its wrap-up call has done the job,
+    # and the night should carry on rather than stop over drift that is gone.
+    if verdict_survives_a_wall(REPAIR_STAGE, {"gates_clean": status == GATE_PASS}):
+        if after == before:
+            # Green with no commit: a sibling merge fixed it underneath us, or the
+            # violation was never real. Either way there is nothing to carry.
+            return True, cost, "the drift cleared without a repair commit", None
+        return True, cost, f"repaired on {branch} ({after[:8]})", None
+
+    # Red gates AND a wall is not a failed repair — it is a repair that never got
+    # to finish. Handing that back as `blocked` would blame the drift for a closed
+    # window and stop a night that had only run out of window, so the wall goes up
+    # to the caller and the card is given back the ordinary way.
+    if wall is not None:
+        return False, cost, f"the repair hit a usage wall before it cleared the gates", wall
+    return False, cost, (f"the repair did not clear the gates — {why}"
+                         if after != before else
+                         "the repair agent changed nothing and the gates are still red"), None
+
+
 def dispatch(root: Path, card: board.Card, base: str, model: str,
              card_budget: float, test_timeout: int,
              test_selector: Callable[[set[str], Path], suite.Selection]
@@ -4564,6 +4752,10 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
     # is cheap to compute regardless of which way the gates went.
     changed = set(gitpaths.changed(root, f"{base}...{branch}"))
     evidence = ""
+    #: Non-empty once a drift repair has landed on this branch: names the gates and
+    #: the commit. Carried to the reviewer, which would otherwise see an unexplained
+    #: change outside the card's criteria and correctly object to it.
+    repaired = ""
     if status == GATE_VIOLATION:
         evidence = "\n".join(f"    {part}" for part in why.split("; ")[:suite.EXCERPT_TESTS])
         # Repo drift, not the card's own doing (failed-attempt-work-is-deleted-
@@ -4584,9 +4776,48 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
         # this drift rather than this attempt's own red gates.
         payload = _gate_violations_json(tree)
         if _is_repo_drift(payload, changed) and                 (drifted := _gates_failing_on_base(root, base, payload or [], card.id)):
-            drop_worktree(root, tree)
-            return Dispatch("blocked", f"{why} — {drifted}", cost, round_no,
-                            honoured_wall, repo_drift=True, evidence=evidence)
+            # Drift confirmed on `base`. Before this ends the night — which is
+            # what it used to do, twice, over a stale doc and 506 bytes — hand it
+            # to a repair agent in this same worktree. A repair that works is
+            # committed onto the card's own branch and merges with it; the card
+            # then carries on through tests and review as if the drift had never
+            # been there (drift-should-not-end-the-night).
+            gate_names = sorted({str(v.get("gate", "")) for v in (payload or [])} - {""})
+            reach = ("" if set(gate_names) <= PROSE_GATES
+                     else " — this one is outside the prose gates, so read its commit")
+            _log(f"    repo drift on {base} ({', '.join(gate_names) or 'gates'}) — "
+                 f"attempting a repair on {branch} before giving up{reach}")
+            _status(root, phase="repair", card=card.id, attempt=attempt,
+                    branch=branch, since=_now())
+            fixed, repair_cost, note, repair_wall = repair_drift(
+                root, tree, card.id, branch, base, drifted, why, out_dir, model,
+                card_budget, test_timeout)
+            cost += repair_cost
+            if not fixed and repair_wall is not None:
+                # Out of window, not out of ideas. `limited` gives the attempt back
+                # and lets the night's own wall arithmetic decide whether to wait
+                # for the next window or stop — the same treatment a walled producer
+                # gets, and the opposite of blaming the drift for the clock.
+                _log(f"    the repair hit a usage wall — {note}")
+                drop_worktree(root, tree)
+                return Dispatch("limited", f"{why} — {drifted} ({note})", cost,
+                                round_no, repair_wall, kept=False)
+            if not fixed:
+                _log(f"    repair failed — {note}")
+                drop_worktree(root, tree)
+                return Dispatch("blocked", f"{why} — {drifted} (repair attempted: {note})",
+                                cost, round_no, honoured_wall, repo_drift=True,
+                                evidence=evidence)
+            _log(f"    drift repaired — {note}; re-judging {branch} on the fixed tree")
+            repaired = f"{', '.join(gate_names) or 'gates'}: {note}"
+            # Everything downstream is judged against the repaired tree, so both
+            # the gate verdict and the diff have to be re-read. `changed` in
+            # particular now includes the repair's own files, which is what the
+            # test slice must see (and what keeps `_is_repo_drift` honest if a
+            # second violation surfaces).
+            status, why = _run_gates(root, tree, out_dir / "gates.txt")
+            changed = set(gitpaths.changed(root, f"{base}...{branch}"))
+            evidence = ""
 
     ok = status == GATE_PASS
     if ok:
@@ -4621,7 +4852,7 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
     if checked:
         made += f", {card.checker} passed it in {round_no} round(s)"
     return Dispatch("review", str(verdict.get("summary", made))[:300], cost, round_no,
-                    honoured_wall,
+                    honoured_wall, repaired=repaired,
                     how_to_test=str(verdict.get("how_to_test", "")).strip()[:1000])
 
 
@@ -5849,7 +6080,8 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
     verdict, cost, wall = review_branch(root, card.id, out_dir, model, base, branch,
                                         card_budget, timeout * 3,
                                         criteria=criteria, intent=intent,
-                                        since=since, prior_finding=prior_finding)
+                                        since=since, prior_finding=prior_finding,
+                                        repaired=result.repaired)
     total = result.cost_usd + cost
 
     # The artefact before the process's exit. A reviewer's *entire* output is its
@@ -6238,6 +6470,25 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
         rescued = (f" — its commits stay on `ai/{card_id}` and will be preserved as a "
                   f"rescue branch (`ai/{card_id}@failed-N`) once this card is "
                   f"dispatched again" if result.repo_drift else "")
+        # Repo drift that survived a repair goes to `blocked/`, never back to
+        # `tasks/` (Karel, 2026-09-04: *"it either can be finished (and should be in
+        # the same run) or can't (and should stay in blocked)"*). Leaving it in
+        # `tasks/` said two contradictory things at once — the card advertised
+        # itself as ready to pick up, while the only process that could pick it up
+        # had just stopped over the very thing blocking it. The attempt is still
+        # given back; `blocked/` is about what the board claims, not about blame.
+        if result.repo_drift:
+            card.write_section(
+                "Blocked",
+                f"Not attempted — the gates were already red on `{default_base(root)}` for a "
+                f"reason outside this card's diff, and the repair could not clear "
+                f"it:\n\n{result.detail}\n\nThe attempt was given back, so this "
+                f"costs the card nothing. Fix the drift on the integration branch "
+                f"— `python -m nightshift.gates.run` names it — then move this card "
+                f"back to `tasks/`.")
+            board.move(root, card, board.BLOCKED_LANE)
+            return (f"{card_id}: → {board.BLOCKED_LANE}/ (not attempted, attempt given "
+                    f"back — {result.detail}{kept}{rescued})")
         board.commit_board(root, f"board: {card_id} not attempted — {why}")
         return f"{card_id}: not attempted, attempt given back — {result.detail}{kept}{rescued}"
 
@@ -7069,10 +7320,15 @@ def run(root: Path, args: argparse.Namespace) -> int:
             if result.outcome == "blocked":
                 _log("  " + _settled(candidate, result, model))
                 if result.repo_drift:
+                    # Reached only after `repair_drift` was tried and failed, so
+                    # this is no longer "the runner met drift" but "the runner met
+                    # drift it could not fix" — a much rarer thing, and the only
+                    # version of it that is still worth a human's night.
                     _stop(f"a failure outside {candidate.card.id}'s own diff — repo "
-                          f"drift, not this card's fault. No attempt was spent and no "
-                          f"card was blamed; fix it on `{base}` and re-run. "
-                          f"{result.detail}")
+                          f"drift, not this card's fault, and a repair on its branch "
+                          f"did not clear it. No attempt was spent and no card was "
+                          f"blamed; the card is in {board.BLOCKED_LANE}/. Fix it on "
+                          f"`{base}` and re-run. {result.detail}")
                 else:
                     _stop("the gate harness is broken on this machine, so no card "
                           "can be judged. No attempt was spent and no card was blamed; fix "
