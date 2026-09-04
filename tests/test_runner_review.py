@@ -131,7 +131,7 @@ def test_a_review_fix_continuation_reviews_only_since_the_prior_verdict(tmp_path
     seen: dict = {}
 
     def fake(root_, label, out_dir, model, base, branch, card_budget, timeout,
-             *, criteria, intent, since="", prior_finding=""):
+             *, criteria, intent, since="", prior_finding="", repaired=""):
         seen["since"] = since
         seen["prior_finding"] = prior_finding
         return {"verdict": "ok", "notes": "fixed"}, 0.1, None
@@ -157,7 +157,7 @@ def test_a_first_review_passes_no_since_or_prior_finding(tmp_path, monkeypatch):
     seen: dict = {}
 
     def fake(root_, label, out_dir, model, base, branch, card_budget, timeout,
-             *, criteria, intent, since="", prior_finding=""):
+             *, criteria, intent, since="", prior_finding="", repaired=""):
         seen["since"] = since
         seen["prior_finding"] = prior_finding
         return {"verdict": "ok"}, 0.1, None
@@ -184,7 +184,7 @@ def test_a_reviewed_sha_no_longer_reachable_falls_back_to_a_full_review(tmp_path
     seen: dict = {}
 
     def fake(root_, label, out_dir, model, base, branch, card_budget, timeout,
-             *, criteria, intent, since="", prior_finding=""):
+             *, criteria, intent, since="", prior_finding="", repaired=""):
         seen["since"] = since
         seen["prior_finding"] = prior_finding
         return {"verdict": "ok"}, 0.1, None

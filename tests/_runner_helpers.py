@@ -385,6 +385,26 @@ def _fake_worker(monkeypatch, *, verdict: dict | None = None, commit: bool = Tru
     return seen
 
 
+def _stub_repair(monkeypatch, *, fixed: bool, note: str = "stubbed",
+                 cost: float = 0.0, wall=None) -> list:
+    """Stand in for `runner.repair_drift` (drift-should-not-end-the-night).
+
+    Drift tests are about *classification and routing* — is this the card's fault,
+    where does the card end up — and the repair is a whole agent dispatch in the
+    middle of that. Stubbed here so those tests keep asking their own question;
+    `repair_drift` itself is tested directly, against real gates.
+    """
+    calls: list = []
+
+    def fake(root, tree, card_id, branch, base, drifted, gates_why, out_dir, model,
+             card_budget, timeout):
+        calls.append({"card": card_id, "branch": branch, "drifted": drifted})
+        return fixed, cost, note, wall
+
+    monkeypatch.setattr(runner, "repair_drift", fake)
+    return calls
+
+
 # --- the night's stopping conditions ----------------------------------------
 #
 # These drive `run()` with `dispatch` replaced, because what is under test is the
@@ -678,7 +698,11 @@ def _stub_reviewer(monkeypatch, verdict: dict, cost: float = 0.2,
     spawned: list = []
 
     def fake(root, label, out_dir, model, base, branch, card_budget, timeout,
-             *, criteria, intent, since="", prior_finding=""):
+             *, criteria, intent, since="", prior_finding="", repaired=""):
+        # `repaired` is accepted and ignored: it is the drift-repair note
+        # (drift-should-not-end-the-night), which every caller now passes and no
+        # test using this generic stub asserts on. A test that cares about it
+        # patches `review_branch` itself and reads the kwarg there.
         spawned.append(branch)
         return verdict, cost, wall
 

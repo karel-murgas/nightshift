@@ -2828,6 +2828,60 @@ def _landed_lane(entry: dict) -> str:
     return str(entry.get("outcome") or "")
 
 
+def _live_lane(ctx: "Context", entry: dict) -> str:
+    """Where the card is **now**, falling back to what the dispatch recorded.
+
+    The run record is a dispatch-time snapshot and the review stage runs after it:
+    `enemy-position-knowledge` (2026-09-04) had its row written at 01:33 with
+    outcome `review`, then the reviewer returned `needs_decision` and `settle`
+    moved it to `needs-decision/` at 05:59 — and this table went on reporting
+    `review` all morning, next to an answer section that was already showing the
+    reviewer's question. Karel: *"when reviewer decides, it should be displayed in
+    the result section"*.
+
+    Re-reading the board is the same correction `_run_sequence` already makes for
+    `needs_fix` — the outcome string alone cannot tell you what the reviewer did
+    with the branch afterwards. The record stays untouched: it is the honest
+    history of what was dispatched, and this column answers "where did it
+    end up", which are two different questions that only look alike when nothing
+    moved in between.
+    """
+    card_id = str(entry.get("card") or "")
+    fresh = board.find(ctx.root, card_id) if card_id else None
+    if fresh is None:
+        # Off the board entirely — most often `done/` after a human filed it, or a
+        # card deleted since. The snapshot is the only answer left.
+        return _landed_lane(entry)
+    recorded = _landed_lane(entry)
+    now = f"→ {fresh.lane}/"
+    # Only mark it when the two genuinely disagree; the overwhelming case is a
+    # card that settled where it was dispatched to and needs no annotation.
+    if recorded.rstrip("/") in (now.rstrip("/"), ""):
+        return now
+    return f"{now} (was {recorded.removeprefix('→ ').strip()})"
+
+
+#: Lane → the mark the Run table puts in front of a row, for a card still on the
+#: board. It outranks the recorded outcome because the lane is the later fact:
+#: `review` is in `LANDED_OUTCOMES`, so a card the reviewer escalated to
+#: `needs-decision/` rendered a green tick — the one reading a human is least
+#: likely to look twice at, on the one row that most needed them to.
+_LANE_MARK: dict[str, str] = {
+    "testing": "m-ok", "done": "m-ok",
+    "needs-decision": "m-now", "blocked": "m-now",
+    "failed": "m-bad",
+}
+
+
+def _live_mark(ctx: "Context", entry: dict, fallback: str) -> str:
+    """The row's mark, preferring where the card actually is over what it returned."""
+    card_id = str(entry.get("card") or "")
+    fresh = board.find(ctx.root, card_id) if card_id else None
+    if fresh is None:
+        return fallback
+    return _LANE_MARK.get(fresh.lane, fallback)
+
+
 def _said(entry: dict, limit: int = 90) -> str:
     """One line of what the reviewer or the failure said, bounded.
 
@@ -3217,13 +3271,18 @@ def _render_run(ctx: Context) -> str:
     for entry in dispatched:
         outcome = str(entry.get("outcome", ""))
         if outcome in run_record.LANDED_OUTCOMES:
-            mark = '<td class="mark m-ok">&check;</td>'
+            cls = "m-ok"
         elif outcome in run_record.FAILED_OUTCOMES:
-            mark = '<td class="mark m-bad">&times;</td>'
+            cls = "m-bad"
         elif outcome in run_record.DECISION_OUTCOMES:
-            mark = '<td class="mark m-now">?</td>'
+            cls = "m-now"
         else:
-            mark = '<td class="mark m-wait">&middot;</td>'
+            cls = "m-wait"
+        cls = _live_mark(ctx, entry, cls)
+        mark = ('<td class="mark m-ok">&check;</td>' if cls == "m-ok"
+                else '<td class="mark m-bad">&times;</td>' if cls == "m-bad"
+                else '<td class="mark m-now">?</td>' if cls == "m-now"
+                else '<td class="mark m-wait">&middot;</td>')
         cost = entry.get("cost_usd") or 0
         out_dir = attempt_dir(ctx.root, str(entry.get("card", "")),
                               int(entry.get("attempt") or 1))
@@ -3234,7 +3293,7 @@ def _render_run(ctx: Context) -> str:
         took = f"{telemetry['wall_s'] / 60:.0f} min" if telemetry.get("wall_s") else ""
         body.append(
             f'<tr>{mark}<td class="card">{_e(entry.get("card", ""))}</td>'
-            f'<td class="lane">{_e(_landed_lane(entry))}</td>'
+            f'<td class="lane">{_e(_live_lane(ctx, entry))}</td>'
             f'<td class="num">{_e(took)}</td>'
             f'<td class="num">${cost:.2f}</td>'
             f'<td class="said">{_e(_said(entry))}</td>'
