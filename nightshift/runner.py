@@ -56,6 +56,7 @@ from pathlib import Path
 from nightshift import board          # the card model
 from nightshift import branches       # branch roles
 from nightshift import conflictmarkers  # what a hand-resolved conflict must not leave
+from nightshift import decide         # reopening a re-parked card's decision state
 from nightshift import gitmerge       # merge strategy + failure reporting, one home
 from nightshift import gitpaths       # git's path lists, read NUL-separated
 from nightshift import limits
@@ -6545,6 +6546,16 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
         # and declaring it is what lets the panel offer the resume as one click
         # (`board.AFTER_ANSWER`).
         card.write({"after_answer": board.AFTER_ANSWER_TASKS})
+        # `## Open questions` was settled (or simply born `none`, the common case
+        # for a card that was dispatchable when the night picked it up) and nothing
+        # else reopens it — `decide.reopen` also boundary-marks `## Thread` so a
+        # prior round's answer, kept as history, is never read as answering the
+        # question just parked (`enemy-position-knowledge`, 2026-09-05). Written to
+        # disk directly (not `write_section`, which only knows one section at a
+        # time) — `board.move` reloads the card from disk next, so an in-memory-only
+        # change here would be silently discarded.
+        card.text = decide.reopen(card.text)
+        textio.write_text_lf(card.path, card.text)
         board.move(root, card, "needs-decision")
         return f"{card_id}: → needs-decision/ (parked)"
 
@@ -6570,6 +6581,13 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
             # Same reasoning as the parked path: a card that has been dispatched this
             # many times is scoped, and what it needs is a decision inside that scope.
             card.write({"after_answer": board.AFTER_ANSWER_TASKS})
+            # Same reopening as the `parked` path just above, and for the same
+            # reason: this card may already have been through needs-decision/ once
+            # (a fix that "recurred across all attempts" implies at least one prior
+            # retry cycle), so `## Open questions`/`## Thread` can carry a stale,
+            # already-settled round that would otherwise read as answering this one.
+            card.text = decide.reopen(card.text)
+            textio.write_text_lf(card.path, card.text)
             board.move(root, card, "needs-decision")
             return (f"{card_id}: → needs-decision/ (a reviewer-flagged fix recurred across "
                     f"{card.attempts} attempts)")
@@ -6643,6 +6661,9 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
         # There is a reviewed branch behind this card, so it is as scoped as a card
         # gets: the answer decides one point about work that already exists.
         card.write({"after_answer": board.AFTER_ANSWER_TASKS})
+        # Same reopening as the `parked` path above — see `decide.reopen`.
+        card.text = decide.reopen(card.text)
+        textio.write_text_lf(card.path, card.text)
         board.move(root, card, "needs-decision")
         return f"{card_id}: → needs-decision/ (reviewer flagged a decision)"
 

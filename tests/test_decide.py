@@ -488,3 +488,56 @@ def test_closing_keeps_lf_endings(tmp_path):
     root = _repo(tmp_path, "- A\n- B\n")
     decide.close_parked(root, "parked", ["A"], "", today=dt.date(2026, 8, 22))
     assert b"\r\n" not in (root / "Board" / "needs-decision" / "parked.md").read_bytes()
+
+
+# --------------------------------------------------------- reopening a re-parked card
+
+def test_reopen_makes_open_questions_unsettled():
+    """A worker-parked, `after_answer: tasks` card is born with `## Open questions:
+    none` — it was fully scoped at triage — and nothing ever reopened it on a park,
+    which made `_decide_state`'s dedicated `after_answer: tasks` banner unreachable
+    (`enemy-position-knowledge`, 2026-09-05)."""
+    text = decide.reopen(_question("- A\n- B\n"))
+    assert not board.open_questions_settled(text)
+
+
+def test_reopen_is_idempotent_on_open_questions():
+    once = decide.reopen(_question("- A\n- B\n"))
+    twice = decide.reopen(once)
+    assert board.section(once, "Open questions") == board.section(twice, "Open questions")
+
+
+def test_a_prior_rounds_answer_does_not_count_after_a_reopen():
+    """The other half of the bug: re-parking a card that already carries a signed
+    answer from a previous round must not read as answered again until a *new*
+    answer is recorded. Before the marker, `has_maintainer_answer` searched the
+    whole `## Thread` and saw the stale entry as answering the fresh question."""
+    card = _question("- A\n- B\n") + "\n## Thread\n\n### 2026-09-04 · karel\n\n> A\n"
+    assert decide.has_maintainer_answer(card, "karel")  # answered, before reopening
+
+    reopened = decide.reopen(card)
+    assert not decide.has_maintainer_answer(reopened, "karel")
+
+
+def test_an_answer_recorded_after_reopening_does_count(tmp_path):
+    card_id = "parked"
+    root = _repo(tmp_path, "- A\n- B\n", card_id=card_id)
+    decide.write_answer(root, card_id, ["A"], "", today=dt.date(2026, 9, 4))
+    text = _text(root, card_id)
+    assert decide.has_maintainer_answer(text, "karel")
+
+    reopened = decide.reopen(text)
+    (root / "Board" / "needs-decision" / f"{card_id}.md").write_text(
+        reopened, encoding="utf-8")
+    assert not decide.has_maintainer_answer(reopened, "karel")
+
+    decide.write_answer(root, card_id, ["B"], "", today=dt.date(2026, 9, 5))
+    assert decide.has_maintainer_answer(_text(root, card_id), "karel")
+
+
+def test_a_card_with_no_marker_still_reads_over_the_whole_thread():
+    """Backward compatible: the corpus of cards parked before this fix existed has
+    no `_REOPENED_MARKER`, and their answer must still be recognised exactly as
+    before."""
+    card = _question("- A\n- B\n") + "\n## Thread\n\n### 2026-09-04 · karel\n\n> A\n"
+    assert decide.has_maintainer_answer(card, "karel")

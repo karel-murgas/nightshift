@@ -70,6 +70,12 @@ _RECOMMENDED = re.compile(
 #: anywhere else would be an answer no report can see.
 THREAD = "Thread"
 
+#: Boundary line `reopen` appends to `## Thread` every time a card is (re)parked.
+#: `has_maintainer_answer` only searches after the *last* one — see `reopen`'s
+#: docstring for the bug this closes (a stale answer to a previous round's question
+#: being read as an answer to the one just parked).
+_REOPENED_MARKER = "<!-- decide: reopened -->"
+
 #: Sections a new `## Thread` must be inserted *before* if they exist, so the card keeps
 #: the order the corpus uses. `## Telemetry` is appended by the runner after the fact and
 #: is always last.
@@ -427,11 +433,23 @@ def answer_pattern(attributor: str) -> re.Pattern[str] | None:
 
 
 def has_maintainer_answer(card_text: str, attributor: str) -> bool:
-    """Whether `## Thread` already carries a dated answer signed by `attributor`.
+    """Whether `## Thread` already carries a dated answer signed by `attributor`,
+    answering the question currently parked rather than a previous round's.
 
     Scoped to `## Thread` only, never the whole card: the `### Decision N — DECIDED
     (…)` headers a picker uses live in `## Question`, and those are the card
     *asking*, not the maintainer having answered in the recorded shape.
+
+    **Scoped to after the last `reopen` marker, when there is one.** A card parked
+    a second time still carries the first round's dated answer as Thread history,
+    and without this a re-parked card reads as already answered the instant it is
+    parked — `_decide_state` then tells you "nothing here is waiting on you" while a
+    brand-new, unanswered `## Question` sits right above (found on
+    `enemy-position-knowledge`, 2026-09-05: attempt 2 parked a new question, and the
+    panel reported the card fully answered on the strength of attempt 1's already-
+    settled one). A card with no marker — everything before `reopen` existed —
+    searches the whole section exactly as before, so this is backward compatible
+    with the existing corpus.
 
     Two readers use it, for the same fact at different distances. The digest flags an
     answered-but-never-moved card in tomorrow's report (the 2026-07-24
@@ -445,7 +463,42 @@ def has_maintainer_answer(card_text: str, attributor: str) -> bool:
     pattern = answer_pattern(attributor)
     if pattern is None:
         return False
-    return bool(pattern.search(board.section(card_text, "Thread")))
+    thread = board.section(card_text, "Thread")
+    marker_at = thread.rfind(_REOPENED_MARKER)
+    if marker_at != -1:
+        thread = thread[marker_at + len(_REOPENED_MARKER):]
+    return bool(pattern.search(thread))
+
+
+def reopen(card_text: str) -> str:
+    """Mark a (re)parked card's decision state live again — the counterpart to
+    `promote_to_tasks`'s `settle_open_questions`, which nothing previously called
+    in the other direction.
+
+    A worker's park writes `## Question` and `after_answer:` itself (`runner._park`),
+    but two things only this closes:
+
+    * `## Open questions` is populated at triage or settled by `promote_to_tasks`,
+      and is otherwise never touched — so an `after_answer: tasks` card, scoped and
+      settled (`none`) the moment it was created, parks its first ever question
+      without this section ever leaving `none`. That makes `_decide_state`'s
+      dedicated `after_answer: tasks` banner (`not settled` — "waiting on your
+      answer" / "answered · ready to dispatch") unreachable, and every such card
+      falls through to a banner built for a different case ("no open question...
+      reporting, not asking").
+    * `## Thread` keeps a re-parked card's prior answer as history, which is what it
+      should do — but `has_maintainer_answer` needs a boundary to tell that history
+      apart from an answer to the question just parked. Appending `_REOPENED_MARKER`
+      here is that boundary; see its use there.
+
+    Idempotent to call on every park, including the first: reopening an already-live
+    `## Open questions` is a no-op re-render of the same text, and a second marker in
+    `## Thread` only moves where `has_maintainer_answer` starts looking, never what
+    it can see.
+    """
+    text = board.append_section(card_text, "Open questions",
+                                "live — see `## Question` above.")
+    return _append_to_thread(text, _REOPENED_MARKER)
 
 
 def promote_to_tasks(root: Path, card_id: str, *, today: dt.date | None = None) -> str:
