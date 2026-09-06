@@ -34,6 +34,20 @@ this, and a `<!-- stale-ok: ... -->` section is excused with a reason on the
 record. `deletion_sweep` is the sibling that watches files and top-level
 class/def; this one watches the literals inside them.
 
+**A relocation is not a replacement (2026-09-06).** The first version compared
+removed against added lines *per file*, on the reasoning that a citation moved
+between paragraphs of one doc has not gone away. That reasoning skipped the case
+where a citation moves between *docs*, which is what a documentation restructure
+does to hundreds of symbols at once: Dungeoneer's
+`state-md-is-a-changelog-not-a-state` moved a per-card register out of an
+always-loaded orientation file into a companion and drew 100 violations, every
+one a live constant that had simply changed file, and every one reported on a
+doc the branch never touched. A token added anywhere in the diff is now excluded.
+Both findings below survive that, because neither re-adds the token it removed —
+and `test_a_replacement_is_still_caught_when_another_doc_gains_the_new_value`
+pins the distinction, since a rebalance really does write its *new* value into a
+second file while the old one is what went missing.
+
 **Two token shapes, and the narrowness is the design.** A gate that fires on a
 card's own honest edits gets appealed into uselessness, so each shape here was
 picked because a false positive is close to impossible: a run of three or more
@@ -102,10 +116,12 @@ def _tokens(text: str) -> set[str]:
 def replaced_tokens(repo_root: Path) -> dict[str, str]:
     """{token -> the file that stopped saying it}, over this branch's whole diff.
 
-    "Stopped saying it" is per file and deliberately strict: the token must
-    appear on a removed line and on no added line *of the same file*. A card that
-    moves a constant's citation from one paragraph to another within a doc has
-    not stopped saying it, and must not be reported.
+    "Stopped saying it" is strict: the token must appear on a removed line, on no
+    added line *of the same file*, and on no added line *anywhere in the diff*. A
+    card that moves a constant's citation from one paragraph to another within a
+    doc has not stopped saying it; neither has one that moves it from one doc to
+    another, which is what a memory restructure does to hundreds of symbols at
+    once.
 
     Diffed against the merge base with the working tree included, so an
     uncommitted edit is judged the same as a committed one — the on-save hook and
@@ -133,13 +149,31 @@ def replaced_tokens(repo_root: Path) -> dict[str, str]:
         elif line.startswith("+"):
             per_file[current][1].update(_tokens(line[1:]))
 
+    # A token this diff added ANYWHERE is not a token the diff stopped saying --
+    # it moved. Subtracting the diff-wide added set is what separates a
+    # *replacement*, which is what this gate is for, from a *relocation* across
+    # files, which a documentation restructure does by the hundred. Measured
+    # 2026-09-06 on Dungeoneer's `state-md-is-a-changelog-not-a-state`: moving
+    # state.md's per-card register out to a companion reported 100 violations,
+    # every one of them a live constant that had simply changed file, and every
+    # one on an innocent doc the branch never touched.
+    #
+    # The per-file rule below still holds for the narrower case it was written
+    # for -- a citation moved between paragraphs of one doc. This adds the
+    # cross-file case, which the original reasoning did not consider. Both true
+    # positives the module docstring cites survive it: neither the old vault
+    # curve nor `EXPECTED_IDS` is re-added anywhere in the diff that removed it.
+    all_added: set[str] = set()
+    for _removed, added in per_file.values():
+        all_added |= added
+
     gone: dict[str, str] = {}
     for path, (removed, added) in per_file.items():
         if path == "/dev/null" or not (repo_root / path).is_file():
             # A file the diff deleted outright is `deletion_sweep`'s subject, not
             # this one: every token in it is "removed", which would be noise.
             continue
-        for token in removed - added:
+        for token in removed - added - all_added:
             gone.setdefault(token, path)
     return gone
 
