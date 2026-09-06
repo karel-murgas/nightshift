@@ -266,3 +266,58 @@ def test_short_or_undivided_tokens_are_not_treated_as_distinctive(tmp_path):
     _card(root, {"demo/roster.py": "N = 1349\nSCREEN = '1280/800'\nRATIO = '5/8'\n"})
 
     assert coreference_sweep.check(root) == []
+
+
+def test_a_citation_moved_to_another_doc_is_not_a_survivor(tmp_path):
+    """A documentation restructure relocates prose between files, and the symbols
+    it cites go with it. Nothing was replaced — the constant is untouched and
+    still live — so every doc that still names it is correct.
+
+    Measured 2026-09-06 on Dungeoneer's `state-md-is-a-changelog-not-a-state`,
+    which moved a per-card register out of the always-loaded `state.md` into a
+    companion: the gate reported 100 violations, every one a live constant that
+    had merely changed file, and every one on a doc the branch never touched. The
+    per-file rule was written for a citation moving between paragraphs of one
+    doc; it read a cross-file move as a deletion.
+
+    The third file matters, as in the within-one-file case above: without a
+    legitimate survivor elsewhere there is nothing to report, and the test would
+    pass whether or not the diff is read correctly.
+    """
+    root = _repo(tmp_path, {
+        "demo/roster.py": "EXPECTED_IDS = (1, 2)\n",
+        "DESIGN.md": "# Design\n\nThe roster is pinned by EXPECTED_IDS.\n",
+        "HISTORY.md": "# History\n\nEmpty for now.\n",
+        "NOTES.md": "# Notes\n\nEXPECTED_IDS is the roster pin.\n",
+    })
+    _card(root, {
+        # The citation leaves DESIGN.md and lands in HISTORY.md, unchanged.
+        "DESIGN.md": "# Design\n\nThe roster is pinned; see the history.\n",
+        "HISTORY.md": "# History\n\nThe roster is pinned by EXPECTED_IDS.\n",
+    })
+
+    assert coreference_sweep.check(root) == []
+
+
+def test_a_replacement_is_still_caught_when_another_doc_gains_the_new_value(tmp_path):
+    """The guard against over-correcting. Ignoring diff-wide additions must key
+    on the *same* token being re-added, not on the diff having added anything at
+    all — otherwise the vault-curve finding dies the moment the same branch
+    writes the new curve into a second file, which is exactly what a real
+    rebalance does."""
+    root = _repo(tmp_path, {
+        "demo/contracts.py": "CONTRACT_VAULT_EXP = 1.7\n",
+        "DESIGN.md": f"# Design\n\nThe curve is {CURVE_OLD}.\n",
+        "HISTORY.md": "# History\n\nEmpty for now.\n",
+        "NOTES.md": f"# Notes\n\n`vault_reward` yields {CURVE_OLD} today.\n",
+    })
+    _card(root, {
+        "demo/contracts.py": "CONTRACT_VAULT_EXP = 1.3\n",
+        "DESIGN.md": f"# Design\n\nThe curve is {CURVE_NEW}.\n",
+        "HISTORY.md": f"# History\n\nThe curve became {CURVE_NEW}.\n",
+    })
+
+    violations = coreference_sweep.check(root)
+
+    assert [v.file for v in violations] == ["NOTES.md"]
+    assert CURVE_OLD in violations[0].rule
