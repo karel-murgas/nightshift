@@ -2626,13 +2626,17 @@ def _route_act(note: str, route: str) -> str:
     So the choice belongs on the row, where the note you are looking at is the note
     the button acts on.
 
-    **`Triage this` is on every row, whatever the route says**, including a note no
-    pass has reached. The route is a recommendation from an agent that deliberately
-    never opened the codebase — the classifier's own charter says *"route from the
-    shape of the request, not the shape of the work"* and *"a wrong answer from you
-    is affordable"* — so the human overruling it is the design working, not a
-    bypass of it. It is also the one action that cannot be spent wrongly by
-    accident: it opens an interactive session you are sitting in front of.
+    **`Triage this`, `Work on this` and `Done` are on every row, whatever the route
+    says**, including a note no pass has reached. The route is a recommendation from
+    an agent that deliberately never opened the codebase — the classifier's own
+    charter says *"route from the shape of the request, not the shape of the work"*
+    and *"a wrong answer from you is affordable"* — so the human overruling it is the
+    design working, not a bypass of it. All three are also actions that cannot be
+    spent wrongly by accident: each opens an interactive session, or a `git`-tracked
+    move, that you are sitting in front of. `Work on this` used to be gated on
+    `route == "inline"`, which meant bypassing classify/triage entirely — the whole
+    point of working a note at the keyboard before any pass has judged it — required
+    the classifier to have already agreed with you first.
 
     Karel, 2026-08-17, asking for exactly this: *"change the classification if
     needed (like run triage on non triaged card for example)"*.
@@ -2652,9 +2656,8 @@ def _route_act(note: str, route: str) -> str:
                          extra='title="One scribe dispatch on this note, on the route the '
                                'last pass gave it. The note becomes the card and leaves the '
                                'lane; a bounce sends it to triage instead."'))
-    if route == "inline":
-        acts.append(_work_act(note=note))
-        acts.append(_done_act(note))
+    acts.append(_work_act(note=note))
+    acts.append(_done_act(note))
     acts.append(_act("Triage this", onclick=f"post('/api/triage',{{note:'{target}'}})",
                      primary=route == "triage",
                      extra='title="Opens a terminal running the triage charter on this '
