@@ -16,6 +16,7 @@ three attempts to find and would be invisible if they regressed.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -217,6 +218,26 @@ def test_the_default_run_really_distributes():
     later write reads back correctly and distributes nothing. Both wrong versions
     passed every unit test above; only spawning a real pytest tells them apart, so
     that is what this does.
+
+    **It asserts a property, not a number, and that is a fix rather than a
+    weakening.** It used to require the worker line to equal
+    `probed_worker_count()` called here, in the parent, after the subprocess had
+    already exited — comparing a decision made at one moment against a *different
+    live measurement* taken at another. `worker_count` is a function of free
+    commit, which moves on its own: anything else on the box allocating or
+    releasing between the two calls flips the answer. Observed 2026-09-06 on a
+    branch that had touched nothing near this code — the child chose 7, the parent
+    then read 6, red build. A test that fails when another program opens a window
+    is testing the machine, not the hook.
+
+    What must hold regardless of when the probe is read:
+
+    * a worker line exists at all, and reports **more than one** — that is the
+      "reads back correctly and distributes nothing" regression;
+    * the count is **not** `os.cpu_count()` whenever the probe is capping below it.
+      xdist's own `auto` *is* the CPU count, so this is what separates "our hook
+      decided" from "the plugin ignored us and fell back to its default", which is
+      the distinction the exact-equality assertion was really reaching for.
     """
     env = {k: v for k, v in os.environ.items() if k != "PYTEST_XDIST_WORKER"}
     done = subprocess.run(
@@ -226,7 +247,19 @@ def test_the_default_run_really_distributes():
     )
 
     assert done.returncode == 0, done.stdout[-2000:]
-    expected = suite.probed_worker_count()
-    if expected is None:                      # a box the probe cannot read
+    if suite.probed_worker_count() is None:   # a box the probe cannot read
         pytest.skip("no memory probe on this box; the count is xdist's own `auto`")
-    assert f"{expected} workers" in done.stdout, done.stdout[:2000]
+
+    match = re.search(r"(\d+) workers", done.stdout)
+    assert match, "no worker line - it did not distribute:\n" + done.stdout[:2000]
+    used = int(match.group(1))
+    assert used > 1, "ran %d worker; the hook wrote numprocesses too late" % used
+
+    # Re-read rather than reuse the value above: the point is that any single
+    # reading is only a snapshot, so what is asserted is whether the probe caps at
+    # all, never the exact number it happened to return.
+    probe, cpus = suite.probed_worker_count(), os.cpu_count()
+    if probe is not None and cpus and probe < cpus:
+        assert used != cpus, (
+            "ran %d workers on a %d-CPU box while the probe wanted ~%d: that is "
+            "xdist's own `auto`, so the hook did not decide" % (used, cpus, probe))
