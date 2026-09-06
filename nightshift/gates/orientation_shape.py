@@ -56,6 +56,61 @@ other manifest-driven gate here follows. `init` declares the memory stubs it wri
 fresh install is covered without the operator having claimed anything about their own
 documents.
 
+## The second shape: a log made of bullets (2026-09-06)
+
+The heading rule above has a blind spot, and Dungeoneer fell straight into it. Its
+`state.md` grew to **240 register lines under a single `## Current State` heading** — one
+bullet per shipped card, newest first, 22.1 KB of a 91.8 KB always-loaded set, appended
+automatically by a `[[memory.fold]]` row. Not one heading was dated, so this gate passed
+it every day for months while the file became exactly the thing the gate exists to
+prevent. The maintainer found it by reading, not by tooling:
+
+    *"`state.md` is read at the start of every session, but it is basically a changelog
+    — one register line per card, newest first, not an overview of features. And it
+    grows by one entry per card forever, so it is not sustainable."*
+
+**The log-detector was heading-shaped; the log was bullet-shaped.** So a second shape:
+list items that carry a date, counted per file.
+
+The register/log distinction that makes the heading rule work does *not* transfer here,
+and that is why this half is a count rather than a pattern. A log bullet
+(`- **Thing shipped** (2026-09-06, `card-id`): …`) and a register bullet
+(`- **Campaign difficulty = Contract Board** (decided 2026-07-16, IMPLEMENTED): …`) are
+syntactically the same object: bold subject, parenthesised date. Nothing in the line says
+which it is. What separates them is **how many there are** — a register has one entry per
+subsystem and stops; a log has one per card and does not.
+
+## The corpus, counted
+
+Steps 2-4 of `verify-before-shipping-a-rule.md`, run over Dungeoneer's 42 memory and
+instruction documents on 2026-09-06 rather than reasoned about:
+
+| Document | Dated list items | In scope? |
+|---|---|---|
+| `state.md`, before the restructure | **103** | yes — the failure |
+| `state_changelog.md` | 97 | no, a companion |
+| `design_detail.md` | 37 | no, a companion |
+| `arch_detail.md` | 24 | no, a companion |
+| `ref_minigame.md` | 12 | no, not declared orientation |
+| `state_history.md` | 10 | no, a companion |
+| **`design.md`** | **7** | **yes — a legitimate register, and the number that sets the floor** |
+| `arch.md`, `MEMORY.md`, `state.md` (after) | 0 | yes |
+| 29 further documents | 0 | — |
+
+So within the declared orientation set the rule must reject 103 and accept 7, and
+`LIST_THRESHOLD = 12` sits in that gap. It is not the midpoint, deliberately:
+
+* **Not 8.** One above `design.md`'s real count leaves a register no room to gain an
+  entry, and a gate that reddens on a legitimate edit gets appealed into uselessness —
+  the failure mode this module's first version already survived once.
+* **Not 30 or 50.** The sibling `orientation_budget` is the late net; the whole argument
+  for this gate is that it fires while the fix is still cheap. 12 catches the shape after
+  roughly a dozen cards, not after a hundred.
+* **12** leaves `design.md` 71% headroom and still rejects the observed failure by 8.6x.
+
+A project whose orientation genuinely needs more dated bullets than this should raise the
+constant in a visible commit, the same bargain `budget_bytes` offers.
+
 ## What it deliberately does not do
 
 It does not read the companion. A file named `state_history.md` is *supposed* to be
@@ -86,6 +141,18 @@ _DATED_HEADING = re.compile(r"^#{1,6}[ \t]+[\W_]*\d{4}-\d{2}-\d{2}(?!\d)")
 # Below this, it is a note. At and above it, it is a log.
 THRESHOLD = 3
 
+# A Markdown list item: `- `, `* `, `+ ` or `1. `, at any indent. Nested items count —
+# a log does not stop being a log because someone indented it.
+_LIST_ITEM = re.compile(r"^[ \t]*(?:[-*+]|\d+\.)[ \t]+")
+
+# An ISO date anywhere in the line. `(?!\d)` for the same reason as `_DATED_HEADING`.
+_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}(?!\d)")
+
+# Dated list items at or above this are a per-card log rather than a per-subsystem
+# register. Sized against a counted corpus — see the docstring; the gap it sits in runs
+# from a real register's 7 to the observed failure's 103.
+LIST_THRESHOLD = 12
+
 
 def check(repo_root: Path) -> list[Violation]:
     try:
@@ -103,24 +170,41 @@ def check(repo_root: Path) -> list[Violation]:
         except (OSError, UnicodeDecodeError):
             continue                     # a missing orientation file is another gate's
         lines = text.splitlines()
-        dated = [n for n, line in enumerate(lines, start=1)
-                 if _DATED_HEADING.match(line)]
-        if len(dated) < THRESHOLD:
-            continue
+
         # Name the companion the project already has, if it has one. Suggesting
         # `design_history.md` to a repo whose convention is `design_detail.md` invents a
         # second home for the same content — from the gate that exists to prevent exactly
         # that kind of sprawl.
         stem, suffix = Path(rel).stem, Path(rel).suffix
-        existing = [f"{stem}{s}{suffix}" for s in ("_history", "_detail", "_log")
-                    if (path.parent / f"{stem}{s}{suffix}").is_file()]
+        existing = [f"{stem}{sfx}{suffix}" for sfx in ("_changelog", "_history", "_detail", "_log")
+                    if (path.parent / f"{stem}{sfx}{suffix}").is_file()]
         companion = existing[0] if existing else f"{stem}_history{suffix}"
-        out.append(Violation(
-            rel, dated[0],
-            f"orientation_shape: {len(dated)} dated headings in a file every session "
-            f"loads — this is becoming a log. Orientation says what is true NOW; move "
-            f"the dated narrative to a companion (`{companion}`) that is read only when "
-            f"a question sends you there, and leave one line here per shipped thing. The "
-            f"origin project reached 196 KB this way, at which point the file cost more "
-            f"to read than the code it described"))
+
+        dated = [n for n, line in enumerate(lines, start=1)
+                 if _DATED_HEADING.match(line)]
+        if len(dated) >= THRESHOLD:
+            out.append(Violation(
+                rel, dated[0],
+                f"orientation_shape: {len(dated)} dated headings in a file every session "
+                f"loads — this is becoming a log. Orientation says what is true NOW; move "
+                f"the dated narrative to a companion (`{companion}`) that is read only when "
+                f"a question sends you there, and leave one line here per shipped thing. The "
+                f"origin project reached 196 KB this way, at which point the file cost more "
+                f"to read than the code it described"))
+
+        # The same rule, the other syntax. A log does not need dated headings — Dungeoneer's
+        # ran to 240 bullets under one undated `## Current State` and this gate passed it
+        # daily. Counted rather than pattern-matched: a register bullet and a log bullet are
+        # the same object, and only the quantity tells them apart.
+        bullets = [n for n, line in enumerate(lines, start=1)
+                   if _LIST_ITEM.match(line) and _DATE.search(line)]
+        if len(bullets) >= LIST_THRESHOLD:
+            out.append(Violation(
+                rel, bullets[0],
+                f"orientation_shape: {len(bullets)} dated list items in a file every "
+                f"session loads — a register has one entry per subsystem and stops, a log "
+                f"has one per shipped card and does not. Move the per-card lines to a "
+                f"companion (`{companion}`) and leave this file saying what is true NOW. "
+                f"If a fold or append step writes them here, repoint it: that is what makes "
+                f"the growth automatic and unbounded"))
     return out
