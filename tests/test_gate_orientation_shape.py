@@ -144,3 +144,103 @@ def test_the_companion_named_is_one_the_project_already_has(tmp_path):
     found = orientation_shape.check(repo)
     assert len(found) == 1
     assert "design_detail.md" in found[0].rule
+
+
+# --- the second shape: a log made of bullets ---------------------------------
+#
+# Dungeoneer, 2026-09-06. `state.md` carried 240 register lines under a single undated
+# `## Current State`, appended by a `[[memory.fold]]` row, and this gate passed it every
+# day for months: the log-detector was heading-shaped and the log was bullet-shaped.
+# Counts below are the real measured ones — 103 dated list items in the failing file,
+# 7 in `design.md`, the register that must keep passing.
+
+def _bullets(n: int, *, card: bool = True) -> str:
+    """`n` register lines in the shape the fold row actually wrote."""
+    tail = ", `card-{i}`" if card else ""
+    return "# State\n\n## Current State\n\n" + "".join(
+        f"- **Thing {i} shipped** (2026-09-0{i % 9 + 1}{tail.format(i=i)}): what it does.\n"
+        for i in range(n))
+
+
+def test_a_log_made_of_bullets_under_one_undated_heading_is_reported(tmp_path):
+    """The failure this half was written for. Not one dated heading, so the original
+    rule sees nothing at all."""
+    repo = _repo(tmp_path, {".claude/memory/state.md": _bullets(103)})
+
+    found = orientation_shape.check(repo)
+
+    assert len(found) == 1
+    assert "103 dated list items" in found[0].rule
+    assert "one entry per subsystem" in found[0].rule
+
+
+def test_a_seven_entry_register_of_dated_bullets_is_not_a_log(tmp_path):
+    """`design.md`'s real measured count on the day the threshold was chosen. A register
+    entry legitimately carries the date the decision was made; the gate must not punish
+    the document that is doing its job, or it gets appealed into uselessness."""
+    register = "# Design\n\n" + "".join(
+        f"- **Subsystem {i}** (decided 2026-07-1{i}, IMPLEMENTED): what it is.\n"
+        for i in range(7))
+    repo = _repo(tmp_path, {".claude/memory/design.md": register})
+
+    assert orientation_shape.check(repo) == []
+
+
+def test_the_list_threshold_boundary_holds_on_both_sides(tmp_path):
+    """Pinned explicitly because the number is the whole rule here — the shapes either
+    side of it are identical, and an off-by-one silently moves where a register becomes
+    a log."""
+    below = _repo(tmp_path / "below", {".claude/memory/state.md": _bullets(11)})
+    at = _repo(tmp_path / "at", {".claude/memory/state.md": _bullets(12)})
+
+    assert orientation_shape.check(below) == []
+    assert len(orientation_shape.check(at)) == 1
+
+
+def test_a_status_table_of_dated_rows_is_not_a_list(tmp_path):
+    """The shape `state.md` was restructured *into*. A table row is not a list item, and
+    a subsystem table that happens to cite dates is exactly what this gate wants people
+    to write — reporting it would punish the fix."""
+    table = "# State\n\n## Current State\n\n| Subsystem | Status | Notes |\n|---|---|---|\n" + "".join(
+        f"| System {i} | shipped | landed 2026-08-0{i % 9 + 1} |\n" for i in range(30))
+    repo = _repo(tmp_path, {".claude/memory/state.md": table})
+
+    assert orientation_shape.check(repo) == []
+
+
+def test_prose_dates_outside_a_list_are_still_untouched(tmp_path):
+    """`_DATE` matches anywhere in the line, so the list-item test is what keeps ordinary
+    dated prose out. Without it every paragraph mentioning a date would count."""
+    prose = "# State\n\n" + "".join(
+        f"The {i}th decision was taken on 2026-08-0{i % 9 + 1} and still holds.\n\n"
+        for i in range(30))
+    repo = _repo(tmp_path, {".claude/memory/state.md": prose})
+
+    assert orientation_shape.check(repo) == []
+
+
+def test_a_file_that_is_both_shapes_reports_both(tmp_path):
+    """They are independent findings about one file: fixing the headings does not fix the
+    bullets. Reporting only the first would hide half the work."""
+    both = LOG + "\n" + _bullets(12).split("\n\n", 1)[1]
+    repo = _repo(tmp_path, {".claude/memory/state.md": both})
+
+    found = orientation_shape.check(repo)
+
+    assert len(found) == 2
+    assert "dated headings" in found[0].rule
+    assert "dated list items" in found[1].rule
+
+
+def test_the_bullet_finding_names_an_existing_changelog_companion(tmp_path):
+    """Same anti-sprawl bargain as the heading finding, extended to the companion a fold
+    row would actually be repointed at."""
+    repo = _repo(
+        tmp_path,
+        {".claude/memory/state.md": _bullets(20),
+         ".claude/memory/state_changelog.md": "# Changelog\n"},
+        declared=[".claude/memory/state.md"])
+
+    found = orientation_shape.check(repo)
+
+    assert "state_changelog.md" in found[0].rule

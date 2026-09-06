@@ -94,6 +94,12 @@ and write down what the threshold is protecting. `orientation_shape` fires at th
 headings, not one, because one is a note; and on headings only, because prose recording
 *"decided 2026-07-24, because…"* is not the failure.
 
+Its second shape fires at **twelve** dated list items rather than three, and the gap is the
+lesson: a heading that *begins* with a date is a log by its shape, so three is plenty, but a
+dated bullet is syntactically identical whether it belongs to a register or a log. Where the
+shape cannot tell them apart, only the count can — so that threshold had to be read off a
+counted corpus (a real register's 7, an observed failure's 103) instead of chosen.
+
 ### 2. It fails open, and reports success while reading zero bytes
 
 `run_stop_recorded` targeted a file that had been deleted in a refactor. Its `check`
@@ -152,6 +158,12 @@ The rule was also *correct about the incident it came from* — an orientation f
 reached 196 KB one dated section at a time — and a rule that explains its originating case
 feels verified by it. It is not. The originating case is one member of the corpus, and it
 is the member the rule was fitted to.
+
+**The same gate proved the point twice.** Fitted to dated *headings*, it then passed a
+240-line changelog daily for months because that log was built out of *bullets* — the shape
+its author had not had an example of. The second half was sized against all 42 documents in
+the tree and replayed against the actual failing commit before shipping; that is the
+difference between step 3 done and step 3 assumed.
 
 **Do:** run the finished gate against the real corpus and print the count. Four rejections
 out of thirty, two of them obviously fine, is visible the moment it is printed and
