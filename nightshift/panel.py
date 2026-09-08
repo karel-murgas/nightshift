@@ -837,6 +837,10 @@ class Context:
     #: (a directory walk under `.ai/runs/`, no subprocess) to pay unconditionally
     #: rather than behind a second read path.
     audio: list[AudioGroup] = field(default_factory=list)
+    #: The same, for images. Gathered for the same reason and at the same cost —
+    #: one walk of `.ai/runs/`, plus a 24-byte header read per PNG, which is what
+    #: the dimension chip costs and is cheaper than the page's own git calls.
+    images: list[ImageGroup] = field(default_factory=list)
     decisions: list[board.Card] = field(default_factory=list)
     testing: list[board.Card] = field(default_factory=list)
     review: list[board.Card] = field(default_factory=list)
@@ -1010,6 +1014,7 @@ def read_context(root: Path, *, fetch_freshness: bool = False) -> Context:
         routing=ingest.read_view(root),
         jobs=jobs.read_all(root, limit=JOBS_READ),
         audio=scan_audio_candidates(root),
+        images=scan_image_candidates(root),
     )
 
 
@@ -1211,6 +1216,210 @@ def resolve_audio_path(root: Path, rel: str) -> Path:
         raise PanelError(f"{rel} is not inside {RUNS.as_posix()}")
     if candidate.suffix.lower() not in AUDIO_EXTS:
         raise PanelError(f"{rel} is not an audio file")
+    if not candidate.is_file():
+        raise PanelError(f"{rel} does not exist")
+    return candidate
+
+
+# --------------------------------------------------------------------------
+# Image candidates — the visual twin of the audio block above, and the surface
+# `runner._park_for_pick`'s `## Question` points at by name. A card that
+# generated N candidates and installed none is filed in `needs-decision/`
+# rather than `testing/` (`runner.unadopted_artefacts`), precisely because
+# what it owes the maintainer is a *choice*; before this there was nowhere to
+# make it, and the card asked him to go and play a picture that was never in
+# the game.
+#
+# Unlike audio there is no `candidates.json` here, so the two facts each
+# candidate carries are read off what is actually on disk: the checker's
+# `review-<round>.json` verdict, and the PNG's own IHDR. Everything is
+# read-and-serve; nothing here judges, converts or installs anything.
+# --------------------------------------------------------------------------
+
+#: `.png` only — what the pixel-art pipeline produces, and the one format whose
+#: header this module can read without a decoder. Deliberately not an
+#: open-ended sniff of whatever a harvest dir holds: a `.jpg` would render but
+#: could carry no dimension chip, and a silently chipless row is worse than an
+#: absent one.
+IMAGE_EXTS = frozenset({".png"})
+
+_IMAGE_CONTENT_TYPES = {".png": "image/png"}
+
+#: Where an image pick survives a reload and a panel restart — same category and
+#: same reasoning as `AUDIO_PICKS_FILE`, keyed by **card** rather than by a name
+#: out of a manifest, because a card is what the answer is written against.
+IMAGE_PICKS_FILE = Path(".ai") / "image_picks.json"  # gate-ok(source_reference_liveness):
+# written the first time `write_image_pick` runs, in a consuming project; this repo
+# dispatches nothing and has picked nothing, so the file does not exist here.
+
+
+@dataclass
+class ImageShot:
+    """One harvested image, with the two facts a fifteen-second decision needs."""
+
+    id: str
+    rel: str  # posix path relative to `root`; `/image/<rel>` is what serves it
+    width: int = 0  # 0 when the IHDR could not be read — shown as such, never faked
+    height: int = 0
+    #: Named by the checker's own verdict as the strongest candidate. Advice, not
+    #: a decision: `runner.unadopted_artefacts` exists because a checker saying
+    #: `pass` is exactly what is *not* enough to install one.
+    best: bool = False
+
+
+@dataclass
+class ImageGroup:
+    """One directory of harvested images from one attempt, with that attempt's
+    checker verdict."""
+
+    card: str
+    attempt: int
+    rel_dir: str  # the directory holding the shots, relative to `root`
+    verdict: str  # "pass" / "revise" / … from review-<round>.json, or ""
+    notes: str  # the checker's prose, or ""
+    best: str  # the filename it named, or ""
+    mtime: float
+    shots: list[ImageShot] = field(default_factory=list)
+
+
+def png_size(path: Path) -> tuple[int, int] | None:
+    """`(width, height)` from the PNG's IHDR, or `None` for anything else.
+
+    Twenty-four bytes off the front of the file rather than a decoder: IHDR sits
+    at a fixed offset in every PNG, so the dimensions cost no dependency at all —
+    the same four lines the consuming project's own `asset_hygiene` gate uses.
+    `None` for a truncated file, a non-PNG behind a `.png` name, or an unreadable
+    one; the caller shows that as unknown rather than guessing 32x32.
+    """
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(24)
+    except OSError:
+        return None
+    if len(data) < 24 or not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+    return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+
+
+def read_checker_verdict(out_dir: Path) -> dict:
+    """The verdict that stood for one attempt: its **highest-numbered**
+    `review-<round>.json`, or `{}`.
+
+    `runner.run_checker` writes one per round (`review-1.json`, `review-2.json`,
+    …), so the last is the one that decided the attempt. Deliberately **not**
+    `review-verdict.json`, which sits in the same directory and is the *diff*
+    reviewer's judgement of the branch — a different agent judging a different
+    thing, and reading it here would put prose about a Python diff under a row
+    of sprites.
+
+    `{}` for an attempt whose checker never ran, and for one whose newest
+    verdict file is unparsable: the section degrades to "no checker verdict on
+    disk" rather than quietly falling back to an older round, because "round 2
+    said this" and "round 1 said this" are not interchangeable claims.
+    """
+    rounds = []
+    for path in out_dir.glob("review-*.json"):
+        match = re.fullmatch(r"review-(\d+)\.json", path.name)
+        if match:
+            rounds.append((int(match.group(1)), path))
+    if not rounds:
+        return {}
+    return _read_json(max(rounds, key=lambda item: item[0])[1])
+
+
+def scan_image_candidates(root: Path) -> list[ImageGroup]:
+    """Every image any run has harvested — newest run first within each card,
+    cards ordered by their own newest run.
+
+    The same walk and the same ordering as `scan_audio_candidates` over the same
+    `runner.harvest` layout (`.ai/runs/*/attempt-*/artefacts/`), grouped by the
+    directory the files landed in so one attempt that wrote two harvest dirs
+    reads as two groups rather than one pile. A project that harvests no images —
+    or nothing at all — gets an empty list rather than an error.
+    """
+    runs_dir = root / RUNS
+    if not runs_dir.is_dir():
+        return []
+    groups: list[ImageGroup] = []
+    for card_dir in runs_dir.iterdir():
+        if not card_dir.is_dir():
+            continue
+        for attempt in sorted(card_dir.glob("attempt-*")):
+            match = re.fullmatch(r"attempt-(\d+)", attempt.name)
+            artefacts = attempt / "artefacts"
+            if not match or not artefacts.is_dir():
+                continue
+            # Per attempt, not per directory: the verdict is written about the
+            # attempt's `artefacts/` as a whole, so both harvest dirs of a
+            # two-dir attempt legitimately carry the same notes.
+            verdict = read_checker_verdict(attempt)
+            best = str(verdict.get("best") or "")
+            by_dir: dict[Path, list[Path]] = {}
+            for item in artefacts.rglob("*"):
+                if item.is_file() and item.suffix.lower() in IMAGE_EXTS:
+                    by_dir.setdefault(item.parent, []).append(item)
+            for directory, files in by_dir.items():
+                shots = []
+                for found in sorted(files):
+                    size = png_size(found)
+                    shots.append(ImageShot(
+                        id=found.stem, rel=found.relative_to(root).as_posix(),
+                        width=size[0] if size else 0, height=size[1] if size else 0,
+                        best=bool(best) and found.name == best))
+                groups.append(ImageGroup(
+                    card=card_dir.name, attempt=int(match.group(1)),
+                    rel_dir=directory.relative_to(root).as_posix(),
+                    verdict=str(verdict.get("verdict") or ""),
+                    notes=str(verdict.get("notes") or ""), best=best,
+                    mtime=directory.stat().st_mtime, shots=shots,
+                ))
+    by_card: dict[str, list[ImageGroup]] = {}
+    for group in groups:
+        by_card.setdefault(group.card, []).append(group)
+    ordered: list[ImageGroup] = []
+    for card in sorted(by_card, key=lambda c: max(g.mtime for g in by_card[c]), reverse=True):
+        ordered.extend(sorted(by_card[card], key=lambda g: g.mtime, reverse=True))
+    return ordered
+
+
+def read_image_picks(root: Path) -> dict[str, str]:
+    """`{card id: chosen shot's rel path}`, read fresh off disk on every render
+    for the same reason `read_audio_picks` is — a pick must outlive the click
+    that made it, and a process-wide variable would not survive a restart."""
+    data = _read_json(root / IMAGE_PICKS_FILE)
+    return {str(key): str(value.get("rel", "")) for key, value in data.items()
+            if isinstance(value, dict) and value.get("rel")}
+
+
+def write_image_pick(root: Path, card_id: str, rel: str) -> None:
+    """Record `rel` as the pick for `card_id`. `rel` must already have been
+    proven to point at a real, harvested image — callers pass it through
+    `resolve_image_path` first, exactly as `_route`'s own POST handler does."""
+    if not card_id:
+        raise PanelError("no card to record the pick against")
+    path = root / IMAGE_PICKS_FILE
+    data = _read_json(path)
+    if not isinstance(data, dict):
+        data = {}
+    data[card_id] = {"rel": rel,
+                     "picked_at": dt.datetime.now().replace(microsecond=0).isoformat()}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    textio.write_text_lf(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+
+def resolve_image_path(root: Path, rel: str) -> Path:
+    """Confine `rel` to `.ai/runs/` — the harvest root, and the one place a
+    request for "an image" is allowed to reach. Same three refusals as
+    `resolve_audio_path`, for the same reason: this path arrives from a URL or a
+    POST body, and neither is trusted to stay inside the run dir on its own.
+    """
+    candidate = Path(rel)
+    candidate = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    runs_root = (root / RUNS).resolve()
+    if candidate != runs_root and runs_root not in candidate.parents:
+        raise PanelError(f"{rel} is not inside {RUNS.as_posix()}")
+    if candidate.suffix.lower() not in IMAGE_EXTS:
+        raise PanelError(f"{rel} is not an image file")
     if not candidate.is_file():
         raise PanelError(f"{rel} does not exist")
     return candidate
@@ -3255,9 +3464,86 @@ def _audio_section(ctx: Context) -> str:
                     sec_id="audio")
 
 
+def _image_section(ctx: Context) -> str:
+    """Every image a run harvested, side by side and zoomed, with the checker's
+    verdict over the group and a Pick button under each candidate.
+
+    **The section `runner._park_for_pick`'s `## Question` names.** A card that
+    produced candidates and installed none is in `needs-decision/` waiting on a
+    choice, and this is where the choice is made: one click records the pick
+    *and* writes it as the card's answer (`api/image/pick`), after which the
+    existing deliberate second click — "To tasks" on the decide page — releases
+    the pass that installs it.
+
+    **Zoomed, nearest-neighbour, on a checkerboard.** These are 32x32 pixel-art
+    icons; at 1:1 they are a smudge the size of this sentence's full stop, and a
+    bilinear upscale of pixel art is a blur that hides exactly the edge quality
+    being judged (`.shot img` — `image-rendering: pixelated`). The checkerboard
+    is not decoration either: half these sprites are dark and half are light,
+    and a transparent background over a flat panel makes one of the two
+    invisible.
+
+    **Absent entirely, not merely empty, when nothing has been harvested** —
+    same rule as `_audio_section`, and for the same reason: `ctx.images` is `[]`
+    in every repo that has never generated art, and a permanent heading over
+    nothing is a heading that trains the eye to skip it.
+
+    Every candidate is shown, including ones the checker argued against. Its
+    `notes` are the fifteen-second version of the decision, not a filter: "d
+    drifts toward cyan" is a reason to look at d, not a reason to hide it.
+    """
+    groups = ctx.images
+    if not groups:
+        return ""
+    picks = read_image_picks(ctx.root)
+    blocks = []
+    total = 0
+    for group in groups:
+        # Keyed on the card, so a card whose second attempt re-rolled shows the
+        # pick against whichever shot was chosen and nothing against the rest.
+        picked_rel = picks.get(group.card, "")
+        shots = []
+        for shot in group.shots:
+            total += 1
+            chips = [_chip(f"{shot.width}x{shot.height}") if shot.width and shot.height
+                     else _chip("unreadable PNG header", "warn")]
+            if shot.best:
+                chips.append(_chip("checker's pick", "ok"))
+            if shot.rel == picked_rel:
+                chips.append(_chip("picked", "ok"))
+            act = (_act("Picked", disabled=True) if shot.rel == picked_rel else
+                   _act("Pick", onclick=f"post('/api/image/pick',"
+                                        f"{{card:'{_attr(group.card)}',"
+                                        f"rel:'{_attr(shot.rel)}'}})"))
+            shots.append(
+                f'<div class="shot{" best" if shot.best else ""}">'
+                f'<img src="/image/{quote(shot.rel, safe="/")}" '
+                f'alt="{_e(shot.id)}" loading="lazy">'
+                f'<span class="shot-name">{_e(shot.id)}</span>'
+                f'{_meta(chips)}<div class="acts">{act}</div></div>')
+        body = [_meta([_chip(f"checker: {group.verdict}",
+                             "ok" if group.verdict == "pass" else "warn")]
+                      if group.verdict else
+                      # Degrades honestly rather than pretending to know, the way
+                      # a missing `candidates.json` does one section up.
+                      [_chip("no checker verdict on disk", "mute")])]
+        if group.notes:
+            body.append(f'<p class="why">{_e(group.notes)}</p>')
+        body.append(f'<div class="shots">{"".join(shots)}</div>')
+        blocks.append(_group(f"{group.card} attempt {group.attempt} — {group.rel_dir}")
+                      + _row(marker="&#9635;", body="".join(body)))
+    return _section("Image candidates", total, "".join(blocks),
+                    note="What a run generated but nobody has looked at yet. "
+                         "Picking one answers the card's question.",
+                    sec_id="images")
+
+
 def _render_run(ctx: Context) -> str:
     record = _latest_record(ctx.root)
-    out = [_running_section(ctx), _audio_section(ctx)]
+    # Images above audio: an image group is what a card in `needs-decision/` is
+    # actually blocked on, so it is the thing to land on. Audio's own cards
+    # commit a synth fallback and land in `testing/`, so nothing waits on them.
+    out = [_running_section(ctx), _image_section(ctx), _audio_section(ctx)]
 
     # When the newest thing that ran wrote no record — an `ingest` pass, a preflight —
     # it goes above the newest record rather than only into the history at the foot of
@@ -4384,6 +4670,21 @@ class Handler(BaseHTTPRequestHandler):
                                                      "application/octet-stream")
             self._send(200, resolved.read_bytes(), content_type)
             return
+        if path.startswith("image/"):
+            # Beside `audio/` and identical in shape: unquoted for the same
+            # reason (the rel path is this module's own, but the browser still
+            # percent-encodes it in the `<img src>` the section wrote), and
+            # confined by `resolve_image_path` rather than by this handler.
+            rel = unquote(path[len("image/"):])
+            try:
+                resolved = resolve_image_path(self.root, rel)
+            except PanelError as exc:
+                self._send_text(400, str(exc))
+                return
+            content_type = _IMAGE_CONTENT_TYPES.get(resolved.suffix.lower(),
+                                                    "application/octet-stream")
+            self._send(200, resolved.read_bytes(), content_type)
+            return
         if path.startswith("diff/"):
             card = board.find(self.root, path[len("diff/"):])
             if card is None:
@@ -4810,6 +5111,46 @@ class Handler(BaseHTTPRequestHandler):
             resolve_audio_path(root, rel)  # raises PanelError on anything bogus
             write_audio_pick(root, key, rel)
             return f"picked {rel!r} for {key!r}"
+
+        if path == "api/image/pick":
+            # Two effects from one click, and the second is what closes the loop:
+            # the pick is recorded, *and* — when the card is parked on exactly this
+            # question (`runner._park_for_pick`) — written into its `## Thread` as
+            # the answer. The deliberate second click stays where it is: an answer
+            # is not a ticket to `tasks/` (`decide.write_answer`'s park-over-promote),
+            # so "To tasks" on the decide page still releases the installing pass.
+            #
+            # No dispatch guard and no `paid`, like `api/audio/pick` and
+            # `api/answer`: this spends nothing, starts nothing and calls no model.
+            #
+            # **Nothing is copied or installed.** Adoption means Dungeoneer nouns —
+            # `assets/items/`, a factory row — and the framework deliberately does
+            # not own that vocabulary; see `audio-audition-review-in-command-center`
+            # on why the panel records a pick and stops.
+            card_id = str(body.get("card", ""))
+            rel = str(body.get("rel", ""))
+            resolve_image_path(root, rel)  # raises PanelError on anything bogus
+            # Written *before* the answer, and it stays written if the answer
+            # fails: the pick is machine-local state that is true either way — he
+            # did choose that file — and discarding it would make him choose again
+            # after fixing the manifest. The refusal below names the real problem.
+            write_image_pick(root, card_id, rel)
+            picked = f"picked {Path(rel).name!r} for {card_id!r}"
+            card = board.find(root, card_id)
+            if card is None or card.lane != "needs-decision":
+                # Not a failure and not a lane move. A pick against a card that
+                # already moved on (or was never on the board — a scratch run dir)
+                # is still a pick worth keeping; inventing a move from whatever
+                # lane it is in is exactly what this endpoint must not do.
+                return f"{picked} · pick recorded only (not parked in needs-decision/)"
+            try:
+                answered = decide.write_answer(
+                    root, card_id, [],
+                    f"Adopt `{Path(rel).name}` — picked in the Command Center's "
+                    f"image candidates from `{Path(rel).parent.as_posix()}`.")
+            except decide.DecideError as exc:
+                raise PanelError(f"{picked}, but the answer was refused: {exc}") from exc
+            return f"{picked} · {answered}"
 
         return None
 

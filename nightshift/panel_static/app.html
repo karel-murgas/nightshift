@@ -406,6 +406,43 @@
      nobody can scan. */
   .body audio { display: block; width: 100%; max-width: 22rem; margin-top: 0.35rem; height: 2rem; }
 
+  /* Image candidates. Side by side, not one per row: the decision is a
+     comparison ("b keeps the silhouette, d drifts toward cyan"), and a
+     comparison you have to scroll between is one you cannot make. */
+  .shots { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 0.5rem; }
+  .shot { display: flex; flex-direction: column; align-items: flex-start; gap: 0.3rem; width: 7.5rem; }
+  .shot img {
+    /* Nearest-neighbour and nothing else. These are 32x32 sprites; the browser's
+       default smooth upscale is a blur that hides the exact thing being judged. */
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    width: 7.5rem;
+    height: 7.5rem;
+    object-fit: contain;
+    border: 1px solid var(--line);
+    /* A mid-grey checkerboard, not the panel colour. Pixel art arrives with a
+       transparent background and in both polarities — a dark ground makes the
+       dark sprites disappear and a light one loses the light ones, while the
+       checker shows every sprite *and* shows where the transparency is. */
+    background-color: #8A968F;
+    background-image:
+      linear-gradient(45deg, #5E6B64 25%, transparent 25%, transparent 75%, #5E6B64 75%),
+      linear-gradient(45deg, #5E6B64 25%, transparent 25%, transparent 75%, #5E6B64 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 8px 8px;
+  }
+  .shot.best img { border-color: var(--phosphor); }
+  .shot-name {
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    color: var(--ink-dim);
+    overflow-wrap: anywhere;
+    line-height: 1.3;
+  }
+  /* The chips stack under a 7.5rem column rather than running off it. */
+  .shot .meta { margin-top: 0; flex-direction: column; align-items: flex-start; gap: 0.1rem; }
+  .shot .acts { justify-content: flex-start; }
+
   .acts { display: flex; gap: 0.4rem; flex-wrap: wrap; justify-content: flex-end; }
 
   .act {

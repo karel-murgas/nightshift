@@ -4386,3 +4386,420 @@ def test_picking_a_bogus_path_is_refused(server):
     status, data = _post(base, "api/audio/pick", {"key": "recharge", "rel": "../secret.wav"})
     assert status == 400
     assert "not inside" in data["message"]
+
+
+# --------------------------------------------------------- image candidates
+#
+# `artefact-cards-owe-a-pick`: the visual twin of the audio surface above.
+# A card that generated N candidates and installed none is parked in
+# `needs-decision/` by `runner.unadopted_artefacts` + `_park_for_pick`, and its
+# `## Question` points here by name — so the properties that matter are not
+# "does it render" but that a pick *answers the card*, that the checker's
+# verdict is read off the highest round rather than any file called
+# `review-*.json`, and that the run root is confined exactly as `audio/` is.
+
+
+def _png(width: int, height: int) -> bytes:
+    """A PNG signature and IHDR declaring `width`x`height`, and nothing after it.
+
+    Header-only on purpose: `panel.png_size` reads the first 24 bytes and no
+    decoder is involved anywhere in this feature, so a real IDAT would only make
+    the fixture's failure modes less obvious. The trailing text is there so a
+    byte-for-byte route assertion is asserting something distinctive.
+    """
+    return (b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR"
+            + width.to_bytes(4, "big") + height.to_bytes(4, "big")
+            + b"\x08\x06\x00\x00\x00" + b"header-only fixture, no IDAT")
+
+
+def _harvest_images(root: Path, card: str, attempt: int, *, shots: list[str] | None = None,
+                    subdir: str = ".tmp", size: tuple[int, int] = (32, 32),
+                    verdict: str = "", best: str = "", notes: str = "") -> Path:
+    """Stand in for what `runner.harvest` leaves an art card: PNGs under
+    `.ai/runs/<card>/attempt-N/artefacts/<subdir>/` — the real
+    `stun-grenade-visuals` layout — plus, when `verdict` is given, the
+    `review-<attempt>.json` `runner.run_checker` writes one directory up."""
+    out_dir = root / panel.RUNS / card / f"attempt-{attempt}"
+    directory = out_dir / "artefacts" / subdir
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in (shots if shots is not None else ["cand_a"]):
+        (directory / f"{name}.png").write_bytes(_png(*size))
+    if verdict:
+        (out_dir / f"review-{attempt}.json").write_text(
+            json.dumps({"verdict": verdict, "best": best, "notes": notes}),
+            encoding="utf-8", newline="")
+    return directory
+
+
+def _image_ctx(root: Path) -> panel.Context:
+    return panel.Context(root=root, rail=panel.read_rail(root), base="main",
+                         images=panel.scan_image_candidates(root))
+
+
+def test_scan_image_candidates_is_empty_with_no_runs_dir(tmp_path):
+    root = _repo(tmp_path)
+    assert panel.scan_image_candidates(root) == []
+
+
+def test_scan_finds_a_harvested_png_with_its_dimensions(tmp_path):
+    root = _repo(tmp_path)
+    _harvest_images(root, "stun-grenade-visuals", 1, shots=["cand_a", "cand_b"],
+                    size=(32, 32))
+
+    groups = panel.scan_image_candidates(root)
+
+    assert len(groups) == 1
+    group = groups[0]
+    assert (group.card, group.attempt) == ("stun-grenade-visuals", 1)
+    assert [s.id for s in group.shots] == ["cand_a", "cand_b"]
+    assert [(s.width, s.height) for s in group.shots] == [(32, 32), (32, 32)]
+    assert group.shots[0].rel.startswith(".ai/runs/stun-grenade-visuals/attempt-1/")
+
+
+def test_scan_ignores_non_image_files_in_the_artefacts_dir(tmp_path):
+    root = _repo(tmp_path)
+    directory = _harvest_images(root, "card-x", 1, shots=["cand_a"])
+    (directory / "prompt.txt").write_text("not an image", encoding="utf-8")
+    (directory / "take.wav").write_bytes(b"RIFF....WAVEfmt")
+
+    groups = panel.scan_image_candidates(root)
+
+    assert [s.id for s in groups[0].shots] == ["cand_a"]
+
+
+def test_scan_reads_the_checkers_verdict_and_marks_its_pick(tmp_path):
+    root = _repo(tmp_path)
+    _harvest_images(root, "card-x", 1, shots=["cand_a", "cand_b"],
+                    verdict="pass", best="cand_b.png",
+                    notes="cand_b keeps the silhouette; cand_a drifts toward cyan.")
+
+    group = panel.scan_image_candidates(root)[0]
+
+    assert group.verdict == "pass"
+    assert "keeps the silhouette" in group.notes
+    assert [s.best for s in group.shots] == [False, True]
+
+
+def test_scan_reads_the_highest_numbered_review_round(tmp_path):
+    """Rounds, not files: `run_checker` writes one per round and the last is the
+    verdict that stood. Reading `review-1.json` would report a judgement that a
+    later round overruled."""
+    root = _repo(tmp_path)
+    _harvest_images(root, "card-x", 1, shots=["cand_a", "cand_b"],
+                    verdict="revise", best="cand_a.png", notes="round one")
+    out_dir = root / panel.RUNS / "card-x" / "attempt-1"
+    (out_dir / "review-2.json").write_text(
+        json.dumps({"verdict": "pass", "best": "cand_b.png", "notes": "round two"}),
+        encoding="utf-8", newline="")
+
+    group = panel.scan_image_candidates(root)[0]
+
+    assert (group.verdict, group.notes) == ("pass", "round two")
+    assert [s.best for s in group.shots] == [False, True]
+
+
+def test_scan_ignores_the_diff_reviewers_own_verdict_file(tmp_path):
+    """`review-verdict.json` sits in the same directory and is the *diff*
+    reviewer's judgement of the branch — a different agent judging a different
+    thing. Reading it would put prose about a Python diff under a row of
+    sprites."""
+    root = _repo(tmp_path)
+    _harvest_images(root, "card-x", 1, shots=["cand_a"])
+    out_dir = root / panel.RUNS / "card-x" / "attempt-1"
+    (out_dir / "review-verdict.json").write_text(
+        json.dumps({"verdict": "ok", "notes": "the diff is fine"}),
+        encoding="utf-8", newline="")
+
+    group = panel.scan_image_candidates(root)[0]
+
+    assert group.verdict == ""
+    assert group.notes == ""
+
+
+def test_scan_degrades_when_no_checker_ever_ran(tmp_path):
+    root = _repo(tmp_path)
+    _harvest_images(root, "card-x", 1, shots=["cand_a"])
+
+    group = panel.scan_image_candidates(root)[0]
+
+    assert (group.verdict, group.notes, group.best) == ("", "", "")
+    assert group.shots[0].best is False
+
+
+def test_scan_degrades_when_the_newest_verdict_is_unparsable(tmp_path):
+    root = _repo(tmp_path)
+    _harvest_images(root, "card-x", 1, shots=["cand_a"], verdict="pass",
+                    best="cand_a.png", notes="fine")
+    (root / panel.RUNS / "card-x" / "attempt-1" / "review-2.json").write_text(
+        "{not json", encoding="utf-8", newline="")
+
+    group = panel.scan_image_candidates(root)[0]
+
+    assert group.verdict == "", "an older round must not stand in for the newest one"
+
+
+def test_scan_reports_unknown_dimensions_for_a_file_that_is_not_a_png(tmp_path):
+    root = _repo(tmp_path)
+    directory = _harvest_images(root, "card-x", 1, shots=[])
+    (directory / "truncated.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    group = panel.scan_image_candidates(root)[0]
+
+    assert (group.shots[0].width, group.shots[0].height) == (0, 0)
+    assert panel.png_size(directory / "truncated.png") is None
+
+
+def test_scan_orders_newest_image_run_first_within_a_card(tmp_path):
+    root = _repo(tmp_path)
+    older = _harvest_images(root, "card-x", 1, shots=["t1"])
+    newer = _harvest_images(root, "card-x", 2, shots=["t2"])
+    os.utime(older, (1_000_000, 1_000_000))
+    os.utime(newer, (2_000_000, 2_000_000))
+
+    assert [g.attempt for g in panel.scan_image_candidates(root)] == [2, 1]
+
+
+def test_scan_orders_image_cards_by_their_own_newest_run(tmp_path):
+    root = _repo(tmp_path)
+    old_card = _harvest_images(root, "old-card", 1, shots=["t1"])
+    new_card = _harvest_images(root, "new-card", 1, shots=["t2"])
+    os.utime(old_card, (1_000_000, 1_000_000))
+    os.utime(new_card, (2_000_000, 2_000_000))
+
+    assert [g.card for g in panel.scan_image_candidates(root)] == ["new-card", "old-card"]
+
+
+def test_image_pick_round_trips_through_disk_not_memory(tmp_path):
+    root = _repo(tmp_path)
+    assert panel.read_image_picks(root) == {}
+
+    panel.write_image_pick(root, "card-x", ".ai/runs/card-x/attempt-1/artefacts/a.png")
+
+    assert panel.read_image_picks(root) == {
+        "card-x": ".ai/runs/card-x/attempt-1/artefacts/a.png"}
+    assert (root / panel.IMAGE_PICKS_FILE).is_file()
+
+
+def test_writing_an_image_pick_without_a_card_is_refused(tmp_path):
+    root = _repo(tmp_path)
+    with pytest.raises(panel.PanelError, match="no card"):
+        panel.write_image_pick(root, "", "some/path.png")
+
+
+def test_resolve_image_path_confines_to_runs(tmp_path):
+    root = _repo(tmp_path)
+    (root / "secret.png").write_bytes(_png(1, 1))
+    with pytest.raises(panel.PanelError, match="not inside"):
+        panel.resolve_image_path(root, "secret.png")
+
+
+def test_resolve_image_path_refuses_traversal_out_of_runs(tmp_path):
+    root = _repo(tmp_path)
+    directory = _harvest_images(root, "card-x", 1, shots=["t1"])
+    (root / "secret.png").write_bytes(_png(1, 1))
+    escaping = (directory / ".." / ".." / ".." / ".." / ".." / "secret.png").as_posix()
+    with pytest.raises(panel.PanelError, match="not inside"):
+        panel.resolve_image_path(root, escaping)
+
+
+def test_resolve_image_path_refuses_a_non_image_extension(tmp_path):
+    root = _repo(tmp_path)
+    directory = _harvest_images(root, "card-x", 1, shots=["t1"])
+    (directory / "prompt.txt").write_text("x", encoding="utf-8")
+    rel = (directory / "prompt.txt").relative_to(root).as_posix()
+    with pytest.raises(panel.PanelError, match="not an image file"):
+        panel.resolve_image_path(root, rel)
+
+
+def test_resolve_image_path_refuses_a_missing_file(tmp_path):
+    root = _repo(tmp_path)
+    _harvest_images(root, "card-x", 1, shots=["t1"])
+    ghost = ".ai/runs/card-x/attempt-1/artefacts/.tmp/ghost.png"
+    with pytest.raises(panel.PanelError, match="does not exist"):
+        panel.resolve_image_path(root, ghost)
+
+
+def test_image_section_is_absent_with_nothing_harvested(tmp_path):
+    """No harvested images means no section at all, not an empty heading — the
+    same rule `_audio_section` holds, and for the same reason."""
+    root = _repo(tmp_path)
+    assert panel._image_section(_image_ctx(root)) == ""
+
+
+def test_image_section_puts_every_candidate_side_by_side_with_its_size(tmp_path):
+    root = _repo(tmp_path)
+    _harvest_images(root, "card-x", 1, shots=["cand_a", "cand_b"], size=(48, 64))
+
+    html = panel._image_section(_image_ctx(root))
+
+    assert "<h2>Image candidates</h2>" in html
+    assert 'class="shots"' in html, "candidates must sit in one comparison row"
+    assert html.count('class="shot"') == 2
+    assert html.count('<img src="/image/.ai/runs/card-x/attempt-1/') == 2
+    assert "48x64" in html
+    assert "cand_a" in html and "cand_b" in html
+
+
+def test_image_section_shows_the_checker_notes_and_chips_its_pick(tmp_path):
+    root = _repo(tmp_path)
+    _harvest_images(root, "card-x", 1, shots=["cand_a", "cand_b"], verdict="pass",
+                    best="cand_b.png", notes="cand_b keeps the silhouette.")
+
+    html = panel._image_section(_image_ctx(root))
+
+    assert "checker: pass" in html
+    assert "cand_b keeps the silhouette." in html
+    assert "checker&#x27;s pick" in html
+    assert html.count('class="shot best"') == 1
+
+
+def test_image_section_says_so_when_no_checker_verdict_is_on_disk(tmp_path):
+    root = _repo(tmp_path)
+    _harvest_images(root, "card-x", 1, shots=["cand_a"])
+
+    html = panel._image_section(_image_ctx(root))
+
+    assert "no checker verdict on disk" in html
+    assert "checker&#x27;s pick" not in html
+
+
+def test_image_section_marks_the_shot_already_picked(tmp_path):
+    root = _repo(tmp_path)
+    _harvest_images(root, "card-x", 1, shots=["cand_a", "cand_b"])
+    group = panel.scan_image_candidates(root)[0]
+    panel.write_image_pick(root, group.card, group.shots[1].rel)
+
+    html = panel._image_section(_image_ctx(root))
+
+    assert ">Picked<" in html
+    assert html.count(">Pick<") == 1, "only the unpicked candidate still offers a Pick"
+
+
+def test_the_shot_style_upscales_with_nearest_neighbour(tmp_path):
+    """A bilinear upscale of a 32x32 sprite hides exactly the edge quality being
+    judged, so this is a property of the deliverable rather than a detail."""
+    css = panel.TEMPLATE.read_text(encoding="utf-8")
+    assert "image-rendering: pixelated" in css
+    assert ".shot img" in css
+
+
+def test_the_run_page_shows_no_image_section_with_nothing_harvested(server):
+    base, _ = server
+    _, text = _get(base, "run")
+    # The rendered heading, not the bare phrase: `app.html`'s own stylesheet
+    # carries a `/* Image candidates */` comment, and asserting on the substring
+    # made this test pass only until the CSS was written.
+    assert "<h2>Image candidates</h2>" not in text
+
+
+def test_the_run_page_lists_a_harvested_candidate(server):
+    base, root = server
+    _harvest_images(root, "card-x", 1, shots=["cand_a"], verdict="pass",
+                    best="cand_a.png", notes="ship it")
+    _, text = _get(base, "run")
+    assert "<h2>Image candidates</h2>" in text
+    assert "cand_a" in text
+    assert "ship it" in text
+
+
+def test_the_image_route_serves_the_actual_bytes(server):
+    base, root = server
+    directory = _harvest_images(root, "card-x", 1, shots=["cand_a"], size=(32, 32))
+    target = directory / "cand_a.png"
+    rel = target.relative_to(root).as_posix()
+
+    with urllib.request.urlopen(f"{base}/image/{quote(rel, safe='/')}", timeout=5) as resp:
+        assert resp.status == 200
+        assert resp.headers["Content-Type"] == "image/png"
+        assert resp.read() == target.read_bytes()
+
+
+def test_the_image_route_refuses_a_path_outside_runs(server):
+    """One percent-encoded segment rather than a literal `../`, matching
+    `test_the_audio_route_refuses_a_path_outside_runs` — a raw `../` risks the
+    HTTP client normalising the URL before it is sent, which would test the
+    client rather than the server's own confinement."""
+    base, root = server
+    (root / "secret.png").write_bytes(_png(1, 1))
+    request = urllib.request.Request(f"{base}/image/{quote('../secret.png', safe='')}")
+    try:
+        with urllib.request.urlopen(request, timeout=5):
+            status = 200
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+    assert status == 400
+
+
+def test_picking_a_bogus_image_path_is_refused(server):
+    base, _ = server
+    status, data = _post(base, "api/image/pick", {"card": "card-x", "rel": "../secret.png"})
+    assert status == 400
+    assert "not inside" in data["message"]
+
+
+def test_picking_an_image_answers_the_parked_card_it_belongs_to(server):
+    """The click that closes the loop: one POST records the pick *and* writes the
+    answer onto the card `runner._park_for_pick` filed in `needs-decision/`. The
+    card is deliberately left there — `decide.write_answer`'s park-over-promote —
+    so the existing "To tasks" click still releases the installing pass."""
+    base, root = server
+    _parked(root, "arty")
+    directory = _harvest_images(root, "arty", 1, shots=["cand_a", "cand_b"])
+    rel = (directory / "cand_b.png").relative_to(root).as_posix()
+
+    status, data = _post(base, "api/image/pick", {"card": "arty", "rel": rel})
+
+    assert status == 200, data
+    assert panel.read_image_picks(root) == {"arty": rel}
+    card = root / "Board" / "needs-decision" / "arty.md"
+    assert card.is_file(), "answering must not move the card"
+    text = card.read_text(encoding="utf-8")
+    assert "· karel" in text
+    assert "> Adopt `cand_b.png`" in text
+
+
+def test_picking_an_image_for_a_card_in_another_lane_records_only_the_pick(server):
+    """No invented lane move, and no failure: a pick against a card that already
+    moved on is still a pick worth keeping."""
+    base, root = server
+    _card(root, "testing", "arty")
+    directory = _harvest_images(root, "arty", 1, shots=["cand_a"])
+    rel = (directory / "cand_a.png").relative_to(root).as_posix()
+
+    status, data = _post(base, "api/image/pick", {"card": "arty", "rel": rel})
+
+    assert status == 200, data
+    assert panel.read_image_picks(root) == {"arty": rel}
+    assert (root / "Board" / "testing" / "arty.md").is_file()
+    assert "## Thread" not in (root / "Board" / "testing" / "arty.md").read_text(
+        encoding="utf-8")
+
+
+def test_picking_an_image_for_a_card_not_on_the_board_records_only_the_pick(server):
+    base, root = server
+    directory = _harvest_images(root, "scratch-run", 1, shots=["cand_a"])
+    rel = (directory / "cand_a.png").relative_to(root).as_posix()
+
+    status, data = _post(base, "api/image/pick", {"card": "scratch-run", "rel": rel})
+
+    assert status == 200, data
+    assert panel.read_image_picks(root) == {"scratch-run": rel}
+
+
+def test_picking_without_a_declared_attributor_is_refused_but_keeps_the_pick(server):
+    """`decide.write_answer` refuses to sign an answer with a guessed token, so
+    the answer half fails loudly. The pick half is kept on purpose: he did choose
+    that file, and discarding it would make him choose again after fixing the
+    manifest."""
+    base, root = server
+    _parked(root, "arty", attributor="")
+    directory = _harvest_images(root, "arty", 1, shots=["cand_a"])
+    rel = (directory / "cand_a.png").relative_to(root).as_posix()
+
+    status, data = _post(base, "api/image/pick", {"card": "arty", "rel": rel})
+
+    assert status >= 400
+    assert "decision_attributor" in data.get("message", "")
+    assert panel.read_image_picks(root) == {"arty": rel}
+    assert "## Thread" not in (root / "Board" / "needs-decision" / "arty.md").read_text(
+        encoding="utf-8")
