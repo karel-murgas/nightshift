@@ -49,7 +49,7 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -1757,6 +1757,64 @@ def harvest(root: Path, tree: Path, out_dir: Path) -> int:
     return rescued
 
 
+def unadopted_artefacts(root: Path, harvested: int, changed: Iterable[str]) -> int:
+    """How many candidates this attempt produced *without installing any of them*.
+
+    Non-zero means what the maintainer is owed is a **choice**, not a
+    play-through, and `settle` routes the card to `needs-decision/` on that basis
+    rather than to whatever `verify:` asked for. Two facts, both already in hand
+    by the end of a dispatch:
+
+    * `harvested` — what `harvest` rescued out of the worktree. An artefact is by
+      definition not a commit: it lives in a gitignored scratch dir, so nothing
+      about it is on the branch, in the repo, or in the running program.
+    * `changed` — this attempt's own diff. If it wrote nothing under the directory
+      the candidates get promoted *into* (`neighbours_dir` — the approved siblings
+      a `checker:` is already shown), then none was adopted and there is nothing
+      installed to exercise.
+
+    **The pair is what separates two shapes that used to share one lane.** A card
+    that generates takes *and* commits one of them — the audio pipeline's synth
+    fallback — has something in the program to play, and `testing/` is right for
+    it. A card that generates candidates and installs none had nothing to play,
+    and until 2026-09-08 reached `testing/` anyway: `stun-grenade-visuals` put
+    four blue grenade icons in `assets/.tmp/`, nothing in `assets/items/`, and
+    asked Karel to go and look at a picture that was not in the game. His answer:
+    *"the card is not ready. It should have ended in needs-decision and give me a
+    way to show and pick these results. It should end up in testing only after it
+    is wired up in game."* `verify:` could not express that, and neither the
+    checker nor the diff reviewer is positioned to notice — both had said `pass`
+    on work that was, on its own terms, finished.
+
+    Zero when the project declares no harvest dir, and zero when the harvest dir
+    has no distinct parent inside the repo to adopt into. Both fall back to the
+    pre-2026-09-08 routing, which is the safe direction: the card lands where its
+    own `verify:` says and a human reads it either way.
+    """
+    if harvested <= 0:
+        return 0
+    adopt = neighbours_dir(root)
+    if adopt is None:
+        return 0
+    try:
+        prefix = adopt.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return 0
+    if not prefix or prefix == ".":
+        return 0
+    # The scratch dirs themselves are gitignored, so they cannot appear in a diff
+    # anyway — excluded explicitly so the rule reads as what it means rather than
+    # relying on that, and so a project that tracks part of a harvest dir does not
+    # get "adopted" from a candidate it merely regenerated in place.
+    scratch = tuple(p.as_posix() for p in harvest_dirs(root))
+    for path in changed:
+        posix = str(path).replace("\\", "/")
+        if posix.startswith(f"{prefix}/") and not any(
+                posix == s or posix.startswith(f"{s}/") for s in scratch):
+            return 0
+    return harvested
+
+
 def drop_worktree(root: Path, path: Path) -> None:
     """Remove the checkout, keep the branch. The branch is the deliverable —
     `review/` reads it and Karel merges it; twenty stale checkouts are not.
@@ -2420,6 +2478,11 @@ class Dispatch:
     # blocked/ with the command that unsticks it, never to review/, because a card
     # nothing will come back for must not sit in the lane that means it will) |
     # "reviewed" (the diff reviewer said ok — settle merges and lands it in testing/) |
+    # "pick" (the same, except the attempt produced candidates and installed none of
+    # them, so what is left is the maintainer choosing one: settle merges the diff
+    # exactly as for "reviewed" and then files the card in needs-decision/ with the
+    # pick as its question. `unadopted_artefacts` is the whole test, and its
+    # docstring carries the failure it came out of) |
     # "needs_fix" (the reviewer found a concrete, verifiable defect with one correct
     # answer — settle sends the card back to tasks/ for another attempt, bounded by
     # the same attempt_limit as "failed"; only escalates to needs-decision if the
@@ -2481,6 +2544,13 @@ class Dispatch:
     # the shape — written deterministically by `settle()` from the verdict rather
     # than left to agent discretion (menu-summary-on-card).
     how_to_test: str = ""
+    # How many harvested candidates this attempt produced without installing any —
+    # `unadopted_artefacts`, computed in `dispatch` where both of its inputs are
+    # already in hand, and carried rather than re-derived because the diff it reads
+    # is gone by the time `settle` has merged the branch. Non-zero turns a
+    # "reviewed" into a "pick" (see the outcome list above); zero is every card
+    # whose deliverable is its diff.
+    unadopted: int = 0
 
 
 def _budget_argv(card_budget: float) -> list[str]:
@@ -4854,7 +4924,8 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
         made += f", {card.checker} passed it in {round_no} round(s)"
     return Dispatch("review", str(verdict.get("summary", made))[:300], cost, round_no,
                     honoured_wall, repaired=repaired,
-                    how_to_test=str(verdict.get("how_to_test", "")).strip()[:1000])
+                    how_to_test=str(verdict.get("how_to_test", "")).strip()[:1000],
+                    unadopted=unadopted_artefacts(root, rescued, changed))
 
 
 # --------------------------------------------------------------------------
@@ -6005,6 +6076,10 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
       carrying the finding, bounded by the same attempt_limit as an ordinary
       `failed` retry.
     * `reviewed` — the reviewer said `ok`; settle merges and lands it in testing/.
+    * `pick` — the reviewer said `ok` (or there was no diff to show it) *and* the
+      attempt left candidates that nobody installed; settle merges whatever diff
+      there is and files the card in needs-decision/ asking which candidate to
+      adopt. `unadopted_artefacts` carries the reasoning.
     * `review` (unchanged from the input) — **a review is still owed and can
       still be had.** Either the card is artefact-only (art: no commit to review,
       and Karel is its reviewer) or the window closed before a verdict was
@@ -6041,10 +6116,21 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
              f"{REVIEWER_AGENT} for {card.id}; its review is still owed")
         return result
 
-    # Nothing to review as a diff: an artefact-only card (art) has no commit on
-    # its branch, and its human gate is Karel at review/, unchanged (this card
-    # "does not change how art review works"). A dead branch lands here too.
+    # Nothing to review as a diff: an artefact-only card has no commit on its
+    # branch, and its human gate is the maintainer, not a diff reviewer. A dead
+    # branch lands here too.
+    #
+    # Which lane that gate sits in is the one thing that changed on 2026-09-08. An
+    # attempt whose candidates are all still uninstalled owes a *pick*, and
+    # `needs-decision/` is the lane that says so; `review/` means "queued for
+    # Claude", and filing a human's decision there is the complaint `blocked/` was
+    # created for, arriving by a fifth road. An artefact-only card with nothing
+    # unadopted — everything it made is already installed — has no question left
+    # and keeps the old behaviour.
     if not branch_has_commits(root, base, branch):
+        if result.unadopted:
+            return Dispatch("pick", result.detail, result.cost_usd, result.rounds,
+                            result.wall, unadopted=result.unadopted)
         return result
 
     try:
@@ -6123,8 +6209,16 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
                         f"in `.ai/runs/{card.id}/attempt-{card.attempts}/`.",
                         total, result.rounds, wall)
     if called == "ok":
-        return Dispatch("reviewed", str(verdict.get("notes", "reviewed ok"))[:300],
-                        total, result.rounds, wall, how_to_test=result.how_to_test)
+        # `ok` on the diff is not the same claim as "this card is finished" when the
+        # attempt's real output never entered the diff. A reviewer looking at
+        # `stun-grenade-visuals` said `ok` and was right to — the tooling commit was
+        # sound — and reasoned in its own notes that "`verify: play` means he sees it
+        # at testing/", which is exactly the inference `unadopted_artefacts` now
+        # makes for it instead of leaving to whoever reads the card next.
+        return Dispatch("pick" if result.unadopted else "reviewed",
+                        str(verdict.get("notes", "reviewed ok"))[:300],
+                        total, result.rounds, wall, how_to_test=result.how_to_test,
+                        unadopted=result.unadopted)
     # The reviewer ran to completion and wrote nothing this can route on — no
     # verdict file, an unparseable one, a verdict naming none of the three words,
     # a timeout, a worktree that would not cut, or no CLI on this host at all
@@ -6350,6 +6444,48 @@ def _card_text_on_branch(root: Path, branch: str, relpath: str) -> str | None:
     """
     done = _git(root, "show", f"{branch}:{relpath}")
     return done.stdout if done.returncode == 0 else None
+
+
+def _park_for_pick(root: Path, card: board.Card, result: Dispatch,
+                   *, merged_from: str = "", integration: str = "") -> str:
+    """File a card whose candidates are waiting to be chosen between, and say so.
+
+    The `pick` half of `settle`'s landing (`unadopted_artefacts`): the attempt is
+    over and whatever diff it had is already on the integration branch, but its
+    real output is a set of candidates in the run directory that nobody has
+    adopted. That is a question, so the card goes to `needs-decision/` carrying
+    one — and `after_answer: tasks`, because answering it does not reshape the
+    card, it releases the second pass that installs the pick.
+
+    The question is written in the shape `decide.parse` reads, so the panel's
+    answer form and the morning digest both offer the options rather than only
+    quoting the prose around them.
+    """
+    attempt = card.attempts
+    count = result.unadopted
+    card.write_section(
+        "Question",
+        f"**{count} candidate(s) were produced and none of them installed**, so what "
+        f"this card is waiting on is a choice, not a play-through — there is nothing "
+        f"in the program yet to exercise.\n\n"
+        f"They are in `{(RUNS / card.id / f'attempt-{attempt}' / 'artefacts').as_posix()}`, "
+        f"and the Command Center's candidates section shows them side by side with "
+        f"whatever the `{card.checker or 'checker'}` said about each. Picking one there "
+        f"records it as the answer to this question.\n\n"
+        f"Answering sends the card back to `tasks/` for a second pass that installs the "
+        f"pick and wires it up; it reaches `testing/` after that, once there is "
+        f"something on screen to look at.\n\n"
+        f"- Adopt one of the candidates — name it, or pick it in the Command Center\n"
+        f"- None of them are right — re-roll, and say what to change\n")
+    card.write({"after_answer": board.AFTER_ANSWER_TASKS})
+    # Same reopening as the `parked` and `needs_decision` paths — see `decide.reopen`.
+    card.text = decide.reopen(card.text)
+    textio.write_text_lf(card.path, card.text)
+    board.move(root, card, "needs-decision")
+    landed = (f", rebased {merged_from} onto {integration} and merged"
+              if merged_from else ", nothing to merge")
+    return (f"{card.id}: → needs-decision/ ({count} candidate(s) produced, none "
+            f"installed{landed})")
 
 
 def settle(root: Path, card_id: str, result: Dispatch) -> str:
@@ -6667,7 +6803,15 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
         board.move(root, card, "needs-decision")
         return f"{card_id}: → needs-decision/ (reviewer flagged a decision)"
 
-    if result.outcome == "reviewed":
+    # `pick` rides the `reviewed` path deliberately: it is the same landing — the
+    # same rebase, the same conflict escalation, the same branch deletion — and
+    # only the final lane differs. Its diff merges *before* the card parks, which
+    # is the whole reason it is not simply a `needs_decision`: a card that parks
+    # with commits still on its branch is cold-started on the next attempt, and
+    # `prepare_worktree` shunts that branch aside as a rescue ref rather than
+    # continuing it. The tooling this attempt wrote would then be reachable but
+    # unlanded, and the second pass would have to write it again.
+    if result.outcome in ("reviewed", "pick"):
         branch = branches.work_branch(card_id, card.fields.get("branch", ""))
         integration = default_base(root)
         # The host's `publish_remote`, resolved here rather than inside
@@ -6675,8 +6819,15 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
         # step stays a function of its arguments. Empty on a host that never
         # opted into pushing, and then nothing is deleted on any remote.
         remote = str(host_setting(root, "publish_remote", "")).strip()
+        if result.outcome == "pick" and not branch_has_commits(root, integration, branch):
+            # An artefact-only attempt: its entire output is the candidates, so
+            # there is no diff to land and nothing for the merge machinery to do.
+            return _park_for_pick(root, card, result)
         merged, why = rebase_and_merge(root, card, branch, integration, remote=remote)
         if merged:
+            if result.outcome == "pick":
+                return _park_for_pick(root, card, result, merged_from=branch,
+                                      integration=integration)
             # Written before the move, so the card carries its scenario into the
             # lane rather than arriving there bare — the same ordering, and for the
             # same reason, as `## Summary` on the `review` branch above.

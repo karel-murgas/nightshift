@@ -265,7 +265,14 @@ def drain(root: Path, base: str, *, card_id: str = "", limit: int = 0,
                                         how_to_test=_how_to_test(card, branch)),
             base, card_budget, test_timeout)
 
-        if reviewed.outcome in ("reviewed", "needs_fix", "needs_decision",
+        # `pick` is accepted for completeness rather than because this pass can
+        # produce one: the synthetic `Dispatch` above carries `unadopted=0` (the
+        # attempt's diff is long gone, and so may its harvested artefacts be), so
+        # `review_stage` never reaches that branch from here. A card whose
+        # candidates are waiting on a pick is filed in needs-decision/ by the
+        # dispatch that made them, which is the point of the outcome — it never
+        # reaches `review/` for this pass to find.
+        if reviewed.outcome in ("reviewed", "pick", "needs_fix", "needs_decision",
                                 "unreviewable"):
             landed = runner.settle(root, card.id, reviewed)
             state = (REVIEWED if reviewed.outcome == "reviewed"

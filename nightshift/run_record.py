@@ -77,7 +77,12 @@ KEEP = 30
 # ambiguity already and nothing distinguishes them there either. The board-lane
 # section of the digest (not this file) is what actually shows a card now sitting
 # in needs-decision/, regardless of how the dispatch that put it there was logged.
-DECISION_OUTCOMES = frozenset({"parked", "needs_decision"})
+# `pick` is a decision even though the diff landed (`runner.unadopted_artefacts`):
+# the attempt produced candidates and installed none, so the card is in
+# needs-decision/ waiting to be told which one. Reporting it as landed would put
+# it in the digest’s "these are done" list, which is the misreport the outcome was
+# introduced to stop.
+DECISION_OUTCOMES = frozenset({"parked", "needs_decision", "pick"})
 LANDED_OUTCOMES = frozenset({"review", "reviewed"})
 FAILED_OUTCOMES = frozenset({"failed"})
 
