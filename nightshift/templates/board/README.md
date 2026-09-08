@@ -77,6 +77,15 @@ a re-lane request, and the next reconcile pulls the card back.
   scoping and the card must be rewritten around it, `tasks` when the card is already
   scoped and the answer settles one point inside it. Two different things end up in
   this lane and they leave it by opposite routes; the field is which.
+
+  A third route arrives here without anyone parking anything: a card whose attempt
+  produced **candidates and installed none of them** — a generator writing into a
+  `[worker].harvest_dirs` scratch dir. Nothing it made is in the program, so there is
+  nothing to exercise and nothing in the diff that carries the work; what is owed is a
+  pick. The runner files it here with the candidates as its question and
+  `after_answer: tasks`, the Command Center shows them side by side, and the pass that
+  answering releases installs the pick. Only that pass reaches `testing/`.
+  `runner.unadopted_artefacts` is the rule.
 - **`review/`** — gates green, awaiting Claude review, or waiting on a sibling card.
 - **`blocked/`** — reviewed `ok`, work finished, and the branch will not land without a
   person. Almost always a rebase conflict the `merge-resolver` agent tried and declined; the
@@ -125,8 +134,9 @@ non-zero** rather than quietly doing nothing.
 any time you wonder whether the board is in a fit state.
 
 A real run takes cards from `tasks/` only, one worktree and branch (`ai/<id>`) each, and
-files the result: gates green → `review/`, worker parked it → `needs-decision/`, gates red
-→ retried up to three times, then `failed/`. It commits the board at the end.
+files the result: gates green → `review/`, worker parked it → `needs-decision/`, candidates
+produced and none installed → `needs-decision/` too, gates red → retried up to three times,
+then `failed/`. It commits the board at the end.
 
 - **Stop a run: create `.ai/STOP`.** The runner exits at the top of the loop, mid-run
   included — and while it is sleeping out a usage limit, which it checks for every minute

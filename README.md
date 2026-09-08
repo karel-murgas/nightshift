@@ -406,8 +406,9 @@ always says why and exits non-zero rather than doing nothing quietly.
 
 A real run takes cards from `tasks/` only, one worktree and branch per card,
 and files the result: gates green → `review/`, worker parked it →
-`needs-decision/`, gates red → retried up to the failure limit, then
-`failed/`. It commits the board at the end. **Stop a run: create `.ai/STOP`**
+`needs-decision/`, an attempt that produced candidates and installed none of
+them → `needs-decision/` too, for the pick, gates red → retried up to the
+failure limit, then `failed/`. It commits the board at the end. **Stop a run: create `.ai/STOP`**
 — the runner checks for it every minute, mid-run included, even while sleeping
 out a usage limit.
 
