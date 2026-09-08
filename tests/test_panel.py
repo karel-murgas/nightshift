@@ -4803,3 +4803,91 @@ def test_picking_without_a_declared_attributor_is_refused_but_keeps_the_pick(ser
     assert panel.read_image_picks(root) == {"arty": rel}
     assert "## Thread" not in (root / "Board" / "needs-decision" / "arty.md").read_text(
         encoding="utf-8")
+
+
+def test_the_decide_page_shows_that_cards_own_candidates(server):
+    """The gap the branch exists for, in miniature: `_park_for_pick`'s question
+    says "N candidates were produced and none installed", and reading that with
+    nothing on screen to look at is the friction parking the card removed."""
+    base, root = server
+    _parked(root, "arty")
+    _harvest_images(root, "arty", 1, shots=["cand_a", "cand_b"], size=(48, 64),
+                    verdict="pass", best="cand_b.png", notes="cand_b keeps the silhouette.")
+
+    status, text = _get(base, "decide/arty")
+
+    assert status == 200
+    assert "<h3>Image candidates" in text
+    # The images themselves, not `class="shot"`: `class="shot-name"` and
+    # `class="shots"` both start with it, and a `best` shot is `class="shot best"`.
+    assert text.count('<img src="/image/.ai/runs/arty/attempt-1/') == 2
+    assert "48x64" in text
+    assert "checker&#x27;s pick" in text
+    assert "cand_b keeps the silhouette." in text
+    assert "/api/image/pick" in text
+
+
+def test_the_decide_page_has_no_candidate_block_for_a_card_with_no_artefacts(server):
+    """Absent, not an empty heading — the same rule the Run section holds, and
+    the state every ordinary parked card is in."""
+    base, root = server
+    _parked(root, "forky")
+
+    status, text = _get(base, "decide/forky")
+
+    assert status == 200
+    # The rendered heading, not the bare phrase: `app.html`'s stylesheet carries
+    # an `/* Image candidates */` comment and is inlined into every page.
+    assert "<h3>Image candidates" not in text
+    assert "/api/image/pick" not in text
+
+
+def test_the_decide_page_does_not_leak_another_cards_candidates(server):
+    base, root = server
+    _parked(root, "arty")
+    _harvest_images(root, "arty", 1, shots=["mine"])
+    _harvest_images(root, "someone-else", 1, shots=["theirs"])
+
+    _, text = _get(base, "decide/arty")
+
+    assert "mine" in text
+    assert "theirs" not in text
+
+
+def test_a_pick_made_on_the_decide_page_is_visible_on_the_next_render(server):
+    """`decide/` is in the client's `REFRESHABLE_PREFIXES`, so a successful POST
+    re-fetches this page 400 ms later. Both halves of the click must show up in
+    that render: the chosen shot as `Picked`, and the answer under `Already on
+    record` — the block that exists because this page was once the one place on
+    the board where you could not see your own answer."""
+    base, root = server
+    _parked(root, "arty")
+    directory = _harvest_images(root, "arty", 1, shots=["cand_a", "cand_b"])
+    rel = (directory / "cand_b.png").relative_to(root).as_posix()
+
+    status, data = _post(base, "api/image/pick", {"card": "arty", "rel": rel})
+    assert status == 200, data
+
+    _, text = _get(base, "decide/arty")
+    assert ">Picked<" in text
+    assert text.count(">Pick<") == 1
+    assert "Already on record" in text
+    assert "Adopt <code>cand_b.png</code>" in text
+
+
+def test_a_card_with_only_the_diff_reviewers_verdict_reads_as_no_checker_verdict(server):
+    """An ordinary code card declares no `checker:`, so the only `review-*.json`
+    in its run dir is the *diff* reviewer's judgement of the branch. Rendering
+    that prose over a row of sprites would attribute an opinion about Python to
+    an image nobody looked at."""
+    base, root = server
+    _parked(root, "arty")
+    _harvest_images(root, "arty", 1, shots=["cand_a"])
+    (root / panel.RUNS / "arty" / "attempt-1" / "review-verdict.json").write_text(
+        json.dumps({"verdict": "ok", "notes": "the diff is fine, ship it"}),
+        encoding="utf-8", newline="")
+
+    _, text = _get(base, "decide/arty")
+
+    assert "no checker verdict on disk" in text
+    assert "the diff is fine" not in text

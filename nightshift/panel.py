@@ -3492,10 +3492,31 @@ def _image_section(ctx: Context) -> str:
     `notes` are the fifteen-second version of the decision, not a filter: "d
     drifts toward cyan" is a reason to look at d, not a reason to hide it.
     """
-    groups = ctx.images
-    if not groups:
+    blocks, total = _image_blocks(ctx.root, ctx.images)
+    if not blocks:
         return ""
-    picks = read_image_picks(ctx.root)
+    return _section("Image candidates", total, blocks,
+                    note="What a run generated but nobody has looked at yet. "
+                         "Picking one answers the card's question.",
+                    sec_id="images")
+
+
+def _image_blocks(root: Path, groups: list[ImageGroup]) -> tuple[str, int]:
+    """`(markup, shot count)` for a list of image groups — the one renderer, used
+    by both surfaces that show candidates.
+
+    **One function on purpose.** These groups are drawn twice: on the Run page
+    ("what did the night produce", every card) and on `/decide/<card>` (the one
+    card whose question they are the answer to). A second copy of this markup
+    would drift — and the drift would be invisible, because each page renders
+    correctly on its own and only a person holding both in their head would
+    notice the Pick button on one of them had stopped saying what the other's
+    does.
+
+    Empty markup for an empty list, which is what lets both callers keep the
+    absent-not-empty rule with one `if`.
+    """
+    picks = read_image_picks(root)
     blocks = []
     total = 0
     for group in groups:
@@ -3532,10 +3553,38 @@ def _image_section(ctx: Context) -> str:
         body.append(f'<div class="shots">{"".join(shots)}</div>')
         blocks.append(_group(f"{group.card} attempt {group.attempt} — {group.rel_dir}")
                       + _row(marker="&#9635;", body="".join(body)))
-    return _section("Image candidates", total, "".join(blocks),
-                    note="What a run generated but nobody has looked at yet. "
-                         "Picking one answers the card's question.",
-                    sec_id="images")
+    return "".join(blocks), total
+
+
+def _decide_images(root: Path, card_id: str) -> str:
+    """This card's own harvested candidates, for the page where its question is
+    read and its answer is typed.
+
+    **The gap this closes is the complaint in miniature.** `_park_for_pick`
+    writes a question that says "N candidates were produced and none installed";
+    without this, reading it here and then having to go to another page to see
+    what it is *about* is exactly the friction the parking was meant to remove.
+    Same groups, same renderer, filtered to one card — the Run page keeps its
+    own, wider view.
+
+    Empty string when this card harvested no images, so an ordinary parked card
+    is unchanged: absent, not an empty heading.
+
+    **An `<h3>`, not a `_section`.** `render_document` puts everything inside one
+    `<div class="doc">` within one `<section>`, so a nested `_section` would sit
+    under `.doc h2`'s rules and read as a page-within-a-page. This matches the
+    "Already on record" block a few lines down, which is the same kind of thing:
+    a labelled part of one document. The *candidates* themselves go through the
+    shared `_image_blocks`, which is where the drift would have been.
+    """
+    groups = [g for g in scan_image_candidates(root) if g.card == card_id]
+    blocks, total = _image_blocks(root, groups)
+    if not blocks:
+        return ""
+    return (f'<h3>Image candidates <span class="count">{total}</span></h3>'
+            f'<p class="note">Picking one records it as this card\'s answer, '
+            f'below. The card stays here until you send it on.</p>'
+            f'<div class="rows">{blocks}</div>')
 
 
 def _render_run(ctx: Context) -> str:
@@ -4383,6 +4432,13 @@ def render_decide(root: Path, card_id: str) -> str:
     question = board.section(card.text, "Question")
     if question:
         blocks.append(f'<div class="doc">{markdown(question)}</div>')
+
+    # Directly under the question, because on an artefact card it *is* the
+    # question: `runner._park_for_pick` writes "N candidates were produced and
+    # none of them installed", and reading that with nothing on screen to look at
+    # is the friction parking the card was supposed to remove. Absent on every
+    # other card, which is all of them until a run harvests images.
+    blocks.append(_decide_images(root, card.id))
 
     # Shown before the picker, not after: this page used to be the one place on the
     # board where you could not see your own answer once you had given it — the

@@ -442,6 +442,10 @@
   /* The chips stack under a 7.5rem column rather than running off it. */
   .shot .meta { margin-top: 0; flex-direction: column; align-items: flex-start; gap: 0.1rem; }
   .shot .acts { justify-content: flex-start; }
+  /* The same strip on a decide page, where it lives inside `.doc` — a box whose
+     measure is set for prose. Comparing sprites is not reading, so it takes the
+     document's side padding back and runs the full width of the panel. */
+  .doc .rows { margin: 0 -1.5rem; }
 
   .acts { display: flex; gap: 0.4rem; flex-wrap: wrap; justify-content: flex-end; }
 
