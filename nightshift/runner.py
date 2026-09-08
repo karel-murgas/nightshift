@@ -1780,7 +1780,7 @@ def unadopted_artefacts(root: Path, harvested: int, changed: Iterable[str]) -> i
     and until 2026-09-08 reached `testing/` anyway: `stun-grenade-visuals` put
     four blue grenade icons in `assets/.tmp/`, nothing in `assets/items/`, and
     asked Karel to go and look at a picture that was not in the game. His answer:
-    *"the card is not ready. It should have ended in needs-decision and give me a
+    *"the card is not ready. It should ended in needs decision and give me a
     way to show and pick these results. It should end up in testing only after it
     is wired up in game."* `verify:` could not express that, and neither the
     checker nor the diff reviewer is positioned to notice — both had said `pass`
