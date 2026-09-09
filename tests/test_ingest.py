@@ -315,6 +315,78 @@ def test_scribe_covers_both_writable_buckets(tmp_path: Path,
     assert set(scribed) == {"alpha.md", "beta.md"}
 
 
+def _card_as_chore(root: Path, note: str) -> str:
+    """A scribe that writes `kind: chore`, whatever the note was routed."""
+    stem = _card_the_note(root, note)
+    path = root / "Board" / "tasks" / f"{stem}.md"
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        "recipe: none\n", "recipe: none\nkind: chore\nsurface: combat\n"),
+        encoding="utf-8")
+    return stem
+
+
+def test_a_scribe_that_overrules_the_route_says_so_on_the_card_line(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+    """Two notes classified the same way became two different kinds of card, and
+    nothing anywhere said why.
+
+    Karel, 2026-09-09: *"Last classifier log say both cards were chore, but one is
+    under chores and one under tasks."* Both routes dispatch the same scribe with
+    the same prompt and its charter tells it to overrule a wrong `route:` — which
+    is right, it has read the whole note — but the log reported the route and then
+    the card id, and the reader had to reconcile the Chores section against a run
+    log that had promised a batch.
+    """
+    root = _repo(tmp_path, alpha="a")
+    _routes(monkeypatch, {"alpha.md": "chore"})
+    assert ingest.main(["--root", str(root), "--scribe"]) == 0
+
+    out = capsys.readouterr().out
+    assert "-> alpha (route said chore, alpha is a full card" in out
+    assert "overruled it" in out
+
+
+def test_the_other_direction_is_reported_too(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+    """A `scribe`-routed note the scribe decided was a one-prompter after all.
+
+    The same disagreement and the same cost — the run log promises a card with its
+    own branch, suite and reviewer, and the batch takes it instead.
+    """
+    root = _repo(tmp_path, alpha="a")
+    _routes(monkeypatch, {"alpha.md": "scribe"}, effect=_card_as_chore)
+    assert ingest.main(["--root", str(root), "--scribe"]) == 0
+
+    assert "-> alpha (route said scribe, alpha is `kind: chore`" in capsys.readouterr().out
+
+
+def test_a_card_that_matches_its_route_gets_no_note(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+    """The line stays bare when the two agree, which is the ordinary case — a note
+    on every card would be noise nobody reads, and this one has to be readable."""
+    root = _repo(tmp_path, alpha="a")
+    _routes(monkeypatch, {"alpha.md": "chore"}, effect=_card_as_chore)
+    assert ingest.main(["--root", str(root), "--scribe"]) == 0
+
+    out = capsys.readouterr().out
+    assert "    -> alpha\n" in out
+    assert "overruled" not in out
+
+
+def test_the_overrule_reaches_the_panel_roster(tmp_path: Path,
+                                               monkeypatch: pytest.MonkeyPatch, capsys):
+    """It rides on the `->` line on purpose: `parse_progress` reads that line's
+    tail as the roster's detail column, so the panel says it and not only the log."""
+    root = _repo(tmp_path, alpha="a")
+    _routes(monkeypatch, {"alpha.md": "chore"})
+    assert ingest.main(["--root", str(root), "--scribe"]) == 0
+
+    progress = ingest.parse_progress(capsys.readouterr().out)
+    done = [i for i in progress.items if i.state == "done"]
+    assert len(done) == 1
+    assert "route said chore" in done[0].detail
+
+
 def test_an_inline_note_is_carded_without_a_scribe_dispatch(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """`inline` costs no agent, and it does not leave the note in the lane either.

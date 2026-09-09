@@ -4431,11 +4431,6 @@ def _harvest_images(root: Path, card: str, attempt: int, *, shots: list[str] | N
     return directory
 
 
-def _image_ctx(root: Path) -> panel.Context:
-    return panel.Context(root=root, rail=panel.read_rail(root), base="main",
-                         images=panel.scan_image_candidates(root))
-
-
 def test_scan_image_candidates_is_empty_with_no_runs_dir(tmp_path):
     root = _repo(tmp_path)
     assert panel.scan_image_candidates(root) == []
@@ -4619,20 +4614,20 @@ def test_resolve_image_path_refuses_a_missing_file(tmp_path):
         panel.resolve_image_path(root, ghost)
 
 
-def test_image_section_is_absent_with_nothing_harvested(tmp_path):
-    """No harvested images means no section at all, not an empty heading — the
+def test_candidates_are_absent_with_nothing_harvested(tmp_path):
+    """No harvested images means no block at all, not an empty heading — the
     same rule `_audio_section` holds, and for the same reason."""
     root = _repo(tmp_path)
-    assert panel._image_section(_image_ctx(root)) == ""
+    assert panel._decide_images(root, "card-x") == ""
 
 
-def test_image_section_puts_every_candidate_side_by_side_with_its_size(tmp_path):
+def test_candidates_sit_side_by_side_with_their_size(tmp_path):
     root = _repo(tmp_path)
     _harvest_images(root, "card-x", 1, shots=["cand_a", "cand_b"], size=(48, 64))
 
-    html = panel._image_section(_image_ctx(root))
+    html = panel._decide_images(root, "card-x")
 
-    assert "<h2>Image candidates</h2>" in html
+    assert "<h3>Image candidates" in html
     assert 'class="shots"' in html, "candidates must sit in one comparison row"
     assert html.count('class="shot"') == 2
     assert html.count('<img src="/image/.ai/runs/card-x/attempt-1/') == 2
@@ -4640,12 +4635,12 @@ def test_image_section_puts_every_candidate_side_by_side_with_its_size(tmp_path)
     assert "cand_a" in html and "cand_b" in html
 
 
-def test_image_section_shows_the_checker_notes_and_chips_its_pick(tmp_path):
+def test_candidates_show_the_checker_notes_and_chip_its_pick(tmp_path):
     root = _repo(tmp_path)
     _harvest_images(root, "card-x", 1, shots=["cand_a", "cand_b"], verdict="pass",
                     best="cand_b.png", notes="cand_b keeps the silhouette.")
 
-    html = panel._image_section(_image_ctx(root))
+    html = panel._decide_images(root, "card-x")
 
     assert "checker: pass" in html
     assert "cand_b keeps the silhouette." in html
@@ -4653,23 +4648,23 @@ def test_image_section_shows_the_checker_notes_and_chips_its_pick(tmp_path):
     assert html.count('class="shot best"') == 1
 
 
-def test_image_section_says_so_when_no_checker_verdict_is_on_disk(tmp_path):
+def test_candidates_say_so_when_no_checker_verdict_is_on_disk(tmp_path):
     root = _repo(tmp_path)
     _harvest_images(root, "card-x", 1, shots=["cand_a"])
 
-    html = panel._image_section(_image_ctx(root))
+    html = panel._decide_images(root, "card-x")
 
     assert "no checker verdict on disk" in html
     assert "checker&#x27;s pick" not in html
 
 
-def test_image_section_marks_the_shot_already_picked(tmp_path):
+def test_candidates_mark_the_shot_already_picked(tmp_path):
     root = _repo(tmp_path)
     _harvest_images(root, "card-x", 1, shots=["cand_a", "cand_b"])
     group = panel.scan_image_candidates(root)[0]
     panel.write_image_pick(root, group.card, group.shots[1].rel)
 
-    html = panel._image_section(_image_ctx(root))
+    html = panel._decide_images(root, "card-x")
 
     assert ">Picked<" in html
     assert html.count(">Pick<") == 1, "only the unpicked candidate still offers a Pick"
@@ -4683,23 +4678,26 @@ def test_the_shot_style_upscales_with_nearest_neighbour(tmp_path):
     assert ".shot img" in css
 
 
-def test_the_run_page_shows_no_image_section_with_nothing_harvested(server):
-    base, _ = server
-    _, text = _get(base, "run")
-    # The rendered heading, not the bare phrase: `app.html`'s own stylesheet
-    # carries a `/* Image candidates */` comment, and asserting on the substring
-    # made this test pass only until the CSS was written.
-    assert "<h2>Image candidates</h2>" not in text
+def test_the_run_page_never_lists_image_candidates(server):
+    """The Run page answers "what happened last night" and nothing else.
 
-
-def test_the_run_page_lists_a_harvested_candidate(server):
+    It used to draw every group `.ai/runs/` still held, for every card, with no
+    tie to a card actually waiting on a choice — so a card answered weeks ago
+    and long since in `done/` kept its candidates there forever, alongside the
+    intermediate `raw/` and `.tmp/` harvest dirs (Karel, 2026-09-09: *"the run
+    summary is filled with images … I don't think this belongs in run summary"*).
+    They live on `/decide/<card>`, where the question they answer is.
+    """
     base, root = server
     _harvest_images(root, "card-x", 1, shots=["cand_a"], verdict="pass",
                     best="cand_a.png", notes="ship it")
     _, text = _get(base, "run")
-    assert "<h2>Image candidates</h2>" in text
-    assert "cand_a" in text
-    assert "ship it" in text
+    # The rendered heading, not the bare phrase: `app.html`'s own stylesheet
+    # carries a `/* Image candidates */` comment, and asserting on the substring
+    # made the older test pass only until the CSS was written.
+    assert "<h2>Image candidates</h2>" not in text
+    assert "cand_a" not in text
+    assert "ship it" not in text
 
 
 def test_the_image_route_serves_the_actual_bytes(server):

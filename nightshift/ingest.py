@@ -682,6 +682,52 @@ class Wrote:
         return "no card appeared and the note is untouched - nothing happened"
 
 
+#: What the two writable routes claim the card's `kind:` will be, so a card that
+#: came out the other way can be spotted without re-deriving the mapping at the
+#: one site that reports it.
+_ROUTE_KIND = {"chore": board.KIND_CHORE, "scribe": ""}
+
+
+def overruled(root: Path, carded: list[str], route: str) -> str:
+    """How the written card's `kind:` disagrees with the route, or "" if it does not.
+
+    **The route is advice and the scribe's `kind:` is the decision, and until
+    2026-09-09 nothing anywhere said so out loud.** Both routes dispatch the same
+    agent with the same prompt (`WRITABLE_ROUTES`), and its charter tells it to
+    read the note's `route:` as a hint and overrule it when it is wrong — which is
+    right, because it is the one actor that has read the whole note. But the
+    overrule left no trace: the run log said `routed: grenades-art.md -> chore`
+    and then `-> grenades-art`, the card came out a full card, and the two
+    artefacts contradicted each other with nothing between them to explain it.
+    Karel, 2026-09-09: *"Last classifier log say both cards were chore, but one is
+    under chores and one under tasks."* Two notes, one classification, two
+    different kinds of card, and the board was right both times.
+
+    So the disagreement is reported where the decision was reported. Nothing is
+    corrected — the scribe's answer stands, because it is the better-informed one
+    — and nothing is refused: this is a note in the log, and its whole job is that
+    the next person reading it does not have to reconcile the two pages himself.
+
+    A dispatch that wrote several cards (the split the charter allows) is judged
+    on each: one sibling coming out a chore and another not is exactly the case
+    worth seeing, not an inconsistency to flatten into one verdict.
+    """
+    if route not in _ROUTE_KIND:
+        return ""
+    expected = _ROUTE_KIND[route]
+    said = []
+    for ident in carded:
+        card = board.find(root, ident)
+        if card is None or card.kind == expected:
+            continue
+        said.append(f"{ident} is "
+                    + (f"`kind: {card.kind}`" if card.kind else "a full card"))
+    if not said:
+        return ""
+    return (f"route said {route}, {'; '.join(said)} — the scribe read the note and "
+            f"overruled it, which is its call to make")
+
+
 def scribe(decisions: list[Decision], root: Path, *, allow_paid: bool = False,
            model: str = SCRIBE_MODEL,
            timeout: int = SCRIBE_TIMEOUT_S) -> tuple[int, int, int, int]:
@@ -733,7 +779,11 @@ def scribe(decisions: list[Decision], root: Path, *, allow_paid: bool = False,
                     carded=sorted(card_ids(root) - before),
                     consumed=not (lane / decision.note).exists())
         if did.ok:
-            print(f"    -> {', '.join(did.carded)}")
+            # The overrule rides on the `->` line rather than a line of its own,
+            # because `_P_DONE` reads that line's tail as the roster's detail
+            # column — so the panel says it too, and not only the log.
+            note = overruled(root, did.carded, decision.route)
+            print(f"    -> {', '.join(did.carded)}" + (f" ({note})" if note else ""))
             written += 1
             _commit(root, f"{decision.note} carded as {', '.join(did.carded)}")
         else:
@@ -813,7 +863,13 @@ def _commit(root: Path, what: str) -> None:
 ROUTE_HEADINGS: dict[str, tuple[str, str]] = {
     "inline": ("Do now - inline", "Carded straight into tasks/ as `unattended: false`; "
                                   "the lane is empty of these by the time you read it."),
-    "chore": ("Chores - batch overnight", "Thin cards, verified as one batch."),
+    # **A recommendation, not the outcome**, and the blurb has to say so: the
+    # scribe writes `kind:` and may overrule this (`overruled`). A blurb that
+    # promised the batch outright is how one classification produced two
+    # different kinds of card and read as a defect.
+    "chore": ("Chores - batch overnight",
+              "Proposed for a batch, verified as one set — the scribe writes the "
+              "card's `kind:` and may still make it a full card."),
     # Mechanism, not criterion. *Why* a note lands here is the consuming project's
     # classifier charter to define, and it moves: this blurb read "Already
     # elaborated; no investigation" until a project redefined the route as the one
