@@ -6469,7 +6469,7 @@ def _park_for_pick(root: Path, card: board.Card, result: Dispatch,
         f"this card is waiting on is a choice, not a play-through — there is nothing "
         f"in the program yet to exercise.\n\n"
         f"They are in `{(RUNS / card.id / f'attempt-{attempt}' / 'artefacts').as_posix()}`, "
-        f"and the Command Center's candidates section shows them side by side with "
+        f"and this card's own page in the Command Center shows them side by side with "
         f"whatever the `{card.checker or 'checker'}` said about each. Picking one there "
         f"records it as the answer to this question.\n\n"
         f"Answering sends the card back to `tasks/` for a second pass that installs the "

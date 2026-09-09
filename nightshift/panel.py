@@ -837,10 +837,12 @@ class Context:
     #: (a directory walk under `.ai/runs/`, no subprocess) to pay unconditionally
     #: rather than behind a second read path.
     audio: list[AudioGroup] = field(default_factory=list)
-    #: The same, for images. Gathered for the same reason and at the same cost —
-    #: one walk of `.ai/runs/`, plus a 24-byte header read per PNG, which is what
-    #: the dimension chip costs and is cheaper than the page's own git calls.
-    images: list[ImageGroup] = field(default_factory=list)
+    #: Deliberately *not* the same for images. Image candidates are read on the
+    #: one page that is about them — `/decide/<card>`, via `_decide_images` — and
+    #: nowhere else, so gathering them into the shared context would make every
+    #: page pay a walk of `.ai/runs/` plus a header read per PNG for a list only
+    #: one page can use. See `_decide_images` on why the Run page stopped drawing
+    #: them at all.
     decisions: list[board.Card] = field(default_factory=list)
     testing: list[board.Card] = field(default_factory=list)
     review: list[board.Card] = field(default_factory=list)
@@ -1014,7 +1016,6 @@ def read_context(root: Path, *, fetch_freshness: bool = False) -> Context:
         routing=ingest.read_view(root),
         jobs=jobs.read_all(root, limit=JOBS_READ),
         audio=scan_audio_candidates(root),
-        images=scan_image_candidates(root),
     )
 
 
@@ -3464,16 +3465,8 @@ def _audio_section(ctx: Context) -> str:
                     sec_id="audio")
 
 
-def _image_section(ctx: Context) -> str:
-    """Every image a run harvested, side by side and zoomed, with the checker's
-    verdict over the group and a Pick button under each candidate.
-
-    **The section `runner._park_for_pick`'s `## Question` names.** A card that
-    produced candidates and installed none is in `needs-decision/` waiting on a
-    choice, and this is where the choice is made: one click records the pick
-    *and* writes it as the card's answer (`api/image/pick`), after which the
-    existing deliberate second click — "To tasks" on the decide page — releases
-    the pass that installs it.
+def _image_blocks(root: Path, groups: list[ImageGroup]) -> tuple[str, int]:
+    """`(markup, shot count)` for a list of image groups — the candidate strip.
 
     **Zoomed, nearest-neighbour, on a checkerboard.** These are 32x32 pixel-art
     icons; at 1:1 they are a smudge the size of this sentence's full stop, and a
@@ -3483,37 +3476,12 @@ def _image_section(ctx: Context) -> str:
     and a transparent background over a flat panel makes one of the two
     invisible.
 
-    **Absent entirely, not merely empty, when nothing has been harvested** —
-    same rule as `_audio_section`, and for the same reason: `ctx.images` is `[]`
-    in every repo that has never generated art, and a permanent heading over
-    nothing is a heading that trains the eye to skip it.
+    Every candidate in a group is shown, including ones the checker argued
+    against. Its `notes` are the fifteen-second version of the decision, not a
+    filter: "d drifts toward cyan" is a reason to look at d, not a reason to
+    hide it.
 
-    Every candidate is shown, including ones the checker argued against. Its
-    `notes` are the fifteen-second version of the decision, not a filter: "d
-    drifts toward cyan" is a reason to look at d, not a reason to hide it.
-    """
-    blocks, total = _image_blocks(ctx.root, ctx.images)
-    if not blocks:
-        return ""
-    return _section("Image candidates", total, blocks,
-                    note="What a run generated but nobody has looked at yet. "
-                         "Picking one answers the card's question.",
-                    sec_id="images")
-
-
-def _image_blocks(root: Path, groups: list[ImageGroup]) -> tuple[str, int]:
-    """`(markup, shot count)` for a list of image groups — the one renderer, used
-    by both surfaces that show candidates.
-
-    **One function on purpose.** These groups are drawn twice: on the Run page
-    ("what did the night produce", every card) and on `/decide/<card>` (the one
-    card whose question they are the answer to). A second copy of this markup
-    would drift — and the drift would be invisible, because each page renders
-    correctly on its own and only a person holding both in their head would
-    notice the Pick button on one of them had stopped saying what the other's
-    does.
-
-    Empty markup for an empty list, which is what lets both callers keep the
+    Empty markup for an empty list, which is what lets the caller keep the
     absent-not-empty rule with one `if`.
     """
     picks = read_image_picks(root)
@@ -3558,14 +3526,27 @@ def _image_blocks(root: Path, groups: list[ImageGroup]) -> tuple[str, int]:
 
 def _decide_images(root: Path, card_id: str) -> str:
     """This card's own harvested candidates, for the page where its question is
-    read and its answer is typed.
+    read and its answer is typed. **The one place candidates are drawn.**
 
     **The gap this closes is the complaint in miniature.** `_park_for_pick`
     writes a question that says "N candidates were produced and none installed";
     without this, reading it here and then having to go to another page to see
     what it is *about* is exactly the friction the parking was meant to remove.
-    Same groups, same renderer, filtered to one card — the Run page keeps its
-    own, wider view.
+
+    **The Run page used to draw them too, and that was the defect** (Karel,
+    2026-09-09: *"the run summary is filled with images … I don't think this
+    belongs in run summary. In the card parked in needs-decision — great"*). It
+    listed every group `.ai/runs/` still held, for every card, forever: nothing
+    there was keyed to a card that is *waiting on a choice*, so a card answered
+    weeks ago and long since in `done/` kept its candidates on the page, and the
+    intermediate `raw/` and `.tmp/` harvest directories showed up beside the
+    finals as equal candidates. Six of the seven groups on the page had no
+    question behind them. Filtered to one card, that cannot happen: the page
+    exists because the card is parked, and it goes when the card does.
+
+    A cross-card overview may still be worth having, but as its own page with
+    its own cleanup rule — not as a permanent block on the page that answers
+    "what happened last night".
 
     Empty string when this card harvested no images, so an ordinary parked card
     is unchanged: absent, not an empty heading.
@@ -3589,10 +3570,10 @@ def _decide_images(root: Path, card_id: str) -> str:
 
 def _render_run(ctx: Context) -> str:
     record = _latest_record(ctx.root)
-    # Images above audio: an image group is what a card in `needs-decision/` is
-    # actually blocked on, so it is the thing to land on. Audio's own cards
-    # commit a synth fallback and land in `testing/`, so nothing waits on them.
-    out = [_running_section(ctx), _image_section(ctx), _audio_section(ctx)]
+    # **No image candidates here.** They are drawn on `/decide/<card>` and only
+    # there — see `_decide_images` for why a per-card question does not belong on
+    # the page that answers "what happened last night".
+    out = [_running_section(ctx), _audio_section(ctx)]
 
     # When the newest thing that ran wrote no record — an `ingest` pass, a preflight —
     # it goes above the newest record rather than only into the history at the foot of
