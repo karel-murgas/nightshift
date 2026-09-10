@@ -1487,6 +1487,54 @@ def test_backstop_is_a_no_op_when_the_branch_did_not_move(tmp_path):
     assert runner._git(root, "rev-parse", base).stdout.strip() == tip
 
 
+def test_backstop_leaves_a_board_only_commit_alone(tmp_path):
+    """2026-09-10, Dungeoneer: a live session's own Board/ commit landed on
+    `base` while a card was dispatching in the background (the in-place
+    topology), and the backstop discarded it, blaming a worker that had made no
+    git call at all. Board/ is the one root a worker's writable roots already
+    allow on `base` (`_worker_env`), so a commit confined to it is not the
+    wrong-checkout defect and must survive."""
+    root = _repo(tmp_path)
+    base = runner.current_branch(root)
+    tip = runner._git(root, "rev-parse", base).stdout.strip()
+
+    (root / "Board" / "tasks").mkdir(parents=True, exist_ok=True)
+    (root / "Board" / "tasks" / "a-card.md").write_text("a card\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "board: a-card carded"], cwd=root, check=True)
+    moved = runner._git(root, "rev-parse", base).stdout.strip()
+    assert moved != tip
+
+    assert runner.assert_integration_unmoved(root, base, tip) is False
+    assert runner._git(root, "rev-parse", base).stdout.strip() == moved, (
+        "a Board-only commit must not be reset away"
+    )
+    assert (root / "Board" / "tasks" / "a-card.md").exists()
+
+
+def test_backstop_still_resets_when_a_non_board_change_rides_along(tmp_path):
+    """The Board-only exemption is deliberately narrow: one non-board path in
+    the same range is still treated as the wrong-checkout defect, even mixed
+    with a legitimate board commit — the same conservative behaviour as before
+    this exemption existed."""
+    root = _repo(tmp_path)
+    base = runner.current_branch(root)
+    tip = runner._git(root, "rev-parse", base).stdout.strip()
+
+    (root / "Board" / "tasks").mkdir(parents=True, exist_ok=True)
+    (root / "Board" / "tasks" / "a-card.md").write_text("a card\n", encoding="utf-8")
+    (root / "stray.py").write_text("print('wrong checkout')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "mixed: board edit plus stray code"],
+                   cwd=root, check=True)
+    assert runner._git(root, "rev-parse", base).stdout.strip() != tip
+
+    assert runner.assert_integration_unmoved(root, base, tip) is True
+    assert runner._git(root, "rev-parse", base).stdout.strip() == tip
+    assert not (root / "stray.py").exists()
+    assert not (root / "Board" / "tasks" / "a-card.md").exists()
+
+
 def test_check_junit_passes_an_all_green_report(tmp_path):
     ok, why = runner._check_junit(_junit(tmp_path / "j.xml", tests=42))
     assert ok and why == ""

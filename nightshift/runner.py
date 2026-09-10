@@ -4202,22 +4202,48 @@ def _worker_env(root: Path, tree: Path, out_dir: Path) -> dict[str, str]:
 
 
 def assert_integration_unmoved(root: Path, base: str, expected_sha: str) -> bool:
-    """The guarantee behind the fence: a worker must never land a commit on the
+    """The guarantee behind the fence: a worker must never land *code* on the
     shared integration branch. The hook *prevents* the wrong-checkout write; this
     *undoes* one that slipped through anyway (a path the hook could not see, or a
     machine where the hook was not read).
 
     `base` is checked out in the main checkout, so a stray worker commit shows up
-    as `base` having moved past the tip the runner last committed. Reset it back —
-    unconditionally, because the shared branch is never the worker's to advance;
-    the card's own success is still judged on its `ai/<id>` branch, untouched here.
-    A no-op (returns False) when `base` is where the runner left it. No LLM (§12):
-    two `rev-parse`s and, only if they differ, a reset.
+    as `base` having moved past the tip the runner last committed — but so does a
+    live session's own legitimate `Board/` commit landing on `base` while a
+    dispatch runs in the background, which happens whenever the launch checkout
+    is still on the integration branch (`run-the-runner`'s in-place topology).
+    "Did the tip move" alone cannot tell those apart, and conflating them cost a
+    board edit outright: 2026-09-10, Dungeoneer — this reset `test` mid-dispatch
+    and silently discarded a card the interactive session had committed seconds
+    earlier, blaming it on the dispatched worker in the log line below even
+    though that worker had made no git call at all (confirmed from its
+    transcript). Recovered by hand from the reflog; nothing caught it on its own.
+
+    So the reset fires only when something *outside* `board.board_rel(root)`
+    changed between `expected_sha` and now. That is the actual shape of the
+    2026-07-25 defect this guards — a worker landing game or framework code on
+    the shared branch — and `Board/` is already the one root a worker's own
+    writable roots deliberately allow on `base` (`_worker_env`, for its own
+    `## Thread` note). A commit confined to `Board/` is ordinary bookkeeping
+    racing the dispatch window and is left alone; anything else resets `base`
+    back to `expected_sha`, discarding it and any uncommitted files with it — the
+    worktree on `ai/<id>` is a separate checkout and is never touched.
+    A no-op (returns False) when `base` is where the runner left it, or when
+    everything since is confined to `Board/`. No LLM (§12): `rev-parse` plus,
+    only if that differs, a name-only `diff` and, only if that finds a non-board
+    path, a reset.
     """
     if not expected_sha:
         return False
     now = _git(root, "rev-parse", base).stdout.strip()
     if now == expected_sha:
+        return False
+    changed = gitpaths.changed(root, expected_sha, now)
+    board_prefix = board.board_rel(root).as_posix().rstrip("/") + "/"
+    if changed and all(path.startswith(board_prefix) for path in changed):
+        # Everything `base` picked up since dispatch started lives under
+        # `Board/` — not the wrong-checkout defect, so leave it alone rather
+        # than discard someone else's real work for no defect at all.
         return False
     # `reset --hard` on the main checkout discards the stray commit *and* any
     # uncommitted files the worker wrote there — both are the defect, both go. The
