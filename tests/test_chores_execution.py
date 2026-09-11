@@ -540,6 +540,37 @@ def test_a_landed_batch_routes_each_card_by_its_own_verify_field(tmp_path,
     assert "look at seen" in board.find(root, "seen").text
 
 
+def test_a_chore_that_installed_none_of_its_candidates_owes_a_pick(tmp_path,
+                                                                  monkeypatch):
+    """`sound-for-taser` (2026-09-11): four takes harvested, a synth fallback
+    committed in code, nothing under the asset tree — and `_land` read only
+    `verify: play`, so it reached `testing/` asking for a play-through of the
+    stopgap. The pick Karel then made had no parked card to answer, and nothing
+    ever installed it. A chore owes the same pick a full card does."""
+    root = _repo(tmp_path, ("seen", "play", "combat"))
+    manifest = root / ".ai" / "manifest.toml"
+    manifest.write_text(manifest.read_text(encoding="utf-8")
+                        + '\n[worker]\nharvest_dirs = ["myapp/assets/.tmp"]\n',
+                        encoding="utf-8")
+    _git(root, "commit", "-qam", "declare a harvest dir")
+    monkeypatch.setattr(runner, "harvest", lambda *a, **k: 2)
+    _Worker(edits={"seen": _touch("seen")}).install(monkeypatch)
+
+    code, batch = chores.execute(root)
+
+    assert code == 0
+    card = board.find(root, "seen")
+    assert card.lane == "needs-decision"
+    assert "2 candidate(s)" in board.section(card.text, "Question")
+    assert card.fields["after_answer"] == board.AFTER_ANSWER_TASKS
+    # The diff still lands — parking must not strand the tooling the chore wrote.
+    listed = _git(root, "ls-tree", "-r", "--name-only", "development_team").stdout
+    assert "myapp/mod_seen.py" in listed
+    text = (root / chores.OUT).read_text(encoding="utf-8")
+    assert "seen chore" not in text.split("## Check these")[1].split("\n## ")[0]
+    assert "## Waiting on a pick (1)" in text
+
+
 def test_a_landed_chore_has_its_branch_deleted(tmp_path, monkeypatch):
     """A branch is deleted when its work is merged. `-d`, not `-D`: the safe form
     refuses anything not actually merged, which is the check wanted here."""

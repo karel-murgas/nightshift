@@ -1154,7 +1154,15 @@ def scan_audio_candidates(root: Path) -> list[AudioGroup]:
                 if item.is_file() and item.suffix.lower() in AUDIO_EXTS:
                     by_dir.setdefault(item.parent, []).append(item)
             for directory, files in by_dir.items():
-                sound_manifest = _read_json(directory / "candidates.json")
+                rel_dir = directory.relative_to(root).as_posix()
+                mtime = directory.stat().st_mtime
+                raw = _read_json_any(directory / "candidates.json")
+                if isinstance(raw, list):
+                    groups.extend(_groups_from_take_list(
+                        root, card_dir.name, int(match.group(1)), rel_dir, mtime,
+                        files, raw))
+                    continue
+                sound_manifest = raw if isinstance(raw, dict) else {}
                 entries = {str(c.get("id")): c for c in sound_manifest.get("candidates", [])
                           if isinstance(c, dict)}
                 adopted = sound_manifest.get("adopted")
@@ -1163,11 +1171,11 @@ def scan_audio_candidates(root: Path) -> list[AudioGroup]:
                         for f in sorted(files)]
                 groups.append(AudioGroup(
                     card=card_dir.name, attempt=int(match.group(1)),
-                    rel_dir=directory.relative_to(root).as_posix(),
+                    rel_dir=rel_dir,
                     sound=str(sound_manifest.get("sound") or ""),
                     generated=str(sound_manifest.get("generated") or ""),
                     adopted_id=str(adopted.get("id") or "") if isinstance(adopted, dict) else "",
-                    mtime=directory.stat().st_mtime, takes=takes,
+                    mtime=mtime, takes=takes,
                 ))
     by_card: dict[str, list[AudioGroup]] = {}
     for group in groups:
@@ -1176,6 +1184,55 @@ def scan_audio_candidates(root: Path) -> list[AudioGroup]:
     for card in sorted(by_card, key=lambda c: max(g.mtime for g in by_card[c]), reverse=True):
         ordered.extend(sorted(by_card[card], key=lambda g: g.mtime, reverse=True))
     return ordered
+
+
+def _read_json_any(path: Path) -> dict | list | None:
+    """`_read_json` without the dict-only filter — `candidates.json` comes in two
+    shapes, and throwing the second away is how a run's metadata went missing."""
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+
+
+def _groups_from_take_list(root: Path, card: str, attempt: int, rel_dir: str,
+                           mtime: float, files: list[Path], rows: list) -> list[AudioGroup]:
+    """One group per sound out of a *flat* `candidates.json` — a list of take rows,
+    each naming its sound in `name` and its file in `file`.
+
+    That is the shape `audio-asset/SKILL.md` §5's own wording produces ("per take:
+    the `name`, the exact `prompt`, the `seed`…"), and `sound-for-taser`
+    (2026-09-11) wrote exactly it: two sounds, four takes, one directory. Read as a
+    dict it was `{}`, so all four takes landed in one group with no metadata and
+    **one** pick between them — a choice between a firing sound and a hit sound,
+    which is not a choice anyone was asked to make. Split by `name`, each sound gets
+    its own pick; a file with no row keeps the directory as its group, the same
+    fallback a manifest-less directory has.
+
+    The validator's numbers sit nested under `validator` in this shape, so the ones
+    the renderer shows (`ok`, `problems`, duration) are lifted to the top of `meta`.
+    """
+    by_file: dict[str, dict] = {}
+    for row in rows:
+        if isinstance(row, dict) and row.get("file"):
+            by_file[Path(str(row["file"])).stem] = row
+    by_sound: dict[str, list[AudioTake]] = {}
+    for found in sorted(files):
+        row = by_file.get(found.stem, {})
+        meta = dict(row)
+        validator = row.get("validator")
+        if isinstance(validator, dict):
+            meta.setdefault("ok", validator.get("ok"))
+            meta.setdefault("problems", validator.get("problems") or [])
+            if validator.get("out_seconds") is not None:
+                meta.setdefault("seconds", validator["out_seconds"])
+        by_sound.setdefault(str(row.get("name") or ""), []).append(AudioTake(
+            id=found.stem, rel=found.relative_to(root).as_posix(), meta=meta))
+    return [AudioGroup(card=card, attempt=attempt, rel_dir=rel_dir, sound=sound,
+                       generated="", adopted_id="", mtime=mtime, takes=takes)
+            for sound, takes in sorted(by_sound.items())]
 
 
 def read_audio_picks(root: Path) -> dict[str, str]:
@@ -1220,6 +1277,53 @@ def resolve_audio_path(root: Path, rel: str) -> Path:
     if not candidate.is_file():
         raise PanelError(f"{rel} does not exist")
     return candidate
+
+
+def answer_audio_pick(root: Path, card_id: str) -> str:
+    """Write the picks into `card_id`'s `## Thread` once **every** sound its newest
+    attempt produced has one; otherwise say how many are still owed.
+
+    Per sound, not per click: a card that generated a firing sound and a hit sound
+    owes two picks, and answering on the first would release the installing pass
+    with half a decision. Only the newest attempt counts — an older attempt's takes
+    were re-rolled away, and a pick filed under the same sound name from another
+    card's run is not a pick of *these* takes (hence the membership check, not a
+    key lookup alone).
+
+    `""` for a card that is not parked in `needs-decision/`: the pick is still kept,
+    and inventing a lane move from wherever the card is would be exactly what
+    `api/image/pick` refuses to do too. Nothing is copied or installed here — the
+    adoption steps are the project's (`audio-asset/SKILL.md` §5), run by the pass
+    this answer releases.
+    """
+    card = board.find(root, card_id)
+    if card is None or card.lane != "needs-decision":
+        return ""
+    groups = [g for g in scan_audio_candidates(root) if g.card == card_id]
+    if not groups:
+        return ""
+    newest = max(g.attempt for g in groups)
+    picks = read_audio_picks(root)
+    chosen: list[tuple[AudioGroup, str]] = []
+    owed: list[str] = []
+    for group in sorted((g for g in groups if g.attempt == newest), key=lambda g: g.pick_key()):
+        rel = picks.get(group.pick_key(), "")
+        if rel and rel in {t.rel for t in group.takes}:
+            chosen.append((group, rel))
+        else:
+            owed.append(group.sound or group.rel_dir)
+    if owed:
+        return (f"{len(owed)} more sound(s) to pick before the card is answered: "
+                + ", ".join(f"`{name}`" for name in owed))
+    adopt = "; ".join(f"`{Path(rel).name}` for `{g.sound or g.rel_dir}`" for g, rel in chosen)
+    where = sorted({Path(rel).parent.as_posix() for _, rel in chosen})
+    try:
+        return decide.write_answer(
+            root, card_id, [],
+            f"Adopt {adopt} — picked in the Command Center's audio candidates from "
+            + ", ".join(f"`{w}`" for w in where) + ".")
+    except decide.DecideError as exc:
+        raise PanelError(f"the pick is recorded, but the answer was refused: {exc}") from exc
 
 
 # --------------------------------------------------------------------------
@@ -3411,10 +3515,19 @@ def _audio_section(ctx: Context) -> str:
     information Karel needs when deciding whether to re-roll, and hiding it
     would be this page making that call for him.
     """
-    groups = ctx.audio
-    if not groups:
+    blocks, total = _audio_blocks(ctx.root, ctx.audio)
+    if not blocks:
         return ""
-    picks = read_audio_picks(ctx.root)
+    return _section("Audio candidates", total, blocks,
+                    note="What a run generated but nobody has heard yet.",
+                    sec_id="audio")
+
+
+def _audio_blocks(root: Path, groups: list[AudioGroup]) -> tuple[str, int]:
+    """`(markup, take count)` for a list of audio groups — shared by the Run page's
+    section and a parked card's own page (`_decide_audio`), so the two cannot
+    drift the way `_image_blocks` exists to prevent for images."""
+    picks = read_audio_picks(root)
     blocks = []
     total = 0
     for group in groups:
@@ -3460,9 +3573,7 @@ def _audio_section(ctx: Context) -> str:
         when = f" · {group.generated}" if group.generated else ""
         blocks.append(_group(f"{heading} — {group.card} attempt {group.attempt}{when}")
                      + "".join(rows))
-    return _section("Audio candidates", total, "".join(blocks),
-                    note="What a run generated but nobody has heard yet.",
-                    sec_id="audio")
+    return "".join(blocks), total
 
 
 def _image_blocks(root: Path, groups: list[ImageGroup]) -> tuple[str, int]:
@@ -3565,6 +3676,24 @@ def _decide_images(root: Path, card_id: str) -> str:
     return (f'<h3>Image candidates <span class="count">{total}</span></h3>'
             f'<p class="note">Picking one records it as this card\'s answer, '
             f'below. The card stays here until you send it on.</p>'
+            f'<div class="rows">{blocks}</div>')
+
+
+def _decide_audio(root: Path, card_id: str) -> str:
+    """The audio twin of `_decide_images`: this card's own takes, where its pick
+    question is answered. Newest attempt only — `answer_audio_pick` counts only
+    those, and showing a re-rolled attempt's takes beside them would offer picks
+    that can never complete the answer. Empty string when there are none."""
+    groups = [g for g in scan_audio_candidates(root) if g.card == card_id]
+    if not groups:
+        return ""
+    newest = max(g.attempt for g in groups)
+    blocks, total = _audio_blocks(root, [g for g in groups if g.attempt == newest])
+    if not blocks:
+        return ""
+    return (f'<h3>Audio candidates <span class="count">{total}</span></h3>'
+            f'<p class="note">Pick one take per sound. Once every sound has a pick, '
+            f'the picks are recorded as this card\'s answer, below.</p>'
             f'<div class="rows">{blocks}</div>')
 
 
@@ -4420,6 +4549,7 @@ def render_decide(root: Path, card_id: str) -> str:
     # is the friction parking the card was supposed to remove. Absent on every
     # other card, which is all of them until a run harvests images.
     blocks.append(_decide_images(root, card.id))
+    blocks.append(_decide_audio(root, card.id))
 
     # Shown before the picker, not after: this page used to be the one place on the
     # board where you could not see your own answer once you had given it — the
@@ -5143,11 +5273,21 @@ class Handler(BaseHTTPRequestHandler):
             # No dispatch guard and no `paid`: this spends nothing and calls no
             # model — the same posture as `api/answer`, a person recording a
             # decision, not the panel starting anything.
+            #
+            # Like `api/image/pick`, a pick also *answers* the card when it is parked
+            # on the pick question (`runner._park_for_pick`) — before 2026-09-11 it
+            # only wrote the JSON file, so nothing downstream ever learned of it and
+            # `sound-for-taser` sat in `testing/` playing its synth stopgap while
+            # Karel's pick waited in `.ai/audio_picks.json`. The card is read off
+            # the path, not the body: `rel` is already confined to `.ai/runs/<card>/`.
             key = str(body.get("key", ""))
             rel = str(body.get("rel", ""))
-            resolve_audio_path(root, rel)  # raises PanelError on anything bogus
+            resolved = resolve_audio_path(root, rel)  # raises PanelError on anything bogus
             write_audio_pick(root, key, rel)
-            return f"picked {rel!r} for {key!r}"
+            picked = f"picked {rel!r} for {key!r}"
+            card_id = resolved.relative_to((root / RUNS).resolve()).parts[0]
+            answered = answer_audio_pick(root, card_id)
+            return f"{picked} · {answered}" if answered else picked
 
         if path == "api/image/pick":
             # Two effects from one click, and the second is what closes the loop:

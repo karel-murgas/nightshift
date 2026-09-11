@@ -144,6 +144,14 @@ class Outcome:
     #: The worker's scenario, carried from its verdict to the card when the batch
     #: lands. Only the worker that built the thing knows which door it is behind.
     how_to_test: str = ""
+    #: `runner.unadopted_artefacts` for this chore's attempt: candidates harvested,
+    #: none installed. Non-zero means it lands in `needs-decision/` owing a pick,
+    #: whatever its `verify:` says — see `_land`.
+    unadopted: int = 0
+
+    @property
+    def owes_a_pick(self) -> bool:
+        return self.state == "done" and self.unadopted > 0
 
     @property
     def needs_an_eye(self) -> bool:
@@ -151,9 +159,10 @@ class Outcome:
 
         A `review`-verified chore that landed green is *not* on it: the gates and the
         suite were the acceptance. Putting it there anyway is how a checklist gets long
-        enough to stop being read.
+        enough to stop being read. Nor is one that owes a pick: there is nothing
+        installed to look at yet, which is the whole point of `owes_a_pick`.
         """
-        return self.state == "done" and self.verify != "review"
+        return self.state == "done" and self.verify != "review" and not self.owes_a_pick
 
 
 @dataclass
@@ -316,12 +325,22 @@ def report(batch: Batch, now: dt.datetime, *, branch: str = "",
             lines.append("")
 
     landed_quietly = [o for o in batch.outcomes
-                      if o.state == "done" and not o.needs_an_eye]
+                      if o.state == "done" and not o.needs_an_eye and not o.owes_a_pick]
     if landed_quietly:
         lines += [f"## Landed without needing you ({len(landed_quietly)})", "",
                   "`verify: review` - green gates and a green suite were the acceptance.", ""]
         lines += [f"- {o.title or o.card_id}" for o in
                   sorted(landed_quietly, key=lambda o: o.card_id)]
+        lines.append("")
+
+    owed = [o for o in batch.outcomes if o.owes_a_pick]
+    if owed:
+        lines += [f"## Waiting on a pick ({len(owed)})", "",
+                  "Candidates were generated and none installed, so there is nothing in "
+                  "the program to check yet. Pick one on the card's page in "
+                  "`needs-decision/`; the pass that installs it follows.", ""]
+        lines += [f"- **{o.title or o.card_id}** (`{o.card_id}`) - {o.unadopted} "
+                  f"candidate(s)" for o in sorted(owed, key=lambda o: o.card_id)]
         lines.append("")
 
     for state, title, blurb in (
@@ -436,6 +455,7 @@ def run_one(work: Path, card: board.Card, base: str, model: str, *,
     # An item that was in truth too big for a batch is caught where the evidence is:
     # the worker's own bounce above, or the batch suite in phase 2.
     out.state, out.detail = "done", result.detail
+    out.unadopted = result.unadopted
     if note := cost_note(out.turns, out.wall_s):
         print(f"  {card.id}: green ({note})")
     return out, result
@@ -577,15 +597,29 @@ def _land(work: Path, card: board.Card, outcome: Outcome, branch: str,
     carrying the batch checklist's row; `review` has none — a gate, an encoding fix,
     inner wiring — so the gates and the suite were its acceptance and it goes
     straight to `done/`. That is what keeps the checklist short enough to be read.
+
+    **Except a chore that owes a pick**, which goes to `needs-decision/` through the
+    same `runner._park_for_pick` a full card's `settle` uses. Without this, `verify:`
+    was the only thing read here, and `runner.unadopted_artefacts` — computed by the
+    very `dispatch` this chore ran through — was dropped on the floor: on
+    2026-09-11 `sound-for-taser` generated four takes, installed none, and landed
+    in `testing/` asking Karel to play a synth stopgap. He picked a take in the
+    Command Center; nothing was ever parked to receive that pick, so nothing ran
+    to install it.
     """
     card.write({"started": None, "finished": runner._now()})
     card.write_section("Summary", outcome.detail or "landed as part of a chore batch")
-    if card.verify == "play":
-        card.write_section("How to test", outcome.how_to_test or
-                           "The worker recorded no scenario - that is itself a defect on a "
-                           f"`verify: play` card; the diff is on `{branch}`.")
-    lane = "testing" if card.verify == "play" else "done"
-    board.move(work, card, lane)
+    if outcome.owes_a_pick:
+        runner._park_for_pick(work, card, runner.Dispatch(
+            "pick", outcome.detail, unadopted=outcome.unadopted))
+        lane = "needs-decision"
+    else:
+        if card.verify == "play":
+            card.write_section("How to test", outcome.how_to_test or
+                               "The worker recorded no scenario - that is itself a defect "
+                               f"on a `verify: play` card; the diff is on `{branch}`.")
+        lane = "testing" if card.verify == "play" else "done"
+        board.move(work, card, lane)
 
     ref = f"ai/{card.id}"
     runner._delete_remote_branch(work, remote, ref)
@@ -743,7 +777,9 @@ def _record_outcomes(record: run_record.Record, batch: Batch,
         else:
             mapped = _RECORD_OUTCOME.get(state, state)
             if state == "done" and outcome.card_id in landed_ids:
-                mapped = "reviewed"
+                # `pick` is a decision even though the diff landed — the same reading
+                # `run_record.DECISION_OUTCOMES` gives a full card's `_park_for_pick`.
+                mapped = "pick" if outcome.owes_a_pick else "reviewed"
         card = cards.get(outcome.card_id)
         entries.append({
             "card": outcome.card_id,

@@ -4388,6 +4388,113 @@ def test_picking_a_bogus_path_is_refused(server):
     assert "not inside" in data["message"]
 
 
+def _harvest_flat_audio(root: Path, card: str, attempt: int, rows: list[dict]) -> Path:
+    """The *flat* `candidates.json` `sound-for-taser` actually wrote: a list of take
+    rows, each naming its sound in `name` and its file in `file`, the validator's
+    numbers nested under `validator`."""
+    directory = _harvest_audio(root, card, attempt, manifest=False,
+                               takes=[{"id": Path(r["file"]).stem} for r in rows])
+    (directory / "candidates.json").write_text(json.dumps(rows), encoding="utf-8")
+    return directory
+
+
+_TASER_ROWS = [
+    {"name": "taser_fire", "file": "taser_fire_s301.wav", "seed": 301, "prompt": "zap",
+     "validator": {"ok": True, "problems": [], "out_seconds": 0.5}},
+    {"name": "taser_fire", "file": "taser_fire_s302.wav", "seed": 302, "prompt": "zap"},
+    {"name": "taser_hit", "file": "taser_hit_s301.wav", "seed": 301, "prompt": "jolt",
+     "validator": {"ok": False, "problems": ["almost silent"], "out_seconds": 0.4}},
+    {"name": "taser_hit", "file": "taser_hit_s302.wav", "seed": 302, "prompt": "jolt"},
+]
+
+
+def test_a_flat_candidates_list_is_one_group_per_sound(tmp_path):
+    """Read as a dict this shape was `{}`: four takes of two different sounds in
+    one group, no metadata, and one pick between a firing sound and a hit sound."""
+    _harvest_flat_audio(tmp_path, "taser", 1, _TASER_ROWS)
+
+    groups = panel.scan_audio_candidates(tmp_path)
+
+    assert sorted(g.sound for g in groups) == ["taser_fire", "taser_hit"]
+    hit = next(g for g in groups if g.sound == "taser_hit")
+    assert [t.id for t in hit.takes] == ["taser_hit_s301", "taser_hit_s302"]
+    first = hit.takes[0].meta
+    assert first["seed"] == 301
+    assert first["ok"] is False and first["problems"] == ["almost silent"]
+    assert first["seconds"] == 0.4
+
+
+def _pick(base: str, root: Path, directory: Path, key: str, stem: str) -> tuple[int, dict]:
+    rel = (directory / f"{stem}.wav").relative_to(root).as_posix()
+    return _post(base, "api/audio/pick", {"key": key, "rel": rel})
+
+
+def test_an_audio_pick_answers_the_parked_card_once_every_sound_has_one(server):
+    """The loop `sound-for-taser` fell out of: a pick that only wrote
+    `.ai/audio_picks.json` reached no card, so no pass ever installed it. Answered
+    once per card, after the *last* sound is picked — answering on the first would
+    release the installing pass with half a decision."""
+    base, root = server
+    _parked(root, "taser")
+    directory = _harvest_flat_audio(root, "taser", 1, _TASER_ROWS)
+    card = root / "Board" / "needs-decision" / "taser.md"
+
+    status, data = _pick(base, root, directory, "taser_fire", "taser_fire_s301")
+    assert status == 200, data
+    assert "1 more sound(s) to pick" in json.dumps(data)
+    assert "## Thread" not in card.read_text(encoding="utf-8")
+
+    status, data = _pick(base, root, directory, "taser_hit", "taser_hit_s302")
+    assert status == 200, data
+    assert card.is_file(), "answering must not move the card"
+    text = card.read_text(encoding="utf-8")
+    assert "· karel" in text
+    assert "> Adopt `taser_fire_s301.wav` for `taser_fire`; `taser_hit_s302.wav` for `taser_hit`" in text
+
+
+def test_an_audio_pick_for_a_card_that_is_not_parked_records_only_the_pick(server):
+    base, root = server
+    _card(root, "testing", "taser")
+    directory = _harvest_flat_audio(root, "taser", 1, _TASER_ROWS[:1])
+
+    status, data = _pick(base, root, directory, "taser_fire", "taser_fire_s301")
+
+    assert status == 200, data
+    assert "taser_fire" in panel.read_audio_picks(root)
+    assert "## Thread" not in (root / "Board" / "testing" / "taser.md").read_text(
+        encoding="utf-8")
+
+
+def test_a_same_named_pick_from_another_cards_run_does_not_answer(server):
+    """Picks are keyed by sound name, which two cards can share. Another card's
+    `recharge` take is not a pick of *this* card's `recharge` takes."""
+    base, root = server
+    _parked(root, "mine")
+    _harvest_audio(root, "mine", 1, sound="recharge", takes=[{"id": "ours"}])
+    theirs = _harvest_audio(root, "theirs", 1, sound="recharge", takes=[{"id": "other"}])
+
+    status, data = _pick(base, root, theirs, "recharge", "other")
+
+    assert status == 200, data
+    assert "## Thread" not in (root / "Board" / "needs-decision" / "mine.md").read_text(
+        encoding="utf-8")
+
+
+def test_the_decide_page_shows_that_cards_own_audio_takes(server):
+    base, root = server
+    _parked(root, "taser")
+    _harvest_flat_audio(root, "taser", 1, _TASER_ROWS)
+    _harvest_audio(root, "someone-else", 1, sound="beep", takes=[{"id": "theirs"}])
+
+    status, text = _get(base, "decide/taser")
+
+    assert status == 200
+    assert "<h3>Audio candidates" in text
+    assert text.count('src="/audio/.ai/runs/taser/attempt-1/') == 4
+    assert "theirs" not in text
+    assert "/api/audio/pick" in text
+
+
 # --------------------------------------------------------- image candidates
 #
 # `artefact-cards-owe-a-pick`: the visual twin of the audio surface above.
