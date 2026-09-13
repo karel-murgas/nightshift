@@ -276,7 +276,7 @@ def fence_env(root: Path) -> str:
 # beside them.
 def integration_checkout_dir(root: Path) -> str:
     declared = _worker(root).integration_checkout_dir
-    return declared or f".{_project_name(root)}-integration"
+    return declared or _manifest.sibling_dir_name(_project_name(root), "integration")
 
 # Dollar caps, **off by default since 2026-07-23**. On a subscription plan
 # `total_cost_usd` is the API-equivalent price of the tokens rather than money
@@ -1009,7 +1009,7 @@ def worktree_root(root: Path) -> Path:
     `card_schema` and the digest, and every card would appear N+1 times. Putting
     it beside the repo costs one `..` and removes a whole class of confusion.
     """
-    return root.parent / f".{_project_name(root)}-worktrees"
+    return root.parent / _manifest.sibling_dir_name(_project_name(root), "worktrees")
 
 
 # --------------------------------------------------------------------------

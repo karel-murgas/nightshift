@@ -195,6 +195,20 @@ class Worker:
     integration_checkout_dir: str = ""
 
 
+def sibling_dir_name(project_name: str, role: str) -> str:
+    """`.<project>-<role>`: the directory the runner keeps beside the repo for
+    `role` (`worktrees`, `integration`) when the manifest does not name one.
+
+    One home because two spellings of it diverged: `init`'s discovery slugified
+    the project name (`project_tigress` -> `.project-tigress-integration`) while
+    the runner used it verbatim (`.project_tigress-integration`), so `doctor`
+    reported drift against any manifest that agreed with the runner. The
+    runner's spelling wins because it is the one already on disk — changing it
+    would strand every existing `.<project>-worktrees/` whose name is not a slug.
+    """
+    return f".{project_name}-{role}"
+
+
 @dataclass(frozen=True)
 class FreshnessRule:
     """"Touching `touches` means `requires` should have been updated." One row read

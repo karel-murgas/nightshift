@@ -282,8 +282,7 @@ def worker_config(root: Path, name: str | None = None) -> list[Proposal]:
     if name is None:
         proposed = project_name(root).value
         name = str(proposed) if proposed else root.name
-    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "project"
-    env = re.sub(r"[^A-Z0-9]+", "_", name.upper()).strip("_") or "PROJECT"
+    env =re.sub(r"[^A-Z0-9]+", "_", name.upper()).strip("_") or "PROJECT"
 
     out = []
     assets = [d for d in (root / name / "assets", root / "assets") if d.is_dir()]
@@ -297,8 +296,9 @@ def worker_config(root: Path, name: str | None = None) -> list[Proposal]:
                             "is the right answer for a code-only project"))
     out.append(Proposal("worker.fence_env", f"{env}_FENCE_ALLOW", HIGH,
                         "derived from the project name"))
-    out.append(Proposal("worker.integration_checkout_dir", f".{slug}-integration", HIGH,
-                        "derived from the project name; a sibling of the repo"))
+    out.append(Proposal("worker.integration_checkout_dir",
+                        _manifest.sibling_dir_name(name, "integration"), HIGH,
+                        "the runner's own default for this project name; a sibling of the repo"))
     return out
 
 
