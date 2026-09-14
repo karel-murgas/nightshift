@@ -350,6 +350,23 @@ def test_the_batch_writes_its_own_run_record(tmp_path, monkeypatch):
     assert run_record.landed(record), "a landed chore must read as landed"
 
 
+def test_a_landed_chores_cost_is_not_hardcoded_to_zero(tmp_path, monkeypatch):
+    """The exact bug `token-economy.md` phase 0.1 names: `_record_outcomes` used
+    to write `"cost_usd": 0.0` unconditionally, so the panel showed `$0` for
+    every chore batch even though `_Worker` here (and a real CLI call) reports a
+    real `total_cost_usd` that `read_telemetry` already parses."""
+    from nightshift import run_record
+
+    root = _repo(tmp_path, ("a", "review", "inner"))
+    _Worker(edits={"a": _touch("a")}).install(monkeypatch)
+    chores.execute(root)
+
+    record = run_record.read_all(root)[0]
+    assert record["dispatched"][0]["cost_usd"] == 0.01
+    # And the per-stage breakdown behind that one total landed in `usage` too.
+    assert any(e["stage"] == "worker" and e["card"] == "a" for e in record["usage"])
+
+
 def test_a_bounced_chore_is_recorded_as_a_routing_signal_not_a_failure(tmp_path,
                                                                       monkeypatch):
     """A bounce is the worker reporting the item was not a one-prompter after all —

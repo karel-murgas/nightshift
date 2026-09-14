@@ -64,7 +64,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from nightshift import board, reconcile, textio
+from nightshift import board, reconcile, run_record, textio
 from nightshift.manifest import find_root
 
 #: Where a promoted note lands. The inbox is the only lane that takes an
@@ -215,6 +215,12 @@ def mark_rejected(root: Path, card_id: str, note: str) -> str:
     # not one to make wait behind whatever Karel dragged to the top by hand.
     card.write({"last_outcome": "needs_fix"})
     board.move(root, card, "tasks")
+    # The one event no run record can hold, because no dispatch produced it
+    # (`token-economy.md` phase 0.3 — `run_record.quality_counters`'s
+    # `testing_rejections`): a play-through can catch what gates, tests and the
+    # diff reviewer could not, and that is exactly the rate a later phase must
+    # not be allowed to quietly move.
+    run_record.record_rejection(root, card.id)
     return f"{card.id}: {REJECTED_FROM}/ → tasks/ (feedback recorded)"
 
 

@@ -41,6 +41,7 @@ import datetime as _dt
 import json
 import os
 from pathlib import Path
+from typing import Callable
 
 from nightshift import textio  # LF-pinned writes (gate write_newline)
 
@@ -160,6 +161,43 @@ class Record:
         self.data["dispatched"] = list(entries)
         self.save()
 
+    def usage(self, stage: str, *, card_id: str, model: str = "", effort: str = "",
+             calls: int = 1, turns: int = 0, wall_s: float = 0.0, api_s: float = 0.0,
+             cost_usd: float = 0.0, input_tokens: int = 0, cache_read_tokens: int = 0,
+             cache_write_tokens: int = 0, output_tokens: int = 0,
+             denials: int = 0) -> None:
+        """What one pipeline stage spent on one card — worker, checker, reviewer,
+        a chore batch's own reviewer pass, repair, or a merge conflict resolver.
+
+        Until this existed, `dispatched()`'s single `cost_usd` was the only number
+        that survived a run: everything else the CLI reports about a call —
+        turns, wall/API time, the four token counters, which model actually did
+        the work — was downloaded, parsed once for its dollar figure, and
+        discarded (`token-economy.md` §1). `runner.usage_breakdown()` is the
+        reader that recovers the rest from what the stage already wrote to
+        `.ai/runs/`; this is where it lands so a report can compare stages and
+        cards without re-parsing a transcript.
+
+        `calls` is how many rounds this stage made on this card — a
+        producer/checker loop can run several — summed into one event rather
+        than reported per round, at the same grain the plan's own cost table
+        already uses: nobody comparing workers to reviewers wants to see round 2
+        of 3 as its own line.
+
+        `effort` is empty until a caller actually varies it (`token-economy.md`
+        phase 3.3); the field exists now so recording does not have to change
+        shape again once it does.
+        """
+        self.data.setdefault("usage", []).append({
+            "stage": stage, "card": card_id, "model": model, "effort": effort,
+            "calls": calls, "turns": turns, "wall_s": round(wall_s, 1),
+            "api_s": round(api_s, 1), "cost_usd": round(cost_usd, 4),
+            "input_tokens": input_tokens, "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens, "output_tokens": output_tokens,
+            "denials": denials, "at": _now(),
+        })
+        self.save()
+
     def skipped(self, entries: list[tuple[str, str]]) -> None:
         """The cards `select()` would not dispatch, as `(card_id, reason)`.
 
@@ -267,7 +305,7 @@ def start(root: Path, *, kind: str, label: str = "", host: str = "") -> Record:
         "started": started, "finished": None, "complete": False,
         "kind": kind, "label": label, "host": host,
         "stop_reason": None, "cost_usd": 0.0, "walls": 0, "cards_dispatched": 0,
-        "dispatched": [], "skipped": [], "oversized": [], "notes": [],
+        "dispatched": [], "skipped": [], "oversized": [], "notes": [], "usage": [],
     })
     record.save()
     prune(root)
@@ -341,3 +379,110 @@ def window(record: dict) -> str:
 
 def day(record: dict) -> str:
     return str(record.get("started", ""))[:10]
+
+
+# --- testing/ rejections ------------------------------------------------------
+#
+# A human's play-through catches what gates, tests and the diff reviewer could
+# not (`03_board.md`, `boardcmd.mark_rejected`'s own docstring on why that gate
+# exists at all) — and that event happens outside any run, at whatever hour
+# Karel gets to `testing/`. It cannot be a `dispatched()` entry because no
+# dispatch produced it, so it gets a log of its own instead: one line per
+# rejection, appended by `boardcmd.mark_rejected`, read back here as a rate.
+
+REJECTIONS_LOG = Path(".ai/runs/testing_rejections.log")
+
+
+def record_rejection(root: Path, card_id: str) -> None:
+    """One card sent back from `testing/` to `tasks/` after failing a play-through.
+
+    Best-effort, like every write in this module (`Record.save`'s docstring):
+    a rejection that failed to log must not stop the rejection itself from
+    landing, which is `boardcmd.mark_rejected`'s actual job.
+    """
+    path = root / REJECTIONS_LOG
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8", newline="\n") as fh:
+            fh.write(f"{_now()}\t{card_id}\n")
+    except OSError:
+        pass
+
+
+def _read_log_lines(path: Path) -> list[str]:
+    try:
+        return [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError:
+        return []
+
+
+def count_rejections(root: Path, *, since: str = "") -> int:
+    """How many `testing/` rejections landed at or after `since` (an ISO stamp,
+    `""` for all time)."""
+    count = 0
+    for line in _read_log_lines(root / REJECTIONS_LOG):
+        stamp, _, _rest = line.partition("\t")
+        if not since or stamp >= since:
+            count += 1
+    return count
+
+
+# --- quality counters ---------------------------------------------------------
+#
+# The tripwire for every phase after this one (`token-economy.md` §2, phase 0.3):
+# "any item that moves these the wrong way gets reverted." Computed from records
+# already on disk — no new dispatch, no new LLM call — over whatever window the
+# caller names, so a before/after comparison across a token-economy change is a
+# read, not a re-run.
+
+#: Substrings the merge/rebase landing path writes into a failure's own `why`
+#: when the *post-merge* re-verification (not the pre-merge one) is what caught
+#: it (`runner.py` lines near "after merging into"/"after rebasing onto") —
+#: the two re-verify call sites that exist specifically to stop something red
+#: from ever reaching `test`. A card carrying either phrase is evidence the
+#: guard fired, not evidence it failed to: this counts how often it *has* to,
+#: which should stay at zero as the surrounding phases change what a worker
+#: verifies for itself before handing a diff over.
+_RED_AFTER_MERGE_MARKERS = ("after merging into", "after rebasing onto")
+
+
+def _is_red_after_merge(entry: dict) -> bool:
+    text = f"{entry.get('detail', '')} {entry.get('landed', '')}"
+    return any(marker in text for marker in _RED_AFTER_MERGE_MARKERS)
+
+
+def quality_counters(records: list[dict], *, root: Path | None = None,
+                     since: str = "") -> dict:
+    """Rates a token-economy change must not move the wrong way.
+
+    `records` is normally `read_all(root)`, newest first, already on disk —
+    this is arithmetic over what the runner and the chore batch already wrote,
+    the same "no LLM anywhere in here" rule the record itself follows (module
+    docstring). `root`/`since` are only needed for `testing_rejections`, which
+    lives in its own log rather than in any one record (see above); omitting
+    `root` reports it as `0` rather than raising, so a caller with only records
+    in hand (a test, a unit report) still gets the other four rates.
+
+    Every rate is `0.0` on an empty denominator rather than `NaN` or a raised
+    `ZeroDivisionError` — "no dispatches in this window" is itself the answer a
+    reader needs, and a crash here must not be how they find that out.
+    """
+    dispatched = [d for r in records for d in r.get("dispatched", [])]
+    total = len(dispatched)
+
+    def _rate(pred: Callable[[dict], bool]) -> float:
+        return round(sum(1 for d in dispatched if pred(d)) / total, 3) if total else 0.0
+
+    return {
+        "dispatched": total,
+        "needs_fix_rate": _rate(lambda d: d.get("outcome") == "needs_fix"),
+        # Not `DECISION_OUTCOMES`: that set also carries `parked` and `pick`
+        # (`run_record.decisions()`'s own grouping), but the plan names these as
+        # three separate rates (`token-economy.md` phase 0.3) — a `parked` card
+        # is not a card the reviewer sent to Karel, and folding it in here would
+        # double-count it against `parked_rate` below.
+        "needs_decision_rate": _rate(lambda d: d.get("outcome") == "needs_decision"),
+        "parked_rate": _rate(lambda d: d.get("outcome") == "parked"),
+        "red_after_merge_rate": _rate(_is_red_after_merge),
+        "testing_rejections": count_rejections(root, since=since) if root else 0,
+    }

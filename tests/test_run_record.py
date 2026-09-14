@@ -205,6 +205,78 @@ def test_old_records_are_pruned_so_nothing_grows_without_bound(tmp_path):
             timespec="seconds"))
 
 
+# --- usage: the per-stage breakdown behind `cost_usd` --------------------------
+
+def test_usage_events_carry_the_full_breakdown_dispatched_never_did(tmp_path):
+    """`dispatched()`'s own `cost_usd` is one float for the whole card; `usage()`
+    is where the stage-by-stage numbers that float used to discard now land
+    (`token-economy.md` phase 0.1)."""
+    record = run_record.start(tmp_path, kind="run")
+    record.usage("worker", card_id="probe", model="sonnet", turns=40,
+                cost_usd=1.999, cache_read_tokens=4_000_000)
+    data = run_record.read_all(tmp_path)[0]
+    assert data["usage"][0]["stage"] == "worker"
+    assert data["usage"][0]["card"] == "probe"
+    assert data["usage"][0]["turns"] == 40
+    assert data["usage"][0]["cost_usd"] == 1.999
+    assert data["usage"][0]["cache_read_tokens"] == 4_000_000
+
+
+def test_a_record_carries_the_usage_field_before_any_card_is_measured(tmp_path):
+    run_record.start(tmp_path, kind="run")
+    assert run_record.read_all(tmp_path)[0]["usage"] == []
+
+
+# --- quality counters: the tripwire for every later phase -----------------------
+
+def test_quality_counters_are_rates_over_dispatched_outcomes(tmp_path):
+    record = run_record.start(tmp_path, kind="run")
+    for card, outcome in (("a", "reviewed"), ("b", "needs_fix"), ("c", "parked"),
+                          ("d", "needs_decision"), ("e", "reviewed")):
+        record.dispatched(card, worker="w", model="m", attempt=1, outcome=outcome)
+    counters = run_record.quality_counters(run_record.read_all(tmp_path))
+    assert counters["dispatched"] == 5
+    assert counters["needs_fix_rate"] == 0.2
+    assert counters["needs_decision_rate"] == 0.2
+    assert counters["parked_rate"] == 0.2
+
+
+def test_quality_counters_do_not_divide_by_zero_on_an_empty_window(tmp_path):
+    counters = run_record.quality_counters([])
+    assert counters["dispatched"] == 0
+    assert counters["needs_fix_rate"] == 0.0
+
+
+def test_red_after_merge_is_read_off_the_failure_wording_the_merge_re_verify_writes(tmp_path):
+    """`runner.py`'s post-merge and post-rebase re-verification is what stops
+    something red from ever reaching `test`; a card whose own failure detail
+    carries that phrasing is evidence the guard fired, which is exactly what
+    this counter is watching for a later phase to start letting through."""
+    record = run_record.start(tmp_path, kind="run")
+    record.dispatched("a", worker="w", model="m", attempt=1, outcome="failed",
+                      detail="after merging into test, gates: boom")
+    record.dispatched("b", worker="w", model="m", attempt=1, outcome="failed",
+                      detail="worker exited 1")
+    counters = run_record.quality_counters(run_record.read_all(tmp_path))
+    assert counters["red_after_merge_rate"] == 0.5
+
+
+def test_testing_rejections_are_read_from_their_own_log_not_a_record(tmp_path):
+    """No dispatch produces this event (`boardcmd.mark_rejected`'s own
+    docstring), so it cannot live in `dispatched` — it gets a log of its own."""
+    run_record.record_rejection(tmp_path, "probe")
+    run_record.record_rejection(tmp_path, "probe-2")
+    assert run_record.count_rejections(tmp_path) == 2
+
+
+def test_quality_counters_report_zero_rejections_without_a_root(tmp_path):
+    """`root` is optional because a caller may have only records in hand (a
+    test, a unit report); reporting `0` beats raising over a log this call was
+    never given a path to."""
+    counters = run_record.quality_counters([])
+    assert counters["testing_rejections"] == 0
+
+
 def test_a_stamp_sorts_in_time_order(tmp_path):
     """`prune` and `read_all` both sort by filename instead of opening every
     file; that is only correct if the stamp is monotonic."""
