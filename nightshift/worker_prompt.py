@@ -23,7 +23,8 @@ of good practice, so guidance that has to be found first is the weaker of the tw
 from __future__ import annotations
 
 __all__ = ["TOOL_ECONOMY", "DOC_TRUTH", "INTERACTIVE_CARD", "INTERACTIVE_CARD_FEEDBACK",
-           "INTERACTIVE_NOTE", "HOW_TO_TEST_STEP", "INTERACTIVE_TRIAGE", "INTERACTIVE_RETRIAGE"]
+           "INTERACTIVE_NOTE", "HOW_TO_TEST_STEP", "INTERACTIVE_TRIAGE", "INTERACTIVE_RETRIAGE",
+           "QUESTION_FORMAT", "QUESTION_EXAMPLE"]
 
 #: The second such block, and it is here for the same reason as the first: the rule was
 #: stated, generalised, and then lived somewhere the worker never reads.
@@ -148,10 +149,56 @@ section carrying what you attempted, what is ambiguous, and what each candidate 
 would imply, and move the card to `needs-decision/`. Parking is a success state; guessing \
 at an ambiguity is not.
 
+{question_format}
+
 {tool_economy}
 
 --- the card ---
 {card_body}
+"""
+
+#: The third such block: how to write a `## Question` so the Command Center can read it.
+#:
+#: `decide.parse` turns the section into the panel's picker, and every agent that can park
+#: a card was told *what* to put in it — attempted, ambiguous, candidates, implications —
+#: but only triage's charter ever showed a *shape*. The reviewer, answering in a one-line
+#: JSON string, wrote `OPTIONS: (A) … (B) … (C) …` inline: `end-of-turn-events` and
+#: `new-skill-bloodletting` (Project Tigress, 2026-09-14) both reached Karel as prose with
+#: nothing to tick. The opposite failure was just as live: with no marker to key on, the
+#: parser guessed, and read a bulleted list of findings under a bold lead-in as a question
+#: with twelve options (`runner-worker-handover`).
+#:
+#: So there is one explicit marker — a `### Decide:` heading — and this block is the only
+#: place it is taught to a prompt. `QUESTION_EXAMPLE` is kept separate so a test can parse
+#: the exact example every agent is shown.
+QUESTION_EXAMPLE = """\
+### Decide: Should a parked attempt count towards the card's retry limit?
+
+- **A — count it** *(recommended)* — one limit however an attempt ends; a card that parks \
+twice stops sooner.
+- **B — do not count it** — parking stays free, but a card can park forever without \
+anyone noticing.
+"""
+
+QUESTION_FORMAT = """\
+**How to write a `## Question`.** The maintainer answers it in the Command Center, which \
+builds a picker by parsing the section — so its shape is a contract, not a style. A \
+question the parser cannot read is shown as prose, with nothing to tick.
+
+1. **Context first:** what you attempted, what is ambiguous, what you found, in whatever \
+form reads best.
+2. **Then one `### Decide:` heading per decision**, carrying the question in one sentence, \
+followed directly by one `- ` bullet per option: a bold label, then what choosing it \
+implies. Mark the option you would take `*(recommended)*`. Several decisions are several \
+`### Decide:` blocks in the one section. Only the bullets under a `### Decide:` heading are \
+read as options, so put nothing after the last one.
+
+```
+""" + QUESTION_EXAMPLE + """```
+
+Never write the options inline in a sentence (`OPTIONS: (A) … (B) …`) — that is exactly \
+the shape that reaches the maintainer as prose. A decision with no options you can \
+enumerate gets no `### Decide:` heading; ask it in the context paragraphs.\
 """
 
 #: Step 3's tail, present only on a card the maintainer has to exercise by hand. On a
@@ -208,6 +255,8 @@ is there, not a new pass through `tasks/`.
 
 **If you cannot finish**, do not guess. Write a `## Question` section and move the card to \
 `needs-decision/` — parking is a success state.
+
+{question_format}
 
 {tool_economy}
 

@@ -1192,6 +1192,7 @@ def test_the_prompt_states_a_resolved_tier(tmp_path):
         tier="worker", model="sonnet", branch="ai/x", base="development_team",
         card_path="Board/tasks/x.md", verdict_path="v.json",
         tool_economy=worker_prompt.TOOL_ECONOMY,
+        question_format=worker_prompt.QUESTION_FORMAT,
         doc_truth=worker_prompt.DOC_TRUTH.format(base="development_team"),
         fold="", card_body="body")
     assert tier_guard.evaluate({"tool_name": "Agent",
@@ -1203,6 +1204,7 @@ def test_the_prompt_forbids_moving_the_card_and_touching_dev(tmp_path):
         tier="worker", model="sonnet", branch="ai/x", base="development_team",
         card_path="Board/tasks/x.md", verdict_path="v.json",
         tool_economy=worker_prompt.TOOL_ECONOMY,
+        question_format=worker_prompt.QUESTION_FORMAT,
         doc_truth=worker_prompt.DOC_TRUTH.format(base="development_team"),
         fold="", card_body="body")
     assert "Do not move the card" in prompt

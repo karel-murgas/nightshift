@@ -65,6 +65,18 @@ _RECOMMENDED = re.compile(
     r"|[ \t]*(?:\*{1,2}|_{1,2})recommended(?:\*{1,2}|_{1,2})",
     re.IGNORECASE)
 
+#: The explicit picker heading — `### Decide: <the question>` — taught to every agent that
+#: can park a card by `worker_prompt.QUESTION_FORMAT`. When a section carries one, it is
+#: the whole contract: only the bullets under it are options, and everything else in the
+#: section is context however it is formatted. Without it the parser still guesses (the
+#: rules below), because the corpus predates the marker and a guess beats no picker — but
+#: the guess misreads in both directions, which is why the marker exists.
+_DECIDE_HEAD = re.compile(r"^###[ \t]+Decide\b[ \t]*[:—–-]?[ \t]*(.*?)[ \t]*$", re.IGNORECASE)
+
+#: Any heading below `##` — ends a `### Decide:` block, so a `### Notes` after the options
+#: does not lend its bullets to the picker.
+_SUBHEAD = re.compile(r"^#{3,6}[ \t]")
+
 #: The heading a recorded answer goes under. `## Thread` is where `manage-board` says
 #: answers live and where `digest._has_maintainer_answer` looks for them; writing
 #: anywhere else would be an answer no report can see.
@@ -128,6 +140,8 @@ def parse(card_text: str) -> list[SubQuestion]:
     lines = board.section(card_text, "Question").splitlines()
     if not lines:
         return []
+    if any(_DECIDE_HEAD.match(line) for line in lines):
+        return _parse_marked(lines)
 
     # A bold lead-in only heads a sub-question if options actually follow it. Without
     # that test, prose that merely *starts* with a bold span — `**What I found:** the
@@ -151,6 +165,27 @@ def parse(card_text: str) -> list[SubQuestion]:
         prompt = " ".join(line.strip() for line in segment[:first_item] if line.strip())
         out.append(SubQuestion(prompt=_unbold(_plain(prompt)),
                                options=_options(segment[first_item:])))
+    return out
+
+
+def _parse_marked(lines: list[str]) -> list[SubQuestion]:
+    """A section written in the `### Decide:` shape: one sub-question per heading.
+
+    No guessing here, and that is the point. Context above the first heading may carry
+    lists and bold lead-ins freely — `runner-worker-handover` put its findings in exactly
+    that form and the guessing parser offered them as twelve options. A heading with no
+    bullets under it is dropped rather than offered as an empty picker.
+    """
+    out: list[SubQuestion] = []
+    for start, line in enumerate(lines):
+        head = _DECIDE_HEAD.match(line)
+        if not head:
+            continue
+        end = next((i for i in range(start + 1, len(lines)) if _SUBHEAD.match(lines[i])),
+                   len(lines))
+        options = _options(lines[start + 1:end], nested_folds=True)
+        if options:
+            out.append(SubQuestion(prompt=_unbold(_plain(head.group(1))), options=options))
     return out
 
 
@@ -182,19 +217,24 @@ def _inside_option(lines: list[str], index: int) -> bool:
     return False
 
 
-def _options(lines: list[str]) -> list[Option]:
+def _options(lines: list[str], *, nested_folds: bool = False) -> list[Option]:
     """Each top-level list item as an `Option`, wrapped lines folded in.
 
     The folding is lifted from `digest._bullets` and is not incidental: an option that
     ran onto a second source line would otherwise be truncated at the wrap — Karel's
     "random end of line", 2026-07-28. A following list item always starts a new option
     and is never folded in, so a card that nests detail under an option keeps it.
+
+    `nested_folds` is the `### Decide:` exception: there the shape is known, so an
+    *indented* item is detail under the option above it and folds in like a wrapped line.
     """
     out: list[Option] = []
     current: str | None = None
     for line in lines:
         matched = _LIST_ITEM.match(line)
-        if matched:
+        if matched and nested_folds and current is not None and line[:1].isspace():
+            current += " " + line.strip()
+        elif matched:
             if current is not None:
                 out.append(_option(current))
             current = matched.group(1)

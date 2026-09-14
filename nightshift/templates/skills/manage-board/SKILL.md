@@ -100,7 +100,9 @@ the "answer a parked card" flow next.
 Apply the triage rules while you do this — they are in `.claude/agents/triage.md` and you
 should read it when refining. The ones that bite most often:
 
-- `## Question` is a **picker**: one sentence, terse options, a `*(recommended)*` default.
+- `## Question` is a **picker**: a `### Decide:` heading per decision carrying one sentence,
+  terse `- **label** — implication` options under it, a `*(recommended)*` default. Only
+  the bullets under that heading reach the Command Center's picker.
 - **Batch** every open decision into one round; a card must not need a second answer.
 - Run the **second-order lens**: does this ripple into work that does not exist yet? If a
   set will grow, require enumeration + a guard, do not hardcode today's members.

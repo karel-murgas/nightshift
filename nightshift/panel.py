@@ -5362,6 +5362,7 @@ def _work_verb(root: Path, body: dict) -> str:
             card_path=card.path.resolve().as_posix(), finished_lane=lane,
             how_to_test=(worker_prompt.HOW_TO_TEST_STEP if card.verify == "play" else ""),
             tool_economy=worker_prompt.TOOL_ECONOMY, card_body=card.text,
+            question_format=worker_prompt.QUESTION_FORMAT,
         )
         tier = effective_tier(card.tier)
         open_terminal(root, *session_argv(root, name=card.id, prompt=prompt,
@@ -5428,6 +5429,7 @@ def _work_feedback_verb(root: Path, body: dict) -> str:
         branch=branches.work_branch(card.id, card.fields.get("branch", "")), base=base,
         card_path=card.path.resolve().as_posix(), finished_lane=lane,
         tool_economy=worker_prompt.TOOL_ECONOMY, card_body=card.text,
+        question_format=worker_prompt.QUESTION_FORMAT,
     )
     tier = effective_tier(card.tier)
     open_terminal(root, *session_argv(root, name=f"{card.id} feedback", prompt=prompt,

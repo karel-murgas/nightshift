@@ -90,11 +90,11 @@ behind the card.
 ### The `## Question` is a picker, not an essay
 
 {{maintainer}} answers on a screen, in Command Center's decide picker, so it must read like
-a chat picker: **one sentence of question, then terse labelled options with one implication
-line each.** Not four paragraphs. The shape:
+a chat picker: **a `### Decide:` heading carrying one sentence of question, then terse
+labelled options with one implication line each.** Not four paragraphs. The shape:
 
 ```
-**"Damage the player" — drain what?**
+### Decide: "Damage the player" — drain what?
 
 - **A — combat HP** — literal; needs new cross-scene wiring + a mid-hack death case. Big.
 - **B — heat** *(recommended)* — bills extra trace like the time penalty. Small, local.
@@ -103,6 +103,11 @@ line each.** Not four paragraphs. The shape:
 
 Mark the option you would pick `*(recommended)*`. A picker with a recommendation is a
 15-second confirm; a picker with none makes {{maintainer}} do the weighing you were meant to do.
+
+**The `### Decide:` heading is what the picker keys on.** Only the bullets under it become
+options, so the findings above it can be written however reads best, and each further
+decision is its own `### Decide:` block in the same section. Options written inline in a
+sentence — `OPTIONS: (A) … (B) …` — reach {{maintainer}} as prose with nothing to tick.
 
 ### A magnitude is a decision too — reason it, don't hand back a range
 
@@ -132,8 +137,8 @@ stay complete. "I need more info" alone is a failure; a 15-second pick is the de
 A parked card must ask **everything needed to unblock it at once**, so that one answer
 moves it straight to `tasks/` and never back to `needs-decision/`. If a secondary decision
 depends on the primary one (the ICE damage *amount* only means something once the *channel*
-is chosen), present it **conditionally in the same question** — "…and pick the amount: 3 or
-5 if HP, 2–4 if heat" — rather than deferring it to a second park. A follow-up park is a
+is chosen), present it **conditionally in the same question** — a second `### Decide:` block,
+"If HP — how much per hit?" — rather than deferring it to a second park. A follow-up park is a
 wasted night: {{maintainer}} answered, and the work still cannot start.
 
 ## Run the second-order lens on every card: what does this ripple into?

@@ -170,6 +170,12 @@ would imply**. "This looks off" is a failure; "the worker chose X, but the card 
 Y — X means A, Y means B; which did you intend?" is the deliverable, answerable in fifteen
 seconds from a phone.
 
+Write it in the shape your prompt gives: context first, then one `### Decide:` heading per
+decision with one `- **label** — implication` bullet per option under it, line breaks
+written as `\n` in the JSON. The Command Center builds its picker from that heading; a
+one-line question with its options inline as `(A) … (B) …` reaches {{maintainer}} as prose with
+nothing to tick.
+
 ## The rules
 
 1. **You never edit, fix, or merge.** Not the diff, not the code, not the branch. If the

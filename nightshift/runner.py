@@ -2089,6 +2089,8 @@ each would imply — a question they can answer in fifteen seconds without openi
 Guessing at an ambiguity is the worst possible overnight outcome; parking is better than \
 inventing.
 
+{question_format}
+
 The runner will run `nightshift.gates.run` and the test slice your change touches over your \
 branch (in parallel, judged by its JUnit report). Do not \
 weaken a gate or a test to make it pass.
@@ -2379,7 +2381,8 @@ apply without re-deriving it. If you fixed prose yourself: what was wrong and wh
 changed, so it can be checked after the fact. Empty string otherwise.>",
     "question": "<if needs_decision: what was attempted, what is ambiguous, the candidate \
 answers, and what each would imply — those four parts are what makes the question \
-answerable. Empty string otherwise.>",
+answerable. Markdown in the shape below, line breaks written as `\\n`. Empty string \
+otherwise.>",
     "notes": "<one or two sentences of reasoning the runner can log>"}}
 
 On `needs_fix` the `finding` goes back to a worker for another attempt, with no human in the \
@@ -2387,6 +2390,11 @@ loop — so it must be self-contained enough to act on alone. On `needs_decision
 `question` is put in front of the maintainer verbatim, with no human in between, so it must \
 stand alone and be answerable in fifteen seconds from a phone. You never edit, fix or merge \
 — you report, the runner routes.
+
+{question_format}
+
+Your `question` is a JSON string, so write its line breaks as `\\n`: a question squeezed \
+onto one line cannot hold that shape, and reaches the maintainer as prose.
 
 --- acceptance criteria, verbatim from the card ---
 {criteria}
@@ -2455,6 +2463,11 @@ human in the loop — so it must be self-contained enough to act on alone. On `n
 the `question` is put in front of the maintainer verbatim, with no human in between, so it \
 must stand alone and be answerable in fifteen seconds from a phone. You never edit, fix or \
 merge — you report, the runner routes each item on its own verdict.
+
+{question_format}
+
+Your `question` is a JSON string, so write its line breaks as `\\n`: a question squeezed \
+onto one line cannot hold that shape, and reaches the maintainer as prose.
 
 --- acceptance criteria, per item, verbatim from each card ---
 {criteria}
@@ -3306,6 +3319,7 @@ def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
             criteria=criteria, intent=told, rubric=_REVIEW_RUBRIC,
             diff_desc=diff_desc, prior_review=prior_review,
             gates=_gates_block(out_dir),
+            question_format=worker_prompt.QUESTION_FORMAT,
         )
         textio.write_text_lf(out_dir / "review-prompt.md", prompt)
         textio.write_text_lf(out_dir / "review-diff.patch", diff.stdout)
@@ -4279,6 +4293,7 @@ def run_producer(root: Path, card: board.Card, tree: Path, out_dir: Path, branch
             card_path=(board.board_dir(root) / "tasks" / card.path.name).resolve().as_posix(),
             verdict_path=verdict_path.resolve().as_posix(),
             tool_economy=worker_prompt.TOOL_ECONOMY,
+            question_format=worker_prompt.QUESTION_FORMAT,
             doc_truth=worker_prompt.DOC_TRUTH.format(base=base),
             fold=_fold_instruction(root, card),
             card_body=card.text,

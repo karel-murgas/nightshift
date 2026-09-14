@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import board, decide
+from nightshift import board, decide, worker_prompt
 
 
 _CARD = """---
@@ -148,6 +148,86 @@ def test_the_recommended_marker_is_read_without_eating_the_option_label():
     assert b.text.count("**") % 2 == 0
     # A reader quotes the card, so it keeps the mark the form strips.
     assert "recommended" in b.raw
+
+
+def test_a_decide_heading_makes_only_its_own_options_count():
+    """`runner-worker-handover`, in shape: a bulleted list of findings under a bold lead-in,
+    above the real choice. The guessing parser offered the findings as options. Once the
+    section carries `### Decide:`, everything above it is context, however it is formatted."""
+    subs = decide.parse(_question(
+        "**Why it cannot today** — two causes:\n\n"
+        "- the session id is dropped\n- the branch is renamed\n\n"
+        "### Decide: Resume the worker's session or start fresh?\n\n"
+        "- **A — resume** *(recommended)* — keeps its context\n"
+        "- **B — fresh** — costs a re-read\n"))
+    assert len(subs) == 1
+    assert subs[0].prompt == "Resume the worker's session or start fresh?"
+    assert [o.text for o in subs[0].options] == [
+        "**A — resume** — keeps its context", "**B — fresh** — costs a re-read"]
+    assert [o.recommended for o in subs[0].options] == [True, False]
+
+
+def test_each_decide_heading_is_its_own_sub_question():
+    subs = decide.parse(_question(
+        "### Decide: Which screens?\n\n- **A — all**\n- **B — hub only**\n\n"
+        "### Decide: If B, keep the old art?\n\n- **Yes**\n- **No**\n"))
+    assert [s.prompt for s in subs] == ["Which screens?", "If B, keep the old art?"]
+    assert [o.text for o in subs[1].options] == ["**Yes**", "**No**"]
+
+
+def test_under_a_decide_heading_nested_detail_stays_inside_its_option():
+    """The guessing parser splits a nested bullet into an option of its own. Under the
+    marker the shape is known, so it is detail and folds into the option above."""
+    subs = decide.parse(_question(
+        "### Decide: Which?\n\n- **A — now**\n  - costs a rework\n- **B — later**\n"))
+    assert [o.text for o in subs[0].options] == [
+        "**A — now** - costs a rework", "**B — later**"]
+
+
+def test_a_later_heading_ends_a_decide_block():
+    subs = decide.parse(_question(
+        "### Decide: Which?\n\n- **A**\n- **B**\n\n### Notes\n\n- not an option\n"))
+    assert [o.text for o in subs[0].options] == ["**A**", "**B**"]
+
+
+def test_a_decide_heading_with_no_options_offers_no_empty_picker():
+    assert decide.parse(_question("### Decide: What should regen do?\n\nNo idea yet.\n")) == []
+
+
+def test_options_inline_in_a_sentence_are_not_a_picker():
+    """`OPTIONS: (A) … (B) …` is what the reviewer's one-line JSON `question` produced on
+    `end-of-turn-events`. Pinned so the fix stays the shape the prompts teach, not a guess
+    at inline letters in prose."""
+    assert decide.parse(_question("OPTIONS: (A) keep it. (B) tick only.\n")) == []
+
+
+def test_the_example_every_agent_is_shown_parses_as_a_picker():
+    """The drift guard between the prompt and the parser. If `QUESTION_EXAMPLE` stopped
+    parsing, every agent that parks a card would be taught to write an unreadable one."""
+    assert worker_prompt.QUESTION_EXAMPLE in worker_prompt.QUESTION_FORMAT
+    subs = decide.parse(_question(worker_prompt.QUESTION_EXAMPLE))
+    assert len(subs) == 1 and subs[0].prompt
+    assert len(subs[0].options) == 2
+    assert [o.recommended for o in subs[0].options] == [True, False]
+
+
+def test_every_prompt_that_can_park_a_card_carries_the_format():
+    from nightshift import runner
+    for name, template in [("runner._PROMPT", runner._PROMPT),
+                           ("runner._REVIEW_PROMPT", runner._REVIEW_PROMPT),
+                           ("runner._BATCH_REVIEW_PROMPT", runner._BATCH_REVIEW_PROMPT),
+                           ("INTERACTIVE_CARD", worker_prompt.INTERACTIVE_CARD),
+                           ("INTERACTIVE_CARD_FEEDBACK", worker_prompt.INTERACTIVE_CARD_FEEDBACK)]:
+        assert "{question_format}" in template, name
+
+
+@pytest.mark.parametrize("template", ["agents/triage.md", "agents/code-reviewer.md",
+                                      "skills/manage-board/SKILL.md"])
+def test_every_charter_that_describes_the_question_teaches_the_marker(template):
+    """Charters are rendered into consuming repos, so they cannot import the constant;
+    they can only be held to naming the marker the parser keys on."""
+    text = (Path(decide.__file__).parent / "templates" / template).read_text(encoding="utf-8")
+    assert "### Decide:" in text
 
 
 def test_prose_only_question_parses_to_nothing_rather_than_failing():
