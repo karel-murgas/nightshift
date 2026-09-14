@@ -154,6 +154,14 @@ def test_nothing_is_said_when_there_is_nothing_to_say():
     assert chores.cost_note(0, 0.0) == ""
 
 
+def test_the_dollar_figure_joins_turns_and_wall_time(tmp_path):
+    """The exact gap `token-economy.md` phase 0.1 names: a chore's own attempt
+    already reports `cost_usd` (`runner.read_telemetry`), and `cost_note` used to
+    take only `turns`/`wall_s` — so the number existed and nothing printed it."""
+    note = chores.cost_note(48, 420.0, 1.999)
+    assert "48 turns" in note and "7 min" in note and "$2.00" in note
+
+
 def test_cost_is_a_note_and_never_a_verdict():
     """The whole point of the rewrite. `cost_note` returns prose for a report; there
     is no threshold, no bool, and no second return value a caller could branch on —

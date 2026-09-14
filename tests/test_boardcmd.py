@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import board, boardcmd
+from nightshift import board, boardcmd, run_record
 from nightshift.gates import card_schema
 
 import _fixtures
@@ -222,6 +222,18 @@ def test_rejecting_a_card_sends_it_back_to_tasks_with_the_feedback(tmp_path):
     assert "the door never opens" in card.text
     assert "## Feedback" in card.text
     assert "tasks/" in message
+
+
+def test_rejecting_logs_itself_for_the_quality_counter(tmp_path):
+    """No dispatch produces this event, so it cannot live in a run record — it
+    gets logged here instead, which is what `run_record.quality_counters`'s
+    `testing_rejections` reads back (`token-economy.md` phase 0.3)."""
+    root = _repo(tmp_path)
+    _card(root, "testing", "played")
+
+    boardcmd.mark_rejected(root, "played", "the door never opens")
+
+    assert run_record.count_rejections(root) == 1
 
 
 def test_rejecting_refuses_from_any_other_lane(tmp_path):

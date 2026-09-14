@@ -2793,33 +2793,46 @@ def _si(n: float) -> str:
     return str(int(n))
 
 
-def read_telemetry(out_dir: Path) -> dict:
-    """What the CLI already reported about one attempt, summed over its rounds.
+def _parse_result_file(path: Path, *, is_json: bool) -> dict:
+    """One stage's terminal result, off disk, in whichever shape it was written.
 
-    **Every number here was already downloaded and thrown away.** The runner
-    writes each round's `worker-N.json` to disk and reads exactly one key out of
-    it — `total_cost_usd` — discarding wall time, API time, turn count, the four
-    token counters, the per-model split and the permission denials. Surfacing
-    them costs no tokens, no API calls and no wall time: it is a read of bytes
-    already paid for, which is why this is a lookup in the runner rather than
-    anything cleverer (§5, §12).
+    `is_json` is `True` for a `worker-N.json` — a clean `json.dumps` of exactly
+    the terminal event (`run_producer._once`'s own comment on why) — and `False`
+    for a `*.log` file, which is `proc.stdout + proc.stderr` and needs
+    `_terminal_result`'s same backward scan the live call already used, so a
+    re-parse here finds the identical object rather than a slightly different
+    one. `{}` on anything unreadable or not an object, matching every other
+    "always a lookup" reader in this module (§12).
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    if is_json:
+        try:
+            data = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+    return _terminal_result(text)
 
-    Kept as a plain dict of totals rather than a dataclass because it is written
-    straight to a card and to `status.json`, and both want JSON.
+
+def _sum_result_files(paths: list[Path], *, is_json: bool) -> dict:
+    """One stage's totals over however many result files it left — the shared
+    arithmetic behind both `read_telemetry` (the worker only) and
+    `usage_breakdown` (every stage). See `_parse_result_file` for the two shapes
+    a caller may be summing.
     """
     total = {
-        "rounds": 0, "wall_s": 0.0, "api_s": 0.0, "turns": 0, "cost_usd": 0.0,
+        "calls": 0, "wall_s": 0.0, "api_s": 0.0, "turns": 0, "cost_usd": 0.0,
         "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0,
         "input_tokens": 0, "denials": 0, "models": [], "ended": "",
     }
-    for path in sorted(out_dir.glob("worker-*.json")):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-        except (OSError, json.JSONDecodeError, ValueError):
+    for path in paths:
+        data = _parse_result_file(path, is_json=is_json)
+        if not data:
             continue
-        if not isinstance(data, dict):
-            continue
-        total["rounds"] += 1
+        total["calls"] += 1
         total["wall_s"] += float(data.get("duration_ms") or 0) / 1000
         total["api_s"] += float(data.get("duration_api_ms") or 0) / 1000
         total["turns"] += int(data.get("num_turns") or 0)
@@ -2839,7 +2852,96 @@ def read_telemetry(out_dir: Path) -> dict:
                 if name not in total["models"]:
                     total["models"].append(name)
         total["ended"] = str(data.get("terminal_reason") or data.get("stop_reason") or "")
+    return total
+
+
+def read_telemetry(out_dir: Path) -> dict:
+    """What the CLI already reported about one attempt's producer, summed over
+    its rounds.
+
+    **Every number here was already downloaded and thrown away.** The runner
+    writes each round's `worker-N.json` to disk and used to read exactly one
+    key out of it — `total_cost_usd` — discarding wall time, API time, turn
+    count, the four token counters, the per-model split and the permission
+    denials. Surfacing them costs no tokens, no API calls and no wall time: it
+    is a read of bytes already paid for, which is why this is a lookup in the
+    runner rather than anything cleverer (§5, §12).
+
+    Kept as a plain dict of totals rather than a dataclass because it is written
+    straight to a card and to `status.json`, and both want JSON. Only the
+    producer's own rounds — `usage_breakdown` is the sibling that covers every
+    other stage the same way.
+    """
+    total = _sum_result_files(sorted(out_dir.glob("worker-*.json")), is_json=True)
+    total["rounds"] = total.pop("calls")
     return total if total["rounds"] else {}
+
+
+#: Which files under one attempt's `out_dir` hold a stage's raw terminal
+#: result(s), and how to find and parse them — the file-naming contract every
+#: spawn site in this module already follows (`run_producer`/`run_checker`/
+#: `review_branch`/`repair_drift`/`_resolve_conflict`). `is_json` distinguishes
+#: a clean `worker-N.json` from a `*.log` that needs `_terminal_result`'s scan
+#: (`_parse_result_file`). Checker and reviewer share the `review*` prefix but
+#: never the same file: a checker round is always `review-<digits>.log`, the
+#: diff reviewer's is always the bare `review.log` — the glob below matches only
+#: the first, and the `is_file()` check below only the second.
+_USAGE_SOURCES: tuple[tuple[str, bool, Callable[[Path], list[Path]]], ...] = (
+    ("worker", True, lambda d: sorted(d.glob("worker-*.json"))),
+    ("checker", False, lambda d: sorted(d.glob("review-[0-9]*.log"))),
+    ("reviewer", False, lambda d: [d / "review.log"] if (d / "review.log").is_file() else []),
+    ("repair", False, lambda d: [d / "repair.log"] if (d / "repair.log").is_file() else []),
+    ("resolver", False, lambda d: sorted(d.glob("resolve-[0-9]*.log"))
+                                  + ([d / "merge-resolve.log"]
+                                     if (d / "merge-resolve.log").is_file() else [])),
+)
+
+
+def usage_breakdown(out_dir: Path) -> list[dict]:
+    """Every LLM call one attempt already paid for, split out by pipeline stage.
+
+    `read_telemetry`'s sibling: that function answers "what did the worker
+    cost", already written onto the card; this answers "what did *every* stage
+    cost" — worker, checker, reviewer, repair, resolver — for a caller that
+    wants the breakdown rather than one folded total (`record_usage`, and
+    `nightshift.costreport`). Same source, same "already downloaded and thrown
+    away" reasoning (§5, §12): nothing here re-runs anything or opens a new
+    process.
+
+    One dict per stage that actually ran, `stage` included, its rounds already
+    summed (`calls`) — never one entry per round, at the grain the plan's own
+    cost table already reports at (`token-economy.md` §1).
+    """
+    out = []
+    for stage, is_json, finder in _USAGE_SOURCES:
+        total = _sum_result_files(finder(out_dir), is_json=is_json)
+        if total["calls"]:
+            total["stage"] = stage
+            out.append(total)
+    return out
+
+
+def record_usage(record: run_record.Record, out_dir: Path, *, card_id: str,
+                 model: str, effort: str = "") -> None:
+    """Write this attempt's whole usage breakdown into the run record, one
+    `Record.usage()` event per stage that actually ran.
+
+    Called once, from the single place a card's `Dispatch` already turns into a
+    `record.dispatched()` event, rather than threaded through the dispatch loop
+    itself: the loop already collapses every stage's cost into one running
+    float (`dispatch`'s own `cost +=`), and this reads the same directory that
+    loop just finished writing to instead of asking it to carry more state
+    through every return path. `model` is `usage_breakdown`'s own per-stage
+    `models` list when the CLI reported one (a checker or reviewer can resolve
+    to a different tier than the worker); the caller's `model` is the fallback
+    for a stage whose result carried none.
+    """
+    for entry in usage_breakdown(out_dir):
+        stage = entry.pop("stage")
+        models = entry.pop("models")
+        entry.pop("ended", None)
+        record.usage(stage, card_id=card_id, model=", ".join(models) or model,
+                     effort=effort, **entry)
 
 
 # How many lines of the CLI's own error text reach the card. Enough to carry a
@@ -7409,6 +7511,11 @@ def run(root: Path, args: argparse.Namespace) -> int:
                 attempt=candidate.card.attempts, outcome=result.outcome,
                 detail=result.detail, cost_usd=result.cost_usd, landed=landed,
                 evidence=result.evidence)
+            # The full per-stage breakdown behind the one `cost_usd` float above
+            # (`token-economy.md` phase 0.1) — a read of `out_dir`, not a second
+            # dispatch, so it costs nothing to take even on a card that failed.
+            record_usage(record, run_dir(work, candidate.card, candidate.card.attempts),
+                        card_id=candidate.card.id, model=model)
             return landed
 
         def _window_closed(wall: limits.Wall, card_id: str, *, retrying: bool) -> bool:

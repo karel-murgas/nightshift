@@ -46,6 +46,7 @@ if str(_CORE_GATES) not in sys.path:
     sys.path.insert(0, str(_CORE_GATES))
 
 from nightshift import board  # noqa: E402
+from nightshift import run_record  # noqa: E402
 from nightshift import runner  # noqa: E402
 
 # The card and repo fixtures are the sibling suite's; rebuilding them here would
@@ -271,6 +272,89 @@ def test_a_permission_denial_is_surfaced_and_a_zero_is_not(tmp_path):
 
     _worker_json(out, 1, permission_denials=[])
     assert "denial" not in runner.telemetry_markdown(runner.read_telemetry(out), 1)
+
+
+def _stage_log(out: Path, name: str, **over: object) -> None:
+    """A checker/reviewer/repair/resolver's `*.log` — `proc.stdout + proc.stderr`,
+    which for a real call is a `stream-json` JSONL blob whose last line is the
+    terminal result. One line is enough here: `_terminal_result` only ever wants
+    the last parseable object, and a one-line file is that trivially."""
+    payload: dict[str, object] = {
+        "duration_ms": 60_000, "duration_api_ms": 30_000, "num_turns": 10,
+        "total_cost_usd": 0.5,
+        "usage": {"output_tokens": 200, "cache_read_input_tokens": 500_000,
+                  "cache_creation_input_tokens": 5_000, "input_tokens": 12},
+        "modelUsage": {"claude-opus-5": {}},
+    }
+    payload.update(over)
+    (out / name).write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+
+def test_usage_breakdown_covers_every_stage_read_telemetry_does_not(tmp_path):
+    """`read_telemetry`'s sibling: the worker's own numbers plus whatever the
+    checker, the diff reviewer, a drift repair and a merge-conflict resolver
+    left behind in the same attempt directory (`token-economy.md` phase 0.1) —
+    each of those was parsed once for `total_cost_usd` at the live call and the
+    rest discarded, same as the worker used to be."""
+    out = tmp_path / "attempt-1"
+    out.mkdir()
+    _worker_json(out, 1, num_turns=40)
+    _stage_log(out, "review-1.log", num_turns=8, total_cost_usd=0.3)     # checker
+    _stage_log(out, "review.log", num_turns=25, total_cost_usd=2.0)      # reviewer
+    _stage_log(out, "repair.log", num_turns=5, total_cost_usd=0.1)
+    _stage_log(out, "resolve-1.log", num_turns=3, total_cost_usd=0.05)   # resolver
+
+    stages = {entry["stage"]: entry for entry in runner.usage_breakdown(out)}
+
+    assert set(stages) == {"worker", "checker", "reviewer", "repair", "resolver"}
+    assert stages["worker"]["turns"] == 40
+    assert stages["checker"]["cost_usd"] == 0.3
+    assert stages["reviewer"]["turns"] == 25
+    assert stages["repair"]["cost_usd"] == 0.1
+    assert stages["resolver"]["turns"] == 3
+
+
+def test_usage_breakdown_does_not_confuse_the_checker_with_the_reviewer(tmp_path):
+    """`review-1.log` (a checker round) and `review.log` (the diff reviewer) sit
+    in the same directory under near-identical names — the one naming collision
+    this file layout has to avoid, since the two are different agents judging
+    different things."""
+    out = tmp_path / "attempt-1"
+    out.mkdir()
+    _stage_log(out, "review-1.log", total_cost_usd=1.0)
+    _stage_log(out, "review-2.log", total_cost_usd=1.0)
+    _stage_log(out, "review.log", total_cost_usd=9.0)
+
+    stages = {entry["stage"]: entry for entry in runner.usage_breakdown(out)}
+
+    assert stages["checker"]["calls"] == 2
+    assert stages["checker"]["cost_usd"] == 2.0
+    assert stages["reviewer"]["calls"] == 1
+    assert stages["reviewer"]["cost_usd"] == 9.0
+
+
+def test_usage_breakdown_is_empty_for_an_attempt_that_left_nothing(tmp_path):
+    out = tmp_path / "attempt-1"
+    out.mkdir()
+    assert runner.usage_breakdown(out) == []
+
+
+def test_record_usage_writes_one_event_per_stage(tmp_path):
+    """The single call site (`_settled`) reads whatever `usage_breakdown` found
+    and writes it into the run record it already has open — nothing here
+    re-parses a transcript or spawns anything."""
+    out = tmp_path / "attempt-1"
+    out.mkdir()
+    _worker_json(out, 1, num_turns=40)
+    _stage_log(out, "review.log", num_turns=25, total_cost_usd=2.0)
+
+    record = run_record.start(tmp_path, kind="run")
+    runner.record_usage(record, out, card_id="probe", model="sonnet")
+
+    data = run_record.read_all(tmp_path)[0]
+    stages = {e["stage"] for e in data["usage"]}
+    assert stages == {"worker", "reviewer"}
+    assert all(e["card"] == "probe" for e in data["usage"])
 
 
 def test_settle_writes_telemetry_onto_the_card(tmp_path):

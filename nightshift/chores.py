@@ -138,6 +138,12 @@ class Outcome:
     detail: str = ""
     turns: int = 0
     wall_s: float = 0.0
+    #: What this item's own attempt cost — read off `runner.read_telemetry`
+    #: alongside `turns`/`wall_s`, which already carried it and discarded it
+    #: (`token-economy.md` phase 0.1's "chore cost is not recorded" finding: the
+    #: panel showed `$0` for a chore batch because this field did not exist to
+    #: hold the number `read_telemetry` had already parsed).
+    cost_usd: float = 0.0
     verify: str = "play"
     surface: str = ""
     title: str = ""
@@ -179,7 +185,7 @@ class Batch:
         return self.by_state("done")
 
 
-def cost_note(turns: int, wall_s: float) -> str:
+def cost_note(turns: int, wall_s: float, cost_usd: float = 0.0) -> str:
     """What this chore cost, as one phrase, or `""` when there is nothing notable.
 
     **Recorded, never a verdict.** This used to be `effort_exceeded`, which failed a
@@ -212,6 +218,8 @@ def cost_note(turns: int, wall_s: float) -> str:
         parts.append(f"{turns} turns")
     if wall_s:
         parts.append(f"{wall_s / 60:.0f} min")
+    if cost_usd:
+        parts.append(f"${cost_usd:.2f}")
     return ", ".join(parts)
 
 
@@ -407,7 +415,8 @@ def _outcome_for(card: board.Card) -> Outcome:
 
 
 def run_one(work: Path, card: board.Card, base: str, model: str, *,
-            card_budget: float, test_timeout: int) -> tuple[Outcome, runner.Dispatch]:
+            card_budget: float, test_timeout: int,
+            record: run_record.Record) -> tuple[Outcome, runner.Dispatch]:
     """Dispatch one chore and judge it on the gates plus the tests it can reach.
 
     Returns the batch outcome *and* the raw dispatch, because the caller needs the
@@ -434,9 +443,16 @@ def run_one(work: Path, card: board.Card, base: str, model: str, *,
         print("  " + runner.settle(work, card.id, result))
         return out, result
 
-    telemetry = runner.read_telemetry(runner.run_dir(work, card, card.attempts))
+    out_dir = runner.run_dir(work, card, card.attempts)
+    telemetry = runner.read_telemetry(out_dir)
     out.turns = int(telemetry.get("turns", 0))
     out.wall_s = float(telemetry.get("wall_s", 0.0))
+    out.cost_usd = float(telemetry.get("cost_usd", 0.0))
+    # The per-stage breakdown behind that one total (worker + its checker, if
+    # the card names one) — `token-economy.md` phase 0.1's fix for the batch
+    # panel showing `$0`: the number was already on disk, just never copied
+    # anywhere that summed to a dollar figure.
+    runner.record_usage(record, out_dir, card_id=card.id, model=model)
 
     if result.outcome == "parked":
         out.state = "bounced"
@@ -456,7 +472,7 @@ def run_one(work: Path, card: board.Card, base: str, model: str, *,
     # the worker's own bounce above, or the batch suite in phase 2.
     out.state, out.detail = "done", result.detail
     out.unadopted = result.unadopted
-    if note := cost_note(out.turns, out.wall_s):
+    if note := cost_note(out.turns, out.wall_s, out.cost_usd):
         print(f"  {card.id}: green ({note})")
     return out, result
 
@@ -786,8 +802,8 @@ def _record_outcomes(record: run_record.Record, batch: Batch,
             "title": outcome.title or (card.title if card else ""),
             "worker": card.worker if card else "",
             "model": model, "attempt": 1, "outcome": mapped,
-            "detail": outcome.detail, "cost_usd": 0.0,
-            "landed": cost_note(outcome.turns, outcome.wall_s),
+            "detail": outcome.detail, "cost_usd": round(outcome.cost_usd, 2),
+            "landed": cost_note(outcome.turns, outcome.wall_s, outcome.cost_usd),
             "evidence": "", "at": _now_iso(),
         })
     record.set_dispatched(entries)
@@ -897,7 +913,8 @@ def execute(root: Path, *, limit: int = DEFAULT_BATCH, allow_paid: bool = False,
                 break
             cards[card.id] = card
             outcome, result = run_one(work, card, base, model,
-                                      card_budget=card_budget, test_timeout=test_timeout)
+                                      card_budget=card_budget, test_timeout=test_timeout,
+                                      record=record)
             outcome.how_to_test = result.how_to_test
             batch.outcomes.append(outcome)
             _record_outcomes(record, batch, cards, model)
@@ -1029,7 +1046,8 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
                 why = ("the batch is green but the money rule stopped the review; "
                        "nothing merges without a review")
             else:
-                review = _review(work, base, branch, out_dir, cards, order, card_budget)
+                review = _review(work, base, branch, out_dir, cards, order, card_budget,
+                                 record)
                 if review.why:
                     # Nothing usable came back at all - unreviewed, same as before this
                     # file learned to split a batch. `order` is untouched, so every
@@ -1168,7 +1186,7 @@ class ReviewResult:
 
 def _review(work: Path, base: str, branch: str, out_dir: Path,
             cards: dict[str, board.Card], order: list[str],
-            card_budget: float) -> ReviewResult:
+            card_budget: float, record: run_record.Record) -> ReviewResult:
     """One review call over the whole batch diff, judging every item independently.
 
     Once, not once per item, and that is not only an economy: the reviewer's
@@ -1204,6 +1222,10 @@ def _review(work: Path, base: str, branch: str, out_dir: Path,
         work, f"batch-{branch.replace('/', '-')}", out_dir, model, base, branch,
         card_budget, BATCH_TEST_TIMEOUT_S, criteria=criteria, intent=intent,
         template=runner._BATCH_REVIEW_PROMPT)
+    # One reviewer call over every item at once, so it is recorded against the
+    # batch rather than any one card — the same "$0" gap `run_one` had, for the
+    # one stage that never had a per-card `out_dir` to begin with.
+    runner.record_usage(record, out_dir, card_id=f"batch:{branch}", model=model)
     items = verdict.get("items") if isinstance(verdict, dict) else None
     if not isinstance(items, list) or not items:
         print(f"  (no usable per-item verdict) - {str(verdict.get('notes', ''))[:100]}")
