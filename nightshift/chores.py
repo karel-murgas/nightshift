@@ -68,6 +68,7 @@ import argparse
 import datetime as dt
 import socket
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -1294,6 +1295,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--test-timeout", type=int, default=600,
                         help="seconds allowed for one chore's own test slice")
     args = parser.parse_args(argv)
+
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
 
     if not args.plan:
         return execute(args.root or repo_root(), limit=args.limit,
