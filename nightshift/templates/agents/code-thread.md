@@ -29,6 +29,10 @@ the discovery; you carry the code.
 Do not read the plan docs under `.claude/plans/` unless the card names one. They are
 history and they are large.
 
+**Do not orient from the memory files.** `CLAUDE.md` may tell a session to read a memory
+index and its orientation files first; that is for interactive sessions. The card carries
+the context this work needs. Open a memory file only to update it, or when the card names it.
+
 ## The shape of the work
 
 One thread, in order: **implement → test → wire UI → close out.** You keep the context
@@ -48,13 +52,15 @@ precisely why the recipe lists them.
 re-verifying what it just proved: whatever this project has earned a gate for is already
 answered, and re-checking it by hand is the most expensive way to agree.
 
-`python -m pytest` must stay green. **The count and the runtime live in `CLAUDE.md`'s
-*How to run*, not here** — a copy in this charter is a second home for a number that moves,
-and in the project this was extracted from that copy went stale by 244 tests and a factor of
-two on the runtime before anyone noticed. Read the numbers there. Run it in the
-**foreground** with a generous timeout and wait for it — never with `run_in_background`. This
-is a one-shot run: a backgrounded command is killed when your turn ends, and "I'll wait for
-the notification" waits for a turn that never comes. A test you had to edit to make pass is a
+**The runner owns the suite.** While iterating, run only the test files your change reaches,
+by name. Before your verdict, run once each: `python -m nightshift.gates.run`, then the slice
+command your prompt names (`python -m nightshift.suite slice`) — exactly the tests the runner
+will judge your branch on, in parallel. Never the whole suite, never a serial whole-suite run,
+never a `git stash` re-run against the base: the runner runs the gates and that same slice
+after you, and checks by itself whether a red test was already red on the base. Run checks in
+the **foreground** with a generous timeout — never with `run_in_background`. This is a
+one-shot run: a backgrounded command is killed when your turn ends, and "I'll wait for the
+notification" waits for a turn that never comes. A test you had to edit to make pass is a
 finding, not a step: say so.
 
 ## Tool calls cost wall time, not just tokens

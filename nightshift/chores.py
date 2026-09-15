@@ -414,6 +414,27 @@ def _outcome_for(card: board.Card) -> Outcome:
                    surface=card.surface)
 
 
+#: The charter every chore is dispatched under, whatever its card's `worker:` says —
+#: when the project has one. A one-prompter used to go through the full feature
+#: pipeline (`code-thread`: the close-out skill chain, an in-game check, a memory
+#: fragment, the doc-truth pass), which is what made a chore cost 24–69 turns
+#: (`token-economy.md` §1). The checks that catch a bad chore do not live in that
+#: pipeline: one attempt with park-on-doubt, the runner's gates and slice, the batch's
+#: whole-suite run, a per-item lead review, and the maintainer's play-test.
+CHORE_AGENT = "chore-thread"
+
+#: A chore has nothing to decide by construction — that is what routed it here — so
+#: it runs below the maintainer's interactive default rather than inheriting it.
+CHORE_EFFORT = "medium"
+
+
+def chore_agent(work: Path) -> str:
+    """`CHORE_AGENT` when this checkout carries its charter, else `""` — the card's
+    own `worker:`. A project that never installed the charter keeps working exactly
+    as before rather than dispatching an agent the CLI cannot find."""
+    return CHORE_AGENT if (work / ".claude" / "agents" / f"{CHORE_AGENT}.md").is_file() else ""
+
+
 def run_one(work: Path, card: board.Card, base: str, model: str, *,
             card_budget: float, test_timeout: int,
             record: run_record.Record) -> tuple[Outcome, runner.Dispatch]:
@@ -436,7 +457,8 @@ def run_one(work: Path, card: board.Card, base: str, model: str, *,
     """
     out = _outcome_for(card)
     result = runner.dispatch(work, card, base, model, card_budget, test_timeout,
-                             test_selector=suite.touched)
+                             test_selector=suite.touched, worker=chore_agent(work),
+                             effort=CHORE_EFFORT)
 
     if result.outcome in ("limited", "blocked", "interrupted"):
         out.state, out.detail = "blocked", result.detail

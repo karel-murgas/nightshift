@@ -24,6 +24,7 @@ import pytest
 from nightshift import board
 from nightshift import limits
 from nightshift import night
+from nightshift import reviewdiff
 from nightshift import run_record
 from nightshift import runner
 from nightshift import stale_sweep
@@ -2620,3 +2621,42 @@ def test_cannot_edit_is_silent_for_a_mode_that_writes_or_is_unknown(tmp_path, mo
 def test_a_machine_with_no_host_entry_can_write():
     """A fresh clone must be able to card, so the fallback is `acceptEdits`."""
     assert runner.cannot_edit(Path(__file__).parent) == ""
+
+
+def _review_prompt_for(tmp_path, monkeypatch) -> str:
+    root = _worktree_repo(tmp_path)
+    _tier_binding(root)
+    card = _reviewed_branch(root, tmp_path)
+
+    def fake(argv, cwd, timeout, stream_path=None, env=None, prompt=""):
+        verdict_line = next(l.strip() for l in prompt.splitlines()
+                            if l.strip().endswith(".json"))
+        Path(verdict_line).parent.mkdir(parents=True, exist_ok=True)
+        Path(verdict_line).write_text(json.dumps({"verdict": "ok"}), encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
+
+    monkeypatch.setattr(runner, "_run_worker", fake)
+    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    runner.review_branch(root, "probe", out_dir, "opus", "development_team",
+                         card.fields["branch"], 0.0, 60, criteria="x", intent="y")
+    return (out_dir / "review-prompt.md").read_text(encoding="utf-8")
+
+
+def test_a_small_diff_is_inlined_at_the_end_of_the_review_prompt(tmp_path, monkeypatch):
+    """`token-economy.md` 4.1: the reviewer spent its first turns reading the patch
+    back off disk, often twice. A diff that fits arrives in the prompt itself — last,
+    so the verdict path and the criteria come before any line of it."""
+    prompt = _review_prompt_for(tmp_path, monkeypatch)
+    head, marker, tail = prompt.partition("--- the diff, verbatim, to the end of this prompt ---")
+    assert marker, "the diff was not inlined"
+    assert "feature.py" in tail
+    assert "--- acceptance criteria" in head and "review-verdict.json" in head
+
+
+def test_a_diff_over_the_cap_is_handed_over_as_a_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(reviewdiff, "INLINE_MAX_CHARS", 0)
+    prompt = _review_prompt_for(tmp_path, monkeypatch)
+    assert "--- the diff, verbatim" not in prompt
+    assert "too large to inline" in prompt and ".review-diff.patch" in prompt

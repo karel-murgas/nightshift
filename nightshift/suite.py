@@ -1218,3 +1218,87 @@ def failure_excerpt(path: Path, *, tests: int = EXCERPT_TESTS,
     if len(found) > tests:
         out.append(f"    …and {len(found) - tests} more failing test(s).")
     return "\n".join(out)
+
+
+# --- 3. The worker's copy of the runner's slice ----------------------------------
+#
+# A dispatched worker used to verify its own branch with the whole suite — one to
+# three full runs per card, sometimes serially, sometimes again under `git stash` —
+# and then the runner ran its own slice over the same branch and judged by that
+# alone (`token-economy.md` §1, measured on real transcripts). Everything the worker
+# ran beyond the slice was paid for twice and decided nothing.
+#
+# So the worker is given the runner's own question to ask: this command computes
+# the slice exactly as the runner will (`select`, or `touched` for the chore batch),
+# from the same diff against the same base, and runs it with the same parallel
+# flags. One policy, two callers — never a second hand-rolled selection.
+
+#: What a dispatch prompt tells the worker to run before its verdict.
+SLICE_COMMAND = "python -m nightshift.suite slice"
+
+
+def slice_command(touched: bool) -> str:
+    """The worker-facing command for the selector its runner uses."""
+    return SLICE_COMMAND + (" --touched" if touched else "")
+
+
+def _branch_paths(root: Path, base: str) -> set[str]:
+    """What the runner's diff will see (`base...HEAD`), plus anything not yet
+    committed — a worker checking before its last commit must not get a narrower
+    slice than the one it is about to be judged on."""
+    from nightshift import gitpaths
+
+    paths = set(gitpaths.changed(root, f"{base}...HEAD"))
+    paths |= set(gitpaths.changed(root, "HEAD"))
+    untracked = gitpaths.git(root, "ls-files", "--others", "--exclude-standard", "-z")
+    if untracked.returncode == 0:
+        paths |= set(gitpaths.split(untracked.stdout))
+    return paths
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    import subprocess
+
+    parser = argparse.ArgumentParser(
+        prog="python -m nightshift.suite",
+        description="Test-selection policy, as a command.")
+    sub = parser.add_subparsers(dest="command", required=True)
+    cut = sub.add_parser(
+        "slice", help="run the test slice the runner will judge this branch on")
+    cut.add_argument("--touched", action="store_true",
+                     help="narrow to test files that import what changed (the chore "
+                          "batch's selector, which has a whole-suite run behind it)")
+    cut.add_argument("--base", default=None,
+                     help="ref to diff against (default: [branches].integration)")
+    cut.add_argument("--dry-run", action="store_true",
+                     help="print the selection and the command, run nothing")
+    cut.add_argument("--root", type=Path, default=None)
+    args = parser.parse_args(argv)
+
+    try:
+        root = (args.root or _manifest.find_root()).resolve()
+        base = args.base or _manifest.load(root).branches.integration
+    except ManifestError as exc:
+        print(f"suite slice: {exc}")
+        return 2
+    if not base:
+        print("suite slice: no base — pass --base, or declare [branches].integration")
+        return 2
+
+    changed = _branch_paths(root, base)
+    selection = (touched if args.touched else select)(changed, root)
+    paths = selection.pytest_args(root / tests_rel(root))
+    print(f"slice: {selection.bucket} — {selection.reason}")
+    if not paths:
+        print("no tests apply to this diff — the gates are the check")
+        return 0
+    argv_ = [sys.executable, "-m", "pytest", *paths, "-q", *parallel_args()]
+    print("$ " + " ".join(["python", *argv_[1:]]))
+    if args.dry_run:
+        return 0
+    return subprocess.run(argv_, cwd=root, check=False).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())

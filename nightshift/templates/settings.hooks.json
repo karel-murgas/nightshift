@@ -11,8 +11,9 @@
     "enforces that, and `nightshift.hooks.project_script` is the cwd-independent",
     "way to reach a script that must stay project-side.",
     "",
-    "The PostToolUse gate run is `; exit 0` on purpose: a violation must show in",
-    "the transcript, not block the edit that would fix it."
+    "The PostToolUse gate run (`nightshift.hooks.gates_on_edit`) always exits 0 on",
+    "purpose: a violation must show in the transcript, not block the edit that would",
+    "fix it. It prints only what is news since the previous edit, never the gate list."
   ],
   "hooks": {
     "PreToolUse": [
@@ -85,6 +86,17 @@
             "statusMessage": "Checking the private-lane fence..."
           }
         ]
+      },
+      {
+        "matcher": "Read|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m nightshift.hooks.tool_economy",
+            "timeout": 10,
+            "statusMessage": "Checking tool economy (no whole reads of big files; a worker runs the slice, not the suite)..."
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -93,9 +105,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python -m nightshift.gates.run; exit 0",
+            "command": "python -m nightshift.hooks.gates_on_edit",
             "timeout": 30,
-            "statusMessage": "Running gates (nightshift.gates.run)..."
+            "statusMessage": "Running gates (nightshift.hooks.gates_on_edit)..."
           }
         ]
       },
