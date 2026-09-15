@@ -880,7 +880,19 @@ def attempt_limit(card: board.Card) -> int:
     disagreeing is the failure this exists to prevent: a chore that selection
     refuses to re-queue but retirement leaves in `tasks/` is a card nothing will
     ever pick up and nothing will ever report.
+
+    Counted from `card.retry_from`, not from zero. A play-test rejection is not a
+    re-dispatch of the prompt that already went wrong — it adds `## Feedback` the
+    earlier attempts never had — so it earns a fresh `attempt_budget`. Without that,
+    every rejected chore (one attempt, already spent) fell out of the batch and into
+    "Do now" as if it needed a person at the keyboard (Karel, 2026-09-16).
     """
+    return card.retry_from + attempt_budget(card)
+
+
+def attempt_budget(card: board.Card) -> int:
+    """Dispatches per budget — one for a chore, three for a full card — regardless
+    of how many earlier budgets a rejection already reset."""
     return CHORE_MAX_ATTEMPTS if card.kind == board.KIND_CHORE else MAX_ATTEMPTS
 
 
@@ -7758,7 +7770,7 @@ def run(root: Path, args: argparse.Namespace) -> int:
                 # money per turn, and it must not depend on another function's
                 # arithmetic staying correct to terminate. Counted locally, reset
                 # whenever the index moves.
-                if fix_rounds >= attempt_limit(candidate.card):
+                if fix_rounds >= attempt_budget(candidate.card):
                     _log(f"  {candidate.card.id} has taken {fix_rounds} review-fix "
                          f"rounds this run without settling — moving on rather than "
                          f"spending another; it keeps its lane and its attempts")

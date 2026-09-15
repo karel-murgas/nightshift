@@ -199,6 +199,12 @@ def mark_rejected(root: Path, card_id: str, note: str) -> str:
     mid-dispatch `needs_fix`, which still has one. The next attempt cold-starts
     from the integration branch, which already carries the merged work — the fix
     lands on top of it, not instead of it.
+
+    **The card keeps its kind and gets a fresh attempt budget** (`retry_from`, read
+    by `runner.attempt_limit`). A rejected chore has already spent its one attempt,
+    and without the reset `chores.eligible()` refused it and the panel filed it
+    under "Do now" — work a person must do by hand — when the fix was usually a
+    one-liner the batch could take. Karel, 2026-09-16.
     """
     if not note.strip():
         raise BoardCommandError("no feedback given — a card sent back with nothing "
@@ -213,7 +219,7 @@ def mark_rejected(root: Path, card_id: str, note: str) -> str:
     # Same front-of-queue bucket a reviewer's `needs_fix` earns
     # (`board.dispatch_order`): a fix this concrete is the cheapest next dispatch,
     # not one to make wait behind whatever Karel dragged to the top by hand.
-    card.write({"last_outcome": "needs_fix"})
+    card.write({"last_outcome": "needs_fix", "retry_from": str(card.attempts)})
     board.move(root, card, "tasks")
     # The one event no run record can hold, because no dispatch produced it
     # (`token-economy.md` phase 0.3 — `run_record.quality_counters`'s

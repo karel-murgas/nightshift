@@ -438,6 +438,17 @@ class Card:
             return 0
 
     @property
+    def retry_from(self) -> int:
+        """The `attempts` value the card's attempt budget counts from — `0` unless a
+        play-test sent it back (`boardcmd.mark_rejected`), which sets it to the attempts
+        already spent so the feedback-carrying card gets a fresh budget. `attempts`
+        itself is never rewound: run dirs are numbered by it."""
+        try:
+            return int(self.fields.get("retry_from", "0"))
+        except ValueError:
+            return 0
+
+    @property
     def last_outcome(self) -> str:
         """What the most recent completed attempt ended in, for `dispatch_order` —
         `needs_fix`, `failed`, or `""`.

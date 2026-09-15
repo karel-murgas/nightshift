@@ -565,19 +565,14 @@ def promote_to_tasks(root: Path, card_id: str, *, today: dt.date | None = None) 
     after all. What the field must never do is refuse a move a person deliberately
     chose while looking at more information than the parker had.
 
-    **A chore that parked has already spent its one attempt, and this does not give
-    it back.** `chores.py` charges the attempt the moment a chore bounces to
-    `needs-decision/` — parking is not free there, by design (`run_one`'s docstring:
-    "One attempt, so it is a human's to read"). So a promoted chore still reads
-    `attempts >= CHORE_MAX_ATTEMPTS` afterwards, which means `chores.eligible()` will
-    keep refusing it and the ordinary runner skips `kind: chore` cards outright — the
-    card sits in `tasks/` looking dispatchable and is not. Found 2026-08-26: the panel's
-    "move to tasks" button flipped `docs-production` straight past this with no word
-    to the maintainer, who only found out when it never ran. The move itself is still
-    allowed — refusing it would block the legitimate case of answering now and
-    dispatching by name later (`--card`, which waives both restrictions on purpose) —
-    but the return message says so, so the fact surfaces at the moment of the click
-    rather than in a digest line easy to miss.
+    **A promoted card gets a fresh attempt budget** (`retry_from`, read by
+    `runner.attempt_limit`), the same as a play-test rejection. `chores.py` charges a
+    chore's one attempt the moment it bounces to `needs-decision/`, and `settle` parks
+    a full card that ran out of attempts, so without the reset a promoted card sat in
+    `tasks/` looking dispatchable and was not — `docs-production` on 2026-08-26, which
+    this function then only *warned* about. The answer is new information the spent
+    attempts never had, which is the whole argument for a fresh budget. Karel,
+    2026-09-16: answering should reset the budget too.
     """
     card = board.find(root, card_id)
     if card is None:
@@ -605,16 +600,7 @@ def promote_to_tasks(root: Path, card_id: str, *, today: dt.date | None = None) 
             text, on=(today or dt.date.today()).isoformat())
 
     text = re.sub(r"^state:.*$", "state: tasks", text, count=1, flags=re.MULTILINE)
+    if card.attempts:
+        text = board.set_fields(text, {"retry_from": str(card.attempts)})
     textio.write_text_lf(card.path, text)
-
-    note = ""
-    if card.kind == board.KIND_CHORE:
-        from nightshift.runner import CHORE_MAX_ATTEMPTS  # local: keeps this module's
-        # imports to board/manifest/textio at module scope; see the module docstring.
-        if card.attempts >= CHORE_MAX_ATTEMPTS:
-            note = (f" — heads up: this chore already used its {card.attempts} attempt "
-                    f"(a chore gets {CHORE_MAX_ATTEMPTS}), so the chore batch will refuse "
-                    f"it again and the ordinary runner skips `kind: chore` cards. Dispatch "
-                    f"it by name when you're ready: `python -m nightshift.runner --card "
-                    f"{card_id}`")
-    return f"{card_id} → tasks/{note}"
+    return f"{card_id} → tasks/"

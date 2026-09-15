@@ -456,14 +456,13 @@ def test_a_card_with_no_route_and_a_live_question_says_so(tmp_path):
         decide.promote_to_tasks(root, "parked")
 
 
-def test_a_promoted_chore_at_its_attempt_cap_says_so(tmp_path):
+def test_a_promoted_chore_at_its_attempt_cap_gets_a_fresh_budget(tmp_path):
     """`chores.py` charges a chore's one attempt the moment it parks to
-    `needs-decision/` (see `run_one`'s docstring) — parking is not free there. So a
-    chore promoted back to `tasks/` still reads `attempts >= CHORE_MAX_ATTEMPTS`
-    afterwards: `chores.eligible()` keeps refusing it and the ordinary runner skips
-    `kind: chore` cards outright. The card must not look dispatchable in silence —
-    found 2026-08-26 when the panel's button did exactly that for `docs-production`.
+    `needs-decision/` (see `run_one`'s docstring). Promoted without a reset it would
+    sit in `tasks/` looking dispatchable while `chores.eligible()` refused it — found
+    2026-08-26 for `docs-production`. The answer earns it a fresh budget instead.
     """
+    from nightshift import chores
     (tmp_path / ".ai").mkdir(parents=True, exist_ok=True)
     (tmp_path / ".ai" / "manifest.toml").write_text(
         '[project]\nname = "probe"\n\n[board]\ndecision_attributor = "karel"\n',
@@ -491,9 +490,10 @@ def test_a_promoted_chore_at_its_attempt_cap_says_so(tmp_path):
 
     message = decide.promote_to_tasks(tmp_path, "a-chore")
 
-    assert "→ tasks/" in message
-    assert "already used its 1 attempt" in message
-    assert "--card a-chore" in message
+    assert message == "a-chore → tasks/"
+    card = board.find(tmp_path, "a-chore")
+    assert card.attempts == 1 and card.retry_from == 1
+    assert chores.eligible(card, capabilities=set()) == ""
 
 
 def test_a_promoted_full_card_gets_no_chore_warning(tmp_path):

@@ -88,6 +88,13 @@ def test_a_chore_that_burned_its_attempt_is_left_out_with_a_reason(tmp_path):
     assert len(skipped) == 1 and "already attempted" in skipped[0].reason
 
 
+def test_a_spent_chore_sent_back_from_testing_rejoins_the_batch(tmp_path):
+    """`retry_from` is what `boardcmd.mark_rejected` writes; the batch must honour it."""
+    root = _repo(tmp_path, {"id": "sent-back", "extra": "attempts: 1\nretry_from: 1\n"})
+    chosen, skipped = chores.select(root)
+    assert [c.id for c in chosen] == ["sent-back"] and skipped == []
+
+
 def test_an_unattended_false_chore_is_left_out(tmp_path):
     root = _repo(tmp_path, {"id": "manual", "unattended": "false"})
     _, skipped = chores.select(root)

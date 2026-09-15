@@ -120,6 +120,18 @@ def test_a_card_at_the_attempt_limit_is_skipped(tmp_path):
     assert not _select(root)["burnt"].dispatchable
 
 
+def test_a_rejected_card_counts_its_budget_from_retry_from(tmp_path):
+    """A play-test rejection resets the budget without rewinding `attempts`."""
+    root = _repo(tmp_path)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "sent-back", attempts=str(runner.MAX_ATTEMPTS),
+          retry_from=str(runner.MAX_ATTEMPTS))
+    assert _select(root)["sent-back"].dispatchable
+    card = board.find(root, "sent-back")
+    assert runner.attempt_limit(card) == 2 * runner.MAX_ATTEMPTS
+    assert runner.attempt_budget(card) == runner.MAX_ATTEMPTS
+
+
 # --- chores are a different queue, not a different kind of night ------------
 #
 # `kind: chore` is dispatched in a batch (`nightshift.chores`): a cheap per-item

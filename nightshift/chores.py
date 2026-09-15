@@ -260,7 +260,9 @@ def eligible(card: board.Card, *, capabilities: frozenset[str] | set[str]) -> st
         attempts = int(card.fields.get("attempts", "0") or 0)
     except ValueError:
         attempts = 0
-    if attempts >= MAX_ATTEMPTS:
+    # `attempt_limit`, not `MAX_ATTEMPTS`: a play-test rejection resets the budget
+    # (`retry_from`), and the runner and this batch must agree on what is spent.
+    if attempts >= runner.attempt_limit(card):
         return (f"already attempted {attempts}x - a chore gets {MAX_ATTEMPTS}; "
                 f"read it rather than re-running it")
     return ""

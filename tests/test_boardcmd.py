@@ -224,6 +224,26 @@ def test_rejecting_a_card_sends_it_back_to_tasks_with_the_feedback(tmp_path):
     assert "tasks/" in message
 
 
+def test_rejecting_a_spent_chore_gives_it_a_fresh_attempt(tmp_path):
+    """A rejected chore had already used its one attempt; without a fresh budget
+    the batch refused it and the panel filed it under "Do now". It must stay a
+    chore the batch will take, with `attempts` itself left alone."""
+    from nightshift import chores, runner
+    root = _repo(tmp_path)
+    path = _card(root, "testing", "played")
+    path.write_text(path.read_text(encoding="utf-8")
+                    .replace("unattended: false\n", "unattended: true\nkind: chore\nattempts: 1\n"),
+                    encoding="utf-8")
+    assert chores.eligible(board.find(root, "played"), capabilities=set()) != ""
+
+    boardcmd.mark_rejected(root, "played", "too high from the bottom")
+
+    card = board.find(root, "played")
+    assert card.attempts == 1 and card.fields["retry_from"] == "1"
+    assert card.attempts < runner.attempt_limit(card)
+    assert chores.eligible(card, capabilities=set()) == ""
+
+
 def test_rejecting_logs_itself_for_the_quality_counter(tmp_path):
     """No dispatch produces this event, so it cannot live in a run record — it
     gets logged here instead, which is what `run_record.quality_counters`'s
