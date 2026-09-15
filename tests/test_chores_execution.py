@@ -227,6 +227,7 @@ class _Worker:
         self.dispatched: list[str] = []
         self.reviews: list[str] = []
         self.models: list[str] = []
+        self.argvs: list[list[str]] = []
 
     def install(self, monkeypatch):
         monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
@@ -251,6 +252,7 @@ class _Worker:
 
     def __call__(self, argv, cwd, timeout, stream_path=None, env=None, prompt=""):
         cwd = Path(cwd)
+        self.argvs.append(list(argv))
         agent = argv[argv.index("--agent") + 1]
         model = argv[argv.index("--model") + 1]
         self.models.append(model)
@@ -321,6 +323,53 @@ def test_a_chore_dispatches_on_the_cheap_tier_as_a_short_alias(tmp_path, monkeyp
     worker = _Worker(edits={"a": _touch("a")}).install(monkeypatch)
     chores.execute(root)
     assert worker.models[:1] == ["sonnet"]
+
+
+def _worker_argvs(worker: _Worker) -> list[list[str]]:
+    return [a for a in worker.argvs if a[a.index("--agent") + 1] != runner.REVIEWER_AGENT]
+
+
+def test_a_chore_runs_under_the_chore_charter_at_medium_effort(tmp_path, monkeypatch):
+    """`token-economy.md` phase 2: a one-prompter skips the feature pipeline its
+    card's `worker:` would have put it through, and does not inherit the
+    maintainer's interactive effort level."""
+    root = _repo(tmp_path, ("a", "review", "inner"))
+    agents = root / ".claude" / "agents"
+    agents.mkdir(parents=True, exist_ok=True)
+    (agents / f"{chores.CHORE_AGENT}.md").write_text("---\nname: chore-thread\n---\n",
+                                                     encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "install the chore charter")
+    worker = _Worker(edits={"a": _touch("a")}).install(monkeypatch)
+    chores.execute(root)
+    (argv,) = _worker_argvs(worker)
+    assert argv[argv.index("--agent") + 1] == "chore-thread"
+    assert argv[argv.index("--effort") + 1] == "medium"
+
+
+def test_without_the_chore_charter_the_cards_own_worker_is_kept(tmp_path, monkeypatch):
+    """A project that never installed the charter must not be sent an agent the
+    CLI cannot find — it keeps dispatching exactly as before."""
+    root = _repo(tmp_path, ("a", "review", "inner"))
+    worker = _Worker(edits={"a": _touch("a")}).install(monkeypatch)
+    chores.execute(root)
+    (argv,) = _worker_argvs(worker)
+    assert argv[argv.index("--agent") + 1] != "chore-thread"
+
+
+def test_a_chore_worker_is_told_to_verify_with_the_touched_slice(tmp_path, monkeypatch):
+    """The batch judges a chore on `suite.touched`, so that is the slice its
+    prompt names — not the broader one a full card is judged on."""
+    root = _repo(tmp_path, ("a", "review", "inner"))
+    prompts: list[str] = []
+    worker = _Worker(edits={"a": _touch("a")}).install(monkeypatch)
+
+    def recording(argv, cwd, timeout, stream_path=None, env=None, prompt=""):
+        prompts.append(prompt)
+        return worker(argv, cwd, timeout, stream_path, env, prompt)
+    monkeypatch.setattr(runner, "_run_worker", recording)
+    chores.execute(root)
+    assert "python -m nightshift.suite slice --touched" in prompts[0]
 
 
 def test_the_batch_writes_its_own_run_record(tmp_path, monkeypatch):

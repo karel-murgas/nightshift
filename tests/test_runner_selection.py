@@ -1194,7 +1194,7 @@ def test_the_prompt_states_a_resolved_tier(tmp_path):
         tool_economy=worker_prompt.TOOL_ECONOMY,
         question_format=worker_prompt.QUESTION_FORMAT,
         doc_truth=worker_prompt.DOC_TRUTH.format(base="development_team"),
-        fold="", card_body="body")
+        fold="", slice_cmd="python -m nightshift.suite slice", card_body="body")
     assert tier_guard.evaluate({"tool_name": "Agent",
                                 "tool_input": {"prompt": prompt}}) is None
 
@@ -1206,7 +1206,7 @@ def test_the_prompt_forbids_moving_the_card_and_touching_dev(tmp_path):
         tool_economy=worker_prompt.TOOL_ECONOMY,
         question_format=worker_prompt.QUESTION_FORMAT,
         doc_truth=worker_prompt.DOC_TRUTH.format(base="development_team"),
-        fold="", card_body="body")
+        fold="", slice_cmd="python -m nightshift.suite slice", card_body="body")
     assert "Do not move the card" in prompt
     assert "never check out `dev`" in prompt
     assert "parked" in prompt and "success state" in prompt

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""PreToolUse hook: a dispatched worker does not pay twice for the same answer.
+"""PreToolUse hook: nobody pays twice for the same answer.
 
 `worker_prompt.TOOL_ECONOMY` has told workers to batch their searches and stop
-re-reading files since it was written, and the dispatch prompt has told them to
-run the suite as `-n auto --dist loadfile` for just as long. Measured on
-Dungeoneer's `tile-layer-surface-cache` (2026-08-29), a card that reviewed `ok`
-on its first attempt and was in every other respect a well-behaved run:
+re-reading files since it was written, and the dispatch prompt has told them how to
+run the suite for just as long. Measured on Dungeoneer's `tile-layer-surface-cache`
+(2026-08-29), a card that reviewed `ok` on its first attempt and was in every other
+respect a well-behaved run:
 
-  - the full suite ran **three** times — once correctly as
+  - the full suite ran **three** times — once as
     `pytest tests/ -n auto --dist loadfile`, then twice more as a bare
     `python -m pytest -q`, serially, at ~5.4 min each. About eleven minutes of
     wall time bought nothing, and the runner re-runs the authoritative slice
@@ -22,13 +22,24 @@ that is ignored is indistinguishable from one that was never written. Same move
 `worktree_fence` makes for the wrong-checkout write — make the expensive thing
 *impossible* rather than merely discouraged.
 
-**Off unless the runner turns it on.** Like `worktree_fence`, this fires only
-when the project's fence env var is set, which only a dispatched worker's
-environment carries. An interactive session never sets it, so a human at a
-prompt can still `cat` a file or run a serial pytest without argument. That
-matters: the rules here are economics for an unattended 100-turn agent, not
-style rules for a person, and enforcing them on a human would be a nuisance
-with no measured saving behind it.
+**Three rules, two scopes.**
+
+* *A dispatched worker* (the project's fence env var is set, which only a
+  worker's environment carries) may not run the whole suite at all — serial or
+  parallel — nor read a file through `cat`/`sed`/`grep`. The suite rule tightened
+  on 2026-09-15 (`token-economy.md` phase 1): the parallel full run was allowed
+  while it was the only way for a worker to check its branch, and it still cost
+  one to three whole-suite runs per card that decided nothing, because the runner
+  judges by its own slice. `python -m nightshift.suite slice` now runs exactly
+  that slice, so the whole suite is pure duplication for a worker.
+* *Every session* — worker, reviewer, a person at a prompt — may not `Read` a
+  file over `BIG_FILE_BYTES` whole. One read of a 64 kB UI module is ~55k
+  characters carried in context for every later turn, and the same 284 kB scene
+  file was read whole twelve times in one card. Unlike the Bash rules this is not
+  a style preference with an equivalent: a ranged Read after a Grep gets the same
+  answer at a fraction of the context, for anyone, which is why it is not gated
+  on the env var. Images, PDFs and notebooks are exempt — the Read tool renders
+  those rather than dumping text.
 
 **Denies, and says why.** A `deny` decision returns its reason to the model,
 which then retries differently — it is feedback, not a wedge. That is the
@@ -38,11 +49,11 @@ simply spent. Every rule here has a stated cheaper alternative that does the
 same job, so there is always a next move.
 
 Fails **open** on anything it cannot parse — a guard that wedges a worker on
-confusion is worse than none. No LLM (`00_architecture.md` §12): string
-inspection only.
+confusion is worse than none. No LLM (`00_architecture.md` §12): string and
+file-size inspection only.
 
 Wired as `python -m nightshift.hooks.tool_economy` in a consuming project's
-`.claude/settings.json` under a `Bash` matcher. Runnable by hand:
+`.claude/settings.json` under a `Read|Bash` matcher. Runnable by hand:
     DUNGEONEER_FENCE_ALLOW=/abs/worktree \\
       echo '{"tool_name":"Bash","tool_input":{"command":"python -m pytest -q"}}' \\
       | python -m nightshift.hooks.tool_economy
@@ -58,26 +69,28 @@ from pathlib import Path
 
 NAME = "tool_economy"
 
-# What nothing sets when a project declares no `[worker].fence_env` — this hook
-# then never arms, the correct behaviour for an unconfigured project.
+# What nothing sets when a project declares no `[worker].fence_env` — the Bash
+# rules then never arm, the correct behaviour for an unconfigured project.
 _DEFAULT_ENV_NAME = "NIGHTSHIFT_FENCE_ALLOW"
+
+#: A whole-file Read above this is denied. Sized from the files that were read
+#: whole in the measured transcripts (64 kB, 284 kB, 387 kB) against the ordinary
+#: module a Read is for, which is well under it.
+BIG_FILE_BYTES = 60_000
+
+#: Rendered by the Read tool rather than dumped as text, so size says nothing
+#: about context cost.
+_RENDERED = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".pdf", ".ipynb"})
 
 #: Splits a command line into the segments that are separate invocations, so
 #: `cd foo && pytest` is judged on the `pytest`, and a pipeline's downstream
 #: `head` is judged separately from its upstream producer.
 _SEGMENT = re.compile(r"\s*(?:\|\||&&|[;|])\s*")
 
-#: xdist is on iff one of these appears — `-n 4`, `-nauto`, `--numprocesses=6`,
-#: or the plugin named directly. `-n` is the only spelling seen in practice; the
-#: others are here so a worker that reaches for the long form is not punished
-#: for being explicit.
-_XDIST = re.compile(r"(?:^|\s)(?:-n\s*\S|--numprocesses(?:[=\s]\S)|-p\s+xdist)")
-
 #: A pytest invocation naming no path at all, or naming only the tests root, is
 #: the whole suite. `pytest tests/test_one.py` names a file and is exempt: a
-#: single file runs in seconds and paying xdist's startup for it is the *worse*
-#: trade, which is exactly why this rule is about the full suite and not about
-#: pytest in general.
+#: single file runs in seconds, and running what you touched is exactly the
+#: behaviour wanted.
 _TESTS_ROOT = re.compile(r"^tests?[/\\]?$")
 
 #: Shell commands that read a file the Read/Grep tools were built to read. Only
@@ -137,15 +150,13 @@ def _words(segment: str) -> list[str]:
 
 
 def _is_full_suite_pytest(words: list[str]) -> bool:
-    """`pytest` / `python -m pytest` over everything, with no xdist."""
+    """`pytest` / `python -m pytest` over everything, parallel or not."""
     joined = " ".join(words)
     if not re.search(r"(?:^|[/\\\s])(?:pytest|py\.test)(?:$|\s)", joined):
         return False
-    if _XDIST.search(joined):
-        return False
     # Any positional argument that is a path other than the tests root means the
-    # worker narrowed the run itself — the behaviour we want, not the one we are
-    # pricing. `-k`/`-m` selections are flags and fall out below.
+    # run was narrowed — the behaviour we want, not the one we are pricing.
+    # `-k`/`-m` selections and `-n <workers>` are flags and fall out below.
     skip_next = False
     for w in words:
         bare = w.strip("\"'")
@@ -153,7 +164,9 @@ def _is_full_suite_pytest(words: list[str]) -> bool:
             skip_next = False
             continue
         if bare.startswith("-"):
-            skip_next = bare in ("-k", "-m", "-p", "-o", "--deselect", "--ignore")
+            # gate-ok(pytest_invocation): these flag names are parsed out of a command a worker typed, never built into an argv this code runs.
+            skip_next = bare in ("-k", "-m", "-p", "-o", "-n", "--dist", "--deselect",
+                                 "--ignore")
             continue
         if "pytest" in bare or bare in ("python", "python3", "py"):
             continue
@@ -190,7 +203,7 @@ def _file_reader(words: list[str], piped_into: bool) -> str | None:
 
 
 def _verdict(command: str) -> str | None:
-    """The reason to deny, or None to allow."""
+    """The reason to deny a dispatched worker's Bash command, or None to allow."""
     segments = _SEGMENT.split(command)
     for i, seg in enumerate(segments):
         words = _words(seg)
@@ -198,12 +211,11 @@ def _verdict(command: str) -> str | None:
             continue
         if _is_full_suite_pytest(words):
             return (  # gate-ok(source_reference_liveness): `tests/test_x.py` below is a placeholder in advice shown to a worker, not a reference to any file in this repo.
-                "Run the full suite in parallel: `python -m pytest tests/ "
-                "-n auto --dist loadfile`. A bare serial pytest over the whole "
-                "suite costs several times what the parallel run does, and the "
-                "runner re-runs the authoritative slice over your branch "
-                "afterwards regardless — so you need only satisfy yourself the "
-                "area you changed is green. To run one file serially, name it: "
+                "Do not run the whole suite. `python -m nightshift.suite slice` runs "
+                "exactly the test slice the runner will judge your branch on, in "
+                "parallel — run it once before your verdict. The runner runs that "
+                "same slice over your branch afterwards regardless, so a whole-suite "
+                "run decides nothing. While iterating, run only the files you touched: "
                 "`pytest tests/test_x.py`."  # gate-ok(source_reference_liveness): a placeholder filename inside advice shown to a worker, not a reference to any file in this repo.
             )
         reader = _file_reader(words, piped_into=i > 0)
@@ -219,18 +231,46 @@ def _verdict(command: str) -> str | None:
     return None
 
 
+def _read_verdict(tool_input: dict) -> str | None:
+    """The reason to deny a whole-file Read of a big text file, or None."""
+    if tool_input.get("offset") is not None or tool_input.get("limit") is not None:
+        return None
+    raw = str(tool_input.get("file_path") or "")
+    if not raw:
+        return None
+    path = Path(raw)
+    if path.suffix.lower() in _RENDERED:
+        return None
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None  # a missing file is the Read tool's error to report, not ours
+    if size <= BIG_FILE_BYTES:
+        return None
+    return (
+        f"`{path.name}` is {size // 1000} kB — read whole, all of it stays in context "
+        f"for every later turn. Grep -n for what you need, then Read with `offset` "
+        f"and `limit` around the hits (a few hundred lines is plenty)."
+    )
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
     except Exception:
         return 0  # fail open
-    if payload.get("tool_name") != "Bash" or not _armed():
+    if not isinstance(payload, dict):
         return 0
-    command = str((payload.get("tool_input") or {}).get("command", ""))
-    if not command.strip():
-        return 0
+    tool = payload.get("tool_name")
+    tool_input = payload.get("tool_input") or {}
     try:
-        reason = _verdict(command)
+        if tool == "Read":
+            reason = _read_verdict(tool_input)
+        elif tool == "Bash" and _armed():
+            command = str(tool_input.get("command", ""))
+            reason = _verdict(command) if command.strip() else None
+        else:
+            reason = None
     except Exception:
         return 0  # fail open
     if reason:

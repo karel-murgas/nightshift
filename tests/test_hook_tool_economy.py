@@ -27,30 +27,37 @@ from nightshift.hooks import tool_economy
 
 # --- the measured incident, verbatim --------------------------------------------
 
-#: Every pytest command the 2026-08-29 attempt actually ran. The first is the
-#: one the prompt asked for and must survive; the two bare ones are the waste.
+#: Every pytest command the 2026-08-29 attempt actually ran. The single-file runs
+#: are the ones to keep. The two bare serial runs were the eleven minutes of waste;
+#: the parallel whole-suite run was allowed then, and is denied since
+#: `token-economy.md` phase 1 — `nightshift.suite slice` runs the runner's own
+#: slice, so a worker's whole-suite run duplicates a check that decides nothing.
 _MEASURED_PYTEST_ALLOWED = (
-    'cd "C:\\x" && python -m pytest tests/ -n auto --dist loadfile -q 2>&1 | tail -100',
     'cd "C:\\x" && python -m pytest tests/test_tile_render_cache.py -q 2>&1 | tail -20',
     'python -m pytest tests/test_tile_render_cache.py -q 2>&1 | tail -80',
 )
 _MEASURED_PYTEST_DENIED = (
     'cd "C:\\x" && python -m pytest -q 2>&1 | tail -30',
     'cd "C:\\x" && python -m pytest -q 2>&1 | tail -40',
+    'cd "C:\\x" && python -m pytest tests/ -n auto --dist loadfile -q 2>&1 | tail -100',
 )
 
 
 @pytest.mark.parametrize("command", _MEASURED_PYTEST_DENIED)
-def test_the_serial_full_suite_runs_that_cost_eleven_minutes_are_denied(command):
+def test_whole_suite_runs_serial_or_parallel_are_pointed_at_the_slice(command):
     reason = tool_economy._verdict(command)
-    assert reason and "-n auto --dist loadfile" in reason
+    assert reason and "python -m nightshift.suite slice" in reason
 
 
 @pytest.mark.parametrize("command", _MEASURED_PYTEST_ALLOWED)
-def test_the_same_attempts_legitimate_pytest_runs_are_untouched(command):
-    """The parallel full run and the single-file runs. Denying any of these would
-    make the rule worse than nothing — a worker cannot check its own work."""
+def test_the_same_attempts_single_file_runs_are_untouched(command):
+    """Running what you touched is the behaviour the rule steers towards; denying
+    it would leave a worker no way to check its own work while iterating."""
     assert tool_economy._verdict(command) is None
+
+
+def test_the_slice_command_itself_is_not_a_pytest_run():
+    assert tool_economy._verdict("python -m nightshift.suite slice --touched") is None
 
 
 def test_a_single_test_file_may_be_run_serially():
@@ -132,12 +139,47 @@ def test_a_deny_is_a_well_formed_decision_that_names_the_hook(monkeypatch, capsy
     assert out["hookEventName"] == "PreToolUse"
     assert out["permissionDecision"] == "deny"
     assert out["permissionDecisionReason"].startswith("[tool_economy] ")
-    assert "-n auto" in out["permissionDecisionReason"]
+    assert "nightshift.suite slice" in out["permissionDecisionReason"]
 
 
-def test_only_bash_is_judged():
-    """A Read is the thing this hook redirects people *to*."""
-    out = _run({"tool_name": "Read", "tool_input": {"file_path": "/x/y.py"}})
+# --- whole reads of big files, for every session -----------------------------
+
+
+def _read(file_path, **extra) -> dict:
+    return {"tool_name": "Read", "tool_input": {"file_path": str(file_path), **extra}}
+
+
+def test_a_whole_read_of_a_big_text_file_is_denied_even_interactively(tmp_path, monkeypatch):
+    """Not gated on the worker env var: a Grep and a ranged Read get the same
+    answer for anyone, and the whole-file read is carried in context for every
+    later turn — 55k characters for one read of a 64 kB module, measured."""
+    monkeypatch.delenv(tool_economy._env_name(), raising=False)
+    big = tmp_path / "game_scene.py"
+    big.write_text("x = 1\n" * (tool_economy.BIG_FILE_BYTES // 6 + 10), encoding="utf-8")
+    out = _run(_read(big))
+    assert out is not None
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "game_scene.py" in reason and "offset" in reason
+
+
+def test_a_ranged_read_of_the_same_file_is_allowed(tmp_path):
+    big = tmp_path / "game_scene.py"
+    big.write_text("x = 1\n" * (tool_economy.BIG_FILE_BYTES // 6 + 10), encoding="utf-8")
+    assert tool_economy._read_verdict(_read(big, offset=100, limit=200)["tool_input"]) is None
+    assert tool_economy._read_verdict(_read(big, limit=200)["tool_input"]) is None
+
+
+def test_small_files_images_and_missing_paths_are_allowed(tmp_path):
+    small = tmp_path / "small.py"
+    small.write_text("x = 1\n", encoding="utf-8")
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"\x89PNG" + b"\0" * (tool_economy.BIG_FILE_BYTES + 1))
+    for path in (small, image, tmp_path / "missing.py"):
+        assert tool_economy._read_verdict(_read(path)["tool_input"]) is None
+
+
+def test_other_tools_are_not_judged():
+    out = _run({"tool_name": "Grep", "tool_input": {"pattern": "x", "path": "."}})
     assert out is None
 
 

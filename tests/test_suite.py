@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+import _fixtures
 from nightshift import suite
 
 _MANIFEST = """
@@ -976,3 +977,48 @@ def test_touched_never_returns_an_empty_run(graphed):
 
 def test_without_a_root_there_is_no_graph_to_read_so_it_falls_back():
     assert suite.touched({"myapp/combat.py"}, None) == suite.select({"myapp/combat.py"})
+
+
+# --- the worker's copy of the runner's slice (`python -m nightshift.suite slice`) -
+
+
+def _git_repo(root: Path) -> None:
+    import subprocess
+
+    def git(*args):
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+                       cwd=root, check=True, capture_output=True)
+    _fixtures.git_init(root, branch="trunk")
+    (root / "myapp" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "myapp" / "alpha.py").write_text("A = 1\n", encoding="utf-8")
+    (root / "myapp" / "beta.py").write_text("B = 1\n", encoding="utf-8")
+    (root / "tests" / "test_alpha.py").write_text(
+        "from myapp.alpha import A\n\ndef test_a():\n    assert A\n", encoding="utf-8")
+    (root / "tests" / "test_beta.py").write_text(
+        "from myapp.beta import B\n\ndef test_b():\n    assert B\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "seed")
+
+
+def test_slice_selects_from_committed_and_uncommitted_changes_alike(repo, capsys):
+    """A worker checking before its last commit must be shown the slice it is
+    about to be judged on, not a narrower one."""
+    _git_repo(repo)
+    (repo / "myapp" / "alpha.py").write_text("A = 2\n", encoding="utf-8")
+    code = suite.main(["slice", "--touched", "--dry-run", "--root", str(repo),
+                       "--base", "trunk"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "tests/test_alpha.py" in out and "test_beta.py" not in out
+    assert "--dist" in out  # the one parallel policy, not a hand-rolled one
+
+
+def test_slice_without_a_base_says_how_to_give_one(repo, capsys):
+    _git_repo(repo)
+    assert suite.main(["slice", "--dry-run", "--root", str(repo)]) == 2
+    assert "--base" in capsys.readouterr().out
+
+
+def test_the_prompt_names_the_selector_the_runner_uses():
+    assert suite.slice_command(touched=False) == "python -m nightshift.suite slice"
+    assert suite.slice_command(touched=True).endswith("slice --touched")
