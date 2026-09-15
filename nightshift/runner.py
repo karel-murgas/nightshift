@@ -3415,12 +3415,12 @@ def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
         # foregrounded as "the diff" narrows to what changed since its own last
         # look.
         diff = _git(root, "diff", f"{since or base}...{branch}")
-        # What the reviewer is shown is filtered (translation values, binaries,
-        # generated views — each listed, never silently dropped) and, when it fits,
+        # What the reviewer is shown is filtered (binaries and generated board
+        # views only — each listed, never silently dropped) and, when it fits,
         # inlined at the end of the prompt so no turn is spent reading it back off
         # disk (`reviewdiff`). The unfiltered patch stays beside it for the reviewer
         # to open if a listed omission matters after all.
-        shown = reviewdiff.filter_diff(diff.stdout, tree)
+        shown = reviewdiff.filter_diff(diff.stdout)
         diff_path = tree / ".review-diff.patch"
         textio.write_text_lf(diff_path, shown.text)
         full_path = tree / ".review-diff-full.patch"

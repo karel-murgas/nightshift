@@ -75,9 +75,8 @@ You are given exactly:
 - **the diff** — the change under review: `git diff <integration>...<branch>`, what this
   branch added since it forked. It is inline at the end of your prompt when it fits — work
   from that copy and do not read it again from disk — and a patch file at the named path when
-  it does not. Hunks a gate or another stage owns (translation values in the target
-  languages, binary files, generated board views) are left out and listed by name; docs,
-  comments and memory files never are.
+  it does not. Files with nothing to read (binary files, generated board views) are left
+  out and listed by name; code, docs, comments, memory files and translations never are.
 - **the acceptance criteria** from the card, verbatim, and a short statement of the card's
   **intent** — what it set out to do. That is the spec you judge against.
 - **the repository** — you may read any surrounding code the diff touches, to judge whether

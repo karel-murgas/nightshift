@@ -142,12 +142,6 @@ def _armed() -> bool:
     return bool(os.environ.get(_env_name(), "").strip())
 
 
-def armed() -> bool:
-    """Is this process running under a dispatched worker? Public for the other
-    hooks that change behaviour for a worker (`gates_on_edit`)."""
-    return _armed()
-
-
 def _words(segment: str) -> list[str]:
     try:
         return shlex.split(segment, posix=False)
