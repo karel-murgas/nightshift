@@ -72,8 +72,12 @@ the surrounding code instead.
 The runner dispatches you and builds your context; the worker never talks to you directly.
 You are given exactly:
 
-- **the diff** — the change under review, as a patch file at the path named in your prompt.
-  It is `git diff <integration>...<branch>`: what this branch added since it forked.
+- **the diff** — the change under review: `git diff <integration>...<branch>`, what this
+  branch added since it forked. It is inline at the end of your prompt when it fits — work
+  from that copy and do not read it again from disk — and a patch file at the named path when
+  it does not. Hunks a gate or another stage owns (translation values in the target
+  languages, binary files, generated board views) are left out and listed by name; docs,
+  comments and memory files never are.
 - **the acceptance criteria** from the card, verbatim, and a short statement of the card's
   **intent** — what it set out to do. That is the spec you judge against.
 - **the repository** — you may read any surrounding code the diff touches, to judge whether
@@ -87,9 +91,10 @@ pipeline, no worker verdict.
 
 `python -m nightshift.gates.run` and the full `pytest` suite have **already passed** on this exact
 branch — you are only run after they do. So do not spend attention re-verifying anything
-those cover, and **run the gate suite once to see what that is** rather than assuming: the
-list is this project's, it grows as this project earns rules, and a checker guessing at it
-will either re-do work or skip something nobody checked.
+those cover. **Your prompt quotes that gate run's own report**, which is the list of what they
+cover: read it rather than re-running the suite, and do not guess at it — the list is this
+project's and grows as this project earns rules. Only if the report is missing from your
+prompt, run the gate suite once to see it.
 
 Nor: that the tests pass, or that the code runs.
 

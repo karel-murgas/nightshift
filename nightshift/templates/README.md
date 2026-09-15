@@ -11,7 +11,7 @@ These templates are what closes that gap.
 
 | Path | Lands at | Notes |
 |---|---|---|
-| `agents/*.md` | `.claude/agents/` | the four core charters — `code-thread`, `code-reviewer`, `triage`, `stale-hunter`. The runner dispatches these by name and `card_schema` checks the file exists |
+| `agents/*.md` | `.claude/agents/` | the core charters — `code-thread`, `chore-thread`, `code-reviewer`, `merge-resolver`, `triage`, `stale-hunter`. The runner dispatches these by name and `card_schema` checks the file exists |
 | `skills/*/SKILL.md` | `.claude/skills/` | the three operator skills. Instructions for the agent, distinct from the README, which is for the person |
 | `settings.hooks.json` | merged into `.claude/settings.json` | seven hook entries. Merged, never overwritten — a project's `permissions` block is its own |
 | `ai/corrections.log` | `.ai/corrections.log` | header only |

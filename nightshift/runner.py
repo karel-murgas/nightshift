@@ -60,6 +60,7 @@ from nightshift import decide         # reopening a re-parked card's decision st
 from nightshift import gitmerge       # merge strategy + failure reporting, one home
 from nightshift import gitpaths       # git's path lists, read NUL-separated
 from nightshift import limits
+from nightshift import reviewdiff     # what the diff reviewer is shown, and how
 from nightshift import manifest as _manifest
 from nightshift import memoryfold  # per-card memory records, folded serially on merge
 from nightshift import reconcile
@@ -2052,10 +2053,22 @@ later turn in which a background task's completion can reach you, so **never sta
 with `run_in_background` and then end your turn to wait for it** — a backgrounded process is \
 killed the instant your turn ends, and any edit you had not committed dies with it. Run any \
 command whose result you need — the gate runner and the test suite included — in the \
-foreground and wait for it inline (give it a generous timeout). Run the suite in parallel — \
-`python -m pytest tests/ -n auto --dist loadfile` — it is several times faster and safe; the \
-runner runs the authoritative slice over your branch afterwards, so you need only satisfy \
-yourself the area you changed is green. And **commit as you go**: an \
+foreground and wait for it inline (give it a generous timeout).
+
+**Test what you touch; verify once.** While you iterate, run only the test files your change \
+reaches, by name. Before your verdict, run exactly what the runner will judge your branch on, \
+once each: `python -m nightshift.gates.run`, then `{slice_cmd}` (your diff's test slice, in \
+parallel). Do not run the whole suite, do not run it serially, and do not `git stash` to \
+re-run anything against the base: the runner runs the gates and that same slice over your \
+branch after you finish, judges by its report, and checks by itself whether a red test was \
+already red on the base. A second copy of that run decides nothing.
+
+**Do not orient from memory files.** The card carries the context this work needs. Open a \
+memory or history file only to update it, or when the card names it; a start-of-session \
+reading list in the project's instructions is for interactive sessions, not for a dispatched \
+run.
+
+And **commit as you go**: an \
 uncommitted edit is not the work, the commit is, so commit before you run a long check and \
 again before you write your verdict. A finished but uncommitted worktree is the one way to \
 do all the work and still have the run record that you produced nothing.
@@ -2122,7 +2135,8 @@ left off. When finished, write the same verdict JSON to:
   {verdict_path}
 as before: {{"outcome": "done" | "parked", "summary": "<2-4 short lines>", \
 "how_to_test": "<a scenario in the maintainer's terms, or "" on a `verify: review` card>"}}. The runner \
-will run `nightshift.gates.run` and the full test suite over your branch; do not weaken either.
+will run `nightshift.gates.run` and the test slice your change touches over your branch; do not \
+weaken either, and do not run the whole suite yourself.
 """
 
 _REENTER_NOTE = """\
@@ -2224,10 +2238,15 @@ was not a one-prompter, and it is worth more than a plausible guess. Write what 
 found into `## Question` as usual. Do **not** widen the change to make it fit, and do \
 not do a reduced version of it without saying so.
 
-**Judge that by what you still do not know, not by how long you have taken.** Reading a \
-lot of a large codebase to place a small change is ordinary and is not a finding. Being \
-unable to say where the change goes, or which of several places is the right one, is — \
-park and say so.
+**Locate, don't read.** Grep for the name, string or symptom the card gives you and read \
+only the lines around what you find. A one-prompter has one obvious home, so finding it \
+should take a search, not a tour of the codebase. Skip the feature pipeline: no close-out \
+skill chain, no in-game check, no memory orientation — run the tests for what you changed, \
+the gates once, commit, and write your verdict.
+
+**Judge whether to park by what you still do not know, not by how long you have taken.** \
+Being unable to say where the change goes, or which of several places is the right one, is \
+the finding — park and say so.
 """
 
 _FEEDBACK = """\
@@ -2355,8 +2374,7 @@ _REVIEW_PROMPT = """\
 Review the finished diff below against the card's acceptance criteria and the surrounding \
 code, at **tier: lead** (resolved to model `{model}`).
 
-The change is on branch `{branch}`. Its diff {diff_desc} is in:
-  {diff}
+The change is on branch `{branch}`. Its diff {diff_desc} {diff_where}
 The repository it changes is rooted at:
   {repo}
 Read the diff, then read whatever surrounding code you need to judge whether the change \
@@ -2401,7 +2419,7 @@ onto one line cannot hold that shape, and reaches the maintainer as prose.
 
 --- what the card set out to do (its intent) ---
 {intent}
-"""
+{diff_inline}"""
 
 # The chore batch's variant (chores.py `_review`): one diff bundling several independent
 # one-prompter chores, judged **per item** in the one call rather than as a single
@@ -2425,8 +2443,7 @@ but say so inside the specific item(s) it implicates rather than failing every i
 item's fault.
 
 The change is on branch `{branch}`. Its diff against the integration branch — what this \
-branch added since it forked — is in:
-  {diff}
+branch added since it forked — {diff_where}
 The repository it changes is rooted at:
   {repo}
 Read the diff, then read whatever surrounding code you need to judge whether each item does \
@@ -2474,7 +2491,7 @@ onto one line cannot hold that shape, and reaches the maintainer as prose.
 
 --- what each item set out to do (its intent) ---
 {intent}
-"""
+{diff_inline}"""
 
 
 @dataclass
@@ -3398,8 +3415,27 @@ def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
         # foregrounded as "the diff" narrows to what changed since its own last
         # look.
         diff = _git(root, "diff", f"{since or base}...{branch}")
+        # What the reviewer is shown is filtered (translation values, binaries,
+        # generated views — each listed, never silently dropped) and, when it fits,
+        # inlined at the end of the prompt so no turn is spent reading it back off
+        # disk (`reviewdiff`). The unfiltered patch stays beside it for the reviewer
+        # to open if a listed omission matters after all.
+        shown = reviewdiff.filter_diff(diff.stdout, tree)
         diff_path = tree / ".review-diff.patch"
-        textio.write_text_lf(diff_path, diff.stdout)
+        textio.write_text_lf(diff_path, shown.text)
+        full_path = tree / ".review-diff-full.patch"
+        if shown.omitted:
+            textio.write_text_lf(full_path, diff.stdout)
+        omitted = shown.omitted_note(full_path.resolve().as_posix())
+        if len(shown.text) <= reviewdiff.INLINE_MAX_CHARS:
+            diff_where = ("is at the very end of this prompt, verbatim — work from that "
+                          "copy; there is no need to read it from disk.")
+            diff_inline = (f"\n--- the diff, verbatim, to the end of this prompt ---\n"
+                           f"{omitted}{shown.text}")
+        else:
+            diff_where = (f"is too large to inline, so it is in:\n  "
+                          f"{diff_path.resolve().as_posix()}\n{omitted}")
+            diff_inline = ""
         verdict_path = tree / ".review-verdict.json"
 
         if since and prior_finding:
@@ -3415,7 +3451,7 @@ def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
         # cannot raise a KeyError on a template that does not mention it.
         told = intent + (_REPAIRED_BLOCK.format(repaired=repaired) if repaired else "")
         prompt = template.format(
-            model=model, branch=branch, diff=diff_path.resolve().as_posix(),
+            model=model, branch=branch, diff_where=diff_where, diff_inline=diff_inline,
             repo=tree.resolve().as_posix(),
             verdict_path=verdict_path.resolve().as_posix(),
             criteria=criteria, intent=told, rubric=_REVIEW_RUBRIC,
@@ -4371,9 +4407,17 @@ def assert_integration_unmoved(root: Path, base: str, expected_sha: str) -> bool
 def run_producer(root: Path, card: board.Card, tree: Path, out_dir: Path, branch: str,
                  base: str, model: str, card_budget: float, timeout: int,
                  round_no: int = 1, feedback: str = "", resume_session: str = "",
-                 continue_note: str = "") -> tuple[dict, float, int, limits.Wall | None]:
+                 continue_note: str = "", agent: str = "", effort: str = "",
+                 slice_cmd: str = suite.SLICE_COMMAND,
+                 ) -> tuple[dict, float, int, limits.Wall | None]:
     """One producer round. Its verdict, its cost, its exit code, and the usage
     limit it hit if it hit one.
+
+    `agent` overrides the card's `worker:` charter and `effort` sets the CLI's effort
+    level — both empty by default, which is the card's own worker at the CLI's default.
+    The chore batch passes both (`chores.CHORE_AGENT`, `chores.CHORE_EFFORT`).
+    `slice_cmd` is the command the prompt tells the worker to verify with: the one
+    that computes the same slice this dispatch's `test_selector` will judge it on.
 
     `resume_session` and `continue_note` continue a limit-interrupted attempt
     (runner-worker-handover). With `resume_session` set, the CLI is invoked
@@ -4398,6 +4442,7 @@ def run_producer(root: Path, card: board.Card, tree: Path, out_dir: Path, branch
             question_format=worker_prompt.QUESTION_FORMAT,
             doc_truth=worker_prompt.DOC_TRUTH.format(base=base),
             fold=_fold_instruction(root, card),
+            slice_cmd=slice_cmd,
             card_body=card.text,
         ) + (_CHORE_NOTE if card.kind == board.KIND_CHORE else "") \
           + continue_note + feedback
@@ -4406,8 +4451,9 @@ def run_producer(root: Path, card: board.Card, tree: Path, out_dir: Path, branch
         """Flags only — the prompt reaches the child on stdin (`_run_worker`)."""
         out = [
             binary, "-p",
-            "--agent", card.worker,
+            "--agent", agent or card.worker,
             "--model", model,
+            *(["--effort", effort] if effort else []),
             *_STREAM_ARGV,
             *(["--resume", session] if session else []),
             *_budget_argv(card_budget),
@@ -4672,7 +4718,7 @@ def repair_drift(root: Path, tree: Path, card_id: str, branch: str, base: str,
 def dispatch(root: Path, card: board.Card, base: str, model: str,
              card_budget: float, test_timeout: int,
              test_selector: Callable[[set[str], Path], suite.Selection]
-             = suite.select) -> Dispatch:
+             = suite.select, *, worker: str = "", effort: str = "") -> Dispatch:
     """One attempt. Every exit path leaves the card's runner fields consistent.
 
     `test_selector` is how the gates-green diff picks its pytest slice, and it
@@ -4766,17 +4812,19 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
 
     while round_no < max_rounds:
         round_no += 1
-        _log(f"  dispatching {card.id} → {card.worker} @ {model} "
+        _log(f"  dispatching {card.id} → {worker or card.worker} @ {model} "
              f"(attempt {attempt}, round {round_no}/{max_rounds})")
         _status(root, phase="worker", card=card.id, attempt=attempt,
-                round=round_no, of_rounds=max_rounds, worker=card.worker,
+                round=round_no, of_rounds=max_rounds, worker=worker or card.worker,
                 model=model, since=_now())
 
         verdict, spent, code, wall = run_producer(
             root, card, tree, out_dir, branch, base, model, card_budget,
             test_timeout * 6, round_no, feedback,
             resume_session=resume_session if round_no == 1 else "",
-            continue_note=continue_note if round_no == 1 else "")
+            continue_note=continue_note if round_no == 1 else "",
+            agent=worker, effort=effort,
+            slice_cmd=suite.slice_command(touched=test_selector is suite.touched))
         cost += spent
         # Backstop the worktree fence before anything else this round: if the
         # worker committed to the shared integration branch from the wrong
