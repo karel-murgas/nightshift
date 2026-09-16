@@ -477,7 +477,12 @@ def run_one(work: Path, card: board.Card, base: str, model: str, *,
     # the card names one) — `token-economy.md` phase 0.1's fix for the batch
     # panel showing `$0`: the number was already on disk, just never copied
     # anywhere that summed to a dollar figure.
-    runner.record_usage(record, out_dir, card_id=card.id, model=model)
+    #
+    # `worker` only: `CHORE_EFFORT` is handed to `dispatch` above, which passes
+    # it to `run_producer` alone — a checker named by the card gets no `--effort`
+    # and inherits the CLI default, so claiming `medium` for it would be false.
+    runner.record_usage(record, out_dir, card_id=card.id, model=model,
+                        efforts={"worker": CHORE_EFFORT})
 
     if result.outcome == "parked":
         out.state = "bounced"

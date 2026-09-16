@@ -416,6 +416,27 @@ def test_a_landed_chores_cost_is_not_hardcoded_to_zero(tmp_path, monkeypatch):
     assert any(e["stage"] == "worker" and e["card"] == "a" for e in record["usage"])
 
 
+def test_a_chore_worker_records_the_effort_it_was_dispatched_with(tmp_path, monkeypatch):
+    """2.2 is `--effort medium` for chore workers, and until now a run left no
+    trace of it: the flag reached the CLI but nothing wrote it anywhere a record
+    could be read back from, so the item could only be confirmed by reading the
+    code (`token-economy.md` §5, defect 4). The batch reviewer is a separate
+    dispatch that gets no effort, and must not inherit this one.
+    """
+    from nightshift import run_record
+
+    root = _repo(tmp_path, ("a", "review", "inner"))
+    _Worker(edits={"a": _touch("a")}).install(monkeypatch)
+    chores.execute(root)
+
+    usage = run_record.read_all(root)[0]["usage"]
+    worker = next(e for e in usage if e["stage"] == "worker" and e["card"] == "a")
+    assert worker["effort"] == chores.CHORE_EFFORT == "medium"
+    for entry in usage:
+        if entry["card"].startswith("batch:"):
+            assert entry["effort"] == "", "the batch reviewer is given no --effort"
+
+
 def test_a_bounced_chore_is_recorded_as_a_routing_signal_not_a_failure(tmp_path,
                                                                       monkeypatch):
     """A bounce is the worker reporting the item was not a one-prompter after all —

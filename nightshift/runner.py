@@ -2951,7 +2951,7 @@ def usage_breakdown(out_dir: Path) -> list[dict]:
 
 
 def record_usage(record: run_record.Record, out_dir: Path, *, card_id: str,
-                 model: str, effort: str = "") -> None:
+                 model: str, efforts: dict[str, str] | None = None) -> None:
     """Write this attempt's whole usage breakdown into the run record, one
     `Record.usage()` event per stage that actually ran.
 
@@ -2964,13 +2964,30 @@ def record_usage(record: run_record.Record, out_dir: Path, *, card_id: str,
     `models` list when the CLI reported one (a checker or reviewer can resolve
     to a different tier than the worker); the caller's `model` is the fallback
     for a stage whose result carried none.
+
+    `efforts` maps a stage name to the `--effort` that stage was actually
+    spawned with, and **is per stage because effort is**: only `run_producer`
+    takes one today: `run_checker` and `review_branch` are given none and so
+    inherit whatever the user's own `~/.claude/settings.json` says
+    (`token-economy.md` §1's "all workers inherit effortLevel high" finding,
+    which 3.3 is what finally closes). A stage the caller does not name is
+    recorded as `""`, which reads as *inherited the CLI default* — the honest
+    answer, and a different claim from `"medium"`. Recording one attempt-wide
+    effort instead would have stamped the chore worker's `medium` onto a
+    reviewer that never saw the flag.
+
+    This field is the instrument 2.2 and 3.3 are checked with: nothing else
+    writes an effort anywhere a run can be read back from, so before this an
+    `--effort` could be passed and have no observable trace at all
+    (`token-economy.md` §5, defect 4).
     """
+    efforts = efforts or {}
     for entry in usage_breakdown(out_dir):
         stage = entry.pop("stage")
         models = entry.pop("models")
         entry.pop("ended", None)
         record.usage(stage, card_id=card_id, model=", ".join(models) or model,
-                     effort=effort, **entry)
+                     effort=efforts.get(stage, ""), **entry)
 
 
 # How many lines of the CLI's own error text reach the card. Enough to carry a

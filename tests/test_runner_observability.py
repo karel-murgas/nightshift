@@ -357,6 +357,44 @@ def test_record_usage_writes_one_event_per_stage(tmp_path):
     assert all(e["card"] == "probe" for e in data["usage"])
 
 
+def test_effort_is_recorded_per_stage_because_only_the_producer_is_given_one(tmp_path):
+    """`--effort` reaches `run_producer` and nothing else — `run_checker` and
+    `review_branch` are spawned without it and inherit the user's own CLI default.
+    So an attempt-wide effort would stamp the chore worker's `medium` onto a
+    reviewer that never saw the flag, and `""` has to keep meaning *inherited the
+    default* rather than being indistinguishable from an unrecorded one.
+
+    Before this the field existed but was never populated from any call site, so
+    2.2 and 3.3 had no observable trace in a run at all (`token-economy.md` §5,
+    defect 4).
+    """
+    out = tmp_path / "attempt-1"
+    out.mkdir()
+    _worker_json(out, 1, num_turns=40)
+    _stage_log(out, "review.log", num_turns=25, total_cost_usd=2.0)
+
+    record = run_record.start(tmp_path, kind="chores")
+    runner.record_usage(record, out, card_id="probe", model="sonnet",
+                        efforts={"worker": "medium"})
+
+    by_stage = {e["stage"]: e for e in run_record.read_all(tmp_path)[0]["usage"]}
+    assert by_stage["worker"]["effort"] == "medium"
+    assert by_stage["reviewer"]["effort"] == "", "the reviewer was never given one"
+
+
+def test_an_unnamed_stage_records_no_effort_rather_than_inheriting_its_neighbour(tmp_path):
+    """The default path, and the one a card dispatch still takes: the night passes
+    no `--effort` at all, so every stage honestly reads `""`."""
+    out = tmp_path / "attempt-1"
+    out.mkdir()
+    _worker_json(out, 1, num_turns=40)
+
+    record = run_record.start(tmp_path, kind="run")
+    runner.record_usage(record, out, card_id="probe", model="sonnet")
+
+    assert [e["effort"] for e in run_record.read_all(tmp_path)[0]["usage"]] == [""]
+
+
 def test_settle_writes_telemetry_onto_the_card(tmp_path):
     """It lives on the **card**, not only in `.ai/runs/`: the card is committed
     and syncs to Karel's other machine, while the run directory is gitignored
