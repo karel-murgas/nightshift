@@ -779,12 +779,30 @@ def _workspace(root: Path, base: str) -> tuple[Path, str]:
 #: own branch and the batch review has not happened yet, which is exactly what `review`
 #: means for a dispatched card. It becomes `reviewed` once the batch lands.
 #:
-#: `bounced` and `blocked` map to themselves and are in none of the record's three
-#: sets — see the comment on `DECISION_OUTCOMES` for why a bounce must not be a
-#: failure. A `_drop` shows up as `parked`, which is what the batch itself calls it;
-#: the reason (would not merge / reddened the suite) rides in `detail`.
+#: **The two names the batch uses internally are not the two the record wants, and
+#: for a while they were mapped straight through — which put each on the wrong side
+#: of `decisions()`/`failures()`.** The map is by *where the card ended up*, because
+#: that is the question every reader of a record is asking:
+#:
+#: * state `bounced` is set in exactly one place: the worker came back `parked`, so
+#:   `settle` put the card in `needs-decision/` with its `## Question`. That is a
+#:   decision, and the record says `parked` so `decisions()` lists it and
+#:   `quality_counters`' `parked_rate` counts it. Mapping it to a literal `"bounced"`
+#:   left it in none of the three sets: the morning digest did not mention a card
+#:   that was sitting in `needs-decision/` waiting to be answered, and phase 0.3's
+#:   park rate — the tripwire for the whole chore path — read `0.0` on a night that
+#:   parked half its chores (`token-economy.md` §5, 2026-09-16).
+#: * state `parked` is a `_drop`: it settles with `Dispatch("failed", …)` and the
+#:   card goes to `failed/`, so the record says `failed`. Calling it `parked` counted
+#:   a drop as a decision nobody was ever asked to make.
+#:
+#: This does not make a bounce a failure — the thing `DECISION_OUTCOMES`' comment
+#: warns against. A bounce is a *decision* here, which is the set it belongs in. The
+#: batch's own report keeps the finer word (`by_state("bounced")` still prints
+#: "Bounced - not chores after all"); only the record, whose readers ask the three
+#: coarse questions, collapses it.
 _RECORD_OUTCOME = {
-    "done": "review", "bounced": "bounced", "parked": "parked",
+    "done": "review", "bounced": "parked", "parked": "failed",
     "blocked": "blocked", "pending": "",
 }
 
