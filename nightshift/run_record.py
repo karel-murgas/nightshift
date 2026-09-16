@@ -60,13 +60,14 @@ KEEP = 30
 # none of them on purpose: neither is a fact about the card (the attempt is given
 # back), so neither belongs under Failed. They surface as the run's stop reason.
 #
-# `bounced` is a chore batch's addition and is in none of them for the same reason,
-# spelled out because it is the one an unwary reader would "fix" into Failed: a
-# bounce is the worker opening the code and reporting that the item was not a
-# one-prompter after all. That is the routing signal the batch exists to produce
-# (`chores` module docstring), not a fact about the card being wrong — the card
-# goes back to `tasks/` intact, to be dispatched normally. Counting it as a failure
-# would report a working detector as a nightly breakage.
+# A chore batch's *bounce* — the worker opening the code and reporting that the item
+# was not a one-prompter after all — is the routing signal the batch exists to produce
+# (`chores` module docstring), not a fact about the card being wrong, and counting it
+# as a failure would report a working detector as a nightly breakage. It reaches a
+# record as `parked`, not as a literal `"bounced"`: the worker came back parked and
+# `settle` put the card in `needs-decision/` with its question, so a decision is what
+# it is and `DECISION_OUTCOMES` is where it belongs. `chores._RECORD_OUTCOME` carries
+# that mapping and the story of getting it wrong; no producer writes `"bounced"` here.
 #
 # `needs_fix` (reviewer-needs-fix-verdict, 2026-08-19) is the same shape as
 # `bounced` and is excluded for the same reason: in the ordinary case it also
@@ -86,6 +87,28 @@ KEEP = 30
 DECISION_OUTCOMES = frozenset({"parked", "needs_decision", "pick"})
 LANDED_OUTCOMES = frozenset({"review", "reviewed"})
 FAILED_OUTCOMES = frozenset({"failed"})
+
+#: Bumped to 2 on 2026-09-16, when `chores._RECORD_OUTCOME` stopped passing the
+#: batch's internal state names through: a chore worker's park used to be written
+#: `"bounced"` (in none of the three sets above) and a `_drop` `"parked"`, which is
+#: each on the wrong side of `decisions()`/`failures()`. Records already on disk
+#: keep the old spelling — nothing rewrites them — so anything that has to compare
+#: a night before the fix with one after it reads them through `_outcome_of` below.
+#: A record with no field at all is vocabulary 1, which is what every existing one is.
+OUTCOME_VOCABULARY = 2
+
+#: How vocabulary-1 chore records spell the two outcomes this changed. Only chore
+#: records need it: the runner always wrote `parked` for a park and never wrote
+#: `bounced` at all, so its old records are already right.
+_LEGACY_CHORE_OUTCOMES = {"bounced": "parked", "parked": "failed"}
+
+
+def _outcome_of(record: dict, entry: dict) -> str:
+    """One dispatch's outcome in today's vocabulary, whatever the record's own is."""
+    outcome = entry.get("outcome") or ""
+    if record.get("kind") == "chores" and record.get("outcome_vocabulary", 1) < 2:
+        return _LEGACY_CHORE_OUTCOMES.get(outcome, outcome)
+    return outcome
 
 
 def _now() -> str:
@@ -306,6 +329,7 @@ def start(root: Path, *, kind: str, label: str = "", host: str = "") -> Record:
         "kind": kind, "label": label, "host": host,
         "stop_reason": None, "cost_usd": 0.0, "walls": 0, "cards_dispatched": 0,
         "dispatched": [], "skipped": [], "oversized": [], "notes": [], "usage": [],
+        "outcome_vocabulary": OUTCOME_VOCABULARY,
     })
     record.save()
     prune(root)
@@ -467,22 +491,34 @@ def quality_counters(records: list[dict], *, root: Path | None = None,
     `ZeroDivisionError` — "no dispatches in this window" is itself the answer a
     reader needs, and a crash here must not be how they find that out.
     """
-    dispatched = [d for r in records for d in r.get("dispatched", [])]
+    # Paired with its record, not flattened: a vocabulary-1 chore record spells two
+    # of these outcomes differently, and `_outcome_of` needs the record to know that.
+    # Comparing a pre-fix night with a post-fix one is the whole point of these
+    # counters, so reading the old spelling correctly is not optional here.
+    # Each dispatch paired with its outcome *in today's vocabulary*: a vocabulary-1
+    # chore record spells two of these differently, and comparing a pre-fix night
+    # with a post-fix one is the whole point of these counters, so reading the old
+    # spelling correctly is not optional here.
+    dispatched = [(_outcome_of(r, d), d)
+                  for r in records for d in r.get("dispatched", [])]
     total = len(dispatched)
 
-    def _rate(pred: Callable[[dict], bool]) -> float:
-        return round(sum(1 for d in dispatched if pred(d)) / total, 3) if total else 0.0
+    def _rate(pred: Callable[[str, dict], bool]) -> float:
+        return round(sum(1 for o, d in dispatched if pred(o, d)) / total, 3) if total else 0.0
+
+    def _is(want: str) -> Callable[[str, dict], bool]:
+        return lambda outcome, _entry: outcome == want
 
     return {
         "dispatched": total,
-        "needs_fix_rate": _rate(lambda d: d.get("outcome") == "needs_fix"),
+        "needs_fix_rate": _rate(_is("needs_fix")),
         # Not `DECISION_OUTCOMES`: that set also carries `parked` and `pick`
         # (`run_record.decisions()`'s own grouping), but the plan names these as
         # three separate rates (`token-economy.md` phase 0.3) — a `parked` card
         # is not a card the reviewer sent to Karel, and folding it in here would
         # double-count it against `parked_rate` below.
-        "needs_decision_rate": _rate(lambda d: d.get("outcome") == "needs_decision"),
-        "parked_rate": _rate(lambda d: d.get("outcome") == "parked"),
-        "red_after_merge_rate": _rate(_is_red_after_merge),
+        "needs_decision_rate": _rate(_is("needs_decision")),
+        "parked_rate": _rate(_is("parked")),
+        "red_after_merge_rate": _rate(lambda _outcome, entry: _is_red_after_merge(entry)),
         "testing_rejections": count_rejections(root, since=since) if root else 0,
     }

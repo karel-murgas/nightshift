@@ -241,6 +241,43 @@ def test_quality_counters_are_rates_over_dispatched_outcomes(tmp_path):
     assert counters["parked_rate"] == 0.2
 
 
+def test_quality_counters_read_a_pre_2026_09_16_chore_records_old_spelling(tmp_path):
+    """Chore records written before `_RECORD_OUTCOME` was corrected spell a worker's
+    park `"bounced"` and a `_drop` `"parked"` — each on the wrong side of the three
+    sets. They are not rewritten, so the counters have to read them, or every
+    comparison against a pre-fix baseline is wrong in exactly the direction that
+    would hide a regression in the chore path (`token-economy.md` §5).
+    """
+    legacy = {"kind": "chores", "dispatched": [
+        {"card": "a", "outcome": "reviewed"},
+        {"card": "b", "outcome": "bounced"},   # the worker parked with a question
+        {"card": "c", "outcome": "parked"},    # a drop: the card went to failed/
+    ]}
+    counters = run_record.quality_counters([legacy])
+    assert counters["parked_rate"] == round(1 / 3, 3), "the bounce is the park"
+
+    # The same shapes in a *runner* record were always right, and must not be
+    # rewritten: there `parked` means parked and `bounced` was never written.
+    straight = {"kind": "run", "dispatched": [{"card": "a", "outcome": "parked"}]}
+    assert run_record.quality_counters([straight])["parked_rate"] == 1.0
+
+    # Today's chores write the same night as vocabulary 2 — the park already spelled
+    # `parked`, the drop already `failed` — and it is read as-is, to the same rates.
+    current = {"kind": "chores",
+               "outcome_vocabulary": run_record.OUTCOME_VOCABULARY,
+               "dispatched": [{"card": "a", "outcome": "reviewed"},
+                              {"card": "b", "outcome": "parked"},
+                              {"card": "c", "outcome": "failed"}]}
+    assert run_record.quality_counters([current])["parked_rate"] == round(1 / 3, 3)
+    assert run_record.quality_counters([current])["dispatched"] == 3
+
+
+def test_a_new_record_declares_the_outcome_vocabulary_it_was_written_in(tmp_path):
+    run_record.start(tmp_path, kind="chores")
+    record = run_record.read_all(tmp_path)[0]
+    assert record["outcome_vocabulary"] == run_record.OUTCOME_VOCABULARY
+
+
 def test_quality_counters_do_not_divide_by_zero_on_an_empty_window(tmp_path):
     counters = run_record.quality_counters([])
     assert counters["dispatched"] == 0

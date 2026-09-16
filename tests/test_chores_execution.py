@@ -420,8 +420,16 @@ def test_a_bounced_chore_is_recorded_as_a_routing_signal_not_a_failure(tmp_path,
                                                                       monkeypatch):
     """A bounce is the worker reporting the item was not a one-prompter after all —
     the signal the batch exists to produce. Counted under Failed it would report a
-    working detector as a nightly breakage, and the card goes back to `tasks/`
-    intact either way."""
+    working detector as a nightly breakage.
+
+    It is a *decision*, though, and the lane is what says so: a parked verdict sends
+    the card to `needs-decision/` with its question. The record has to agree, which
+    is the half this test used to leave out — it asserted the outcome string and not
+    the lane, so a record saying `"bounced"` (in none of the three sets) passed while
+    `decisions()` returned nothing for a card sitting in `needs-decision/` waiting to
+    be answered. `token-economy.md` §5 caught it on a night that parked half its
+    chores and reported a park rate of `0.0`.
+    """
     from nightshift import run_record
 
     root = _repo(tmp_path, ("a", "review", "inner"))
@@ -430,10 +438,14 @@ def test_a_bounced_chore_is_recorded_as_a_routing_signal_not_a_failure(tmp_path,
                             "summary": "which save format?"}}).install(monkeypatch)
     chores.execute(root)
 
+    assert board.find(root, "a").lane == "needs-decision"
     record = run_record.read_all(root)[0]
-    assert record["dispatched"][0]["outcome"] == "bounced"
+    assert record["dispatched"][0]["outcome"] == "parked"
+    assert [d["card"] for d in run_record.decisions(record)] == ["a"]
     assert not run_record.failures(record), "a bounce is not a failure"
     assert not run_record.landed(record)
+    counters = run_record.quality_counters([record])
+    assert counters["parked_rate"] == 1.0, "phase 0.3's tripwire has to see it"
 
 
 def test_a_refusal_before_the_board_is_read_leaves_no_record(tmp_path, monkeypatch):
@@ -824,7 +836,15 @@ def test_a_batch_that_reddens_twice_is_handed_over_rather_than_narrowed_further(
 def test_a_branch_that_will_not_merge_is_dropped_with_the_reason(tmp_path,
                                                                  monkeypatch):
     """Never left half-applied and never silently absent — the same rule
-    `select` follows for a card left out of the batch."""
+    `select` follows for a card left out of the batch.
+
+    The batch calls this state `parked`; the *record* calls it `failed`, because
+    `_drop` settles it with `Dispatch("failed", …)` and the card goes to `failed/`.
+    Passing the batch's word straight through put a drop under `decisions()` and
+    into `parked_rate`, counting a dead card as a question nobody was asked.
+    """
+    from nightshift import run_record
+
     root = _repo(tmp_path, ("a", "review", "x"), ("b", "review", "x"))
     _Worker(edits={"a": ("myapp/clash.py", "VALUE = 'a'\n"),
                    "b": ("myapp/clash.py", "VALUE = 'b'\n")}).install(monkeypatch)
@@ -833,6 +853,13 @@ def test_a_branch_that_will_not_merge_is_dropped_with_the_reason(tmp_path,
     dropped = [o for o in batch.outcomes if o.state == "parked"]
     assert len(dropped) == 1
     assert "merge" in dropped[0].detail
+
+    record = run_record.read_all(root)[0]
+    entry = next(d for d in record["dispatched"] if d["card"] == dropped[0].card_id)
+    assert entry["outcome"] == "failed"
+    assert board.find(root, dropped[0].card_id).lane == "failed"
+    assert dropped[0].card_id not in [d["card"] for d in run_record.decisions(record)]
+    assert run_record.quality_counters([record])["parked_rate"] == 0.0
 
 
 # --------------------------------------------------------------- the bisect itself
