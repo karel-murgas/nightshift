@@ -1222,3 +1222,39 @@ def test_the_prompt_forbids_moving_the_card_and_touching_dev(tmp_path):
     assert "Do not move the card" in prompt
     assert "never check out `dev`" in prompt
     assert "parked" in prompt and "success state" in prompt
+
+
+def test_a_park_that_asks_nothing_reaches_the_board_saying_so(tmp_path):
+    """The backstop under `decide.mark_decided`. A worker that parks without writing a
+    question, on a card whose only picker was already answered and retired, would
+    otherwise land in `needs-decision/` asking nothing — and the maintainer would open
+    it to find their own answer looking back at them (`show-weapon-schematic-stats`,
+    2026-09-17, which did exactly this three times with the picker still live)."""
+    root = _repo(tmp_path)
+    path = _card(root, "tasks", "unclear", attempts="1", started="2026-07-23T03:00:00")
+    path.write_text(path.read_text(encoding="utf-8") + (
+        "\n## Question\n\n"
+        "### Decided (2026-09-16): How should the bonus be shown?\n\n"
+        "- **A — beside the row** — matches perks.\n"), encoding="utf-8")
+
+    runner.settle(root, "unclear", runner.Dispatch("parked", "re-checked cold"))
+    question = board.section(board.find(root, "unclear").text, "Question")
+    assert "This park asked nothing." in question
+    assert ".ai/runs/unclear/" in question
+    assert "### Decided (2026-09-16)" in question, "the retired picker is kept below it"
+
+
+def test_a_park_on_a_question_still_live_is_an_ordinary_park(tmp_path):
+    """The other side of it: a card parked while its picker is genuinely unanswered is
+    the normal case and must not be annotated as a defect."""
+    root = _repo(tmp_path)
+    path = _card(root, "tasks", "unclear", attempts="1", started="2026-07-23T03:00:00")
+    path.write_text(path.read_text(encoding="utf-8") + (
+        "\n## Question\n\n"
+        "### Decide: How should the bonus be shown?\n\n"
+        "- **A — beside the row** — matches perks.\n"), encoding="utf-8")
+
+    runner.settle(root, "unclear", runner.Dispatch("parked", "re-checked cold"))
+    question = board.section(board.find(root, "unclear").text, "Question")
+    assert "This park asked nothing." not in question
+    assert "### Decide: How should the bonus be shown?" in question

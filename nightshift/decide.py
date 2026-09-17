@@ -73,6 +73,23 @@ _RECOMMENDED = re.compile(
 #: the guess misreads in both directions, which is why the marker exists.
 _DECIDE_HEAD = re.compile(r"^###[ \t]+Decide\b[ \t]*[:—–-]?[ \t]*(.*?)[ \t]*$", re.IGNORECASE)
 
+#: The same heading once it has been answered — `### Decided (<date>): <the question>`,
+#: written by `mark_decided` when the card leaves `needs-decision/`. `Decide\b` cannot
+#: match it (`\b` fails between `e` and `d`), which is what makes one word the whole
+#: state flag: a block is live or it is history, and no reader has to consult a second
+#: place to tell which.
+#:
+#: **Why the picker has to be retired and not merely answered.** `write_answer` appends
+#: to `## Thread` and leaves `## Question` untouched, so an answered card went to
+#: `tasks/` still carrying a perfectly-formed `### Decide:` block — the exact shape the
+#: worker prompt teaches as *the* marker of an unanswered decision. The next worker read
+#: the strong signal, not the Thread entry under it, reported "no answer has been
+#: recorded" and parked the identical question; the answer was in the prompt it was
+#: given (`show-weapon-schematic-stats` attempt 3, 2026-09-17). A card that contradicts
+#: itself is answered by whichever half is louder, and the picker is louder.
+_DECIDED_HEAD = re.compile(r"^###[ \t]+Decided\b[ \t]*(?:\(([^)]*)\))?[ \t]*[:—–-]?[ \t]*(.*?)[ \t]*$",
+                           re.IGNORECASE)
+
 #: Any heading below `##` — ends a `### Decide:` block, so a `### Notes` after the options
 #: does not lend its bullets to the picker. A thematic break ends one too: `---` under the
 #: options is how a section separates the live question from a round kept as history, and
@@ -146,6 +163,13 @@ def parse(card_text: str) -> list[SubQuestion]:
         return []
     if any(_DECIDE_HEAD.match(line) for line in lines):
         return _parse_marked(lines)
+    # Every picker this section had has been answered and retired by `mark_decided`.
+    # Returning `[]` rather than falling through to the guessing parser is the point:
+    # the bullets under a `### Decided` heading are the options that *were* offered,
+    # kept as the card's record of what was chosen, and the guesser would happily
+    # scrape them and offer an already-made decision a second time.
+    if any(_DECIDED_HEAD.match(line) for line in lines):
+        return []
 
     # A bold lead-in only heads a sub-question if options actually follow it. Without
     # that test, prose that merely *starts* with a bold span — `**What I found:** the
@@ -514,6 +538,87 @@ def has_maintainer_answer(card_text: str, attributor: str) -> bool:
     return bool(pattern.search(thread))
 
 
+def latest_answer(card_text: str, attributor: str) -> str:
+    """`attributor`'s most recent `## Thread` answer, verbatim, or `""`.
+
+    The text `has_maintainer_answer` returns a bool about, for the caller that has to
+    *show* it — `runner`, quoting it into the dispatched worker's prompt
+    (`worker_prompt.ANSWERED`). Same scoping, for the same reason: only after the last
+    `reopen` marker, so a card re-parked on a new question never quotes the previous
+    round's answer as though it settled this one.
+
+    Runs to the next `###` heading, which is where the next round's entry begins — a
+    worker's own dated Thread note ends the quote exactly as another answer would, and
+    both are the right boundary: what follows is a different entry either way.
+    """
+    pattern = answer_pattern(attributor)
+    if pattern is None:
+        return ""
+    thread = board.section(card_text, "Thread")
+    marker_at = thread.rfind(_REOPENED_MARKER)
+    if marker_at != -1:
+        thread = thread[marker_at + len(_REOPENED_MARKER):]
+    found = None
+    for found in pattern.finditer(thread):
+        pass
+    if found is None:
+        return ""
+    rest = thread[found.start():]
+    after = re.search(r"^###[ \t]", rest[1:], re.MULTILINE)
+    return rest[:after.start() + 1 if after else len(rest)].strip()
+
+
+def has_live_picker(card_text: str) -> bool:
+    """Whether `## Question` still carries an unretired `### Decide:` block.
+
+    Read by `runner._park` to tell a card that is parked *asking* something from one
+    parked on a settled question — see its use there.
+    """
+    return any(_DECIDE_HEAD.match(line)
+               for line in board.section(card_text, "Question").splitlines())
+
+
+def mark_decided(card_text: str, *, on: str) -> str:
+    """Retire every `### Decide:` block in `## Question`, keeping it as the record.
+
+    The counterpart to `reopen`, and the half of "this card has been answered" that
+    nobody was writing. `write_answer` records the answer in `## Thread` and
+    `settle_open_questions` updates `## Open questions`; between them the card said
+    it was answered in two quiet places while `## Question` went on displaying the
+    picker verbatim — and the picker is the shape every worker is explicitly taught
+    to read as *an unanswered decision* (`worker_prompt.QUESTION_FORMAT`). The
+    measured result: `show-weapon-schematic-stats` was answered on 2026-09-16,
+    promoted, dispatched, and attempt 3 reported "No answer to the `### Decide:`
+    below has been recorded" and parked the same question back — with Karel's answer
+    sitting in the prompt it had been handed, 60 lines above. The loop is unbounded:
+    every answer produces another attempt that asks for it again.
+
+    **Nothing is deleted.** The heading becomes `### Decided (<date>): <question>`
+    and gains a pointer line; the options stay exactly as written, because they are
+    what was chosen *between* and a card that dropped them would make its own Thread
+    entry unreadable. Same principle as `settle_open_questions`, which keeps the old
+    body as a quote for the same reason.
+
+    Idempotent: a `### Decided` heading does not match `_DECIDE_HEAD`, so promoting a
+    card twice cannot double the marker or restamp the date.
+    """
+    def retire(body: str) -> str:
+        out = []
+        for line in body.splitlines():
+            head = _DECIDE_HEAD.match(line)
+            if not head:
+                out.append(line)
+                continue
+            out.append(f"### Decided ({on}): {head.group(1)}".rstrip())
+            out.append("")
+            out.append("> **Answered — see `## Thread`.** The options below are kept as "
+                       "the record of what was chosen between; they are not a live "
+                       "question, and this decision is not to be parked again.")
+        return "\n".join(out) + ("\n" if body.endswith("\n") else "")
+
+    return board.map_section(card_text, "Question", retire)
+
+
 def reopen(card_text: str) -> str:
     """Mark a (re)parked card's decision state live again — the counterpart to
     `promote_to_tasks`'s `settle_open_questions`, which nothing previously called
@@ -603,6 +708,13 @@ def promote_to_tasks(root: Path, card_id: str, *, today: dt.date | None = None) 
         text = board.settle_open_questions(
             text, on=(today or dt.date.today()).isoformat())
 
+    # The card is about to be handed to a worker, so every picker still standing in
+    # `## Question` is now history — see `mark_decided` for the loop this closes.
+    # Unconditional, including on the "already settled" path above: a card parked on a
+    # *report* carries no picker and this is a no-op, while one carrying a picker left
+    # over from an earlier round is exactly the card that must not reach `tasks/` still
+    # looking like it is asking something.
+    text = mark_decided(text, on=(today or dt.date.today()).isoformat())
     text = re.sub(r"^state:.*$", "state: tasks", text, count=1, flags=re.MULTILINE)
     if card.attempts:
         text = board.set_fields(text, {"retry_from": str(card.attempts)})

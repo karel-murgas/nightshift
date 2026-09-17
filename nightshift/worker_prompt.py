@@ -24,7 +24,7 @@ from __future__ import annotations
 
 __all__ = ["TOOL_ECONOMY", "DOC_TRUTH", "INTERACTIVE_CARD", "INTERACTIVE_CARD_FEEDBACK",
            "INTERACTIVE_NOTE", "HOW_TO_TEST_STEP", "INTERACTIVE_TRIAGE", "INTERACTIVE_RETRIAGE",
-           "QUESTION_FORMAT", "QUESTION_EXAMPLE"]
+           "QUESTION_FORMAT", "QUESTION_EXAMPLE", "ANSWERED"]
 
 #: The second such block, and it is here for the same reason as the first: the rule was
 #: stated, generalised, and then lived somewhere the worker never reads.
@@ -322,6 +322,44 @@ If it stays parked, its `after_answer:` must describe the *new* question, not th
 scoped and only that one point is open. `card_schema` requires the field on a parked card.
 
 Do not start building what the card describes. The deliverable is the card.
+"""
+
+#: Appended to a dispatched worker's prompt when the card it is executing carries the
+#: maintainer's answer to a question it was parked on. The `after_answer: tasks` route
+#: had no such block, and `INTERACTIVE_RETRIAGE` above — which says exactly this, in one
+#: sentence — shows that the `after_answer: triage` route always did. That asymmetry is
+#: the whole defect: re-triage is *told* it has been answered, while the route that goes
+#: straight back to a worker was left to infer it from a Thread entry sitting below the
+#: telemetry, under three HTML comment markers, with the answered picker still rendered
+#: in full further down the same card.
+#:
+#: Measured on `show-weapon-schematic-stats`, 2026-09-17: the answer was on line 132 of
+#: the prompt and the retired-looking picker on line 194; the worker read the picker,
+#: wrote "This attempt was re-dispatched without an answer being added", and parked the
+#: question again. `decide.mark_decided` removes the false signal; this adds the true
+#: one, and they are deliberately both — a card whose prose and whose prompt agree
+#: cannot be resolved the wrong way by a worker that only reads one of them.
+#:
+#: Quoting the answer inline rather than pointing at `## Thread` is the same rule
+#: `decide.compose` follows for the option text: the worker reads this with nobody to
+#: ask, and a pointer is one more thing that can be looked past.
+ANSWERED = """\
+
+--- the maintainer answered this card ---
+This card was parked on a question, **it has been answered, and the answer is what this \
+attempt is for**. Here is what was recorded, verbatim from `## Thread`:
+
+{answer}
+
+Read that as a decision already made, not as one more input. The `### Decided (…)` block \
+in `## Question` below is the question it settles, kept as the record of what was chosen \
+between — it is history, not a live picker.
+
+So: **do not park this decision again, and do not report that no answer was recorded.** \
+If acting on the answer turns out to be more work than the card describes, that is worth \
+saying — say it in your `## Summary` and do the work, or park on the *new* thing you \
+found. Re-asking a question that has been answered costs an entire attempt and returns \
+the card to exactly where it already was.\
 """
 
 #: Appended to the *system* prompt when the panel's `Talk` resumes a finished

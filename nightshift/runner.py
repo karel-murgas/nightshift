@@ -4614,6 +4614,23 @@ def assert_integration_unmoved(root: Path, base: str, expected_sha: str) -> bool
     return True
 
 
+def _answered_note(root: Path, card: board.Card) -> str:
+    """`worker_prompt.ANSWERED` for a card carrying a live answer, else `""`.
+
+    Ordered *after* `_CHORE_NOTE` in the prompt on purpose. That note tells a chore
+    worker to park the moment "the change needs a design decision" — correct in
+    general, and precisely the instruction that sent an already-decided card back to
+    `needs-decision/` for the third time (`show-weapon-schematic-stats`, 2026-09-17).
+    The decision it names has been made; the block that says so has to come last.
+
+    Silent when the project declares no `[board].decision_attributor` — `decide` has
+    no token to recognise an answer by, and a prompt asserting an answer exists when
+    nothing can tell is worse than the prompt this replaces.
+    """
+    answer = decide.latest_answer(card.text, decide.attributor(root))
+    return worker_prompt.ANSWERED.format(answer=answer) if answer else ""
+
+
 def run_producer(root: Path, card: board.Card, tree: Path, out_dir: Path, branch: str,
                  base: str, model: str, card_budget: float, timeout: int,
                  round_no: int = 1, feedback: str = "", resume_session: str = "",
@@ -4655,7 +4672,7 @@ def run_producer(root: Path, card: board.Card, tree: Path, out_dir: Path, branch
             slice_cmd=slice_cmd,
             card_body=card.text,
         ) + (_CHORE_NOTE if card.kind == board.KIND_CHORE else "") \
-          + continue_note + feedback
+          + _answered_note(root, card) + continue_note + feedback
 
     def _argv(session: str) -> list[str]:
         """Flags only — the prompt reaches the child on stdin (`_run_worker`)."""
@@ -7101,6 +7118,27 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
             card.write_section("Question", result.detail or
                                "The worker parked this card but recorded no question — "
                                "that is itself a defect; see `.ai/runs/` for the attempt.")
+        elif not decide.has_live_picker(card.text):
+            # The worker parked, wrote no new question, and the only question on the
+            # card has already been answered and retired (`decide.mark_decided`). That
+            # is the re-park loop with its false signal removed: the card would go to
+            # `needs-decision/` asking nothing, and the maintainer would open it to
+            # find their own answer looking back at them.
+            #
+            # Not converted to a failure — the attempt may have found something real
+            # and merely failed to write it as a picker — but it must not reach the
+            # board looking like an ordinary park, because the two need opposite
+            # responses: one wants an answer, this one wants the run record read.
+            card.write_section("Question", (
+                f"**This park asked nothing.** The worker parked without writing a new "
+                f"question, and every `### Decide:` on this card was already answered "
+                f"and retired before it was dispatched — so there is no decision here "
+                f"waiting on you.\n\nThat is a defect in the attempt, not a question: "
+                f"either it re-asked something already settled, or it had a finding and "
+                f"did not write it in the `### Decide:` shape. Read "
+                f"`.ai/runs/{card_id}/` before answering anything, and send the card "
+                f"back to `tasks/` rather than adding a second answer to the "
+                f"first.\n\n---\n\n{pre_dispatch_question}"))
         # This card was dispatchable when the night picked it up, so its `## Approach`
         # and `## Acceptance` still describe the work — the answer settles one point
         # inside a scoped card rather than scoping it. That is `after_answer: tasks`,

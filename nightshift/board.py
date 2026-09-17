@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -320,6 +321,28 @@ def append_section(text: str, heading: str, body: str) -> str:
         text = text[:start] + text[end:]
     start, end = spans[0]
     return text[:start] + replacement + text[end:]
+
+
+def map_section(text: str, heading: str, sub: Callable[[str], str]) -> str:
+    """Rewrite the body of every `## <heading>` section through `sub`, in place.
+
+    The read-modify-write counterpart to `section`, which joins the bodies and so
+    cannot be written back, and to `append_section`, which replaces a section
+    wholesale and so collapses duplicates the caller may not have meant to touch.
+    `decide.mark_decided` needs neither: it edits headings *inside* `## Question`
+    and must leave every other section, and the card's own duplicate history,
+    exactly where it found it.
+
+    The heading line itself is not passed to `sub` and cannot be changed by it —
+    a rewrite that could rename the section it was scoped to would be able to
+    lose the scope on the next pass.
+    """
+    spans = _section_spans(text, heading)
+    # Last first, so the earlier spans keep the offsets they were measured at.
+    for start, end in reversed(spans):
+        head, newline, body = text[start:end].partition("\n")
+        text = text[:start] + head + newline + sub(body) + text[end:]
+    return text
 
 
 @dataclass

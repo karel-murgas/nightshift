@@ -2811,3 +2811,97 @@ def test_a_walled_fix_attempt_keeps_its_review_anchor(tmp_path):
     assert after.review_finding == "name commit Y instead"
     # ...while the interruption's own three fields are the ones that moved.
     assert after.diff_hash != "prior-hash"
+
+
+# ---------------------------------- the maintainer's answer reaches the worker
+#
+# `show-weapon-schematic-stats`, 2026-09-17. The `after_answer: triage` route has
+# always been told it was answered (`worker_prompt.INTERACTIVE_RETRIAGE`, first
+# paragraph); the `after_answer: tasks` route — which goes straight back to a
+# worker — was not, and had to infer it from a `## Thread` entry under the
+# telemetry while the answered picker was still rendered in full below. It
+# inferred wrong, on a chore whose charter tells it to park on a design decision.
+
+def _attributed(root: Path) -> None:
+    """Add `[board].decision_attributor` to the fixture manifest — without a token
+    `decide` cannot recognise an answer, which is its own tested case below."""
+    path = root / ".ai" / "manifest.toml"
+    path.write_text(path.read_text(encoding="utf-8") +
+                    '\n[board]\ndecision_attributor = "karel"\n', encoding="utf-8")
+
+
+def _answered_card(root: Path, **extra: str) -> Path:
+    path = _card(root, "tasks", "probe", **extra)
+    path.write_text(path.read_text(encoding="utf-8") + (
+        "\n## Question\n\n"
+        "### Decided (2026-09-16): How should the bonus be shown?\n\n"
+        "- **A — beside the row** — matches perks.\n"
+        "- **B — expand downward** — what is there today.\n\n"
+        "## Thread\n\n"
+        "<!-- decide: reopened -->\n\n"
+        "### 2026-09-16 · karel\n\n"
+        "> **A — beside the row** — matches perks.\n"), encoding="utf-8")
+    return path
+
+
+def test_the_dispatch_prompt_quotes_the_answer_the_maintainer_gave(tmp_path, monkeypatch):
+    """The answer is in the prompt as a decision already made, not left to be found
+    in the card body — which is where it was, and was looked past."""
+    root = _worktree_repo(tmp_path)
+    _attributed(root)
+    _charter(root, "code-thread")
+    _answered_card(root)
+    _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
+
+    runner.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 3.0, 120)
+    prompt = (root / ".ai" / "runs" / "probe" / "attempt-1" / "prompt-1.md").read_text(
+        encoding="utf-8")
+    assert "the maintainer answered this card" in prompt
+    assert "> **A — beside the row** — matches perks." in prompt
+    assert "do not park this decision again" in prompt
+
+
+def test_the_answer_is_told_to_the_worker_after_the_park_on_a_decision_rule(
+        tmp_path, monkeypatch):
+    """Ordering, and it is the whole point on a chore: `_CHORE_NOTE` says to park the
+    moment the change needs a design decision, and that instruction is what sent an
+    already-decided card back a third time. The block saying the decision is made has
+    to come after it."""
+    root = _worktree_repo(tmp_path)
+    _attributed(root)
+    _charter(root, "chore-thread")
+    _answered_card(root, kind="chore", worker="chore-thread")
+    _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
+
+    runner.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 3.0, 120)
+    prompt = (root / ".ai" / "runs" / "probe" / "attempt-1" / "prompt-1.md").read_text(
+        encoding="utf-8")
+    assert prompt.index("the change needs a design decision") < \
+           prompt.index("the maintainer answered this card")
+
+
+def test_a_card_nobody_answered_gets_no_such_block(tmp_path, monkeypatch):
+    root = _worktree_repo(tmp_path)
+    _attributed(root)
+    _charter(root, "code-thread")
+    _card(root, "tasks", "probe")
+    _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
+
+    runner.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 3.0, 120)
+    prompt = (root / ".ai" / "runs" / "probe" / "attempt-1" / "prompt-1.md").read_text(
+        encoding="utf-8")
+    assert "the maintainer answered this card" not in prompt
+
+
+def test_a_project_with_no_attributor_is_not_told_it_has_an_answer(tmp_path, monkeypatch):
+    """`decide` has no token to tell Karel's answer from an agent's note, so it cannot
+    know one exists. Asserting it anyway would be the worse failure of the two."""
+    root = _worktree_repo(tmp_path)
+    _charter(root, "code-thread")
+    _answered_card(root)                            # no `_attributed(root)`
+    _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
+
+    runner.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 3.0, 120)
+    prompt = (root / ".ai" / "runs" / "probe" / "attempt-1" / "prompt-1.md").read_text(
+        encoding="utf-8")
+    assert "the maintainer answered this card" not in prompt
