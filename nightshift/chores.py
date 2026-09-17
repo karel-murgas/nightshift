@@ -428,7 +428,25 @@ CHORE_AGENT = "chore-thread"
 
 #: A chore has nothing to decide by construction — that is what routed it here — so
 #: it runs below the maintainer's interactive default rather than inheriting it.
+#:
+#: **A fallback now, not the source of truth.** `token-economy.md` 2.2 shipped this
+#: as a constant and said so ("the manifest per-tier field is 3.3"); 3.3 is that
+#: field, so the effort a chore runs at is `[tiers].effort.worker` like every other
+#: worker-tier stage. This is what a project that declares no effort table gets —
+#: kept rather than dropped to `""` because the argument above is about the *kind*
+#: of work, which is true in every project, and because 2.2 is measured and shipped.
 CHORE_EFFORT = "medium"
+
+
+def chore_effort(work: Path) -> str:
+    """The `--effort` this batch's workers run at: the project's own
+    `[tiers].effort.worker`, or `CHORE_EFFORT` where it declares none.
+
+    By tier and not off the card, for the same reason as `CHORE_TIER` one screen
+    up: a hand-edited card must not be able to pull a batch onto a setting the
+    project did not choose.
+    """
+    return tiers.effort(work, CHORE_TIER) or CHORE_EFFORT
 
 
 def chore_agent(work: Path) -> str:
@@ -461,7 +479,7 @@ def run_one(work: Path, card: board.Card, base: str, model: str, *,
     out = _outcome_for(card)
     result = runner.dispatch(work, card, base, model, card_budget, test_timeout,
                              test_selector=suite.touched, worker=chore_agent(work),
-                             effort=CHORE_EFFORT)
+                             effort=chore_effort(work))
 
     if result.outcome in ("limited", "blocked", "interrupted"):
         out.state, out.detail = "blocked", result.detail
@@ -478,11 +496,11 @@ def run_one(work: Path, card: board.Card, base: str, model: str, *,
     # panel showing `$0`: the number was already on disk, just never copied
     # anywhere that summed to a dollar figure.
     #
-    # `worker` only: `CHORE_EFFORT` is handed to `dispatch` above, which passes
-    # it to `run_producer` alone — a checker named by the card gets no `--effort`
-    # and inherits the CLI default, so claiming `medium` for it would be false.
+    # The whole map, straight off the `Dispatch` that produced these stages
+    # (`runner.stage_efforts`) — not `{"worker": ...}` reconstructed here, which
+    # was true only while the worker was the one stage that got an `--effort`.
     runner.record_usage(record, out_dir, card_id=card.id, model=model,
-                        efforts={"worker": CHORE_EFFORT})
+                        efforts=result.efforts)
 
     if result.outcome == "parked":
         out.state = "bounced"
@@ -1269,11 +1287,13 @@ def _review(work: Path, base: str, branch: str, out_dir: Path,
     verdict, _cost, wall = runner.review_branch(
         work, f"batch-{branch.replace('/', '-')}", out_dir, model, base, branch,
         card_budget, BATCH_TEST_TIMEOUT_S, criteria=criteria, intent=intent,
+        effort=tiers.effort(work, "lead"),
         template=runner._BATCH_REVIEW_PROMPT)
     # One reviewer call over every item at once, so it is recorded against the
     # batch rather than any one card — the same "$0" gap `run_one` had, for the
     # one stage that never had a per-card `out_dir` to begin with.
-    runner.record_usage(record, out_dir, card_id=f"batch:{branch}", model=model)
+    runner.record_usage(record, out_dir, card_id=f"batch:{branch}", model=model,
+                        efforts={"reviewer": tiers.effort(work, "lead")})
     items = verdict.get("items") if isinstance(verdict, dict) else None
     if not isinstance(items, list) or not items:
         print(f"  (no usable per-item verdict) - {str(verdict.get('notes', ''))[:100]}")

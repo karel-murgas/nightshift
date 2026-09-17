@@ -1119,7 +1119,7 @@ def test_a_repairable_drift_is_repaired_and_the_card_carries_on(tmp_path, monkey
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
 
     def repaired(root_, tree, card_id, branch, base, drifted, why, out_dir, model,
-                 budget, timeout):
+                 budget, timeout, *, effort=""):
         flag.write_text("fixed", encoding="utf-8")
         return True, 0.4, f"repaired on {branch} (abc1234)", None
 

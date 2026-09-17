@@ -113,3 +113,86 @@ def test_the_manifest_never_carries_the_models_themselves():
     second home the rule forbids, and the 2026-07-22 bug was a correct table
     nothing read."""
     assert manifest._KNOWN["tiers"] == ("binding_doc",)
+
+
+# --- effort per tier (`token-economy.md` 3.3) ---------------------------------
+#
+# The rule these defend is the one `effort()`'s docstring states and `resolve()`'s
+# does not: **an undeclared tier is not a default, it is "pass no flag"**. That
+# asymmetry between the two lookups is the whole design, so it is what is pinned
+# here — a future change that gives effort a default value would make a run claim
+# a setting the CLI never received, which is `token-economy.md` defect 4a coming
+# back wearing the fix's own clothes.
+
+
+def _effort_repo(tmp_path: Path, table: str) -> Path:
+    (tmp_path / ".ai").mkdir(exist_ok=True)
+    (tmp_path / ".ai" / "manifest.toml").write_text(
+        '[project]\nname = "myapp"\n\n[tiers]\n'
+        'binding_doc = "docs/tier-binding.md"\n' + table,
+        encoding="utf-8")
+    doc = tmp_path / "docs" / "tier-binding.md"
+    doc.parent.mkdir(parents=True, exist_ok=True)
+    doc.write_text(_BLOCK, encoding="utf-8")
+    return tmp_path
+
+
+def test_a_declared_tier_resolves_to_its_effort(tmp_path):
+    root = _effort_repo(tmp_path, '\n[tiers.effort]\nworker = "medium"\nlead = "high"\n')
+    assert tiers.effort(root, "worker") == "medium"
+    assert tiers.effort(root, "lead") == "high"
+
+
+def test_an_undeclared_tier_is_empty_not_a_default(tmp_path):
+    """The distinction the run record is read through: `""` means the stage was
+    spawned with no `--effort` at all and inherited the CLI's own setting. A
+    default here would be a claim about a flag nobody passed."""
+    root = _effort_repo(tmp_path, '\n[tiers.effort]\nworker = "medium"\n')
+    assert tiers.effort(root, "lead") == ""
+
+
+def test_a_project_declaring_no_effort_table_is_unchanged(tmp_path):
+    """Every tier inherits, which is how every stage behaved before 3.3. This is
+    the case that makes the change safe to ship to a repo that has not opted in."""
+    root = _effort_repo(tmp_path, "")
+    assert tiers.effort(root, "worker") == ""
+    assert tiers.effort(root, "lead") == ""
+
+
+def test_a_missing_manifest_inherits_rather_than_raising(tmp_path):
+    """Unlike `binding()`. There is nothing a dispatcher can get *wrong* by having
+    no effort, because having none is itself a supported answer — where a guessed
+    *model* would run silently, which is what §16 forbids."""
+    assert tiers.effort(tmp_path, "worker") == ""
+
+
+def test_a_typo_in_the_effort_table_is_refused(tmp_path):
+    """Loudly, and at resolution rather than at the CLI: an unknown value reaches
+    `claude --effort` as a dead worker process with the attempt already spent."""
+    root = _effort_repo(tmp_path, '\n[tiers.effort]\nworker = "meduim"\n')
+    with pytest.raises(tiers.TierError) as exc:
+        tiers.effort(root, "worker")
+    assert "meduim" in str(exc.value)
+    assert "low, medium, high, xhigh, max" in str(exc.value)
+
+
+def test_the_known_efforts_are_the_cli_s_own_set_in_ascending_order(tmp_path):
+    """Read off `claude --help`, not assumed. An earlier draft stopped at `high`
+    and would have refused `xhigh` and `max` — real levels — as typos, which is
+    worse than not validating at all: it makes a correct manifest unrunnable.
+
+    The *order* is asserted too, because callers compare two tiers by index
+    (a worker must not outrank a lead), and a set would not carry that."""
+    assert tiers.KNOWN_EFFORTS == ("low", "medium", "high", "xhigh", "max")
+
+
+def test_an_effort_above_high_is_accepted(tmp_path):
+    root = _effort_repo(tmp_path, '\n[tiers.effort]\nlead = "max"\n')
+    assert tiers.effort(root, "lead") == "max"
+
+
+def test_a_non_string_effort_is_a_manifest_error(tmp_path):
+    root = _effort_repo(tmp_path, "\n[tiers.effort]\nworker = 3\n")
+    with pytest.raises(manifest.ManifestError) as exc:
+        manifest.load(root)
+    assert "tiers.effort" in str(exc.value)

@@ -53,7 +53,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import board, manifest, suite, textio, usage
+from nightshift import board, manifest, suite, textio, tiers, usage
 from nightshift.manifest import AI_DIR
 # The one place the CLI is executed lives in `runner`; see the alias's comment there
 # on why this imports it rather than growing a second copy of the deadlock fix.
@@ -70,6 +70,13 @@ OUT = Path(board.ROUTING_VIEW)
 #: pinned id rots. Classification is a reading task with a one-line-per-note tail, so
 #: it does not want the session's default tier — that mismatch is the cost this whole
 #: module exists to remove.
+#:
+#: **The fallback, not the binding.** `00_architecture.md` §16 says the tier→model
+#: binding lives in exactly one document, and two constants naming a model here were
+#: a second home for it — the drift this rule exists to prevent, sitting one import
+#: away from `tiers`. `_tier_model` resolves the worker tier and falls back to these,
+#: so a project that rebinds its worker tier moves this module with it and one that
+#: has no binding document keeps working exactly as before (`token-economy.md` 5.3).
 CLASSIFIER_MODEL = "sonnet"
 SCRIBE_MODEL = "sonnet"
 
@@ -310,6 +317,27 @@ def _guard(allow_paid: bool, what: str) -> usage.Verdict:
     return verdict
 
 
+#: The tier both charters run at. Neither classifies nor writes a card by weighing a
+#: design question — the classifier is explicitly forbidden to open the codebase —
+#: so both are worker work, and both resolve their model *and* their effort from it.
+INGEST_TIER = "worker"
+
+
+def _tier_model(root: Path, fallback: str) -> str:
+    """`INGEST_TIER`'s bound model, or `fallback` where nothing binds it.
+
+    Never raises: an unresolvable tier here must not stop a lane being classified,
+    which is what the module-level constants are for. That is the opposite of
+    `runner`'s posture, and deliberately — §16 forbids *guessing* a model for a
+    dispatch that would otherwise run at the lead tier by default, and this one
+    cannot: it names its own fallback and the fallback is the mid tier.
+    """
+    try:
+        return tiers.resolve(root, INGEST_TIER)
+    except tiers.TierError:
+        return fallback
+
+
 def _dispatch(agent: str, prompt: str, root: Path, model: str,
               timeout: int) -> tuple[str, str]:
     """Run one charter headlessly and return its final text.
@@ -317,6 +345,12 @@ def _dispatch(agent: str, prompt: str, root: Path, model: str,
     The prompt goes in on **stdin**, never in `argv`: a lane's worth of notes would
     overflow a Windows command line, and `prompt_not_in_argv` is a gate here for that
     reason.
+
+    Effort comes off `INGEST_TIER` like the model (`token-economy.md` 3.3/5.3).
+    Before that this was the one dispatch path in the framework that pinned a model
+    and then let the *effort* inherit the maintainer's interactive default — so a
+    classifier correctly dropped to sonnet still ran at whatever `~/.claude` said,
+    which on this box is `high`.
     """
     binary = claude_binary()
     if not binary:
@@ -338,6 +372,8 @@ def _dispatch(agent: str, prompt: str, root: Path, model: str,
             "--permission-mode", str(host_setting(root, "permission_mode", "acceptEdits"))]
     if model:
         argv += ["--model", model]
+    if effort := tiers.effort(root, INGEST_TIER):
+        argv += ["--effort", effort]
     completed = run_cli(argv, cwd=root, timeout=timeout, prompt=prompt)
     if refused := denials(completed):
         # Parenthesised, not prefixed with `!`, and that is not cosmetic. `!` is
@@ -372,10 +408,16 @@ def _classify_prompt(found: list[Note]) -> str:
     )
 
 
-def classify(found: list[Note], root: Path, *, model: str = CLASSIFIER_MODEL,
+def classify(found: list[Note], root: Path, *, model: str = "",
              timeout: int = CLASSIFY_TIMEOUT_S) -> Routing:
-    """One dispatch over the whole lane. Cheap by construction — it reads no source."""
-    text, why = _dispatch("classifier", _classify_prompt(found), root, model, timeout)
+    """One dispatch over the whole lane. Cheap by construction — it reads no source.
+
+    `model=""` resolves `INGEST_TIER` (`_tier_model`) rather than defaulting to
+    `CLASSIFIER_MODEL` in the signature: a default evaluated at import cannot ask
+    the repo what its worker tier is bound to.
+    """
+    text, why = _dispatch("classifier", _classify_prompt(found), root,
+                          model or _tier_model(root, CLASSIFIER_MODEL), timeout)
     if why:
         return Routing(error=why)
     payload, why = _extract_json(text)
@@ -729,7 +771,7 @@ def overruled(root: Path, carded: list[str], route: str) -> str:
 
 
 def scribe(decisions: list[Decision], root: Path, *, allow_paid: bool = False,
-           model: str = SCRIBE_MODEL,
+           model: str = "",
            timeout: int = SCRIBE_TIMEOUT_S) -> tuple[int, int, int, int]:
     """Fan the scribe over the writable routes.
 
@@ -758,7 +800,7 @@ def scribe(decisions: list[Decision], root: Path, *, allow_paid: bool = False,
             f"behind. Bounce only if the note contains a fork you cannot resolve without "
             f"reading the code - not because you cannot name the file or symbol the work "
             f"lands in, which is the worker's job to find."
-        ), root, model, timeout)
+        ), root, model or _tier_model(root, SCRIBE_MODEL), timeout)
         if why:
             print(f"    ! failed - {why}")
             bounced += 1
@@ -1403,8 +1445,9 @@ def main(argv: list[str] | None = None) -> int:
                              f"note in the last pass, and classify nothing")
     parser.add_argument("--allow-paid", action="store_true",
                         help="proceed even if a dispatch would draw on paid credits")
-    parser.add_argument("--model", default=CLASSIFIER_MODEL,
-                        help=f"model for the classifier (default {CLASSIFIER_MODEL})")
+    parser.add_argument("--model", default="",
+                        help=f"model for the classifier (default: whatever `tier: "
+                             f"{INGEST_TIER}` is bound to, else {CLASSIFIER_MODEL})")
     parser.add_argument("--dry-run", action="store_true",
                         help="list the notes and the meters; dispatch nothing")
     parser.add_argument("--no-push", action="store_true",

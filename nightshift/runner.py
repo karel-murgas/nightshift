@@ -2675,6 +2675,12 @@ class Dispatch:
     # the shape — written deterministically by `settle()` from the verdict rather
     # than left to agent discretion (menu-summary-on-card).
     how_to_test: str = ""
+    # The `--effort` every stage of this attempt was spawned with
+    # (`stage_efforts`). Carried rather than recomputed at the record site
+    # because `dispatch` is where the override is applied, and a second
+    # resolution there would be free to disagree with what actually ran —
+    # `token-economy.md` defect 4a in a new place.
+    efforts: dict[str, str] = field(default_factory=dict)
     # How many harvested candidates this attempt produced without installing any —
     # `unadopted_artefacts`, computed in `dispatch` where both of its inputs are
     # already in hand, and carried rather than re-derived because the diff it reads
@@ -3039,6 +3045,42 @@ def usage_breakdown(out_dir: Path) -> list[dict]:
     return out
 
 
+#: Which tier each pipeline stage is dispatched at. The stages of `_USAGE_SOURCES`,
+#: mapped to the tier whose model they already resolve through — `run_checker` and
+#: `repair_drift` are both handed the *card's* model by their caller, and both
+#: resolvers resolve `lead` themselves. Written down once because
+#: `token-economy.md` defect 4a was precisely this table existing only as a habit:
+#: `--effort` reached one stage and the run record described all five.
+_STAGE_TIER: dict[str, str] = {
+    "worker": "", "checker": "", "repair": "",   # "" = the card's own tier
+    "reviewer": "lead", "resolver": "lead",
+}
+
+
+def stage_efforts(root: Path, card_tier: str, *, worker: str = "") -> dict[str, str]:
+    """`{stage: --effort}` for one card's whole pipeline.
+
+    **The single answer to "what effort does this stage run at", used by both
+    the spawn and the record.** That is the whole design: `token-economy.md`
+    defect 4a was not a missing flag but a missing *shared* answer — `--effort`
+    was passed at one call site and the run record was written at another, so a
+    dispatched effort could be true and unrecorded, or recorded and untrue, with
+    no way to tell which from a finished run. Both now read this.
+
+    `worker` overrides the card-tier stages for a caller that dispatches by name
+    rather than off the card — the chore batch, which pins its tier so a
+    hand-edited `tier:` cannot pull a batch onto the expensive model, and pins
+    its effort for the same reason.
+
+    A tier that `[tiers].effort` does not name resolves to `""`, and every
+    consumer treats that as *pass no flag / inherited*, never as a default
+    (`tiers.effort`).
+    """
+    own = worker or tiers.effort(root, card_tier)
+    return {stage: (tiers.effort(root, tier) if tier else own)
+            for stage, tier in _STAGE_TIER.items()}
+
+
 def record_usage(record: run_record.Record, out_dir: Path, *, card_id: str,
                  model: str, efforts: dict[str, str] | None = None) -> None:
     """Write this attempt's whole usage breakdown into the run record, one
@@ -3055,20 +3097,25 @@ def record_usage(record: run_record.Record, out_dir: Path, *, card_id: str,
     for a stage whose result carried none.
 
     `efforts` maps a stage name to the `--effort` that stage was actually
-    spawned with, and **is per stage because effort is**: only `run_producer`
-    takes one today: `run_checker` and `review_branch` are given none and so
-    inherit whatever the user's own `~/.claude/settings.json` says
-    (`token-economy.md` §1's "all workers inherit effortLevel high" finding,
-    which 3.3 is what finally closes). A stage the caller does not name is
-    recorded as `""`, which reads as *inherited the CLI default* — the honest
-    answer, and a different claim from `"medium"`. Recording one attempt-wide
-    effort instead would have stamped the chore worker's `medium` onto a
-    reviewer that never saw the flag.
+    spawned with, and **is per stage because effort is** — `stage_efforts` is
+    where that map comes from, and callers are expected to hand it through
+    rather than build one: it is the same map the stages were spawned from, so
+    the record cannot claim an effort the CLI never saw. Recording one
+    attempt-wide effort instead would have stamped the chore worker's `medium`
+    onto a reviewer that never got the flag.
+
+    A stage the caller does not name is still recorded as `""`, which reads as
+    *inherited the CLI default* — the honest answer, and a different claim from
+    `"medium"`.
 
     This field is the instrument 2.2 and 3.3 are checked with: nothing else
     writes an effort anywhere a run can be read back from, so before this an
     `--effort` could be passed and have no observable trace at all
-    (`token-economy.md` §5, defect 4).
+    (`token-economy.md` §5, defect 4). Until 3.3 only `run_producer` took one,
+    so the map had a single live key and the other four stages recorded `""`
+    truthfully — they really did inherit. Now every stage resolves an effort
+    from its tier, so a `""` here means the project declared none for that tier,
+    not that the runner forgot to pass one.
     """
     efforts = efforts or {}
     for entry in usage_breakdown(out_dir):
@@ -3165,8 +3212,8 @@ def telemetry_markdown(tel: dict, attempt: int) -> str:
 
 
 def run_checker(root: Path, card: board.Card, out_dir: Path, round_no: int,
-                model: str, card_budget: float,
-                timeout: int) -> tuple[dict, float, limits.Wall | None]:
+                model: str, card_budget: float, timeout: int, *,
+                effort: str = "") -> tuple[dict, float, limits.Wall | None]:
     """Spawn the card's checker on the artefacts of one round.
 
     **The checker's context is constructed here, and that is the whole point.**
@@ -3202,6 +3249,7 @@ def run_checker(root: Path, card: board.Card, out_dir: Path, round_no: int,
         binary, "-p",
         "--agent", card.checker,
         "--model", model,
+        *(["--effort", effort] if effort else []),
         *_STREAM_ARGV,
         *_budget_argv(card_budget),
         *_STRICT_MCP_ARGV,
@@ -3524,7 +3572,7 @@ allowlisted its way to green is exactly the defect worth a `needs_fix`."""
 def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
                   branch: str, card_budget: float, timeout: int, *,
                   criteria: str, intent: str, since: str = "", prior_finding: str = "",
-                  repaired: str = "",
+                  repaired: str = "", effort: str = "",
                   template: str = _REVIEW_PROMPT) -> tuple[dict, float, limits.Wall | None]:
     """Spawn the diff reviewer on a finished branch (automate-review-step).
 
@@ -3676,6 +3724,7 @@ def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
             binary, "-p",
             "--agent", REVIEWER_AGENT,
             "--model", model,
+            *(["--effort", effort] if effort else []),
             # Streamed, like the worker's, so a review is auditable after the
             # fact. It was `--output-format json`, which leaves `review.log`
             # holding exactly one line — the terminal result — and that is the
@@ -4869,7 +4918,7 @@ Write a one-paragraph summary of what you changed (or why you stopped) as the la
 
 def repair_drift(root: Path, tree: Path, card_id: str, branch: str, base: str,
                  drifted: str, gates_why: str, out_dir: Path, model: str,
-                 card_budget: float, timeout: int
+                 card_budget: float, timeout: int, *, effort: str = ""
                  ) -> tuple[bool, float, str, "limits.Wall | None"]:
     """Try to fix drift in the card's own worktree.
 
@@ -4900,6 +4949,7 @@ def repair_drift(root: Path, tree: Path, card_id: str, branch: str, base: str,
         binary, "-p",
         "--agent", REPAIR_AGENT,
         "--model", model,
+        *(["--effort", effort] if effort else []),
         *_STREAM_ARGV,
         *_budget_argv(card_budget),
         *_STRICT_MCP_ARGV,
@@ -4955,6 +5005,27 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
              card_budget: float, test_timeout: int,
              test_selector: Callable[[set[str], Path], suite.Selection]
              = suite.select, *, worker: str = "", effort: str = "") -> Dispatch:
+    """One attempt, with the effort map stamped onto whatever it returns.
+
+    A wrapper and not part of `_dispatch_attempt` because that function has a
+    dozen exit paths and the map belongs on **every** one of them — including
+    the failure paths, where what a stage was dispatched with is exactly what a
+    post-mortem wants. Threading a keyword through twelve `return Dispatch(...)`
+    calls is a change that goes stale the first time a thirteenth is added; a
+    single assignment at the boundary cannot.
+    """
+    efforts = stage_efforts(root, card.tier, worker=effort)
+    result = _dispatch_attempt(root, card, base, model, card_budget, test_timeout,
+                               test_selector, worker=worker, efforts=efforts)
+    result.efforts = efforts
+    return result
+
+
+def _dispatch_attempt(root: Path, card: board.Card, base: str, model: str,
+                      card_budget: float, test_timeout: int,
+                      test_selector: Callable[[set[str], Path], suite.Selection]
+                      = suite.select, *, worker: str = "",
+                      efforts: dict[str, str]) -> Dispatch:
     """One attempt. Every exit path leaves the card's runner fields consistent.
 
     `test_selector` is how the gates-green diff picks its pytest slice, and it
@@ -4978,6 +5049,10 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
     """
     attempt = card.attempts + 1
     out_dir = run_dir(root, card, attempt)
+    # Resolved by `dispatch` before anything spawns and handed down, so the
+    # producer, the checker it may loop with and the drift repair all run at the
+    # effort the record will report — one map, one resolution (`stage_efforts`).
+    tier_effort = efforts["worker"]
 
     try:
         tree, branch, mode = prepare_worktree(root, card, base)
@@ -5059,7 +5134,7 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
             test_timeout * 6, round_no, feedback,
             resume_session=resume_session if round_no == 1 else "",
             continue_note=continue_note if round_no == 1 else "",
-            agent=worker, effort=effort,
+            agent=worker, effort=tier_effort,
             slice_cmd=suite.slice_command(touched=test_selector is suite.touched))
         cost += spent
         # Backstop the worktree fence before anything else this round: if the
@@ -5147,7 +5222,8 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
                 round=round_no, of_rounds=max_rounds, checker=card.checker,
                 model=model, since=_now())
         review, spent, wall = run_checker(root, card, out_dir, round_no, model,
-                                          card_budget, test_timeout * 2)
+                                          card_budget, test_timeout * 2,
+                                          effort=efforts["checker"])
         cost += spent
         if wall is not None:
             # The reported instance of this card, and the reason it exists:
@@ -5293,7 +5369,7 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
                     branch=branch, since=_now())
             fixed, repair_cost, note, repair_wall = repair_drift(
                 root, tree, card.id, branch, base, drifted, why, out_dir, model,
-                card_budget, test_timeout)
+                card_budget, test_timeout, effort=efforts["repair"])
             cost += repair_cost
             if not fixed and repair_wall is not None:
                 # Out of window, not out of ideas. `limited` gives the attempt back
@@ -5605,6 +5681,11 @@ def _resolve_conflict(root: Path, tree: Path, card: board.Card, branch: str,
     # on a project whose binding document is missing. Judgment about whether two
     # sides can both be kept is lead work; the charter says so too.
     model = model or tiers.resolve(root, "lead")
+    # Same reasoning, same tier, one line later: the effort a tier is dispatched
+    # with is resolved wherever its model is (`tiers.effort`), never carried
+    # separately — a stage whose model says `lead` and whose effort says nothing
+    # is exactly the split `token-economy.md` defect 4a was.
+    effort = tiers.effort(root, "lead")
     # Defensive, though every production caller hands in a `run_dir()` that exists:
     # an exception raised here escapes with the rebase still paused, which is the one
     # state this function must never leave behind — the worktree is torn down by the
@@ -5635,6 +5716,7 @@ def _resolve_conflict(root: Path, tree: Path, card: board.Card, branch: str,
             binary, "-p",
             "--agent", RESOLVER_AGENT,
             "--model", model,
+            *(["--effort", effort] if effort else []),
             "--output-format", "json",
             *_budget_argv(card_budget),
             *_STRICT_MCP_ARGV,
@@ -5780,6 +5862,7 @@ def _resolve_merge_conflict(root: Path, tree: Path, card: board.Card, branch: st
     """
     binary = claude_binary()
     model = model or tiers.resolve(root, "lead")
+    effort = tiers.effort(root, "lead")
     out_dir.mkdir(parents=True, exist_ok=True)
     conflicts = _unmerged_paths(tree)
     if not conflicts:
@@ -5802,6 +5885,7 @@ def _resolve_merge_conflict(root: Path, tree: Path, card: board.Card, branch: st
         binary, "-p",
         "--agent", RESOLVER_AGENT,
         "--model", model,
+        *(["--effort", effort] if effort else []),
         "--output-format", "json",
         *_budget_argv(card_budget),
         *_STRICT_MCP_ARGV,
@@ -6610,7 +6694,8 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
                                         card_budget, timeout * 3,
                                         criteria=criteria, intent=intent,
                                         since=since, prior_finding=prior_finding,
-                                        repaired=result.repaired)
+                                        repaired=result.repaired,
+                                        effort=tiers.effort(root, "lead"))
     total = result.cost_usd + cost
 
     # The artefact before the process's exit. A reviewer's *entire* output is its
@@ -7835,7 +7920,8 @@ def run(root: Path, args: argparse.Namespace) -> int:
             # (`token-economy.md` phase 0.1) — a read of `out_dir`, not a second
             # dispatch, so it costs nothing to take even on a card that failed.
             record_usage(record, run_dir(work, candidate.card, candidate.card.attempts),
-                        card_id=candidate.card.id, model=model)
+                        card_id=candidate.card.id, model=model,
+                        efforts=result.efforts)
             return landed
 
         def _window_closed(wall: limits.Wall, card_id: str, *, retrying: bool) -> bool:
