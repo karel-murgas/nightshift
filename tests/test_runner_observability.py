@@ -357,16 +357,17 @@ def test_record_usage_writes_one_event_per_stage(tmp_path):
     assert all(e["card"] == "probe" for e in data["usage"])
 
 
-def test_effort_is_recorded_per_stage_because_only_the_producer_is_given_one(tmp_path):
-    """`--effort` reaches `run_producer` and nothing else — `run_checker` and
-    `review_branch` are spawned without it and inherit the user's own CLI default.
-    So an attempt-wide effort would stamp the chore worker's `medium` onto a
-    reviewer that never saw the flag, and `""` has to keep meaning *inherited the
-    default* rather than being indistinguishable from an unrecorded one.
+def test_effort_is_recorded_per_stage_and_not_attempt_wide(tmp_path):
+    """Stages run at their own tier's effort, so one attempt can carry two of
+    them: a chore worker pinned to `medium` and a reviewer at the lead tier.
+    An attempt-wide field would stamp one onto the other.
 
-    Before this the field existed but was never populated from any call site, so
-    2.2 and 3.3 had no observable trace in a run at all (`token-economy.md` §5,
-    defect 4).
+    `""` keeps meaning *no flag was passed, the CLI's own default applied* —
+    which is a stage's honest answer for a tier the project declares no effort
+    for, and is why this is asserted rather than left to a default.
+
+    Before the field was populated from any call site, 2.2 and 3.3 had no
+    observable trace in a run at all (`token-economy.md` §5, defect 4).
     """
     out = tmp_path / "attempt-1"
     out.mkdir()
@@ -379,12 +380,13 @@ def test_effort_is_recorded_per_stage_because_only_the_producer_is_given_one(tmp
 
     by_stage = {e["stage"]: e for e in run_record.read_all(tmp_path)[0]["usage"]}
     assert by_stage["worker"]["effort"] == "medium"
-    assert by_stage["reviewer"]["effort"] == "", "the reviewer was never given one"
+    assert by_stage["reviewer"]["effort"] == "", "unnamed here, so nothing is claimed"
 
 
 def test_an_unnamed_stage_records_no_effort_rather_than_inheriting_its_neighbour(tmp_path):
-    """The default path, and the one a card dispatch still takes: the night passes
-    no `--effort` at all, so every stage honestly reads `""`."""
+    """What a project declaring no `[tiers].effort` gets: `stage_efforts` resolves
+    every tier to `""`, nothing passes `--effort`, and the record says so rather
+    than borrowing the value from the stage next to it."""
     out = tmp_path / "attempt-1"
     out.mkdir()
     _worker_json(out, 1, num_turns=40)
@@ -492,3 +494,66 @@ def test_top_level_names_survives_what_a_failed_read_returns():
     assert deletion_sweep._top_level_names(None) == set()
     assert deletion_sweep._top_level_names(b"def f(): pass") == set()
     assert deletion_sweep._top_level_names("def (") == set()
+
+
+# --- one answer for both the spawn and the record (`token-economy.md` 3.3/4a) --
+#
+# Defect 4a was not a missing flag. It was a missing *shared* answer: `--effort`
+# was chosen at the spawn site and the record was written at another, so a run
+# could report an effort no stage received, or receive one it never reported, and
+# a finished run gave no way to tell which. `stage_efforts` is the one answer both
+# read, and these pin that it stays one.
+
+
+def _effort_root(tmp_path, table: str = "") -> Path:
+    (tmp_path / ".ai").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".ai" / "manifest.toml").write_text(
+        '[project]\nname = "t"\n\n[tiers]\nbinding_doc = "docs/tb.md"\n' + table,
+        encoding="utf-8")
+    doc = tmp_path / "docs" / "tb.md"
+    doc.parent.mkdir(parents=True, exist_ok=True)
+    doc.write_text("```tier-binding\nworker = sonnet\nlead = opus\n```\n",
+                   encoding="utf-8")
+    return tmp_path
+
+
+def test_stage_efforts_reads_each_stage_from_the_tier_it_actually_runs_at(tmp_path):
+    """The checker and the drift repair are handed the *card's* model by their
+    caller, so they take the card's effort; both resolvers and the diff reviewer
+    resolve `lead` themselves, so they take the lead tier's."""
+    root = _effort_root(tmp_path, '\n[tiers.effort]\nworker = "medium"\nlead = "high"\n')
+
+    assert runner.stage_efforts(root, "worker") == {
+        "worker": "medium", "checker": "medium", "repair": "medium",
+        "reviewer": "high", "resolver": "high",
+    }
+
+
+def test_a_lead_tier_card_moves_its_own_stages_but_not_the_reviewer(tmp_path):
+    """`tier: lead` on a card is about the work, not the review — the reviewer is
+    the lead tier by definition either way."""
+    root = _effort_root(tmp_path, '\n[tiers.effort]\nworker = "medium"\nlead = "high"\n')
+
+    efforts = runner.stage_efforts(root, "lead")
+
+    assert efforts["worker"] == "high"
+    assert efforts["reviewer"] == "high"
+
+
+def test_a_worker_override_moves_only_the_card_tier_stages(tmp_path):
+    """The chore batch's case: it pins its own effort by name so a hand-edited
+    `tier:` cannot move it, and that pin must not reach the reviewer — which is
+    the stamping bug `record_usage`'s per-stage shape exists to prevent."""
+    root = _effort_root(tmp_path, '\n[tiers.effort]\nworker = "high"\nlead = "high"\n')
+
+    efforts = runner.stage_efforts(root, "worker", worker="low")
+
+    assert efforts["worker"] == efforts["checker"] == efforts["repair"] == "low"
+    assert efforts["reviewer"] == "high"
+
+
+def test_a_project_with_no_effort_table_gets_no_flags_anywhere(tmp_path):
+    """Every stage inherits, exactly as before 3.3. The safe-to-ship case."""
+    root = _effort_root(tmp_path)
+
+    assert set(runner.stage_efforts(root, "worker").values()) == {""}

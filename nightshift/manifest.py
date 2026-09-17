@@ -438,6 +438,19 @@ class Tiers:
     # declares no [tiers] table and carries no docs/tier-binding.md of its own.
     binding_doc: str = "docs/tier-binding.md"
 
+    #: `((tier, effort), ...)` — the `--effort` each tier is dispatched with.
+    #: A table here and not in the binding block, which §16 reserves for the
+    #: tier→model binding alone: effort is not a model, so declaring it here
+    #: creates no second home for the thing that rule protects.
+    #:
+    #: **Empty means inherit, and that is a different claim from a value.** A
+    #: tier with no entry is dispatched with no `--effort` at all and takes
+    #: whatever the maintainer's own `~/.claude/settings.json` says — which is
+    #: how every stage behaved before `token-economy.md` 3.3, and which the run
+    #: record writes as `effort: ""` rather than guessing the inherited value.
+    #: So the default below is not "medium for everyone"; it is "unchanged".
+    effort: tuple[tuple[str, str], ...] = ()
+
 
 @dataclass(frozen=True)
 class Manifest:
@@ -702,6 +715,14 @@ def parse(data: dict, root: Path) -> Manifest:
             "audit.infra_gates must be a table of gate name -> the reason it is out "
             "of the matrix's scope; a bare list would be the exemption without the reason")
 
+    tiers_t = _table(data, "tiers")
+    tier_effort = tiers_t.get("effort", {})
+    if not isinstance(tier_effort, dict) or             not all(isinstance(v, str) for v in tier_effort.values()):
+        raise ManifestError(
+            "tiers.effort must be a table of tier name -> the `--effort` that tier "
+            "is dispatched with (e.g. worker = \"medium\"); omit a tier to leave it "
+            "inheriting the CLI default")
+
     dead_code_t = _table(data, "dead_code")
     confidence = dead_code_t.get("min_confidence", DeadCode.min_confidence)
     if not isinstance(confidence, int) or isinstance(confidence, bool):
@@ -757,8 +778,8 @@ def parse(data: dict, root: Path) -> Manifest:
         ),
         accounts=tuple(accounts),
         tiers=Tiers(
-            binding_doc=str(_table(data, "tiers").get("binding_doc",
-                                                      Tiers.binding_doc)),
+            binding_doc=str(tiers_t.get("binding_doc", Tiers.binding_doc)),
+            effort=tuple(sorted(tier_effort.items())),
         ),
     )
 

@@ -107,6 +107,48 @@ def resolve(repo_root: Path, tier: str) -> str:
     return table[tier]
 
 
+# The values `claude --effort` accepts. Validated here rather than left to the
+# CLI because a typo in the manifest would otherwise surface as a dead worker
+# process mid-night, with the attempt already spent.
+KNOWN_EFFORTS = ("low", "medium", "high")
+
+
+def effort(repo_root: Path, tier: str) -> str:
+    """The `--effort` to dispatch `tier` with, or `""` to pass no flag at all.
+
+    `resolve`'s sibling, and deliberately **not** read out of the same place.
+    §16 says the tier→model binding lives in exactly one document and that no
+    caller names a model; effort is not a model, so it is declared in
+    `[tiers].effort` where a project's other dispatch facts already live, and
+    §16's block is left with the one job the rule is about.
+
+    **An undeclared tier returns `""`, which is not the same as a default.** It
+    means *pass no flag*, so the stage inherits whatever the maintainer's own
+    `~/.claude/settings.json` says — the behaviour of every stage before
+    `token-economy.md` 3.3, kept as the answer for a project that declares
+    nothing. `record_usage` writes that `""` through to the run record
+    unchanged, so a run says "inherited" instead of claiming a value nobody
+    passed (`token-economy.md` §5, defect 4a).
+
+    Unlike `binding`, a missing manifest is not an error: there is nothing here
+    a dispatcher could get *wrong* by having no answer, because having no answer
+    is itself a supported answer. That asymmetry is the point — §16 forbids
+    guessing a model precisely because a guessed model runs silently.
+    """
+    try:
+        table = dict(_manifest.load(repo_root).tiers.effort)
+    except _manifest.ManifestError:
+        return ""
+    value = table.get(tier, "")
+    if value and value not in KNOWN_EFFORTS:
+        raise TierError(
+            f"`[tiers].effort.{tier} = \"{value}\"` is not one of "
+            f"{', '.join(KNOWN_EFFORTS)} — a typo here would reach the CLI as a "
+            "dead worker process with the attempt already spent"
+        )
+    return value
+
+
 if __name__ == "__main__":
     import sys
 
@@ -120,4 +162,5 @@ if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     for tier, model in sorted(binding(root).items()):
-        print(f"{tier:8} → {model}")
+        how = effort(root, tier) or "inherited"
+        print(f"{tier:8} → {model:12} @ {how}")

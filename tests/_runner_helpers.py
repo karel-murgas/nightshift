@@ -397,8 +397,9 @@ def _stub_repair(monkeypatch, *, fixed: bool, note: str = "stubbed",
     calls: list = []
 
     def fake(root, tree, card_id, branch, base, drifted, gates_why, out_dir, model,
-             card_budget, timeout):
-        calls.append({"card": card_id, "branch": branch, "drifted": drifted})
+             card_budget, timeout, *, effort=""):
+        calls.append({"card": card_id, "branch": branch, "drifted": drifted,
+                      "effort": effort})
         return fixed, cost, note, wall
 
     monkeypatch.setattr(runner, "repair_drift", fake)
@@ -698,10 +699,12 @@ def _stub_reviewer(monkeypatch, verdict: dict, cost: float = 0.2,
     spawned: list = []
 
     def fake(root, label, out_dir, model, base, branch, card_budget, timeout,
-             *, criteria, intent, since="", prior_finding="", repaired=""):
-        # `repaired` is accepted and ignored: it is the drift-repair note
-        # (drift-should-not-end-the-night), which every caller now passes and no
-        # test using this generic stub asserts on. A test that cares about it
+             *, criteria, intent, since="", prior_finding="", repaired="",
+             effort=""):
+        # `repaired` and `effort` are accepted and ignored: the drift-repair note
+        # (drift-should-not-end-the-night) and the tier's `--effort`
+        # (`token-economy.md` 3.3), which every caller now passes and no test
+        # using this generic stub asserts on. A test that cares about either
         # patches `review_branch` itself and reads the kwarg there.
         spawned.append(branch)
         return verdict, cost, wall
