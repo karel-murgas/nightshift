@@ -621,3 +621,66 @@ def test_a_card_with_no_marker_still_reads_over_the_whole_thread():
     before."""
     card = _question("- A\n- B\n") + "\n## Thread\n\n### 2026-09-04 · karel\n\n> A\n"
     assert decide.has_maintainer_answer(card, "karel")
+
+
+def test_a_thematic_break_ends_a_decide_block():
+    """`---` under the options separates the live question from a round kept as
+    history. With only `###` terminating the block, the archived round's bullets
+    were folded in as further options — `show-weapon-schematic-stats`, 2026-09-16,
+    where the picker offered two real choices plus four of a reviewer's
+    verification observations."""
+    card = """## Question
+
+What is left is a display decision.
+
+### Decide: How should the bonus be shown?
+
+- **A — beside the row** *(recommended)* — matches the perks panel.
+- **B — expand downward** — what is there today.
+
+---
+
+*Previous round, kept for the record:*
+
+Verified by driving the picker headlessly:
+
+- rows are at y = 401 / 427 / 453 / 479.
+- selecting the rifle moves every one of them.
+"""
+    subs = decide.parse(card)
+    assert len(subs) == 1
+    assert [option.text[:1] for option in subs[0].options] == ["*", "*"]
+    assert len(subs[0].options) == 2
+    assert subs[0].options[0].recommended
+    assert not any("y = 401" in option.text for option in subs[0].options)
+
+
+def test_a_picker_below_a_stale_question_section_still_parses():
+    """The end-to-end shape of the same bug: two `## Question` sections, the picker
+    in the second. `board.section` joins them, so the `### Decide:` heading is found
+    and the stale section's bullets stay context rather than becoming options."""
+    card = """## Question
+
+The reviewer found a defect across all attempts. Most recent finding:
+
+- rows are at y = 401 / 427 / 453 / 479.
+- a left click equips a weapon other than the one drawn highlighted.
+
+## Feedback
+
+Unify it with the existing standard.
+
+## Question
+
+What is left is a display decision.
+
+### Decide: How should the bonus be shown?
+
+- **A — beside the row** *(recommended)* — matches the perks panel.
+- **B — expand downward** — what is there today.
+"""
+    subs = decide.parse(card)
+    assert len(subs) == 1
+    assert subs[0].prompt == "How should the bonus be shown?"
+    assert len(subs[0].options) == 2
+    assert not any("y = 401" in option.text for option in subs[0].options)

@@ -270,6 +270,29 @@ def _sections(text: str) -> set[str]:
     return {m.group(1).lower() for m in _SECTION.finditer(text)}
 
 
+def _duplicate_sections(text: str) -> list[str]:
+    """`## <heading>`s the card carries more than once, in first-seen order.
+
+    **Two sections with one name is a card that reads differently than it looks.**
+    `board.section` joins them now and `board.append_section` collapses them on the
+    next write, but neither is a reason to let one sit there: a worker that appends
+    a second `## Question` instead of replacing the first has written a question the
+    runner's own duplicate-detection cannot see, and before the join it was the
+    *stale* copy that reached the panel — `show-weapon-schematic-stats` offered a
+    reviewer's four verification observations as the choices on its picker
+    (2026-09-16). The gate catches it when the worker's branch lands, which is
+    weeks before anyone opens the decide page.
+    """
+    seen: list[str] = []
+    dupes: list[str] = []
+    for match in _SECTION.finditer(text):
+        name = match.group(1).lower()
+        if name in seen and name not in dupes:
+            dupes.append(match.group(1))
+        seen.append(name)
+    return dupes
+
+
 def _has_section(sections: set[str], *prefixes: str) -> bool:
     return any(s.startswith(p) for s in sections for p in prefixes)
 
@@ -426,6 +449,10 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
         bad("recipe", f"`recipe: {recipe}` has no spine at .ai/recipes/{recipe}.md")
 
     sections = _sections(text)
+    for duplicate in _duplicate_sections(text):
+        out.append(Violation(rel, 1, f"card_schema: `## {duplicate}` appears more than once "
+                                     f"— merge them into one section; a second copy is read "
+                                     f"by nothing that writes the first"))
     if lane not in _UNTRIAGED and not _has_section(sections, "intent"):
         out.append(Violation(rel, 1, "card_schema: missing `## Intent` — required from tasks/ onward"))
 

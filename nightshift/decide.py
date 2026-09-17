@@ -74,8 +74,12 @@ _RECOMMENDED = re.compile(
 _DECIDE_HEAD = re.compile(r"^###[ \t]+Decide\b[ \t]*[:—–-]?[ \t]*(.*?)[ \t]*$", re.IGNORECASE)
 
 #: Any heading below `##` — ends a `### Decide:` block, so a `### Notes` after the options
-#: does not lend its bullets to the picker.
-_SUBHEAD = re.compile(r"^#{3,6}[ \t]")
+#: does not lend its bullets to the picker. A thematic break ends one too: `---` under the
+#: options is how a section separates the live question from a round kept as history, and
+#: with only the heading as a terminator the archived round's bullets were folded into the
+#: picker as further options (`show-weapon-schematic-stats`, 2026-09-16). A `---` is a
+#: section break by any reading of the markdown, so honour it as one here.
+_SUBHEAD = re.compile(r"^(?:#{3,6}[ \t]|(?:-{3,}|\*{3,}|_{3,})[ \t]*$)")
 
 #: The heading a recorded answer goes under. `## Thread` is where `manage-board` says
 #: answers live and where `digest._has_maintainer_answer` looks for them; writing

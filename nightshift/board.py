@@ -302,15 +302,24 @@ def append_section(text: str, heading: str, body: str) -> str:
     on every failed attempt, and three attempts must leave one current error
     rather than three stale ones. The attempt history lives in
     `.ai/runs/<id>/`, which is where run output belongs (`Board/README.md`).
+
+    **A card carrying the heading twice is collapsed, not half-updated.** Workers
+    edit their own card's markdown, and an agent told to "write a `## Question`"
+    appends one rather than noticing the section is already there —
+    `show-weapon-schematic-stats` reached `needs-decision/` with two of them
+    (2026-09-16). Substituting only the first left the stale copy sitting below
+    the new one, where `section` would go on finding it forever.
     """
-    section = f"## {heading}\n\n{body.rstrip()}\n"
-    pattern = re.compile(
-        rf"^##[ \t]+{re.escape(heading)}[ \t]*$.*?(?=^##[ \t]|\Z)",
-        re.MULTILINE | re.DOTALL | re.IGNORECASE,
-    )
-    if pattern.search(text):
-        return pattern.sub(section, text, count=1)
-    return text.rstrip() + "\n\n" + section
+    replacement = f"## {heading}\n\n{body.rstrip()}\n"
+    spans = _section_spans(text, heading)
+    if not spans:
+        return text.rstrip() + "\n\n" + replacement
+    # Later duplicates go first, so the earlier spans keep the offsets they were
+    # measured at.
+    for start, end in reversed(spans[1:]):
+        text = text[:start] + text[end:]
+    start, end = spans[0]
+    return text[:start] + replacement + text[end:]
 
 
 @dataclass
@@ -476,18 +485,48 @@ class Card:
         write_text_lf(self.path, self.text)
 
 
+def _section_spans(text: str, heading: str) -> list[tuple[int, int]]:
+    """`(start, end)` for every `## <heading>` section, head included, in order."""
+    pattern = re.compile(
+        rf"^##[ \t]+{re.escape(heading)}[ \t]*$.*?(?=^##[ \t]|\Z)",
+        re.MULTILINE | re.DOTALL | re.IGNORECASE,
+    )
+    return [match.span() for match in pattern.finditer(text)]
+
+
 def section(text: str, heading: str) -> str:
-    """The body of one `## <heading>` section, verbatim.
+    """The body of the named `## <heading>` section(s), verbatim.
 
     The runner uses this to hand a checker the card's acceptance criteria
     *without* handing it the card — §16's seam only works if the checker never
     sees how the artefact was meant to be made.
+
+    **Every occurrence, joined in document order — not the first.** `re.search`
+    took the first, which is silently wrong on a card a worker has appended to.
+    `show-weapon-schematic-stats` carried the runner's stale "the fix recurred
+    across all attempts" escalation as its first `## Question` and the worker's
+    real parked question — `### Decide:` picker and all — as its second. The
+    panel rendered the stale one, `decide.parse` found no picker in it, fell back
+    to guessing, and offered the reviewer's four *verification observations* as
+    the options: a picker whose choices answered no question (Karel, 2026-09-16).
+
+    The same read disabled the guard written against this class of loss.
+    `runner._park` decides whether the worker wrote a new question by comparing
+    `## Question` on the worker's branch against the pre-dispatch copy — and
+    first-against-first those were the same stale text, so it saw no change and
+    merged nothing.
+
+    Joining rather than taking the *last* is deliberate: the earlier copies are
+    real history, not a stale placeholder, and a reader that dropped them would
+    trade one silent loss for another. `append_section` collapses the duplicates
+    on the next write, so a card is normalised by being written rather than by
+    being read.
     """
-    found = re.search(
-        rf"^##[ \t]+{re.escape(heading)}[ \t]*$(.*?)(?=^##[ \t]|\Z)",
-        text, re.MULTILINE | re.DOTALL | re.IGNORECASE,
-    )
-    return found.group(1).strip() if found else ""
+    bodies = []
+    for start, end in _section_spans(text, heading):
+        head, _, body = text[start:end].partition("\n")
+        bodies.append(body.strip())
+    return "\n\n".join(body for body in bodies if body)
 
 
 #: `none` at the head of a body, under the markers it may be wearing: a list

@@ -264,3 +264,35 @@ def test_a_normalise_failure_does_not_take_the_board_write_down(tmp_path, monkey
     said = subprocess.run(["git", "log", "--format=%s", "-1"], cwd=root,
                           capture_output=True, text=True, check=True).stdout
     assert said.strip() == "board: still commits"
+
+
+# --- duplicate sections -------------------------------------------------------
+
+_DOUBLED = (
+    _CARD.rstrip()
+    + "\n\n## Question\n\nThe stale escalation prose.\n\n- an observation\n"
+    + "\n## Feedback\n\nUnify it with the existing standard.\n"
+    + "\n## Question\n\nThe question the worker actually parked.\n"
+)
+
+
+def test_section_joins_every_copy_rather_than_taking_the_first():
+    """A worker appends a second `## Question` instead of replacing the first, and
+    reading only the first served the panel the stale copy — `show-weapon-schematic-
+    stats`, 2026-09-16. Both are real history; both come back, in document order."""
+    out = board.section(_DOUBLED, "Question")
+    assert out.index("The stale escalation prose.") < out.index("The question the worker actually parked.")
+    assert "Unify it with the existing standard." not in out
+
+
+def test_writing_a_doubled_section_collapses_it():
+    """The write is what normalises the card: one section left, at the position the
+    first copy held, and nothing from the second still loose below it."""
+    out = board.append_section(_DOUBLED, "Question", "the merged question")
+    assert out.count("## Question") == 1
+    assert "The stale escalation prose." not in out
+    assert "The question the worker actually parked." not in out
+    assert board.section(out, "Question") == "the merged question"
+    # The sections that merely sat between the two copies are untouched.
+    assert board.section(out, "Feedback") == "Unify it with the existing standard."
+    assert out.index("## Question") < out.index("## Feedback")

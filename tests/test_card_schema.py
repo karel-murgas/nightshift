@@ -492,3 +492,25 @@ def test_an_unattended_false_chore_is_a_contradiction(tmp_path):
 def test_absent_kind_means_a_full_card_so_no_existing_card_changes_meaning(tmp_path):
     root = _board(tmp_path, "tasks", _GOOD.format(id="probe", lane="tasks"))
     assert card_schema.check(root) == []
+
+
+# --- card_schema: duplicate sections ---------------------------------------
+
+def test_a_card_with_two_sections_of_one_name_is_refused(tmp_path):
+    """A worker that appends a `## Question` rather than replacing the existing one
+    writes a question the runner's own duplicate-detection cannot see, and before
+    `board.section` joined them it was the stale copy that reached the panel
+    (`show-weapon-schematic-stats`, 2026-09-16). Caught when the branch lands."""
+    body = _GOOD.format(id="probe", lane="needs-decision")
+    body = body.replace("state: needs-decision", "state: needs-decision\nafter_answer: tasks")
+    body += "\n## Question\n\nthe stale one\n\n## Question\n\nthe live one\n"
+    out = card_schema.check(_board(tmp_path, "needs-decision", body))
+    assert "`## Question` appears more than once" in _rules(out)
+
+
+def test_a_card_with_one_of_each_section_is_not_flagged(tmp_path):
+    body = _GOOD.format(id="probe", lane="needs-decision")
+    body = body.replace("state: needs-decision", "state: needs-decision\nafter_answer: tasks")
+    body += "\n## Question\n\nthe only one\n"
+    out = card_schema.check(_board(tmp_path, "needs-decision", body))
+    assert "appears more than once" not in _rules(out)
