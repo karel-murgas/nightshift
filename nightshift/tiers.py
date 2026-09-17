@@ -107,10 +107,16 @@ def resolve(repo_root: Path, tier: str) -> str:
     return table[tier]
 
 
-# The values `claude --effort` accepts. Validated here rather than left to the
-# CLI because a typo in the manifest would otherwise surface as a dead worker
-# process mid-night, with the attempt already spent.
-KNOWN_EFFORTS = ("low", "medium", "high")
+#: The values `claude --effort` accepts, **in ascending order** — `effort_rank`
+#: and every caller comparing two tiers depend on that order, not just on
+#: membership. Read off `claude --help` rather than assumed: an earlier draft of
+#: this tuple stopped at `high` and would have refused `xhigh` and `max`, which
+#: are real levels, as typos.
+#:
+#: Validated here rather than left to the CLI because a typo in the manifest
+#: surfaces as a dead worker process mid-night with the attempt already spent —
+#: the failure is far from its cause and costs a card to diagnose.
+KNOWN_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
 def effort(repo_root: Path, tier: str) -> str:

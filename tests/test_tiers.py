@@ -173,7 +173,22 @@ def test_a_typo_in_the_effort_table_is_refused(tmp_path):
     with pytest.raises(tiers.TierError) as exc:
         tiers.effort(root, "worker")
     assert "meduim" in str(exc.value)
-    assert "low, medium, high" in str(exc.value)
+    assert "low, medium, high, xhigh, max" in str(exc.value)
+
+
+def test_the_known_efforts_are_the_cli_s_own_set_in_ascending_order(tmp_path):
+    """Read off `claude --help`, not assumed. An earlier draft stopped at `high`
+    and would have refused `xhigh` and `max` — real levels — as typos, which is
+    worse than not validating at all: it makes a correct manifest unrunnable.
+
+    The *order* is asserted too, because callers compare two tiers by index
+    (a worker must not outrank a lead), and a set would not carry that."""
+    assert tiers.KNOWN_EFFORTS == ("low", "medium", "high", "xhigh", "max")
+
+
+def test_an_effort_above_high_is_accepted(tmp_path):
+    root = _effort_repo(tmp_path, '\n[tiers.effort]\nlead = "max"\n')
+    assert tiers.effort(root, "lead") == "max"
 
 
 def test_a_non_string_effort_is_a_manifest_error(tmp_path):
