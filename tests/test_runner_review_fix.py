@@ -128,19 +128,109 @@ def test_a_changed_constant_is_refused_and_becomes_needs_fix(landed):
                           capture_output=True, text=True).stdout.strip() == tip
 
 
-def test_a_changed_docstring_is_refused(landed):
-    """Conservative on purpose: a docstring is compiled into the module, so it reads
-    as code here. A refused docstring correction costs one round-trip; a wrongly
-    admitted behavioural edit costs a silently altered program."""
+def test_a_reworded_docstring_is_prose(landed):
+    """`reviewer-may-correct-a-docstring`. A docstring is compiled into the module, so
+    a raw code-object comparison refused a reworded one and the correction took a
+    lead-tier round-trip to be *typed*. Measured on
+    `triage-findings-have-a-shelf-life` (2026-09-16): three findings, all text, two in
+    a gate's docstring — $3.44 and a whole extra round to land 29 lines of prose. Each
+    side now has its docstrings blanked before the compare, so the wording is compared
+    as what it is."""
     root, tree, tip = landed
     (tree / "mod.py").write_text(
         'LIMIT = 5\n\n\ndef f(x):\n    """Add the limit."""\n    return x + LIMIT\n',
         encoding="utf-8")
-    _commit_in(tree, "review: add a docstring")
+    head = _commit_in(tree, "review: add a docstring")
+
+    out = runner._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
+
+    assert out["verdict"] == "ok"
+    assert subprocess.run(["git", "rev-parse", "ai/probe"], cwd=root,
+                          capture_output=True, text=True).stdout.strip() == head
+
+
+def test_a_reworded_module_docstring_is_prose(landed):
+    """The module slot, not only the function one — and the one that matters most,
+    because a gate's module docstring is where its rationale lives."""
+    root, tree, tip = landed
+    (tree / "mod.py").write_text(
+        '"""What this module is for, corrected."""\nLIMIT = 5\n\n\n'
+        'def f(x):\n    return x + LIMIT\n', encoding="utf-8")
+    head = _commit_in(tree, "review: correct the module docstring")
+
+    out = runner._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
+
+    assert out["verdict"] == "ok"
+    assert subprocess.run(["git", "rev-parse", "ai/probe"], cwd=root,
+                          capture_output=True, text=True).stdout.strip() == head
+
+
+def test_a_comment_that_shifts_the_lines_below_it_is_prose(landed):
+    """The false refusal the old guard had while its docstring denied having one.
+    Comments do not reach `co_code`, but they *do* shift the `co_firstlineno` of every
+    nested code object below them, and `co_consts` compares that — so inserting a
+    comment line was refused as "executable content". Normalising through
+    `ast.unparse` renumbers, so now it is prose, which is what it always was."""
+    root, tree, tip = landed
+    (tree / "mod.py").write_text(
+        "# A whole new line of comment above everything.\n"
+        "LIMIT = 5\n\n\ndef f(x):\n    return x + LIMIT\n", encoding="utf-8")
+    head = _commit_in(tree, "review: add a clarifying comment")
+
+    out = runner._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
+
+    assert out["verdict"] == "ok"
+    assert subprocess.run(["git", "rev-parse", "ai/probe"], cwd=root,
+                          capture_output=True, text=True).stdout.strip() == head
+
+
+def test_a_string_that_is_not_in_the_docstring_slot_is_refused(landed):
+    """The boundary is the AST, not "does it look like a docstring". An assigned
+    string is a value the program uses, however triple-quoted it is, so blanking the
+    docstring slot must not reach it."""
+    root, tree, tip = landed
+    (tree / "mod.py").write_text(
+        'LIMIT = 5\n\n\ndef f(x):\n    msg = """Add the limit."""\n'
+        '    return x + LIMIT if msg else 0\n', encoding="utf-8")
+    _commit_in(tree, "review: 'just a string'")
 
     out = runner._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
 
     assert out["verdict"] == "needs_fix"
+    assert out["fixed"] == []
+    assert subprocess.run(["git", "rev-parse", "ai/probe"], cwd=root,
+                          capture_output=True, text=True).stdout.strip() == tip
+
+
+def test_a_behaviour_edit_hidden_behind_a_docstring_reword_is_refused(landed):
+    """The case the relaxation must not open: real prose *and* a changed constant in
+    one commit. One card, one route — the whole verdict is `needs_fix`."""
+    root, tree, tip = landed
+    (tree / "mod.py").write_text(
+        'LIMIT = 9\n\n\ndef f(x):\n    """Add the limit."""\n    return x + LIMIT\n',
+        encoding="utf-8")
+    _commit_in(tree, "review: docstring, and quietly the constant")
+
+    out = runner._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
+
+    assert out["verdict"] == "needs_fix"
+    assert "executable content" in out["notes"]
+    assert subprocess.run(["git", "rev-parse", "ai/probe"], cwd=root,
+                          capture_output=True, text=True).stdout.strip() == tip
+
+
+def test_a_file_that_will_not_parse_is_refused(landed):
+    """Unknown is not ok — a file the guard cannot normalise is one it cannot vouch
+    for, so it refuses rather than waving the commit through."""
+    root, tree, tip = landed
+    (tree / "mod.py").write_text("LIMIT = 5\n\n\ndef f(x:\n", encoding="utf-8")
+    _commit_in(tree, "review: broke the file")
+
+    out = runner._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
+
+    assert out["verdict"] == "needs_fix"
+    assert subprocess.run(["git", "rev-parse", "ai/probe"], cwd=root,
+                          capture_output=True, text=True).stdout.strip() == tip
 
 
 def test_a_rewritten_history_is_refused(landed):

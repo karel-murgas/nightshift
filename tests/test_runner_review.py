@@ -174,8 +174,12 @@ def test_a_reviewed_sha_no_longer_reachable_falls_back_to_a_full_review(tmp_path
     """A stale or invalid `reviewed_sha` (the branch was cold-started fresh in
     between, or the handover is simply wrong) must not be trusted as an
     incremental diff base — that would silently hide whatever the rebuild
-    changed. The ancestor check catches it and `review_stage` falls back to the
-    full `base...branch` review, exactly as if there were no handover."""
+    changed. The ancestor check catches it and the diff goes back to the full
+    `base...branch` one.
+
+    The **finding still goes through** (`review-anchor-survives-the-replay`): it is
+    true whatever the branch did in between, and a reviewer told nothing cannot even
+    tell it is a fix round. Only `since` is gated on the anchor being reachable."""
     root = _worktree_repo(tmp_path)
     _tier_binding(root)
     card = _reviewed_branch(root, tmp_path)
@@ -194,7 +198,48 @@ def test_a_reviewed_sha_no_longer_reachable_falls_back_to_a_full_review(tmp_path
     runner.review_stage(root, card, runner.Dispatch("review", "x", 0.1),
                         "development_team", 0.0, 120)
 
-    assert seen == {"since": "", "prior_finding": ""}
+    assert seen == {"since": "", "prior_finding": "stale finding"}
+
+
+def test_a_full_diff_fix_round_is_told_it_is_one_without_the_incremental_claim(
+        tmp_path, monkeypatch):
+    """The middle case `review-anchor-survives-the-replay` added: a fix round whose
+    anchor is unreachable gets the whole branch as its diff, so the prompt must carry
+    the finding **without** claiming the diff is only what changed since. Saying
+    "everything before that point is not repeated below" over a full-branch diff
+    would be a flat lie about what the reviewer is holding."""
+    root = _worktree_repo(tmp_path)
+    _tier_binding(root)
+    card = _reviewed_branch(root, tmp_path)
+    branch = card.fields["branch"]
+
+    prompts: list[str] = []
+
+    def fake(argv, cwd, timeout, stream_path=None, env=None, prompt=""):
+        prompts.append(prompt)
+        verdict_line = next(l.strip() for l in prompt.splitlines()
+                            if l.strip().endswith(".json"))
+        Path(verdict_line).parent.mkdir(parents=True, exist_ok=True)
+        Path(verdict_line).write_text(json.dumps({"verdict": "ok"}), encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
+
+    monkeypatch.setattr(runner, "_run_worker", fake)
+    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    runner.review_branch(root, "probe", out_dir, "opus", "development_team", branch,
+                         0.0, 60, criteria="x", intent="y",
+                         since="", prior_finding="the finding to re-check")
+
+    prompt = prompts[0]
+    assert "the finding to re-check" in prompt
+    assert "your own prior review of this branch" in prompt
+    # The full-diff wording, not the incremental one.
+    assert "what this branch added since it forked" in prompt
+    assert "not repeated here" not in prompt
+    # And the standing instruction that stops a settled question being re-routed.
+    assert "already considered is closed" in prompt
 
 
 def test_review_branch_diffs_only_since_the_prior_review_when_given(tmp_path, monkeypatch):
