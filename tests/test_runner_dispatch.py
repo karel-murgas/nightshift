@@ -2691,3 +2691,123 @@ def test_a_resumed_branch_that_will_not_replay_cold_starts_and_keeps_its_commits
     assert rescues, "the branch's commits must be preserved, not discarded"
     # And no rebase was left paused in the worktree the fall-through discarded.
     assert not runner._rebase_in_progress(runner.worktree_root(root) / "clash")
+
+
+def test_a_replayed_review_fix_branch_keeps_its_review_anchor(tmp_path):
+    """`review-anchor-survives-the-replay`. Two correct fixes collided: the replay
+    (`menu-art-start-run`, 2026-09-03) rebases every resumed branch onto base, and a
+    rebase rewrites every hash on it — which broke the ancestor check guarding the
+    incremental re-review base (`review-reviews-only-the-fix`, 2026-08-27). So every
+    `needs_fix` round on a branch that was behind — in a productive night, all of
+    them — silently paid for a full lead-tier re-review of the whole branch.
+
+    The replayed tip is the correct anchor and not an approximation: this path runs
+    *before* the worker is dispatched, so the branch carries exactly the commits the
+    last review saw and not one more.
+    """
+    root = _worktree_repo(tmp_path)
+    _card(root, "tasks", "anchor")
+    _branch_with_file(root, tmp_path, "ai/anchor", "feature.py", "x = 1\n")
+    reviewed = runner._git(root, "rev-parse", "ai/anchor").stdout.strip()
+    runner.write_handover(root, "anchor", runner.Handover(
+        review_fix=True, reviewed_sha=reviewed, review_finding="name commit Y instead"))
+    # A sibling card merges into base while this one waits to be re-dispatched —
+    # which is why the branch is behind, and why the replay fires at all.
+    _commit_on_base(root, tmp_path, "sibling.txt", "a sibling card landed")
+
+    tree, branch, mode = runner.prepare_worktree(
+        root, board.find(root, "anchor"), "development_team")
+
+    assert mode == runner.FROM_REVIEW
+    assert runner._commits_behind(root, branch, "development_team") == 0
+    after = runner.read_handover(root, "anchor")
+    assert after.reviewed_sha != reviewed, "the pre-rebase sha cannot survive a rebase"
+    assert runner._is_ancestor(root, after.reviewed_sha, branch), \
+        "the anchor must be reachable from the branch, or review_stage discards it"
+    # The anchor is the replayed tip, so the incremental diff is empty until the
+    # worker commits the fix — which is exactly right: nothing new to review yet.
+    assert after.reviewed_sha == runner._git(tree, "rev-parse", "HEAD").stdout.strip()
+    # And the fields that are not about the replay came through untouched.
+    assert after.review_fix is True
+    assert after.review_finding == "name commit Y instead"
+
+
+def test_a_review_fix_branch_that_is_level_with_base_keeps_its_anchor_unchanged(tmp_path):
+    """No replay, nothing to re-anchor. The sha already points into the branch, so
+    touching it would be churn — and a write here would be the one chance to get it
+    wrong on the path that was never broken."""
+    root = _worktree_repo(tmp_path)
+    _card(root, "tasks", "level")
+    _branch_with_file(root, tmp_path, "ai/level", "feature.py", "x = 1\n")
+    reviewed = runner._git(root, "rev-parse", "ai/level").stdout.strip()
+    runner.write_handover(root, "level", runner.Handover(
+        review_fix=True, reviewed_sha=reviewed, review_finding="f"))
+
+    tree, branch, mode = runner.prepare_worktree(
+        root, board.find(root, "level"), "development_team")
+
+    assert mode == runner.FROM_REVIEW
+    assert runner.read_handover(root, "level").reviewed_sha == reviewed
+
+
+def test_a_replayed_wip_branch_does_not_move_its_review_anchor(tmp_path):
+    """The boundary, and the reason `_reanchor_review` is gated on `FROM_REVIEW`.
+
+    A `wip:` resume reaches a branch whose tip may already carry the fix the reviewer
+    is about to be asked to check. Re-anchoring there would set the incremental base
+    *past* that work and hide it — the exact failure the ancestor check exists to
+    prevent, reintroduced from the other side.
+    """
+    root = _worktree_repo(tmp_path)
+    _card(root, "tasks", "wipanchor")
+    _seed_wip_branch(root, tmp_path, "wipanchor", "half-applied fix")
+    reviewed = runner._git(root, "rev-parse", "ai/wipanchor~1").stdout.strip()
+    prior = runner.read_handover(root, "wipanchor")
+    runner.write_handover(root, "wipanchor", runner.Handover(
+        session_id=prior.session_id, diff_hash=prior.diff_hash,
+        review_fix=True, reviewed_sha=reviewed, review_finding="f"))
+    _commit_on_base(root, tmp_path, "sibling.txt", "a sibling card landed")
+
+    tree, branch, mode = runner.prepare_worktree(
+        root, board.find(root, "wipanchor"), "development_team")
+
+    assert mode == runner.FROM_WIP
+    assert runner.read_handover(root, "wipanchor").reviewed_sha == reviewed
+
+
+def test_a_walled_fix_attempt_keeps_its_review_anchor(tmp_path):
+    """The same defect one layer over (`review-anchor-survives-the-replay`).
+
+    `_limit_reached` used to rebuild the handover as `Handover(session, hash, n)` —
+    the three fields an interruption is *about* — which dropped the three the next
+    review needs. A fix attempt that happened to be walled therefore lost its
+    incremental base for a reason that has nothing to do with reviewing. The anchor
+    stays valid across a wall: the worktree is kept, so whatever partial fix it holds
+    is uncommitted or a `wip:` commit on top, and an incremental diff showing that
+    partial fix is exactly what the re-review wants to see.
+    """
+    root = _worktree_repo(tmp_path)
+    _card(root, "tasks", "walled")
+    _branch_with_file(root, tmp_path, "ai/walled", "feature.py", "x = 1\n")
+    reviewed = runner._git(root, "rev-parse", "ai/walled").stdout.strip()
+    runner.write_handover(root, "walled", runner.Handover(
+        session_id="s-1", diff_hash="prior-hash",
+        review_fix=True, reviewed_sha=reviewed, review_finding="name commit Y instead"))
+
+    tree, branch, mode = runner.prepare_worktree(
+        root, board.find(root, "walled"), "development_team")
+    (tree / "half-done.txt").write_text("the fix, partly applied", encoding="utf-8")
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    result = runner._limit_reached(
+        root, board.find(root, "walled"), tree, branch, out_dir, 1,
+        limits.Wall(limits.SESSION, None, "session limit"), 0.5, "walled mid-fix")
+
+    assert result.outcome == "limited"
+    after = runner.read_handover(root, "walled")
+    assert after.review_fix is True
+    assert after.reviewed_sha == reviewed
+    assert after.review_finding == "name commit Y instead"
+    # ...while the interruption's own three fields are the ones that moved.
+    assert after.diff_hash != "prior-hash"

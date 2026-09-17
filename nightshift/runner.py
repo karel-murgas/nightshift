@@ -37,6 +37,7 @@ dispatching. The vault syncs, so dropping that file from the phone stops tonight
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime as dt
 import hashlib
 import json
@@ -50,8 +51,9 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import CodeType
 
 from nightshift import board          # the card model
 from nightshift import branches       # branch roles
@@ -1314,6 +1316,14 @@ class Handover:
     was cold-started from scratch in between (its history no longer contains that
     commit) falls back to a full review rather than silently hiding a rebuilt
     diff (`review-reviews-only-the-fix`).
+
+    **These three fields survive an interruption; the other three are the
+    interruption.** Every rewrite of an existing handover therefore goes through
+    `dataclasses.replace`, never a fresh `Handover(session, hash, n)` — building a
+    new one from the interruption fields alone silently dropped the review anchor
+    and cost the next review its incremental base. `_reanchor_review` moves
+    `reviewed_sha` onto the replayed tip when a resume rebases the branch, for the
+    same reason (`review-anchor-survives-the-replay`).
     """
     session_id: str = ""
     diff_hash: str = ""
@@ -1351,6 +1361,50 @@ def clear_handover(root: Path, card_id: str) -> None:
     of that id must cold-start, never re-enter a session that belonged to a run
     that is already over."""
     _handover_path(root, card_id).unlink(missing_ok=True)
+
+
+def _reanchor_review(root: Path, card_id: str, tree: Path, mode: str) -> None:
+    """Move `reviewed_sha` onto the just-replayed tip, so the rebase does not cost
+    the next review its incremental base (`review-anchor-survives-the-replay`).
+
+    Two correct fixes, five days apart, and the second silently disabled the first.
+    `review-reviews-only-the-fix` (2026-08-27) recorded the tip the last review
+    actually saw so the next one could diff `reviewed_sha...branch` — the fix alone
+    — instead of the whole branch at lead-tier prices. Then the `menu-art-start-run`
+    replay (2026-09-03) made every resumed branch rebase onto `base` first, which is
+    right and must stay. But a rebase rewrites every hash on the branch, so
+    `_is_ancestor(reviewed_sha, branch)` in `review_stage` stopped holding and the
+    incremental base fell back to a full review — every `needs_fix` round, on every
+    card whose branch was behind, which in a productive night is all of them.
+    Measured on `triage-findings-have-a-shelf-life` (2026-09-16): its fourth round
+    re-reviewed the full 688-line branch diff to approve a 29-line prose fix, and
+    re-derived from scratch the whole census the third round had already confirmed.
+
+    **Why the replayed tip is the right anchor, and not an approximation.** This runs
+    on the `FROM_REVIEW` path only, and that path is entered *before* the worker is
+    dispatched — at this moment the branch carries exactly the commits the last
+    review saw and not one more. So the rebased `HEAD` is that same reviewed content,
+    replayed: the anchor by construction, not a guess at a commit mapping. Re-anchoring
+    rather than counting commits also survives a rebase that drops a commit as empty.
+
+    Deliberately **not** done on the other resume paths. `FROM_WIP` and `REENTER`
+    reach a branch whose tip may already carry the fix (a `wip:` commit, or an
+    api-error interruption's), and re-anchoring there would hide exactly the change
+    the reviewer is being asked to check. A rebase that *fails* never gets here —
+    `from_branch` returns `None`, the branch is genuinely rebuilt from cold, and
+    `review_stage`'s ancestor check correctly refuses the stale anchor as before.
+    """
+    if mode != FROM_REVIEW:
+        return
+    prior = read_handover(root, card_id)
+    if not (prior.review_fix and prior.reviewed_sha):
+        return
+    tip = _git(tree, "rev-parse", "HEAD").stdout.strip()
+    if not tip:
+        # Nothing to re-anchor onto. Leaving the old sha is the safe direction: it
+        # is no longer an ancestor, so `review_stage` falls back to a full review.
+        return
+    write_handover(root, card_id, replace(prior, reviewed_sha=tip))
 
 
 def _worktree_dirty(root: Path, tree: Path) -> bool:
@@ -1646,6 +1700,7 @@ def prepare_worktree(root: Path, card: board.Card,
                      f"rescue branch")
                 return None
             _log(f"    replayed {branch} onto {base} ({behind} commit(s) behind)")
+            _reanchor_review(root, card.id, path, mode)
         _normalize_worktree(path)
         return path, branch, mode
 
@@ -2357,20 +2412,28 @@ The boundary is strict, and it is about *what you may edit*, not about how confi
 feel:
 
 - **Never change executable content.** No constant, no condition, no call, no test \
-assertion, no docstring (a docstring is compiled into the module and is checked as code \
-here). Comments and Markdown only. The runner verifies this by compiling every `.py` you \
-touched before and after and requiring identical bytecode — a behavioural edit is refused \
-and the card round-trips as `needs_fix` anyway, so there is nothing to gain by trying.
+assertion, no statement moved or added. Comments, docstrings and Markdown only. The runner \
+verifies this by compiling every `.py` you touched before and after — each side with its \
+docstrings removed, so rewording one is prose, and unparsed from its syntax tree, so a \
+comment that shifts the lines below it is prose too — and requiring identical bytecode. A \
+behavioural edit is refused and the card round-trips as `needs_fix` anyway, so there is \
+nothing to gain by trying. A string that is not a docstring is not prose: an assigned \
+triple-quoted string is a value the program uses, and editing it is refused.
+- **Fix every copy of a claim, not the first one.** A wrong sentence is usually wrong in \
+more than one place — the docstring, the comment that paraphrases it, the memory fragment \
+that records it. Before you commit (or write a `needs_fix` finding), grep the tree for the \
+claim itself and list every occurrence. A correction that lands on three of four copies \
+costs the card another whole round for the fourth.
 - **Commit on top of what you reviewed.** An ordinary commit; never amend, reset or \
 rebase — the worker's commits must stay exactly as they are underneath yours.
 - **If any defect is not prose, the whole verdict is `needs_fix`.** Do not fix the text \
 half and report the code half; one card, one route.\
 """
 
-#: The re-review addendum (`review-reviews-only-the-fix`): only ever non-empty
-#: when `review_branch` was given `since` — see its docstring. Substituted into
-#: `_REVIEW_PROMPT` as `{prior_review}`; empty string leaves that paragraph blank
-#: for an ordinary first review, so the template needs no separate variant.
+#: The re-review addendum (`review-reviews-only-the-fix`): non-empty whenever
+#: `review_branch` was given a `prior_finding` — see its docstring. Substituted
+#: into `_REVIEW_PROMPT` as `{prior_review}`; empty string leaves that paragraph
+#: blank for an ordinary first review, so the template needs no separate variant.
 _PRIOR_REVIEW_BLOCK = """
 --- your own prior review of this branch ---
 You already reviewed an earlier point on this branch and returned `needs_fix`. The diff \
@@ -2378,6 +2441,32 @@ above is only what changed since then — everything before it was already revie
 not repeated here. Verify that the finding below was actually fixed, and that the fix \
 introduces nothing new; you do not need to re-verify code you already approved unless this \
 diff touches it.
+
+{finding}
+"""
+
+#: The same addendum for a fix round whose incremental base was **not** usable — the
+#: branch was rebuilt since, so the diff above really is the whole branch
+#: (`review-anchor-survives-the-replay`). It must not repeat the "only what changed"
+#: sentence, which would be a flat lie about the diff the reviewer is holding; what it
+#: can still say is the half that does not depend on the diff's near side, and that
+#: half is worth saying. A reviewer told nothing at all cannot tell it is a fix round:
+#: it re-asks a design question a previous round considered and declined, and re-derives
+#: verifications a previous round already established — both measured, both expensive.
+_PRIOR_REVIEW_FULL_BLOCK = """
+--- your own prior review of this branch ---
+You already reviewed this branch once and returned the `needs_fix` finding below; the
+attempt since then was dispatched to apply it. The branch was rebuilt or replayed in the
+meantime, so the diff above is the **whole** branch again, not only the fix — read it as
+such. Two things follow, and they are the point of telling you:
+
+- **Verify the finding below was actually fixed**, and that the fix introduced nothing new.
+  That is the first call on your attention this round.
+- **A design question a previous round of this review already considered is closed**, unless
+  this diff changed the facts underneath it. If the last verdict was a `needs_decision` that
+  the maintainer has since answered, or a `needs_fix` whose notes record a judgment call left
+  deliberately unescalated, do not re-open it: it was already routed once, and routing it
+  twice costs another round and another interruption for an answer that already exists.
 
 {finding}
 """
@@ -3162,11 +3251,38 @@ def _behaviour_is_unchanged(root: Path, tree: Path, old: str, new: str) -> tuple
     flipped condition does not. Every other file — Markdown, JSON, recipes — is
     prose by construction and passes.
 
-    Docstrings *do* reach the code object (as `co_consts`), so rewording one reads
-    as a change here and is refused. That is the conservative direction and it is
-    the right one: this guard's job is to be boringly certain, and a docstring
-    correction that has to go back to a worker costs a round-trip, while a wrong
-    "unchanged" verdict costs a silently altered program nobody reviewed.
+    **Docstrings are prose and are compared as prose** (`reviewer-may-correct-a-
+    docstring`). They do reach the code object, as `co_consts`, so a raw comparison
+    refuses a reworded one — and that priced a whole lead-tier round at a rewritten
+    sentence. Measured on `triage-findings-have-a-shelf-life` (2026-09-16): all three
+    of round 3's findings were text, two of them in a gate's docstring, so the
+    reviewer that had already established the right wording had to route the card
+    back to a worker to type it; round 4 then cost $3.44 to land 29 lines of prose.
+    So each side is normalised before it is compared — every docstring blanked, in
+    the `Module`/`FunctionDef`/`AsyncFunctionDef`/`ClassDef` slot where a docstring
+    is the syntactic first statement — and only then compiled.
+
+    The same normalisation closes a false refusal this docstring used to claim it did
+    not have. Comments and blank lines *do* survive into a nested code object's
+    `co_firstlineno`, which `co_consts` compares, so adding a comment line shifted
+    every function below it and was refused too — "comments and reflow compare equal"
+    was simply not true. Normalising through `ast.unparse` drops comments and
+    renumbers, so now it is.
+
+    What stays refused is everything executable, and the boundary is the AST rather
+    than the text: a changed literal, a moved call, a flipped condition, a reordered
+    body, and a docstring turned into an assigned string (`y = "..."` is not the
+    docstring slot). Anything that will not parse, unparse or compile is refused as
+    well — a file this cannot check is a file it cannot vouch for.
+
+    **The one residual exposure, and what covers it.** A docstring can reach runtime
+    as data: `argparse(description=__doc__)` in nine modules across the two repos, and
+    `readme_gen._first_sentence(module.__doc__)` for a gate with no `DESCRIPTION`. For
+    the argparse cases a corrected sentence is the entire point. For the generated
+    README it is real drift — caught by the `readme_generated` gate in the gate-and-test
+    run the runner does on the *rebased* branch after the reviewer's commit and before
+    the merge, which is the same net that covers every other way a reviewer's commit
+    could surprise the tree.
 
     Returns `(ok, why)`; `why` is empty when ok. Any failure to read or compile is
     **not** ok — a file this cannot check is a file it cannot vouch for.
@@ -3188,13 +3304,60 @@ def _behaviour_is_unchanged(root: Path, tree: Path, old: str, new: str) -> tuple
         if before.returncode != 0 or after.returncode != 0:
             return False, f"could not read both versions of {rel}"
         try:
-            a = compile(before.stdout, rel, "exec")
-            b = compile(after.stdout, rel, "exec")
+            a = _compiled_without_docstrings(before.stdout, rel)
+            b = _compiled_without_docstrings(after.stdout, rel)
         except SyntaxError as exc:
             return False, f"{rel} would not compile ({exc.msg})"
+        except (ValueError, RecursionError, MemoryError) as exc:
+            # `ast.unparse` refusing the tree, or a literal it cannot round-trip.
+            # Unknown is not ok: the point of this guard is that it can vouch.
+            return False, f"{rel} could not be normalised for comparison ({exc})"
         if a.co_code != b.co_code or a.co_consts != b.co_consts:
             return False, f"{rel} changed executable content, not only prose"
     return True, ""
+
+
+def _compiled_without_docstrings(source: str, rel: str) -> CodeType:
+    """`source` compiled with every docstring removed — the comparable form
+    `_behaviour_is_unchanged` judges a reviewer's `.py` edit in.
+
+    Two normalisations, both of things that are prose by definition:
+
+    * **Docstrings** are dropped wherever one is the syntactic first statement of a
+      module, function or class — `Expr(Constant(str))` in `body[0]`, which is what
+      *makes* it a docstring rather than an expression that happens to be a string.
+      An assigned string, a parenthesised one, or a string passed to a call is not
+      in that slot and is left exactly where it is.
+    * **Comments, blank lines and formatting** disappear through `ast.unparse`,
+      which also renumbers every node — so a comment inserted above a function can
+      no longer shift the `co_firstlineno` that `co_consts` compares.
+
+    **Removed, not blanked**, because blanking still records *that there was one*:
+    a function with no docstring has `None` in that const slot and one with a
+    blanked docstring has `''`, so adding or deleting a docstring would still read
+    as a change. Dropping the statement makes the three cases — absent, present,
+    reworded — one case, which is the point. A body left empty by the drop gets a
+    `Pass`, and that is sound rather than a patch over a hole: a function, class or
+    module whose entire body *was* its docstring does exactly what `pass` does.
+
+    Nothing executable is normalised, because nothing executable is outside the AST:
+    whatever `unparse` drops was never in the tree, and whatever was in the tree is
+    unparsed and recompiled. Raises `SyntaxError` on a file that will not parse, and
+    `ValueError` on a tree `unparse` will not round-trip; both are refusals upstream.
+    """
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.FunctionDef,
+                                 ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        first = node.body[0] if node.body else None
+        if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)):
+            node.body.pop(0)
+            # A module may legally be empty; a function or class body may not.
+            if not node.body and not isinstance(node, ast.Module):
+                node.body.append(ast.Pass())
+    return compile(ast.unparse(tree), rel, "exec")
 
 
 def _checkout_holding(root: Path, branch: str) -> Path | None:
@@ -3407,6 +3570,15 @@ def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
     `since` (the default, and every non-continuation call) is the original
     behaviour, byte-for-byte.
 
+    **The two arrive independently** (`review-anchor-survives-the-replay`). They
+    used to be one condition, which read a usable anchor as a precondition for
+    mentioning the previous round at all — so a fix round whose anchor a replay had
+    rewritten was handed the full diff *and* no word that it was a fix round.
+    `since` governs the diff's near side and nothing else. A `prior_finding` with no
+    `since` is the ordinary full diff plus `_PRIOR_REVIEW_FULL_BLOCK`: the finding to
+    check, and the standing instruction not to re-route a question a previous round
+    of this same review already routed.
+
     Returns `(verdict, cost, wall)`, all lookups — `{}` (no verdict file, a
     timeout, no CLI, or a worktree that would not cut) degrades in the caller to
     a human's eye, never to a guessed routing (§12).
@@ -3467,10 +3639,19 @@ def review_branch(root: Path, label: str, out_dir: Path, model: str, base: str,
             diff_inline = ""
         verdict_path = tree / ".review-verdict.json"
 
+        # Three shapes, not two. `since` decides what the diff *is*, so it alone
+        # picks `diff_desc`; `prior_finding` decides whether there is a prior round
+        # to speak of, and it arrives on every fix round now — including the ones
+        # whose anchor was unusable (`review-anchor-survives-the-replay`). The
+        # middle case is that pair coming apart: a fix round on a full diff, which
+        # gets the finding with the incremental sentence stripped out of it.
         if since and prior_finding:
             diff_desc = ("since your own last review of this branch — everything before "
                         "that point was already reviewed and is not repeated below")
             prior_review = _PRIOR_REVIEW_BLOCK.format(finding=prior_finding)
+        elif prior_finding:
+            diff_desc = "against the integration branch — what this branch added since it forked"
+            prior_review = _PRIOR_REVIEW_FULL_BLOCK.format(finding=prior_finding)
         else:
             diff_desc = "against the integration branch — what this branch added since it forked"
             prior_review = ""
@@ -4589,7 +4770,16 @@ def _limit_reached(root: Path, card: board.Card, tree: Path, branch: str,
         no_progress = 0 if progressed else prior.no_progress + 1
     stuck = (not progressed) and (no_progress >= NO_PROGRESS_STOP)
 
-    write_handover(root, card.id, Handover(session, state_hash, no_progress))
+    # `replace(prior, ...)`, not a fresh `Handover`: the three review fields are
+    # not about this interruption and must survive it. Constructing a new one from
+    # the three interruption fields dropped `reviewed_sha` on the floor, so a fix
+    # attempt that happened to be walled lost the next review's incremental base
+    # for the same reason the replay did (`review-anchor-survives-the-replay`). The
+    # sha stays a valid ancestor across a wall — the worktree is kept, so whatever
+    # partial fix it holds is uncommitted or a `wip:` commit on top — and the
+    # incremental diff showing that partial fix is exactly what the re-review wants.
+    write_handover(root, card.id, replace(
+        prior, session_id=session, diff_hash=state_hash, no_progress=no_progress))
     if not progressed:
         _log(f"    {card.id} resumed but the working tree did not move "
              f"({no_progress}/{NO_PROGRESS_STOP} — "
@@ -4898,7 +5088,11 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
                 session = _session_id(out_dir, round_no)
                 state_hash = _worktree_state_hash(tree)
                 drop_worktree(root, tree)
-                write_handover(root, card.id, Handover(session, state_hash, 0))
+                # `replace`, for the reason `_limit_reached` uses it: the review
+                # anchor is not about this interruption and must survive it.
+                write_handover(root, card.id, replace(
+                    read_handover(root, card.id), session_id=session,
+                    diff_hash=state_hash, no_progress=0))
                 # `kept=False`: the worktree was just dropped, and `kept` means
                 # exactly "the checkout was preserved for a warm resume in
                 # place" — `settle` appends "worktree kept for warm resume" from
@@ -6376,13 +6570,24 @@ def review_stage(root: Path, card: board.Card, result: Dispatch, base: str,
     # was otherwise rebuilt) no longer contains that commit, and reusing it then
     # would silently hide the rebuilt diff rather than fail loud — so it falls back
     # to a full review exactly as before.
+    #
+    # `prior_finding` is deliberately **not** gated on that ancestor check
+    # (`review-anchor-survives-the-replay`). The two answer different questions:
+    # `since` is "may the diff be narrowed", which needs the anchor to be provably
+    # reachable; the finding is "what did you object to last round", which is true
+    # whatever the branch did in between. Gating them together meant a fix round
+    # whose anchor was gone got neither — and a reviewer with neither cannot even
+    # tell it is a fix round, so it re-asks questions a previous round already
+    # declined and re-verifies what one already confirmed. Measured on
+    # `triage-findings-have-a-shelf-life` (2026-09-16): round 4's reviewer
+    # reconstructed the prior finding out of `git log` and `git show`, spending
+    # turns to rediscover a string the runner was holding in this very file.
     handover = read_handover(root, card.id)
     since = ""
-    prior_finding = ""
+    prior_finding = handover.review_finding if handover.review_fix else ""
     if (handover.review_fix and handover.reviewed_sha
             and _is_ancestor(root, handover.reviewed_sha, branch)):
         since = handover.reviewed_sha
-        prior_finding = handover.review_finding
 
     verdict, cost, wall = review_branch(root, card.id, out_dir, model, base, branch,
                                         card_budget, timeout * 3,
