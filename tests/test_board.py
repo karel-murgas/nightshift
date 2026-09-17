@@ -296,3 +296,26 @@ def test_writing_a_doubled_section_collapses_it():
     # The sections that merely sat between the two copies are untouched.
     assert board.section(out, "Feedback") == "Unify it with the existing standard."
     assert out.index("## Question") < out.index("## Feedback")
+
+
+def test_mapping_a_section_rewrites_its_body_and_nothing_else():
+    """`decide.mark_decided` edits headings inside `## Question` and must leave every
+    other section where it found it — including a `### Decide:` quoted in prose
+    elsewhere on the card, which is narration about a decision, not the picker."""
+    out = board.map_section(_DOUBLED, "Question", lambda body: body.upper())
+    assert "THE STALE ESCALATION PROSE." in out
+    assert "THE QUESTION THE WORKER ACTUALLY PARKED." in out
+    assert board.section(out, "Feedback") == "Unify it with the existing standard."
+
+
+def test_mapping_a_section_keeps_both_copies_of_a_doubled_one():
+    """Unlike `append_section`, which collapses them: a rewrite is not a write of the
+    whole section, and silently dropping history on the way through would be a second
+    loss traded for the first."""
+    out = board.map_section(_DOUBLED, "Question", lambda body: body)
+    assert out == _DOUBLED
+    assert out.count("## Question") == 2
+
+
+def test_mapping_a_section_the_card_does_not_have_changes_nothing():
+    assert board.map_section(_DOUBLED, "Nowhere", lambda body: "x") == _DOUBLED

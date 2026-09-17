@@ -684,3 +684,143 @@ What is left is a display decision.
     assert subs[0].prompt == "How should the bonus be shown?"
     assert len(subs[0].options) == 2
     assert not any("y = 401" in option.text for option in subs[0].options)
+
+
+# ------------------------------------- retiring a picker that has been answered
+#
+# `show-weapon-schematic-stats`, 2026-09-17, third park on one question. Karel
+# answered it, promoted the card, ran the batch; the worker reported "No answer to
+# the `### Decide:` below has been recorded" and parked the same question back. The
+# answer was in the prompt it was handed. Nothing had gone wrong mechanically — the
+# card simply said both things at once, and the picker is the louder half.
+
+def test_promoting_an_answered_card_retires_its_picker(tmp_path):
+    """The fix. A card handed to a worker must not still be displaying the shape
+    every worker is taught to read as an unanswered decision."""
+    root = _repo(tmp_path, "### Decide: How should the bonus be shown?\n\n"
+                           "- **A — beside the row** *(recommended)* — matches perks.\n"
+                           "- **B — expand downward** — what is there today.\n",
+                 route="tasks", open_questions="- where does the bonus go?")
+    decide.write_answer(root, "parked", ["**A — beside the row** — matches perks."], "",
+                        today=dt.date(2026, 9, 16))
+    decide.promote_to_tasks(root, "parked", today=dt.date(2026, 9, 16))
+
+    text = _text(root)
+    assert "### Decide:" not in text, "the live picker must not survive the promotion"
+    assert "### Decided (2026-09-16): How should the bonus be shown?" in text
+    assert "Answered — see `## Thread`." in text
+
+
+def test_a_retired_picker_keeps_every_option_it_offered(tmp_path):
+    """Nothing is deleted, for `settle_open_questions`' reason: the options are what
+    was chosen *between*, and without them the Thread entry quoting one is unreadable."""
+    root = _repo(tmp_path, "### Decide: How should the bonus be shown?\n\n"
+                           "- **A — beside the row** *(recommended)* — matches perks.\n"
+                           "- **B — expand downward** — what is there today.\n",
+                 route="tasks", open_questions="- where does the bonus go?")
+    decide.write_answer(root, "parked", ["**A — beside the row** — matches perks."], "",
+                        today=dt.date(2026, 9, 16))
+    decide.promote_to_tasks(root, "parked", today=dt.date(2026, 9, 16))
+
+    text = _text(root)
+    assert "**A — beside the row** *(recommended)* — matches perks." in text
+    assert "**B — expand downward** — what is there today." in text
+
+
+def test_a_retired_picker_is_not_offered_to_be_answered_again():
+    """`parse` returns nothing rather than falling through to the guessing parser,
+    which would happily scrape the kept options and offer a settled decision twice."""
+    assert decide.parse(_question(
+        "### Decided (2026-09-16): How should the bonus be shown?\n\n"
+        "> **Answered — see `## Thread`.**\n\n"
+        "- **A — beside the row** — matches perks.\n"
+        "- **B — expand downward** — what is there today.\n")) == []
+
+
+def test_a_live_picker_beside_a_retired_one_is_still_offered():
+    """A card answered once and parked again on something new: only the new question
+    is pickable, and the retired block lends it no options."""
+    subs = decide.parse(_question(
+        "### Decided (2026-09-16): How should the bonus be shown?\n\n"
+        "- **A — beside the row** — matches perks.\n"
+        "- **B — expand downward** — what is there today.\n\n"
+        "### Decide: What happens at the screen edge?\n\n"
+        "- **A — flip to the other side** *(recommended)* — never clipped.\n"))
+    assert len(subs) == 1
+    assert subs[0].prompt == "What happens at the screen edge?"
+    assert [o.text for o in subs[0].options] == [
+        "**A — flip to the other side** — never clipped."]
+
+
+def test_retiring_a_picker_is_idempotent():
+    """`Decide\b` cannot match `Decided`, so a second promotion cannot double the
+    marker or restamp the date onto a decision made a week earlier."""
+    once = decide.mark_decided(_question("### Decide: Which one?\n\n- **A** — this.\n"),
+                               on="2026-09-16")
+    assert decide.mark_decided(once, on="2026-09-17") == once
+
+
+def test_retiring_a_picker_leaves_the_rest_of_the_card_alone():
+    """Scoped to `## Question` through `board.map_section`: a `### Decide:` quoted in
+    the Thread or in a review finding is prose about a decision, not the picker."""
+    card = _CARD.format(id="x", open="none", route="tasks",
+                        question="### Decide: Which one?\n\n- **A** — this.\n",
+                        tail="\n## Thread\n\nThe worker wrote `### Decide: Which one?`\n")
+    out = decide.mark_decided(card, on="2026-09-16")
+    assert "The worker wrote `### Decide: Which one?`" in out, "## Thread is not ours"
+    assert "### Decided (2026-09-16): Which one?" in out
+
+
+# --------------------------------------- the answer the dispatched worker is shown
+
+def test_the_maintainers_answer_is_readable_back_verbatim(tmp_path):
+    """`has_maintainer_answer` says *that* one exists; the runner has to quote it into
+    the worker's prompt, and a pointer is one more thing that can be looked past."""
+    root = _repo(tmp_path, "### Decide: Which one?\n\n- **A** — this.\n- **B** — that.\n")
+    decide.write_answer(root, "parked", ["**A** — this."], "and keep it simple",
+                        today=dt.date(2026, 9, 16))
+    answer = decide.latest_answer(_text(root), "karel")
+    assert answer.startswith("### 2026-09-16 · karel")
+    assert "> **A** — this." in answer
+    assert "> and keep it simple" in answer
+
+
+def test_an_answer_from_a_previous_round_is_not_quoted_at_a_re_parked_card(tmp_path):
+    """Same boundary `has_maintainer_answer` uses, for the same reason: a card parked
+    again keeps the old answer as history, and quoting it would tell the next worker
+    its new question had been answered."""
+    root = _repo(tmp_path, "### Decide: Which one?\n\n- **A** — this.\n- **B** — that.\n")
+    decide.write_answer(root, "parked", ["**A** — this."], "", today=dt.date(2026, 9, 16))
+    reparked = decide.reopen(_text(root))
+    assert decide.latest_answer(reparked, "karel") == ""
+
+
+def test_a_worker_note_after_the_answer_does_not_run_into_the_quote(tmp_path):
+    """The quote ends at the next `###`, so a dated Thread note the worker appended
+    is not handed to the next one as part of what Karel said."""
+    root = _repo(tmp_path, "### Decide: Which one?\n\n- **A** — this.\n- **B** — that.\n")
+    decide.write_answer(root, "parked", ["**A** — this."], "", today=dt.date(2026, 9, 16))
+    text = _text(root) + "\n### 2026-09-17 · attempt 3 (chore-thread)\n\nRe-checked cold.\n"
+    answer = decide.latest_answer(text, "karel")
+    assert "> **A** — this." in answer
+    assert "Re-checked cold" not in answer
+
+
+def test_a_card_with_no_answer_has_nothing_to_quote(tmp_path):
+    root = _repo(tmp_path, "### Decide: Which one?\n\n- **A** — this.\n")
+    assert decide.latest_answer(_text(root), "karel") == ""
+
+
+def test_the_answered_prompt_block_names_the_answer_and_forbids_re_parking():
+    """The other half of the fix, and it has to be the other half: the card no longer
+    lies, and the prompt now says the true thing outright. A worker reading only one
+    of the two still gets it right."""
+    block = worker_prompt.ANSWERED.format(answer="### 2026-09-16 · karel\n\n> **A**")
+    assert "> **A**" in block
+    assert "do not park this decision again" in block
+
+
+def test_a_card_still_asking_has_a_live_picker():
+    assert decide.has_live_picker(_question("### Decide: Which one?\n\n- **A** — this.\n"))
+    assert not decide.has_live_picker(_question(
+        "### Decided (2026-09-16): Which one?\n\n- **A** — this.\n"))
