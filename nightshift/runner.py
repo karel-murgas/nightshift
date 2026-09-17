@@ -5004,7 +5004,7 @@ def repair_drift(root: Path, tree: Path, card_id: str, branch: str, base: str,
 def dispatch(root: Path, card: board.Card, base: str, model: str,
              card_budget: float, test_timeout: int,
              test_selector: Callable[[set[str], Path], suite.Selection]
-             = suite.select, *, worker: str = "", effort: str = "") -> Dispatch:
+             = suite.touched, *, worker: str = "", effort: str = "") -> Dispatch:
     """One attempt, with the effort map stamped onto whatever it returns.
 
     A wrapper and not part of `_dispatch_attempt` because that function has a
@@ -5024,17 +5024,33 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
 def _dispatch_attempt(root: Path, card: board.Card, base: str, model: str,
                       card_budget: float, test_timeout: int,
                       test_selector: Callable[[set[str], Path], suite.Selection]
-                      = suite.select, *, worker: str = "",
+                      = suite.touched, *, worker: str = "",
                       efforts: dict[str, str]) -> Dispatch:
     """One attempt. Every exit path leaves the card's runner fields consistent.
 
-    `test_selector` is how the gates-green diff picks its pytest slice, and it
-    defaults to the only answer that is safe on its own: `suite.select`, the
-    game/system split. A caller that runs the **whole** suite over the result
-    afterwards — the chore batch is the one that does — may pass
-    `suite.touched` for a narrower first pass; part 1b of `suite.py` states why
-    that condition is not optional. A seam rather than a boolean because the two
-    are both selections and the choice is which one, not whether.
+    `test_selector` is how the gates-green diff picks its pytest slice.
+
+    **It defaults to `suite.touched`, not `suite.select`, since `per-module-
+    test-slice` (2026-09-17).** Part 1b of `suite.py` states `touched`'s general
+    condition — sound only for a caller with something re-checking the result
+    with `select` anyway — and every caller here meets it, not only the chore
+    batch that motivated the condition: `rebase_and_merge` unconditionally
+    re-verifies every card's rebased result with `suite.select` (never
+    `test_selector`, never skippable) before it can reach the integration
+    branch (see its call there). Since `touched`'s file set is always a subset
+    of what `select`'s matching bucket would run — it only narrows *within* the
+    parts `select` would already include, and falls back to `select` outright
+    for anything it cannot map with confidence — nothing this narrower first
+    pass could miss is also missed at merge time. Narrowing it only changes how
+    soon a real regression is caught, not whether it is, which is what makes it
+    safe as the default rather than an opt-in a caller has to know to request.
+    (`nightshift.preflight`'s pytest step is *not* the backstop this rests on —
+    its default is `suite.select` too, same as `rebase_and_merge`, and only
+    `--full-tests` forces literally everything; the unconditional `select`
+    re-check at merge time is the actual guarantee.) A caller that wants the
+    broader first pass regardless may still pass `suite.select` explicitly. A
+    seam rather than a boolean because the two are both selections and the
+    choice is which one, not whether.
 
     A card naming a `checker:` runs a **producer→checker loop inside this one
     attempt** (`00_architecture.md` §16's second seam), bounded by `MAX_ROUNDS`.

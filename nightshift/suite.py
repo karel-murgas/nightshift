@@ -123,6 +123,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from nightshift import manifest as _manifest
+from nightshift import memoryfold as _memoryfold
 from nightshift.manifest import AI_DIR, ManifestError
 
 # The three test-bearing *parts* a diff can touch. A `select` result is the union
@@ -320,6 +321,17 @@ def classify(path: str, repo_root: Path | None = None) -> str:
     bucket, because a typical game card also edits `.claude/memory/*.md` per the
     update rules and that must not drag every game card up to ALL.
 
+    A card's `.ai/memory-fragments/<id>.md` (`nightshift.memoryfold.FRAGMENT_DIR`)
+    is `other` for the same reason, not `system`: it is markdown, not code, no
+    test reads a real one (`nightshift`'s own fold tests use synthetic fixtures,
+    the same pattern as `Board/`'s real content — see the module docstring), and
+    **every** dispatched card writes one as its last step. Left under the blanket
+    `.ai/` → `system` rule below, that write alone put `system` in `kinds` on
+    every single card, which paired with the card's own `game` changes resolved
+    to ALL every time — measured across `.ai/runs/`, this was *the* reason the
+    bucket selector never narrowed in practice, not merely the 94%-game-bucket
+    fact the rest of this module's docstring quotes.
+
     `repo_root` does two things, and both were one thing before the manifest:
     it lets a changed *test file* be classified by what it imports as well as by
     its name, and it is how the project's own `source_dirs`, `tests.dir` and
@@ -346,6 +358,8 @@ def classify(path: str, repo_root: Path | None = None) -> str:
                 # answer for a file both slices must run.
                 return SYSTEM if not touches_game(full, where.source_packages) else ALL
         return GAME
+    if p.startswith(f"{AI_DIR}/{_memoryfold.FRAGMENT_DIR}/"):
+        return "other"
     if p.startswith(f"{AI_DIR}/"):
         return SYSTEM
     if p.startswith(board_prefix):
@@ -718,10 +732,13 @@ def touched(changed: set[str], repo_root: Path | None) -> Selection:
 
     Falls back to `select` — never to something narrower — whenever the diff holds
     a path this cannot reason about: anything outside the project's own `.py`
-    files and its tests, a missing root, or a narrowing that came out empty. Paths
-    carrying no test weight at all (docs, memory notes, board notes) are ignored
-    rather than triggering the fallback, exactly as `select` ignores them; a chore
-    that edits a module and its documentation is the common case, not an exception.
+    files and its named `test_*.py` files, a `conftest.py` or other test-support
+    module under the tests dir (not in `_source_graph`, and often consumed via
+    pytest's fixture injection rather than a plain import — see the loop below),
+    a missing root, or a narrowing that came out empty. Paths carrying no test
+    weight at all (docs, memory notes, board notes) are ignored rather than
+    triggering the fallback, exactly as `select` ignores them; a chore that edits
+    a module and its documentation is the common case, not an exception.
     """
     fallback = select(changed, repo_root)
     if repo_root is None or not changed:
@@ -742,6 +759,15 @@ def touched(changed: set[str], repo_root: Path | None) -> Selection:
         if p.startswith(tests_prefix) and name.startswith("test_") and name.endswith(".py"):
             named_tests.add(name)
             continue
+        if p.startswith(tests_prefix) and name.endswith(".py"):
+            # conftest.py, a shared fixture module (`_fixtures.py`), anything else
+            # under the tests dir that is not itself a `test_*.py`. None of it is
+            # in `_source_graph` (that only walks `source_dirs`), and a fixture is
+            # commonly consumed by pytest's own dependency injection rather than
+            # a plain import an AST walk would see — exactly "cannot resolve with
+            # confidence", so this widens rather than silently running only the
+            # few test files that happen to `import` it by name.
+            return fallback
         module = module_of(p, where)
         if module:
             changed_modules.add(module)

@@ -57,6 +57,7 @@ def _tests_dir(root: Path, *names: str, body: str = "") -> Path:
     ("myapp/rendering/hud.py", suite.GAME),
     (".ai/runner.py", suite.SYSTEM),
     (".ai/gates/card_schema.py", suite.SYSTEM),
+    (".ai/memory-fragments/some-card.md", "other"),
     ("Board/tasks/x.md", suite.BOARD),
     ("Board/review/y.md", suite.BOARD),
     ("Board/done/z.md", suite.BOARD),
@@ -79,6 +80,22 @@ def test_classify(repo, path, kind):
 def test_classify_normalises_backslashes_and_dot_prefix(repo):
     assert suite.classify("myapp\\combat\\action.py", repo) == suite.GAME
     assert suite.classify("./.ai/runner.py", repo) == suite.SYSTEM
+
+
+def test_a_cards_own_memory_fragment_does_not_drag_a_game_diff_to_all(repo):
+    """`per-module-test-slice` (2026-09-17): every dispatched card writes its own
+    `.ai/memory-fragments/<id>.md` as a last step (CLAUDE.md's memory workflow),
+    and the blanket `.ai/` -> SYSTEM rule used to classify that write as `system`
+    — which, paired with the card's own `game` changes, resolved to ALL on every
+    single card. Scored against 17 of Project Tigress's own archived
+    `.ai/runs/*/attempt-*` diffs, this was *the* reason the bucket selector never
+    narrowed in practice, not merely the fact that most test files import the
+    game package. No test reads a real fragment's content — `nightshift`'s own
+    fold tests use synthetic fixtures, the same pattern as `Board/`'s real
+    content — so it carries the same weight as a doc edit, not code."""
+    changed = {"myapp/combat/action.py", ".ai/memory-fragments/some-card.md"}
+    picked = suite.select(changed, repo)
+    assert picked.bucket == suite.GAME, picked.reason
 
 
 # --- the manifest is what makes the project half knowable ---------------------
@@ -938,6 +955,21 @@ def test_a_path_it_cannot_reason_about_falls_back_rather_than_narrowing(graphed)
         picked = suite.touched({"myapp/combat.py", path}, graphed)
         assert picked.bucket != suite.TOUCHED, path
         assert picked == suite.select({"myapp/combat.py", path}, graphed), path
+
+
+def test_a_conftest_change_falls_back_rather_than_narrowing(graphed):
+    """`per-module-test-slice`'s named case: a shared fixture module is not in
+    `_source_graph` (that only walks `source_dirs`) and is commonly reached by
+    pytest's own dependency injection rather than a plain import an AST walk
+    would see — a test that never mentions `conftest.py` by name can still be
+    broken by editing it. That is "cannot resolve with confidence", the same
+    bar a change to `suite.py` itself would fail, so this must widen to
+    `select` rather than silently running only the few files that `import`
+    the module by name."""
+    (graphed / "tests" / "conftest.py").write_text("import pytest\n", encoding="utf-8")
+    picked = suite.touched({"myapp/combat.py", "tests/conftest.py"}, graphed)
+    assert picked.bucket != suite.TOUCHED
+    assert picked == suite.select({"myapp/combat.py", "tests/conftest.py"}, graphed)
 
 
 def test_a_change_nothing_imports_runs_the_ordinary_slice_not_nothing(graphed):
