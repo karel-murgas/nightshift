@@ -430,7 +430,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     apply(removal)
-    print(f"\n  Removed. `nightshift init` will now start from scratch here.")
+    print("\n  Removed. `nightshift init` will now start from scratch here.")
     print("  Anything you had committed is still in git — check `git status`.")
     return 0
 

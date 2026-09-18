@@ -663,7 +663,7 @@ def describe(snapshot: Snapshot) -> list[str]:
              for b in snapshot.buckets]
     if snapshot.paid_enabled:
         spent = snapshot.paid_used_display
-        lines.append(f"paid overage ENABLED" + (f" - {spent} used" if spent else ""))
+        lines.append("paid overage ENABLED" + (f" - {spent} used" if spent else ""))
     else:
         lines.append("paid overage disabled")
     return lines

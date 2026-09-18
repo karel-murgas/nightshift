@@ -625,7 +625,7 @@ def _duplicates(found: list[tuple[Path, str]], repo_root: Path) -> list[Violatio
         board_rel = _board.board_dir(repo_root).relative_to(repo_root).as_posix()
         out.append(Violation(
             f"{board_rel}/{lanes[0]}/{name}", 1,
-            f"card_schema: `{name}` also exists in {', '.join(f'`{l}/`' for l in lanes[1:])} "
+            f"card_schema: `{name}` also exists in {', '.join(f'`{lane}/`' for lane in lanes[1:])} "
             f"— one state means one lane, and every reader picks a different copy. "
             f"A `git mv` whose commit named only the destination leaves exactly this; "
             f"delete the stale copy with `git rm`",

@@ -52,7 +52,7 @@ from pathlib import Path
 __all__ = [
     "AI_DIR", "MANIFEST_NAME", "ManifestError",
     "Manifest", "Project", "Tests", "Branches", "Board", "Worker",
-    "Memory", "FreshnessRule", "LayeringRule", "I18n", "DeadCode", "Audit", "Account", "Problem",
+    "Memory", "FreshnessRule", "LayeringRule", "I18n", "DeadCode", "Lint", "Audit", "Account", "Problem",
     "find_root", "manifest_path", "load", "parse", "validate", "require", "schema",
 ]
 
@@ -368,6 +368,37 @@ class DeadCode:
 
 
 @dataclass(frozen=True)
+class Lint:
+    """What `nightshift.gates.lint` points `ruff` at: which rules it enforces
+    and where it looks.
+
+    **Explicit `select`, never ruff's bare default.** Measured on Project
+    Tigress, 2026-09-18: `ruff check` with no `--select` at all resolved to
+    something close to its full rule catalogue in the installed version
+    (0.16), not the small "E4,E7,E9,F" set older docs describe — 1051 findings
+    on a clean-running 149-file tree, most of them modernisation suggestions
+    (`UP037`, `I001`, `SIM102`) rather than bugs. A gate whose rule set is
+    "whatever ruff currently defaults to" changes shape on every ruff upgrade
+    with no signal here. So this table always passes an explicit `select`, and
+    the default below is nightshift's own considered choice, not ruff's:
+    `F` (pyflakes — unused/undefined names, duplicate dict keys, redefinitions),
+    `E9` (syntax errors), `E7` (statement-level correctness — bare `except:`,
+    comparisons to `None`/`True` with `==`), and `B` (bugbear — mutable default
+    arguments, `zip()` without `strict=`, a loop variable never read). None of
+    these is a style opinion; each is a shape a running program can get wrong.
+
+    `ignore` subtracts specific codes back out of `select` — a project's own
+    earned exception, the same override relationship `[dead_code]` has with
+    `min_confidence`. `paths` empty means `project.source_dirs`, exactly as
+    `DeadCode.paths` does and for the same reason: a project that has
+    configured nothing still gets the check.
+    """
+    paths: tuple[str, ...] = ()
+    select: tuple[str, ...] = ("E9", "F", "E7", "B")
+    ignore: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Audit:
     """Where this project keeps its rule-enforcement matrix, and which of its
     own gates that matrix is not expected to have a row for.
@@ -470,6 +501,7 @@ class Manifest:
     layering: tuple[LayeringRule, ...] = ()
     i18n: I18n | None = None
     dead_code: DeadCode = field(default_factory=DeadCode)
+    lint: Lint = field(default_factory=Lint)
     audit: Audit = field(default_factory=Audit)
     accounts: tuple[Account, ...] = ()
     tiers: Tiers = field(default_factory=Tiers)
@@ -486,6 +518,13 @@ class Manifest:
         anything else that wants to know — a gate that fell back on its own
         would make the default invisible from the manifest side."""
         return self.dead_code.paths or self.project.source_dirs
+
+    @property
+    def lint_paths(self) -> tuple[str, ...]:
+        """What the lint gate scans: the `[lint]` table's paths, or
+        `source_dirs` when it declares none — same override relationship as
+        `dead_code_paths`."""
+        return self.lint.paths or self.project.source_dirs
 
     @property
     def tests_path(self) -> Path:
@@ -576,7 +615,7 @@ def _unknown(table: dict, known: tuple[str, ...], where: str) -> list[Problem]:
 
 
 _KNOWN_TABLES = ("project", "tests", "branches", "board", "worker", "memory",
-                 "layering", "i18n", "dead_code", "audit", "accounts", "tiers")
+                 "layering", "i18n", "dead_code", "lint", "audit", "accounts", "tiers")
 _KNOWN: dict[str, tuple[str, ...]] = {
     "project": ("name", "maintainer", "source_dirs", "extra_source_dirs",
                 "tooling_dirs", "doc_files"),
@@ -588,6 +627,7 @@ _KNOWN: dict[str, tuple[str, ...]] = {
     "layering": ("forbid",),
     "i18n": ("adapter", "base", "targets", "untranslated_allowlist", "loanwords_denylist"),
     "dead_code": ("paths", "min_confidence"),
+    "lint": ("paths", "select", "ignore"),
     "audit": ("matrix", "infra_gates"),
     "accounts": ("label", "config_dir", "dispatch"),
     "tiers": ("binding_doc",),
@@ -728,6 +768,8 @@ def parse(data: dict, root: Path) -> Manifest:
     if not isinstance(confidence, int) or isinstance(confidence, bool):
         raise ManifestError("dead_code.min_confidence must be an integer percentage")
 
+    lint_t = _table(data, "lint")
+
     return Manifest(
         root=root,
         project=Project(
@@ -771,6 +813,11 @@ def parse(data: dict, root: Path) -> Manifest:
         dead_code=DeadCode(
             paths=_as_str_tuple(dead_code_t.get("paths", []), "dead_code.paths"),
             min_confidence=confidence,
+        ),
+        lint=Lint(
+            paths=_as_str_tuple(lint_t.get("paths", []), "lint.paths"),
+            select=_as_str_tuple(lint_t.get("select", list(Lint.select)), "lint.select"),
+            ignore=_as_str_tuple(lint_t.get("ignore", []), "lint.ignore"),
         ),
         audit=Audit(
             matrix=str(audit_t.get("matrix", "")),
@@ -882,6 +929,13 @@ def validate(manifest: Manifest, data: dict | None = None) -> list[Problem]:
     if not 0 <= manifest.dead_code.min_confidence <= 100:
         problems.append(Problem("error", "dead_code.min_confidence",
                                 "must be a percentage between 0 and 100"))
+    for i, rel in enumerate(manifest.lint.paths):
+        check_path(rel, f"lint.paths[{i}]", must_exist=True, kind="scanned path")
+    if not manifest.lint.select:
+        problems.append(Problem("error", "lint.select",
+                                "must name at least one rule code — an empty select "
+                                "runs ruff with no rules enabled, which is silence "
+                                "dressed as a clean gate"))
 
     if manifest.memory.budget_bytes is not None and manifest.memory.budget_bytes <= 0:
         problems.append(Problem("error", "memory.budget_bytes",

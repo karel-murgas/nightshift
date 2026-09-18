@@ -516,6 +516,7 @@ project's one.
 | `git_path_lists` | a git command that lists paths lists them NUL-separated |
 | `import_layering` | a declared one-way dependency between packages stays one-way |
 | `line_endings` | Line endings stay LF, in the index and in the working tree. |
+| `lint` | ruff reports no lint findings in the project's source at the configured rule selection |
 | `memory_freshness` | a diff touching a declared source area must also touch its memory doc |
 | `orientation_budget` | the declared orientation files stay under [memory].budget_bytes |
 | `orientation_shape` | declared orientation docs hold current state, not dated history |
@@ -599,6 +600,7 @@ marker for the same purpose.
 | `[layering]` | `forbid = [{importer, imports, exempt}]` | `importer` must not import `imports`. |
 | `[i18n]` | `adapter` (required), `base='en'`, `targets=()`, `untranslated_allowlist=''`, `loanwords_denylist=''` | Present only if the project has localisation; `Manifest.i18n` is `None` otherwise and a project's i18n gates find nothing to check. |
 | `[dead_code]` | `paths=()`, `min_confidence=80` | What `nightshift.gates.dead_code` points `vulture` at, and how sure it must be before it speaks. |
+| `[lint]` | `paths=()`, `select=('E9', 'F', 'E7', 'B')`, `ignore=()` | What `nightshift.gates.lint` points `ruff` at: which rules it enforces and where it looks. |
 | `[audit]` | `matrix=''`, `infra_gates=()` | Where this project keeps its rule-enforcement matrix, and which of its own gates that matrix is not expected to have a row for. |
 | `[[accounts]]` | one row per account: `{label, config_dir, dispatch}` | One Claude account this project's tooling may know about. |
 | `[tiers]` | `binding_doc='docs/tier-binding.md'` | Which document carries the `tier: → model` binding block. |

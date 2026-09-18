@@ -16,8 +16,9 @@ license = { text = "Proprietary" }
 # new repo has to remember. `vulture` is the first: `nightshift.gates.dead_code`
 # shells out to it, and a real dependency is what makes
 # `pip install -e path/to/nightshift` the only step that repo takes. Deliberately
-# not an optional extra — an extra is the manual step.
-dependencies = ["vulture>=2.16"]
+# not an optional extra — an extra is the manual step. `ruff` is the second,
+# for `nightshift.gates.lint`, same reasoning.
+dependencies = ["vulture>=2.16", "ruff>=0.16"]
 authors = [{ name = "Karel Murgas" }]
 
 [project.optional-dependencies]

@@ -40,7 +40,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from nightshift import discover
-from nightshift import gitpaths
 from nightshift import textio
 from nightshift import tiers
 from nightshift.gates import line_endings
@@ -1227,8 +1226,8 @@ def report(plan: Plan, proposals: list[discover.Proposal]) -> None:
         # `--dry-run` under-reports by exactly one file — and a dry run that does not
         # name every path it will write is the one thing it must not be.
         print(f"    + {RECEIPT}")
-        print(f"      (the list above, so `nightshift uninstall` can take back these "
-              f"files and nothing else)")
+        print("      (the list above, so `nightshift uninstall` can take back these "
+              "files and nothing else)")
     if plan.appends:
         print("\nappend to (yours; a marked block, removable by `nightshift uninstall`):")
         for rel in sorted(plan.appends):
@@ -1286,7 +1285,7 @@ def next_steps(plan: Plan, *, integration: str | None, permission_mode: str) -> 
     print("     It never weakens a check to pass it, never commits, and files a")
     print("     card in Board/needs-decision/ for anything needing your judgment.")
     if permission_mode != "bypassPermissions":
-        print(f"     The flag elevates that pass only — your standing permission_mode")
+        print("     The flag elevates that pass only — your standing permission_mode")
         print(f"     stays `{permission_mode}` in {AI_DIR}/hosts.json.")
     print("     `--dry-run` shows the diagnosis and the exact prompt, dispatching")
     print("     nothing.\n")

@@ -1515,7 +1515,7 @@ def _classify_pass(root: Path, args: argparse.Namespace) -> int:
     # costs nothing at all, which is what makes it safe to press the button twice.
     if not pending:
         print("  every note already carries a route - nothing to classify")
-        print(f"  clear `route:` on a note to put it back in the queue")
+        print("  clear `route:` on a note to put it back in the queue")
         return 0
 
     if not _guard(args.allow_paid, "classifying").allow:

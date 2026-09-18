@@ -3006,7 +3006,7 @@ def _work_act(*, card: str = "", note: str = "", tier: str = "", worker: str = "
         opens_at = effective_tier(tier)
         detail = " · ".join(x for x in (f"{opens_at} tier" if opens_at else "",
                                         worker if worker and worker != "none" else "") if x)
-        title = (f"Opens an interactive session on this card"
+        title = ("Opens an interactive session on this card"
                  + (f" ({detail})" if detail else "")
                  + ". It reads the card, cuts the card's own branch and works with you "
                    "at the keyboard — nothing is dispatched and no verdict is written."
@@ -4563,7 +4563,7 @@ def render_decide(root: Path, card_id: str) -> str:
 
     for index, sub in enumerate(subquestions):
         options = []
-        for choice, option in enumerate(sub.options):
+        for _choice, option in enumerate(sub.options):
             mark = _chip("recommended", "ok") if option.recommended else ""
             options.append(
                 f'<label class="pickone">'

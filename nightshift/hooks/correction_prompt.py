@@ -42,7 +42,6 @@ to add the `UserPromptSubmit` entry, not carry its own copy of the file.
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 from pathlib import Path
 

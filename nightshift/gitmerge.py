@@ -72,7 +72,7 @@ def failure_detail(result: subprocess.CompletedProcess, *,
     if not lines:
         return "merge did not apply cleanly, and git printed nothing"
 
-    specific = [l for l in lines if not l.lower().startswith(_SUMMARY_PREFIXES)]
+    specific = [line for line in lines if not line.lower().startswith(_SUMMARY_PREFIXES)]
     # Keep the summary only when it is all there is — better a weak reason than none.
     chosen = specific or lines
     return " | ".join(chosen[:max_lines])[:limit]

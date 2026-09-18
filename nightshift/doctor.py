@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 import nightshift
-from nightshift import freshness, gitpaths, preflight, runner
+from nightshift import freshness, gitpaths, runner
 from nightshift.gates import line_endings
 from nightshift.manifest import AI_DIR, ManifestError
 from nightshift.preflight import Check
