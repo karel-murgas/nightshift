@@ -123,3 +123,73 @@ def test_this_repo_is_clean():
     """The baseline for nightshift's own tree — the gate ships travel-ready."""
     repo_root = Path(__file__).resolve().parent.parent
     assert line_endings.check(repo_root) == []
+
+
+# --- fix() ---------------------------------------------------------------
+#
+# hygiene-rules-belong-in-a-script: a blind `\r\n` -> `\n` rewrite of whatever
+# is currently on disk, with no comparison against the index blob. That is
+# deliberately wider than `normalize_worktree`, which only repairs a file
+# whose worktree content is byte-identical to the index after the same
+# substitution — a legacy phantom-dirty checkout. The case that motivated this
+# gate's `fix()` (finding 3 of the card) is different: a *fresh, uncommitted*
+# CRLF edit, which fails that identity check and which `normalize_worktree`
+# therefore leaves alone.
+
+
+def test_fix_rewrites_a_phantom_dirty_worktree_file_and_check_then_passes(tmp_path):
+    repo = _repo(tmp_path, {"a.py": b"x = 1\ny = 2\n"})
+    (repo / "a.py").write_bytes(b"x = 1\r\ny = 2\r\n")
+    fixed = line_endings.fix(repo)
+    assert fixed == ["a.py"]
+    assert (repo / "a.py").read_bytes() == b"x = 1\ny = 2\n"
+    assert line_endings.check(repo) == []
+
+
+def test_fix_covers_a_file_with_a_genuine_uncommitted_edit_too(tmp_path):
+    """The case `normalize_worktree` cannot reach: real, uncommitted content
+    change (a new line) plus CRLF. `_is_content_identical` would return False
+    here and `normalize_worktree` would skip it, unchanged — the blind rewrite
+    fixes it anyway, because it never compares against the index at all."""
+    repo = _repo(tmp_path, {"a.py": b"x = 1\ny = 2\n"})
+    (repo / "a.py").write_bytes(b"x = 1\r\ny = 2\r\nz = 3\r\n")
+    fixed = line_endings.fix(repo)
+    assert fixed == ["a.py"]
+    assert (repo / "a.py").read_bytes() == b"x = 1\ny = 2\nz = 3\n"
+    assert line_endings.check(repo) == []
+
+
+def test_fix_leaves_a_committed_crlf_blob_still_needing_renormalize(tmp_path):
+    """fix() only ever rewrites the working-tree file's bytes — it makes no
+    index change. A blob committed as CRLF (before the attribute existed)
+    still needs `git add --renormalize`, which fix() deliberately does not
+    do (a staging-index change is a different risk than rewriting a file's
+    own bytes on disk)."""
+    repo = _repo(tmp_path, {"a.py": b"x = 1\r\ny = 2\r\n"}, attributes=None)
+    (repo / ".gitattributes").write_bytes(line_endings.REQUIRED_ATTRIBUTE.encode("utf-8") + b"\n")
+    fixed = line_endings.fix(repo)
+    # The worktree copy (which was also literally CRLF) is rewritten to LF —
+    assert fixed == ["a.py"]
+    assert (repo / "a.py").read_bytes() == b"x = 1\ny = 2\n"
+    # — but the committed blob is untouched, so that violation survives.
+    violations = line_endings.check(repo)
+    assert any(v.file == "a.py" and "committed blob" in v.rule for v in violations)
+    assert not any("working tree" in v.rule for v in violations)
+
+
+def test_fix_does_not_touch_a_binary_file(tmp_path):
+    blob = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64 + b"\r\n" * 100
+    repo = _repo(tmp_path, {"art.png": blob})
+    assert line_endings.fix(repo) == []
+    assert (repo / "art.png").read_bytes() == blob
+
+
+def test_fix_on_an_already_clean_repo_is_a_no_op(tmp_path):
+    repo = _repo(tmp_path, {"a.py": b"x = 1\ny = 2\n"})
+    assert line_endings.fix(repo) == []
+
+
+def test_fix_with_no_git_is_a_no_op(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert line_endings.fix(plain) == []

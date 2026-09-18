@@ -177,15 +177,18 @@ Reconcile is deterministic (§1): a card whose `state:` disagrees with its
 folder gets its file moved to match. Commit the result with the message
 `board: <id> <from> → <to>`. If several cards changed, one reconcile handles them all.
 
-Two things reliably break on a move, both caught by the gates on save:
+One thing still breaks on a move, caught by the gates on save: **a doc citing a card by
+its lane path breaks the moment the card moves.** That is why the cross-reference rule is
+`[[wikilinks]], never file paths` — `doc_reference_liveness` fires on the stale path, in a
+file nobody was editing. Fix by converting the citation, not by moving the card back.
 
-- **Rewrite a card with `pathlib.write_text` on Windows and you convert it to CRLF** —
-  `line_endings` fires, and `normalize_worktree` refuses to help because the file now has
-  uncommitted changes. Use `write_bytes`, or `newline=""`.
-- **A doc citing a card by its lane path breaks the moment the card moves.** That is why the
-  cross-reference rule is `[[wikilinks]], never file paths` — `doc_reference_liveness` fires
-  on the stale path, in a file nobody was editing. Fix by converting the citation, not by
-  moving the card back.
+Rewriting a card with `pathlib.write_text` on Windows used to convert it to CRLF and leave
+`normalize_worktree` unable to help (a file with real content changes was outside its
+narrower, index-comparison repair). That is no longer something to remember to avoid:
+`line_endings.fix()` rewrites any CRLF file back to LF automatically, at the next gate
+run — the on-save hook after your next `Write`/`Edit`, or `preflight` if none comes first
+— with no index comparison at all (hygiene-rules-belong-in-a-script card).
+`write_bytes`/`newline=""` is still the cleaner habit, not a workaround you have to apply.
 
 ### Closing out a card you did yourself
 

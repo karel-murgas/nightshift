@@ -23,6 +23,14 @@ The merge/push boundary is rare, deterministic to detect, and it is the last
 moment a session's lessons still exist in context (`10_self_improvement.md` §3,
 `explained-instead-of-fixed`). So the expensive checks run once, there.
 
+Before any of the below: `_fix_hygiene` silently auto-fixes CRLF and a missing
+trailing newline on the tree — the two mechanical hygiene rules with exactly one
+correct output (`nightshift.gates.line_endings`/`trailing_newline`'s `fix()`).
+It runs before doctor's `lf_worktree`, not just before the gate suite, so a
+worktree CRLF file that this session left behind is repaired rather than
+reported as a per-machine precondition failure (hygiene-rules-belong-in-a-
+script card).
+
 **What it checks**, in cheapest-first order so a fast failure is fast:
 
 0. `nightshift.doctor` — the per-machine preconditions no gate can see, because
@@ -614,10 +622,38 @@ def _run_pytest(root: Path, base: str, changed: set[str] | None, how: str, merge
     return True, _pytest_detail(selection, reused, stale, cache, ran_total, mode), selection.bucket
 
 
+def _fix_hygiene(root: Path) -> None:
+    """Auto-fix CRLF and a missing trailing newline before anything below
+    *looks* at the tree — doctor's `lf_worktree` included, which is why this
+    runs before `doctor.checks`, not just before the gate suite.
+
+    `doctor.py`'s own charter is "nothing here fixes anything... a check that
+    repaired the tree would be a check nobody reads the output of" — true of
+    doctor's per-machine preconditions, which genuinely have no one correct
+    auto-fix, and it stays true here only because this sweep already leaves
+    doctor a clean tree to report on rather than doctor doing the fixing
+    itself (hygiene-rules-belong-in-a-script card, finding 4).
+
+    Discovered generically — every gate `nightshift.gates.run` finds that
+    defines a `fix()` — rather than a hand-written `line_endings,
+    trailing_newline` list: the same reasoning `run.py --fix` itself uses, so
+    a third fixable gate needs no edit here either. Only `check()` is skipped
+    for gates with no `fix()` — this is a fix pass, not a report, and the gate
+    suite's own step (below) still checks and reports everything.
+    """
+    from nightshift.gates import run as gates_run
+
+    for module in gates_run.discover(root).values():
+        if hasattr(module, "fix"):
+            module.fix(root)  # type: ignore[attr-defined]
+
+
 def run_checks(root: Path, base: str, no_corrections: str | None,
                skip_tests: bool = False, full_tests: bool = False,
                fresh_tests: bool = False) -> Result:
     result = Result()
+
+    _fix_hygiene(root)
 
     # Imported here rather than at module level: `doctor` imports *this* module
     # (for `Check` and the two bridged accessors it probes), and a module-level

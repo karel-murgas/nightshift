@@ -191,6 +191,49 @@ def test_json_prints_nothing_but_the_one_json_line(tmp_path, capsys):
     assert len(out.strip().splitlines()) == 1
 
 
+# --- --fix ---------------------------------------------------------------
+#
+# hygiene-rules-belong-in-a-script, finding 1: `total` used to be built from
+# `check()`'s violations BEFORE `fix()` ran, so `--fix` fixed the tree but
+# still reported the violation and exited non-zero on the very same run.
+
+FIXABLE_GATE = '''
+from pathlib import Path
+
+from nightshift.gates.base import Violation
+
+def check(root):
+    if (Path(root) / "_fixed").exists():
+        return []
+    return [Violation("a.py", 1, "needs a fix")]
+
+def fix(root):
+    (Path(root) / "_fixed").touch()
+'''
+
+
+def test_fix_re_checks_so_a_fixed_violation_is_not_still_reported(tmp_path, capsys):
+    root = _project(tmp_path, fixable=FIXABLE_GATE)
+    assert gates_run.main(["--root", str(root), "fixable", "--fix"]) == 0
+    out = capsys.readouterr().out
+    assert "needs a fix" not in out
+    assert "All clear" in out
+
+
+def test_without_fix_the_violation_is_still_reported(tmp_path, capsys):
+    """The control: the same gate, no `--fix`, still fails — the bug fix must
+    not have made `fix()` run unconditionally."""
+    root = _project(tmp_path, fixable=FIXABLE_GATE)
+    assert gates_run.main(["--root", str(root), "fixable"]) == 1
+    assert "needs a fix" in capsys.readouterr().out
+
+
+def test_fix_on_a_gate_with_no_fix_method_just_checks(tmp_path, capsys):
+    root = _project(tmp_path, no_tabs=GATE.format(file="a.py", rule="tabs"))
+    assert gates_run.main(["--root", str(root), "no_tabs", "--fix"]) == 1
+    assert "tabs" in capsys.readouterr().out
+
+
 # --- the two directories -----------------------------------------------------
 
 def test_both_directories_are_searched(tmp_path):

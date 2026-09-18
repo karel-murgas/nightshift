@@ -92,7 +92,9 @@ def main(argv: list[str] | None = None) -> int:
         description="Run the Nightshift gates (deterministic Python only).")
     parser.add_argument("gates", nargs="*", help="specific gate names to run (default: all)")
     parser.add_argument("--fix", action="store_true",
-                        help="apply autofixes where a gate supports one (currently none do)")
+                        help="apply autofixes where a gate supports one (line_endings, "
+                             "trailing_newline), then re-check so a fixed violation is "
+                             "not still counted against the run")
     parser.add_argument("--json", action="store_true",
                         help="emit violations as structured JSON ({file, line, rule, gate}) "
                              "instead of the human-readable text, for a caller that needs to "
@@ -135,6 +137,11 @@ def main(argv: list[str] | None = None) -> int:
         violations = module.check(repo_root)  # type: ignore[attr-defined]
         if args.fix and hasattr(module, "fix"):
             module.fix(repo_root)  # type: ignore[attr-defined]
+            # Re-check rather than trust the fix: `violations` above is what the
+            # TREE LOOKED LIKE BEFORE the fix ran, so counting it here would
+            # report (and exit non-zero on) violations `fix()` just resolved.
+            # What `check` says about the tree *now* is the only honest count.
+            violations = module.check(repo_root)  # type: ignore[attr-defined]
         for v in violations:
             if args.json:
                 structured.append({"gate": name, "file": v.file, "line": v.line,

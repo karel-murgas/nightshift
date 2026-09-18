@@ -92,6 +92,33 @@ def test_without_a_session_id_everything_is_shown_every_time(tmp_path, monkeypat
         assert "key missing in cs" in gates_on_edit.run(tmp_path, "")
 
 
+def test_a_gate_with_fix_is_fixed_before_it_is_checked(tmp_path, monkeypatch):
+    """Mechanical hygiene (CRLF, a missing trailing newline) is fixed silently,
+    in place, before `check()` runs — the violation it would otherwise report
+    generally never exists to report (hygiene-rules-belong-in-a-script card)."""
+    state = {"broken": True}
+
+    def check(root):
+        return [_v("a.py", "CRLF")] if state["broken"] else []
+
+    def fix(root):
+        state["broken"] = False
+
+    monkeypatch.setattr(
+        "nightshift.gates.run.discover",
+        lambda root: {"line_endings": types.SimpleNamespace(check=check, fix=fix)},
+    )
+    assert gates_on_edit.run(tmp_path, "s1") == "gates: ok"
+
+
+def test_a_gate_with_no_fix_method_is_only_checked(tmp_path, monkeypatch):
+    """No behaviour change for a gate that defines no `fix()` — same as before
+    this card."""
+    _gates(monkeypatch, {"parity": [_v("i18n.py", "key missing in cs")]})
+    out = gates_on_edit.run(tmp_path, "s1")
+    assert "key missing in cs" in out
+
+
 def test_a_crashing_gate_is_reported_not_swallowed(tmp_path, monkeypatch):
     def boom(root):
         raise RuntimeError("bad parse")
