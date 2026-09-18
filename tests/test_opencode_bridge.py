@@ -76,6 +76,55 @@ class TestDecide:
             {"tool": "read", "args": {"filePath": "x"}}) == ("deny", "second fence says no")
 
 
+class TestToolEconomy:
+    """`tool_economy` slots into `_hook_verdicts` as two more pure-function checks
+    (see `opencode_bridge.py`'s module docstring) — these prove the translation
+    reaches it, not the rule itself (that is `test_hook_tool_economy.py`'s job)."""
+
+    def test_denies_unbounded_read_of_a_big_file(self, tmp_path):
+        from nightshift.hooks import tool_economy
+
+        big = tmp_path / "big.py"
+        big.write_text("x = 1\n" * (tool_economy.BIG_FILE_BYTES // 6 + 10), encoding="utf-8")
+        status, reason = opencode_bridge.decide(
+            {"tool": "read", "args": {"filePath": str(big)}})
+        assert status == "deny" and "offset" in reason
+
+    def test_denies_whole_suite_pytest_when_armed(self, monkeypatch):
+        from nightshift.hooks import tool_economy
+
+        monkeypatch.setenv(tool_economy._env_name(), "/some/worktree")
+        status, reason = opencode_bridge.decide(
+            {"tool": "bash", "args": {"command": "python -m pytest -q"}})
+        assert status == "deny" and "nightshift.suite slice" in reason
+
+    def test_allows_the_same_bash_call_when_unarmed(self, monkeypatch):
+        from nightshift.hooks import tool_economy
+
+        monkeypatch.delenv(tool_economy._env_name(), raising=False)
+        assert opencode_bridge.decide(
+            {"tool": "bash", "args": {"command": "python -m pytest -q"}}) == ("allow", "")
+
+
+class TestAfterReport:
+    """`after_report()` is the second shape: a report, not a verdict."""
+
+    def test_returns_exactly_what_gates_on_edit_run_produces(self, monkeypatch, tmp_path):
+        from nightshift.hooks import gates_on_edit
+
+        calls = []
+
+        def fake_run(root, session_id):
+            calls.append((root, session_id))
+            return "gates: ok"
+
+        monkeypatch.setattr(gates_on_edit, "run", fake_run)
+        monkeypatch.setattr("nightshift.manifest.find_root", lambda start=None: tmp_path)
+        got = opencode_bridge.after_report({"cwd": str(tmp_path), "sessionID": "s1"})
+        assert got == "gates: ok"
+        assert calls == [(tmp_path.resolve(), "s1")]
+
+
 class TestProcessContract:
     """The JS half speaks to this over stdin/stdout, so the wire shape is a contract."""
 
