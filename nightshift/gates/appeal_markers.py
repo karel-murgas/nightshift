@@ -146,7 +146,7 @@ def _default_roots(repo_root: Path) -> tuple[str, ...]:
     same fallback `nightshift.preflight.tests_dir` takes for the same reason.
     """
     try:
-        from nightshift.manifest import ManifestError, load as load_manifest
+        from nightshift.manifest import load as load_manifest
 
         project = load_manifest(repo_root).project
         return (AI_DIR, *project.source_dirs, *project.extra_source_dirs)

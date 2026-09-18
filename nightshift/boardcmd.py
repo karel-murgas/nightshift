@@ -520,8 +520,8 @@ def _parser() -> argparse.ArgumentParser:
     moved = subs.add_parser("promote", help=f"move one note into {INBOX}/ without reading it")
     moved.add_argument("name", help="the note's filename, no path")
 
-    closed = subs.add_parser("close", help=f"an inline note is finished: stamp the "
-                                           f"minimum and file it in done/")
+    closed = subs.add_parser("close", help="an inline note is finished: stamp the "
+                                           "minimum and file it in done/")
     closed.add_argument("name", help="the note's filename, no path")
 
     note = subs.add_parser("note", help=f"write a new bare note into {INBOX}/ (or {board.PRIVATE_LANE}/)")

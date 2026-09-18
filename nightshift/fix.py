@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from nightshift import board, gitpaths, preflight, runner, textio, tiers
-from nightshift.manifest import AI_DIR, ManifestError, find_root
+from nightshift.manifest import AI_DIR, find_root
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):

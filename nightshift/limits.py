@@ -479,7 +479,7 @@ def detect(returncode: int, stdout: str = "", stderr: str = "",
     else:
         scope = SESSION
 
-    line = next((l.strip() for l in text.splitlines() if _WALL.search(l)),
+    line = next((raw.strip() for raw in text.splitlines() if _WALL.search(raw)),
                 found.group(0) if found else "")
     # A stream's terminal result is one enormous line, and its first 200
     # characters are boilerplate — the CLI's own message says more in less, so

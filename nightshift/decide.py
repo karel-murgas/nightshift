@@ -559,8 +559,8 @@ def latest_answer(card_text: str, attributor: str) -> str:
     if marker_at != -1:
         thread = thread[marker_at + len(_REOPENED_MARKER):]
     found = None
-    for found in pattern.finditer(thread):
-        pass
+    for match in pattern.finditer(thread):
+        found = match
     if found is None:
         return ""
     rest = thread[found.start():]

@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
 
 #: OpenCode tool name -> the Claude Code name the hooks match on. A name absent here
 #: is a tool no hook watches; it is allowed without asking any of them.

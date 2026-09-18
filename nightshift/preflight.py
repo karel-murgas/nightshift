@@ -505,7 +505,7 @@ def _run_subset(root: Path, parts: frozenset, reason: str) -> tuple[bool, int, s
     if ok and tests.returncode != 0:
         # A clean report plus a non-zero exit is a collection or internal error —
         # the per-test XML would carry no trace of it. Same cross-check the runner makes.
-        failed = [l for l in stdout.splitlines() if l.startswith("FAILED")]
+        failed = [line for line in stdout.splitlines() if line.startswith("FAILED")]
         ok = False
         why = "pytest: " + ("; ".join(failed[:4]) or
                             f"exited {tests.returncode} with a clean report — "

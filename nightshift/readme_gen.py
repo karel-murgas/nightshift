@@ -108,6 +108,7 @@ _TABLE_CLASSES: dict[str, type] = {
     "memory": _manifest.Memory,
     "i18n": _manifest.I18n,
     "dead_code": _manifest.DeadCode,
+    "lint": _manifest.Lint,
     "audit": _manifest.Audit,
     "tiers": _manifest.Tiers,
 }

@@ -32,7 +32,6 @@ entry, and a gate that guessed at it would be re-checking what a person decided
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 from nightshift.gates.base import Violation

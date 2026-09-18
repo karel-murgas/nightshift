@@ -276,7 +276,6 @@ def select(repo_root: Path, n: int, ledger: dict[str, str] | None = None) -> lis
 
 def _main(argv: list[str] | None = None) -> int:
     import argparse
-    import sys
 
     from nightshift.manifest import find_root
 

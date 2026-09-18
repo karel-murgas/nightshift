@@ -72,7 +72,7 @@ from nightshift import suite          # test policy
 from nightshift import textio         # LF-pinned writes (gate write_newline)
 from nightshift import tiers
 from nightshift import worker_prompt  # harness-level worker discipline
-from nightshift.manifest import AI_DIR, ManifestError, find_root
+from nightshift.manifest import ManifestError, find_root
 
 def _worker(root: Path):
     """The `[worker]` table, or its all-empty default.
@@ -931,7 +931,7 @@ def select(root: Path, capabilities: set[str], bad_schema: dict[str, list[str]],
     for card in board.cards(root, "tasks"):
         forced_now = forced is not None and card.id == forced
 
-        def add(dispatchable: bool, reason: str) -> None:
+        def add(dispatchable: bool, reason: str, card: board.Card = card) -> None:
             note = oversize_note(card)
             out.append(Candidate(card, dispatchable, f"{reason}; {note}" if note else reason))
 
@@ -4136,11 +4136,11 @@ def _run_gates(root: Path, cwd: Path, log: Path) -> tuple[str, str]:
     # function never read, so a crash produced the reason `"gates: "` with
     # nothing after it and the card carried that into its `## Error`.
     if "Traceback (most recent call last)" in stderr:
-        tail = [l.strip() for l in stderr.splitlines() if l.strip()]
+        tail = [line.strip() for line in stderr.splitlines() if line.strip()]
         return GATE_CRASH, ("the gate harness crashed, so no card can be judged on this "
                             f"machine — {tail[-1] if tail else f'exit {out.returncode}'}")
 
-    lines = [l for l in stdout.splitlines() if l.strip()]
+    lines = [line for line in stdout.splitlines() if line.strip()]
     if not lines:
         # Non-zero with nothing said. Whatever this is, it is not a verdict about
         # the card, and guessing that it is spends an attempt for free.
@@ -4257,7 +4257,7 @@ def _run_tests(cwd: Path, log: Path, timeout: int, junit: Path,
         # A clean-looking report with a non-zero exit: a collection or internal
         # error, which the per-test XML cannot carry. pytest's own `FAILED` lines
         # on stdout are then the only evidence there is, so they become the block.
-        failed = [l for l in stdout.splitlines() if l.startswith("FAILED")]
+        failed = [line for line in stdout.splitlines() if line.startswith("FAILED")]
         why = "pytest: " + ("; ".join(failed[:4]) or f"exited {out.returncode} with a "
                             "clean report — a collection or internal error")
         return False, why, "\n".join(f"    {line}" for line in failed[:suite.EXCERPT_TESTS])
@@ -4593,7 +4593,7 @@ def _run_worker(argv: list[str], cwd: Path, timeout: int,
         t_in.join(timeout=5)
         _close_stream()
         raise subprocess.TimeoutExpired(argv, timeout, output="".join(out_lines),
-                                        stderr="".join(err_lines))
+                                        stderr="".join(err_lines)) from None
 
     # Bounded exactly like the timeout path above, for the grandchild-holds-
     # the-pipe-open case described on the docstring: proc has exited, but the
@@ -5022,7 +5022,7 @@ def repair_drift(root: Path, tree: Path, card_id: str, branch: str, base: str,
     # window and stop a night that had only run out of window, so the wall goes up
     # to the caller and the card is given back the ordinary way.
     if wall is not None:
-        return False, cost, f"the repair hit a usage wall before it cleared the gates", wall
+        return False, cost, "the repair hit a usage wall before it cleared the gates", wall
     return False, cost, (f"the repair did not clear the gates — {why}"
                          if after != before else
                          "the repair agent changed nothing and the gates are still red"), None
@@ -5237,8 +5237,8 @@ def _dispatch_attempt(root: Path, card: board.Card, base: str, model: str,
                 # above, which is the `FROM_WIP` path, not the warm one.
                 return Dispatch(
                     "interrupted",
-                    f"worker interrupted (api_error) before verification ran — "
-                    f"resuming from its `wip:` commit next dispatch",
+                    "worker interrupted (api_error) before verification ran — "
+                    "resuming from its `wip:` commit next dispatch",
                     cost, round_no, kept=False)
             drop_worktree(root, tree)
             # `evidence` is why, not just that: the gates and tests paths both fill
