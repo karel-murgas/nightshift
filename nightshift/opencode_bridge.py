@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
-"""Run nightshift's PreToolUse hooks for an OpenCode tool call.
+"""Run nightshift's PreToolUse/PostToolUse hooks for an OpenCode tool call.
 
 `04_local_runtime.md` §8: *"nightshift's hooks are Python modules reading JSON on
 stdin, so one shim module bridges all of them."* This is that shim's Python half. The
 JS half is a plugin that pipes a call here and applies the answer.
 
+The shim now has two shapes. `decide()` is deny-via-`tool.execute.before`-throw:
+`worktree_fence`, `ideas_fence` and `tool_economy` each get a chance to deny, and the
+JS half throws on the first denial. `after_report()` is report-via-`tool.execute.after`-
+append: `gates_on_edit` is not a deny/allow verdict, it is text to surface after an edit,
+the same way Claude Code's own `PostToolUse` hook does.
+
 **Why a bridge and not a JS reimplementation.** The rules already have one home. A
 second copy in another language is the defect that cost a day on 2026-09-18, when the
 `stale-hunter` charter headlined one verdict schema while the runner's prompt specified
 another and the model — correctly — followed the document it was pointed at. So this
-calls each hook's existing `evaluate()` rather than restating what it decides.
+calls each hook's existing `evaluate()` (or, for `tool_economy`, its own pure verdict
+functions — already shaped exactly like `evaluate()`, so no wrapper was invented) rather
+than restating what it decides.
 
 **The translation is the actual work**, because the two runtimes disagree on names:
 
@@ -115,17 +123,74 @@ def _hook_verdicts(payload: dict):
     except Exception as exc:  # noqa: BLE001
         print(f"opencode_bridge: ideas_fence raised: {exc!r}", file=sys.stderr)
 
+    try:
+        # tool_economy's two rules are pure functions gated the same way its own
+        # main() gates them (`_armed()` for the Bash rule, unconditional for Read),
+        # so they slot in here rather than through an evaluate() wrapper that would
+        # just restate that branching a third time.
+        from nightshift.hooks import tool_economy
+
+        tool_name = payload.get("tool_name")
+        tool_input = payload.get("tool_input") or {}
+        if tool_name == "Read":
+            yield tool_economy._read_verdict(tool_input)
+        elif tool_name == "Bash" and tool_economy._armed():
+            yield tool_economy._verdict(str(tool_input.get("command", "")))
+    except Exception as exc:  # noqa: BLE001
+        print(f"opencode_bridge: tool_economy raised: {exc!r}", file=sys.stderr)
+
+
+def after_report(payload: dict) -> str:
+    """The gate report for one edit — the report-mode call the JS plugin's
+    `tool.execute.after` handler makes after a write/edit/patch, and appends to
+    `output.output` when non-empty.
+
+    Unlike `decide()` this is not a deny/allow verdict: `gates_on_edit` is a report,
+    not a fence, so it needs the repo root and a session id rather than a tool call.
+    Root resolution mirrors `gates_on_edit.main()`'s own: the payload's `cwd` when it
+    names a real directory, else the process's own — hard-coding either would be the
+    second home `_hook_verdicts` above exists to avoid.
+    """
+    from pathlib import Path
+
+    from nightshift.hooks import gates_on_edit
+    from nightshift.manifest import find_root
+
+    given = Path(str(payload.get("cwd") or ""))
+    start = given if str(given) not in ("", ".") and given.is_dir() else Path.cwd()
+    root = find_root(start).resolve()
+    session_id = str(payload.get("sessionID") or payload.get("session_id") or "")
+    return gates_on_edit.run(root, session_id)
+
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    after_mode = "--after" in argv
+
     try:
-        call = json.load(sys.stdin)
+        payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
-        # Never block on a payload we cannot parse — same posture as the hooks
-        # themselves, and the reason is the same: a fence that fails closed on a
-        # parse error stops the night for a quoting bug.
-        json.dump({"status": "allow", "reason": ""}, sys.stdout)
+        if after_mode:
+            # A report can tolerate an empty payload (falls back to cwd / no
+            # session id); a deny/allow decision cannot silently invent one.
+            payload = {}
+        else:
+            # Never block on a payload we cannot parse — same posture as the hooks
+            # themselves, and the reason is the same: a fence that fails closed on
+            # a parse error stops the night for a quoting bug.
+            json.dump({"status": "allow", "reason": ""}, sys.stdout)
+            return 0
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if after_mode:
+        try:
+            sys.stdout.write(after_report(payload))
+        except Exception as exc:  # noqa: BLE001 - see decide()'s docstring
+            print(f"opencode_bridge: after_report raised: {exc!r}", file=sys.stderr)
         return 0
-    status, reason = decide(call if isinstance(call, dict) else {})
+
+    status, reason = decide(payload)
     json.dump({"status": status, "reason": reason}, sys.stdout)
     return 0
 
