@@ -32,6 +32,13 @@ time, not tokens, and it moved a violation's discovery from the edit that caused
 to the end of the attempt — where a worker that forgot its final gate run would
 lose the whole attempt to the runner's gate check.
 
+**A gate that defines `fix()` is fixed, silently, before it is checked.** CRLF and
+a missing trailing newline are mechanical — one correct output, no judgment a
+worker could usefully apply — so this is the point in a session where an edit is
+most likely to have just produced one (`hygiene-rules-belong-in-a-script` card).
+The tree is repaired before `check()` ever runs, so the violation this hook would
+otherwise have printed generally never exists to report.
+
 Always exits 0: a violation must show, not block the edit that would fix it. Fails
 open with a one-line note on anything unexpected.
 """
@@ -69,7 +76,17 @@ def run(root: Path, session_id: str) -> str:
     found: dict[str, str] = {}
     for name in sorted(gates):
         try:
-            violations = gates[name].check(root)  # type: ignore[attr-defined]
+            module = gates[name]
+            # Mechanical hygiene (CRLF, a missing trailing newline) is fixed
+            # silently, in place, before the check that would otherwise report
+            # it — the tree a worker's edit just left is repaired before the
+            # worker ever sees a violation for it, rather than a "no CRLF
+            # permitted" it has to go investigate and fix by hand
+            # (hygiene-rules-belong-in-a-script card). Only gates that define
+            # `fix()` are touched; every other gate still just reports.
+            if hasattr(module, "fix"):
+                module.fix(root)  # type: ignore[attr-defined]
+            violations = module.check(root)  # type: ignore[attr-defined]
         except Exception as exc:
             found[f"{name}|crash"] = f"{name}: the gate crashed — {type(exc).__name__}: {exc}"
             continue

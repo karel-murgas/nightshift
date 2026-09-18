@@ -79,10 +79,12 @@ _CRLF_ALLOWED: frozenset[str] = frozenset()
 # which is a CRLF problem by any reading. `none` means no line endings at all (a
 # one-line file with no trailing newline) and is fine.
 _CRLF_EOLS = frozenset({"crlf", "mixed"})
-_BINARY = "-text"
+#: Public: `trailing_newline` reuses this to exclude the same binary files from
+#: its own check, rather than re-deriving git's binary verdict a second way.
+BINARY = "-text"
 
 
-def _eol_report(repo_root: Path) -> dict[str, tuple[str, str]] | None:
+def eol_report(repo_root: Path) -> dict[str, tuple[str, str]] | None:
     """`{path: (index eol, worktree eol)}` — git's own answer, in ONE call.
 
     This gate used to derive the same facts itself: `git cat-file` per tracked file for
@@ -95,6 +97,10 @@ def _eol_report(repo_root: Path) -> dict[str, tuple[str, str]] | None:
 
     Returns None when git cannot answer — not a repo, no git binary — which the caller
     treats as "cannot compare", not as "clean".
+
+    Public because `trailing_newline` asks the same question — which tracked paths
+    are text, at their current worktree content — and a second `git ls-files --eol`
+    call would just be this one, copied.
     """
     try:
         out = subprocess.run(
@@ -144,7 +150,7 @@ def check(repo_root: Path) -> list[Violation]:
             "files go phantom-dirty",
         ))
 
-    report = _eol_report(repo_root)
+    report = eol_report(repo_root)
     if report is None:
         # Not a repo, or no git binary. Nothing to compare against; the
         # attributes check above is still meaningful, so report what we have
@@ -158,7 +164,7 @@ def check(repo_root: Path) -> list[Violation]:
         # NUL-sniff of the first N bytes and is strictly better: it consults
         # .gitattributes, so a file the project has *declared* binary is treated
         # as binary even when its first bytes happen to look like text.
-        if _BINARY in (index_eol, worktree_eol):
+        if BINARY in (index_eol, worktree_eol):
             continue
         if index_eol in _CRLF_EOLS:
             violations.append(Violation(
@@ -177,6 +183,45 @@ def check(repo_root: Path) -> list[Violation]:
             ))
 
     return violations
+
+
+def fix(repo_root: Path) -> list[str]:
+    """Rewrite every working-tree CRLF file's *current* bytes to LF, in place.
+
+    Blind `\\r\\n` -> `\\n` on whatever is on disk right now — no comparison
+    against the index blob. That is deliberately wider than
+    `nightshift.normalize_worktree`, which only repairs a file whose worktree
+    content, after the same substitution, comes out byte-identical to what git
+    already has: a legacy phantom-dirty checkout. A file with a genuine,
+    uncommitted edit that happens to land CRLF (a tool that bypassed the
+    `eol=lf` filter, mid-session) fails that identity check and
+    `normalize_worktree` leaves it alone — which is exactly the case this gate's
+    docstring says costs a worker a hand investigation. The blind rewrite fixes
+    both, and is lossless here because nothing in this tree needs a literal
+    `\\r` (see the module docstring).
+
+    Does not touch the *committed-blob* CRLF violation (`index_eol` in
+    `_CRLF_EOLS`) — that one requires `git add --renormalize`, a staging-index
+    change with a different risk profile than rewriting a file's own bytes, and
+    is left to report-and-fail.
+
+    Returns the paths rewritten.
+    """
+    report = eol_report(repo_root)
+    if report is None:
+        return []
+    fixed: list[str] = []
+    for rel, (_index_eol, worktree_eol) in sorted(report.items()):
+        if rel in _CRLF_ALLOWED or worktree_eol not in _CRLF_EOLS:
+            continue
+        path = repo_root / rel
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        path.write_bytes(data.replace(b"\r\n", b"\n"))
+        fixed.append(rel)
+    return fixed
 
 
 if __name__ == "__main__":

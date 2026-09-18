@@ -526,6 +526,7 @@ project's one.
 | `source_reference_liveness` | a source string literal that looks like a repo path must resolve to something real |
 | `subprocess_encoding` | no subprocess call in the tooling decodes output with the locale codec |
 | `subprocess_result_checked` | no subprocess call in the tooling discards its result |
+| `trailing_newline` | every tracked text file ends with a trailing newline |
 | `write_newline` | no text-mode write in the tooling leaves newline translation unpinned |
 <!-- /generated:gate-list -->
 
