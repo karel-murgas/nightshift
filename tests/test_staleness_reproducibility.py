@@ -238,11 +238,14 @@ def test_findings_are_committed_before_the_doc_is_ledgered(tmp_path, monkeypatch
     (root / ".claude" / "agents").mkdir(parents=True)
     (root / ".claude" / "agents" / "code-thread.md").write_text(
         "---\nname: code-thread\n---\n", encoding="utf-8")
+    # Quote-or-drop is enforced now: the doc the sweep reports on must exist
+    # and must contain the finding's claim, or the finding is dropped.
+    (root / "drift.md").write_text("c is documented here.\n", encoding="utf-8")
 
     committed_when_ledgered: list[bool] = []
     slug = runner._stale_slug("drift.md")
 
-    def _spy_mark_verified(r, doc, ledger):
+    def _spy_mark_verified(r, doc, ledger, *, authoritative=True):
         tracked = subprocess.run(
             ["git", "-C", str(r), "ls-files", f"Board/tasks/{slug}.md"],
             capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -280,11 +283,14 @@ def test_a_swept_doc_records_progress_even_if_the_run_never_finishes(tmp_path, m
     (root / ".claude" / "agents").mkdir(parents=True)
     (root / ".claude" / "agents" / "code-thread.md").write_text(
         "---\nname: code-thread\n---\n", encoding="utf-8")
+    # Quote-or-drop is enforced now: the doc the sweep reports on must exist
+    # and must contain the finding's claim, or the finding is dropped.
+    (root / "drift.md").write_text("c is documented here.\n", encoding="utf-8")
 
     monkeypatch.setattr(runner.stale_sweep, "load_ledger", lambda r: {})
     monkeypatch.setattr(runner.stale_sweep, "select", lambda r, n, ledger: [
         stale_sweep.Candidate("drift.md", 5, None, 5)])
-    monkeypatch.setattr(runner.stale_sweep, "mark_verified", lambda r, d, l: None)
+    monkeypatch.setattr(runner.stale_sweep, "mark_verified", lambda r, d, l, **kw: None)
     monkeypatch.setattr(runner, "stale_run_dir", lambda r, doc: root)
     monkeypatch.setattr(runner, "run_stale_check", lambda *a, **k: (
         {"complete": True, "summary": "1 drift",
@@ -319,6 +325,9 @@ def test_a_stale_checker_that_walls_after_a_complete_verdict_is_honoured(
     (root / ".claude" / "agents").mkdir(parents=True)
     (root / ".claude" / "agents" / "code-thread.md").write_text(
         "---\nname: code-thread\n---\n", encoding="utf-8")
+    # Quote-or-drop is enforced now: the doc the sweep reports on must exist
+    # and must contain the finding's claim, or the finding is dropped.
+    (root / "drift.md").write_text("c is documented here.\n", encoding="utf-8")
 
     ledgered: list[str] = []
     monkeypatch.setattr(runner.stale_sweep, "load_ledger", lambda r: {})
@@ -326,7 +335,7 @@ def test_a_stale_checker_that_walls_after_a_complete_verdict_is_honoured(
         stale_sweep.Candidate("drift.md", 5, None, 5),
         stale_sweep.Candidate("other.md", 4, None, 4)])
     monkeypatch.setattr(runner.stale_sweep, "mark_verified",
-                        lambda r, d, l: ledgered.append(d))
+                        lambda r, d, l, **kw: ledgered.append(d))
     monkeypatch.setattr(runner, "stale_run_dir", lambda r, doc: root)
     monkeypatch.setattr(runner, "run_stale_check", lambda *a, **k: (
         {"complete": True, "summary": "1 drift",
@@ -361,7 +370,7 @@ def test_a_stale_checker_that_walls_with_nothing_complete_leaves_the_ledger_alon
     monkeypatch.setattr(runner.stale_sweep, "select", lambda r, n, ledger: [
         stale_sweep.Candidate("drift.md", 5, None, 5)])
     monkeypatch.setattr(runner.stale_sweep, "mark_verified",
-                        lambda r, d, l: ledgered.append(d))
+                        lambda r, d, l, **kw: ledgered.append(d))
     monkeypatch.setattr(runner, "stale_run_dir", lambda r, doc: root)
     monkeypatch.setattr(runner, "run_stale_check", lambda *a, **k: (
         {"complete": False}, 0.0,

@@ -4045,7 +4045,28 @@ def stale_phase(root: Path, count: int, model: str, deadline, card_budget: float
         # sweep is all it takes. A doc with no findings needs no commit: its only
         # record is the gitignored, per-machine, rebuildable ledger, so losing
         # that costs a re-check and nothing else.
-        findings = verdict.get("findings") or []
+        # Quote-or-drop, enforced rather than asked for. A claim that is not in
+        # the doc is not a finding however true its `why` reads — see
+        # `stale_sweep.quote_checked`.
+        try:
+            doc_text = (root / cand.doc).read_text(encoding="utf-8", errors="replace")
+            quote_checkable = True
+        except OSError:
+            # Cannot adjudicate, so do not pretend to: keep every finding (they are
+            # leads either way) and refuse the ledger. Dropping them all here would
+            # turn an unreadable doc into silent data loss.
+            doc_text, quote_checkable = "", False
+        if quote_checkable:
+            findings, spliced = stale_sweep.quote_checked(
+                doc_text, verdict.get("findings") or [])
+        else:
+            findings, spliced = list(verdict.get("findings") or []), []
+        if spliced:
+            _log(f"  {cand.doc}: dropped {len(spliced)} finding(s) — the quoted claim is "
+                 f"not in the doc (quote-or-drop)")
+        ok_to_ledger, why_not = stale_sweep.may_ledger(verdict, spliced)
+        if ok_to_ledger and not quote_checkable:
+            ok_to_ledger, why_not = False, f"could not read {cand.doc} to check its quotes"
         if findings:
             card_path = board.board_dir(root) / "tasks" / f"{_stale_slug(cand.doc)}.md"
             # Relative to root, not out_dir as-is: out_dir is anchored to this
@@ -4060,9 +4081,15 @@ def stale_phase(root: Path, count: int, model: str, deadline, card_budget: float
             board.commit_board(root, f"stale: {cand.doc} — {len(findings)} drift(s) carded")
             _log(f"  {cand.doc}: {len(findings)} drift(s) — carded {card_path.name}")
         else:
-            _log(f"  {cand.doc}: {verdict.get('summary', 'no drift')} — verified")
-        stale_sweep.mark_verified(root, cand.doc, ledger)
-        verified += 1
+            _log(f"  {cand.doc}: {verdict.get('summary', 'no drift')}")
+        if ok_to_ledger:
+            stale_sweep.mark_verified(root, cand.doc, ledger, authoritative=True)
+            verified += 1
+        else:
+            # Carded what it found, but the doc is NOT recorded as checked: it
+            # comes back round next sweep. `complete` is not `exhaustive`.
+            _log(f"  {cand.doc}: not ledgered — {why_not}")
+            incomplete += 1
         _flush()
         if wall is not None:
             # This doc's verdict was honoured and is now durable — card committed,

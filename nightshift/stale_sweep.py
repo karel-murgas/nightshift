@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -160,9 +161,76 @@ def head_sha(repo_root: Path) -> str:
                           encoding="utf-8", errors="replace").stdout.strip()
 
 
-def mark_verified(repo_root: Path, doc: str, ledger: dict[str, str]) -> None:
-    """Record that `doc` was completely verified at the current HEAD. Only ever
-    called on a *complete* verdict — Karel's rule (a cut-off sweep re-checks)."""
+def normalise_quote(text: str) -> str:
+    """Collapse whitespace and drop backticks so a quote survives re-wrapping.
+
+    A doc is hard-wrapped and a checker quotes across the wrap; a literal `in`
+    would reject an honest quote for a newline. Backticks go because a checker
+    may add or drop the code fencing around a symbol it quotes.
+    """
+    return re.sub(r"\s+", " ", str(text).replace("`", "")).strip().casefold()
+
+
+def quote_checked(doc_text: str, findings: list) -> tuple[list, list]:
+    """Split `findings` into (verbatim, spliced) on the charter's quote-or-drop rule.
+
+    A finding whose `claim` does not occur in the document is not a finding: the
+    charter requires a verbatim quote *because* every claim is checked
+    mechanically before a human reads it, and this is that check.
+
+    Why it exists (2026-09-18, Project Tigress `04_local_runtime.md` §9d): a local
+    checker returned three findings against a pinned fixture. Two were verbatim and
+    true. The third fused two clauses of a single sentence into a claim the doc
+    never makes, then reasoned — correctly — that the fused claim contradicts the
+    source. Its `why` was true and its `claim` was fiction, which is the shape of
+    false positive a human reviewer is *least* likely to catch, because the
+    reasoning reads perfectly. Precision behind this check was 2 of 2; in front of
+    it, 2 of 3.
+    """
+    doc = normalise_quote(doc_text)
+    verbatim, spliced = [], []
+    for finding in findings:
+        claim = normalise_quote((finding or {}).get("claim", ""))
+        (verbatim if claim and claim in doc else spliced).append(finding)
+    return verbatim, spliced
+
+
+def may_ledger(verdict: dict, spliced: list) -> tuple[bool, str]:
+    """Whether this verdict may mark its doc verified. Returns (ok, reason).
+
+    **`complete` is not `exhaustive`, and the ledger reads it as if it were.**
+    `complete: true` is the checker saying *"I read the whole document"*. The
+    ledger uses it to mean *"this document is now checked"* and stops re-checking.
+    Those are the same claim only for a checker with high recall.
+
+    Measured on 2026-09-18: a local model returned `complete: true` having found
+    **2 of 5** known drifts in the fixture doc. Ledgering that verdict would have
+    recorded three live drifts as verified and never looked again — strictly worse
+    than not running the checker at all.
+
+    The runtime term cannot be written yet (there is no local dispatch path), so
+    this deliberately takes no default: every call site must state its answer, and
+    the question becomes impossible to skip when local checkers do arrive.
+    """
+    if not verdict.get("complete"):
+        return False, "no complete verdict"
+    if spliced:
+        return False, (f"{len(spliced)} finding(s) failed quote-or-drop — a checker that "
+                       f"broke its own evidence rule is not one to trust on coverage")
+    return True, ""
+
+
+def mark_verified(repo_root: Path, doc: str, ledger: dict[str, str], *,
+                  authoritative: bool) -> None:
+    """Record that `doc` was completely verified at the current HEAD.
+
+    `authoritative` has no default on purpose — see `may_ledger`. Passing `True`
+    is a claim that this verdict is good enough to stop re-checking the doc.
+    """
+    if not authoritative:
+        raise ValueError(
+            "mark_verified called with authoritative=False — the caller must skip "
+            "the ledger write, not delegate the decision here")
     ledger[doc] = head_sha(repo_root)
     save_ledger(repo_root, ledger)
 
