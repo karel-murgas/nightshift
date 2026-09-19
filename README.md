@@ -524,6 +524,7 @@ project's one.
 | `memory_freshness` | a diff touching a declared source area must also touch its memory doc |
 | `orientation_budget` | the declared orientation files stay under [memory].budget_bytes |
 | `orientation_shape` | declared orientation docs hold current state, not dated history |
+| `player_visible_skipped_testing` | a done/ card touching a declared player-visible path carries verify: play and ## How to test |
 | `prompt_not_in_argv` | no argv carries a worker prompt on `-p`; it goes down the child's stdin |
 | `pytest_invocation` | only suite.py may spell pytest's parallel flags; callers use parallel_args() |
 | `readme_generated` | README.md's generated blocks (gate list, runner flags, manifest fields) match a fresh generation |
@@ -598,7 +599,7 @@ marker for the same purpose.
 | `[project]` | `name=''`, `maintainer=''`, `source_dirs=()`, `extra_source_dirs=()`, `tooling_dirs=()`, `doc_files=('CLAUDE.md',)` | What the code under test is called and where it lives. |
 | `[tests]` | `dir='tests'`, `parallel=True`, `timeout_s=0` | `dir` is where pytest is pointed. |
 | `[branches]` | `integration=None`, `stable='main'`, `forbidden_extra=()` | `integration` has no default on purpose (module docstring). |
-| `[board]` | `root='Board'` | Lane names are framework config, not project facts (D5), so they are not here — only where the board lives, and who signs a decision on it. |
+| `[board]` | `root='Board'`, `decision_attributor=''`, `player_visible_paths=()` | Lane names are framework config, not project facts (D5), so they are not here — only where the board lives, and who signs a decision on it. |
 | `[worker]` | `harvest_dirs=()`, `fence_env=''`, `integration_checkout_dir=''` | The three constants that were the entire project-specific content of `runner.py`'s 3,597 lines. |
 | `[memory]` | `orientation=()`, `budget_bytes=None`, `freshness=()`, `fold=()` | `budget_bytes = None` means **the orientation-budget gate does not run**, and that is the recommended starting value. |
 | `[layering]` | `forbid = [{importer, imports, exempt}]` | `importer` must not import `imports`. |

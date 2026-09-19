@@ -46,6 +46,8 @@ forbidden_extra = ["dev"]
 
 [board]
 root = "Board"
+decision_attributor = "karel"
+player_visible_paths = ["dungeoneer/rendering", "dungeoneer/core/i18n.py"]
 
 [worker]
 harvest_dirs = ["dungeoneer/assets/.tmp"]
@@ -88,6 +90,8 @@ def test_every_section_of_the_documented_sketch_round_trips(tmp_path):
     assert manifest.branches.integration == "development_team"
     assert manifest.branches.forbidden_extra == ("dev",)
     assert manifest.board.root == "Board"
+    assert manifest.board.decision_attributor == "karel"
+    assert manifest.board.player_visible_paths == ("dungeoneer/rendering", "dungeoneer/core/i18n.py")
     assert manifest.worker.fence_env == "DUNGEONEER_FENCE_ALLOW"
     assert manifest.memory.budget_bytes == 104857600
     assert manifest.memory.freshness[0].requires == ".claude/memory/ref_i18n.md"
@@ -95,6 +99,22 @@ def test_every_section_of_the_documented_sketch_round_trips(tmp_path):
     assert manifest.i18n is not None and manifest.i18n.targets == ("cs", "es")
     assert manifest.dead_code.paths == ("dungeoneer", "main.py")
     assert manifest.dead_code.min_confidence == 80
+
+
+def test_the_documented_sketch_raises_no_unknown_key_problem(tmp_path):
+    """`_KNOWN["board"]` used to list only `root`, while `parse()` and `Board`
+    both already read `decision_attributor` — a field declared in every real
+    project manifest (07_portability.md's own worked example) validated as an
+    error nothing printed anywhere `validate()` actually runs. `FULL` above is
+    the one fixture meant to catch exactly this, and it never had the field —
+    found while adding `player_visible_paths` to the same table, not by this
+    test failing. Round-tripping (previous test) proves `parse()` accepts a
+    field; this proves `validate()` agrees it is not a typo."""
+    path = _write(tmp_path, FULL)
+    with path.open("rb") as fh:
+        data = tomllib.load(fh)
+    problems = m.validate(m.parse(data, tmp_path), data)
+    assert [p for p in problems if p.level == "error"] == []
 
 
 def test_paths_resolve_against_the_root_the_manifest_was_read_from(tmp_path):

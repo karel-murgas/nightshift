@@ -179,6 +179,21 @@ class Board:
     #: reports a check that never ran.
     decision_attributor: str = ""
 
+    #: Path prefixes (relative to the repo root) this project considers a
+    #: *player-visible surface* — read by `gates.player_visible_skipped_testing`.
+    #: `inline-route-assumed-karel-was-the-author` (`.ai/corrections.log`,
+    #: 2026-08-29): `verify: review` routes a card straight to `done/`, skipping
+    #: the one lane where Karel actually looks at what shipped, and three
+    #: finished features did exactly that before he caught one by accident. The
+    #: field is what "player-visible" means for *this* game — a UI framework's
+    #: vocabulary is not this package's to invent (07_portability.md D5, the same
+    #: reasoning `[layering].forbid` and `[dead_code].paths` already follow).
+    #:
+    #: **Empty disables the gate**, not "nothing is player-visible" — a project
+    #: that has not declared this gets no opinion, same as an unset
+    #: `decision_attributor`.
+    player_visible_paths: tuple[str, ...] = ()
+
 
 @dataclass(frozen=True)
 class Worker:
@@ -621,7 +636,7 @@ _KNOWN: dict[str, tuple[str, ...]] = {
                 "tooling_dirs", "doc_files"),
     "tests": ("dir", "parallel", "timeout_s"),
     "branches": ("integration", "stable", "forbidden_extra"),
-    "board": ("root",),
+    "board": ("root", "decision_attributor", "player_visible_paths"),
     "worker": ("harvest_dirs", "fence_env", "integration_checkout_dir"),
     "memory": ("orientation", "budget_bytes", "freshness", "fold"),
     "layering": ("forbid",),
@@ -796,7 +811,9 @@ def parse(data: dict, root: Path) -> Manifest:
                                           "branches.forbidden_extra"),
         ),
         board=Board(root=str(board_t.get("root", "Board")),
-                    decision_attributor=str(board_t.get("decision_attributor", ""))),
+                    decision_attributor=str(board_t.get("decision_attributor", "")),
+                    player_visible_paths=_as_str_tuple(
+                        board_t.get("player_visible_paths", []), "board.player_visible_paths")),
         worker=Worker(
             harvest_dirs=_as_str_tuple(worker_t.get("harvest_dirs", []), "worker.harvest_dirs"),
             fence_env=str(worker_t.get("fence_env", "")),
