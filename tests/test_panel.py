@@ -1224,6 +1224,23 @@ def test_an_idea_can_be_read_back_too_because_the_editor_is_the_persons_own(tmp_
         "pomeranian-carburettor\n"
 
 
+def test_a_body_read_for_editing_leaves_the_frontmatter_behind(tmp_path):
+    """The two tests above use files with no frontmatter at all, and that is exactly
+    why this went uncaught for as long as it did: on a bare note the whole file and
+    its body are the same string, so a read that returns either one passes both.
+
+    `boardcmd.edit_body` — the one write this read feeds — keeps the file's existing
+    frontmatter and replaces everything after it. Returning the whole file therefore
+    made the round trip asymmetric, and a single edit through the panel's editor left
+    the block in the file twice (`unify-runner-and-chores`, 2026-09-19).
+    """
+    root = _repo(tmp_path)
+    note = root / "Board" / "inbox" / "stamped.md"
+    note.write_text("---\nstate: inbox\ncreated: 2026-09-19\n---\n\nhalf a thought\n",
+                    encoding="utf-8")
+    assert panel.read_body(root, "Board/inbox/stamped.md") == "\nhalf a thought\n"
+
+
 def test_a_notes_page_carries_both_modes_so_switching_never_reloads(server):
     """The editor used to be a two-line box on the row. A note is prose a person is
     thinking about, so the note's own page *is* the editor — and both modes are in

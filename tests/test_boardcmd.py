@@ -768,3 +768,81 @@ def test_the_close_is_committed_like_every_other_board_write(tmp_path):
 
     assert _git(root, "status", "--porcelain").stdout.strip() == ""
     assert "closed inline note" in _git(root, "log", "-1", "--format=%s").stdout
+
+
+# -------------------------------------------- the edit-then-close round trip
+#
+# Two surfaces, each correct alone, whose SEQUENCE nothing exercised: the panel
+# handed its editor a whole file and `edit_body` spliced the saved text in after
+# a frontmatter block the file already had, so one edit doubled the block — and
+# the doubling only surfaced on `close_note`, days later, as a refusal that
+# blamed triage (Karel, 2026-09-19: *"Close the note, I can't do it in this
+# state."*).
+
+
+def test_editing_a_note_through_the_panels_editor_does_not_duplicate_frontmatter(tmp_path):
+    """The regression test for the round trip, written the way it broke: read the
+    text the editor is given, hand it straight back with an edit, and the file must
+    still have exactly one frontmatter block.
+
+    Asserted end to end across the two modules rather than on either alone, because
+    both were individually correct — `read_body` honestly returned the file and
+    `edit_body` honestly preserved the frontmatter. Only the pairing is wrong, so
+    only the pairing can catch it.
+    """
+    from nightshift import panel
+
+    root = _repo(tmp_path)
+    note = root / "Board" / "inbox" / "n.md"
+    note.write_text("---\nstate: inbox\ncreated: 2026-09-19\n---\n\nthe original prose\n",
+                    encoding="utf-8")
+
+    shown = panel.read_body(root, "Board/inbox/n.md")
+    assert "state: inbox" not in shown, "the editor is handed the body, not the file"
+    boardcmd.edit_body(root, "Board/inbox/n.md", shown.rstrip("\n") + "\n\nand a new paragraph\n")
+
+    text = note.read_text(encoding="utf-8")
+    assert text.count("---\n") == 2, f"frontmatter is not intact: {text!r}"
+    assert text.count("created: 2026-09-19") == 1
+    assert "the original prose" in text and "and a new paragraph" in text
+
+
+def test_a_note_carrying_created_still_closes(tmp_path):
+    """`close_note` writes `created:` itself, so carrying one cannot be evidence
+    against running it — the only outcome is a date replaced by a date.
+
+    It refused until 2026-09-19, and the cost was a note nobody could close from
+    the panel: a hand-written note routinely carries the field, and the refusal
+    said it was "a card being triaged", which it was not. Same shape as the
+    `kanban_order` bug two tests up, found the same way — on a real board.
+    """
+    root = _repo(tmp_path)
+    (root / "Board" / "inbox" / "n.md").write_text(
+        "---\nstate: inbox\ncreated: 2026-08-01\n---\n\nthe real prose\n",
+        encoding="utf-8")
+
+    boardcmd.close_note(root, "n.md")
+
+    text = (root / "Board" / "done" / "n.md").read_text(encoding="utf-8")
+    assert "the real prose" in text
+    assert text.count("---\n") == 2, text
+    # The note's own date, not today's: it records when the thought was written,
+    # and a note can sit in `inbox/` for weeks before anyone closes it.
+    assert "created: 2026-08-01" in text
+
+
+def test_close_still_refuses_a_card_that_has_actually_been_triaged(tmp_path):
+    """The guard's real job, unchanged by letting `created` through: stamping the
+    closed-inline block over a triaged card would destroy the fields that cost
+    something to lose."""
+    root = _repo(tmp_path)
+    (root / "Board" / "inbox" / "n.md").write_text(
+        "---\nstate: inbox\ncreated: 2026-08-01\ntier: worker\nworker: code-thread\n"
+        "---\n\nthe real prose\n", encoding="utf-8")
+
+    with pytest.raises(boardcmd.BoardCommandError) as refusal:
+        boardcmd.close_note(root, "n.md")
+
+    assert "tier" in str(refusal.value) and "worker" in str(refusal.value)
+    assert "created" not in str(refusal.value), "the allowed field must not be blamed"
+    assert (root / "Board" / "inbox" / "n.md").is_file(), "the note stayed put"

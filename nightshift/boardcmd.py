@@ -282,7 +282,21 @@ def promote(root: Path, name: str) -> str:
 #: (`id`, `title`, `tier`, `worker`, …), never by the presence of a frontmatter block.
 #: `route:` joins them for the same reason: `ingest` stamps it on every note it has
 #: classified, so after any routing pass it is on notes that no triage has touched.
-_NOTE_BOOKKEEPING = frozenset({"state", "kanban_order", "route"})
+#: Frontmatter a *bare note* may carry without being a card. `close_note` refuses
+#: anything else, because stamping `_CLOSED_INLINE` over a card mid-triage would
+#: destroy its `tier`/`worker`/`attempts`/`branch` — the fields that cost something
+#: to lose.
+#:
+#: `created` is here because **`close_note` writes it itself**, so carrying it
+#: cannot be evidence against running the verb: the one outcome is that a date is
+#: replaced by a date. It was absent until 2026-09-19, and the cost was a note
+#: nobody could close from the panel — hand-written notes routinely carry a
+#: `created:` line, and the refusal told the maintainer it was "a card being
+#: triaged", which it was not (Karel: *"Close the note, I can't do it in this
+#: state."*). Every field that means a card has actually been triaged — `id`,
+#: `title`, `tier`, `worker`, `recipe`, `unattended`, `verify`, `kind`, `attempts`,
+#: `branch` — still refuses, which is the whole of what the guard is for.
+_NOTE_BOOKKEEPING = frozenset({"state", "kanban_order", "route", "created"})
 
 _CLOSED_INLINE = """\
 ---
@@ -349,14 +363,20 @@ def close_note(root: Path, name: str) -> str:
     target = board.board_dir(root) / "done" / f"{ident}.md"
     if target.exists():
         raise BoardCommandError(f"done/{ident}.md already exists — rename the note")
-    today = dt.date.today().isoformat()
+    # The note's own `created:` when it carries one. It records when the thought was
+    # written, which is the fact worth keeping; stamping today would date a card to
+    # the morning somebody got round to closing it, for a note that may have sat in
+    # `inbox/` for weeks. Now that the field no longer refuses the verb (see
+    # `_NOTE_BOOKKEEPING`), letting it through is the only reading that makes the
+    # allowance coherent — the alternative is to accept the field and discard it.
+    created = board.parse_fields(text).get("created") or dt.date.today().isoformat()
     target.parent.mkdir(parents=True, exist_ok=True)
     # The note's *prose*, not its bookkeeping: the old frontmatter is replaced by the
     # stamped block above, so leaving it in would put a second `---` fence inside
     # `## Intent` and Obsidian would read the file as having two frontmatter blocks.
     body = board.FRONTMATTER.sub("", text, count=1).strip()
     textio.write_text_lf(target, _CLOSED_INLINE.format(
-        ident=ident, title=Path(filename).stem.replace('"', "'"), today=today,
+        ident=ident, title=Path(filename).stem.replace('"', "'"), today=created,
         body=body or "(the note was empty)", lane=INBOX, filename=filename))
     source.unlink()
     board.commit_board(root, f"board: closed inline note {filename} into done/")
