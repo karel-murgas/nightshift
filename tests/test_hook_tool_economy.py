@@ -98,6 +98,76 @@ def test_ordinary_commands_pass():
         assert tool_economy._verdict(command) is None
 
 
+# --- foreground-slow-command rule, every session ------------------------------
+#
+# `blocked-the-session-on-a-foreground-long-command` (2026-08-29): a foreground
+# call to one of these renders no output between call and return, so a session
+# running one is indistinguishable from a hung one. Unlike `_verdict` above,
+# `_slow_verdict` is not gated on the worker fence env var — a person at a
+# prompt hits the identical hang.
+
+
+@pytest.mark.parametrize("command", [
+    "python -m pytest -q",
+    "pytest",
+    "pytest tests/",
+    "python -m nightshift.preflight",
+    "python -m nightshift.runner",
+    "python3 -m nightshift.preflight",
+    "cd C:\\x && python -m nightshift.runner --dry-run",
+])
+def test_a_known_slow_command_in_the_foreground_is_denied(command):
+    reason = tool_economy._slow_verdict(command, run_in_background=False)
+    assert reason and "run_in_background" in reason
+
+
+@pytest.mark.parametrize("command", [
+    "python -m pytest -q",
+    "pytest tests/",
+    "python -m nightshift.preflight",
+    "python -m nightshift.runner",
+])
+def test_the_identical_command_with_run_in_background_is_allowed(command):
+    assert tool_economy._slow_verdict(command, run_in_background=True) is None
+
+
+@pytest.mark.parametrize("command", [
+    "git status",
+    "pytest tests/test_x.py",
+    "python -m nightshift.suite slice",
+    "python -m nightshift.gates.run",
+])
+def test_a_command_off_the_named_list_is_never_denied_by_the_slow_rule(command):
+    assert tool_economy._slow_verdict(command, run_in_background=False) is None
+
+
+def test_the_slow_rule_fires_without_the_worker_fence_armed(monkeypatch):
+    """The point of the rule: an interactive session (never armed) gets the same
+    foreground-block protection a dispatched worker does."""
+    monkeypatch.delenv(tool_economy._env_name(), raising=False)
+    assert not tool_economy._armed()
+    out = _run({"tool_name": "Bash",
+                "tool_input": {"command": "python -m nightshift.preflight"}})
+    assert out is not None
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert reason.startswith("[tool_economy] ") and "run_in_background" in reason
+
+
+def test_the_slow_rule_allows_through_with_run_in_background_set():
+    out = _run({"tool_name": "Bash",
+                "tool_input": {"command": "python -m nightshift.preflight",
+                                "run_in_background": True}})
+    assert out is None
+
+
+def test_an_armed_worker_running_the_whole_suite_keeps_the_stricter_message(monkeypatch):
+    """A worker may not run the whole suite at all, in the background or not —
+    the slow-command rule must not soften that into "just background it"."""
+    monkeypatch.setattr(tool_economy, "_armed", lambda: True)
+    reason = tool_economy._verdict("python -m pytest -q")
+    assert reason and "nightshift.suite slice" in reason
+
+
 # --- arming -------------------------------------------------------------------
 
 

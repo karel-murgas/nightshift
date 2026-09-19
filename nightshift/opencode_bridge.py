@@ -124,18 +124,22 @@ def _hook_verdicts(payload: dict):
         print(f"opencode_bridge: ideas_fence raised: {exc!r}", file=sys.stderr)
 
     try:
-        # tool_economy's two rules are pure functions gated the same way its own
-        # main() gates them (`_armed()` for the Bash rule, unconditional for Read),
-        # so they slot in here rather than through an evaluate() wrapper that would
-        # just restate that branching a third time.
+        # tool_economy's rules are pure functions gated the same way its own main()
+        # gates them (`_armed()` for the worker-only Bash rule, unconditional for
+        # Read and for the foreground-slow-command rule), so they slot in here
+        # rather than through an evaluate() wrapper that would just restate that
+        # branching a third time.
         from nightshift.hooks import tool_economy
 
         tool_name = payload.get("tool_name")
         tool_input = payload.get("tool_input") or {}
         if tool_name == "Read":
             yield tool_economy._read_verdict(tool_input)
-        elif tool_name == "Bash" and tool_economy._armed():
-            yield tool_economy._verdict(str(tool_input.get("command", "")))
+        elif tool_name == "Bash":
+            command = str(tool_input.get("command", ""))
+            if tool_economy._armed():
+                yield tool_economy._verdict(command)
+            yield tool_economy._slow_verdict(command, bool(tool_input.get("run_in_background")))
     except Exception as exc:  # noqa: BLE001
         print(f"opencode_bridge: tool_economy raised: {exc!r}", file=sys.stderr)
 
