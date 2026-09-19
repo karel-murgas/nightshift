@@ -98,12 +98,37 @@ class TestToolEconomy:
             {"tool": "bash", "args": {"command": "python -m pytest -q"}})
         assert status == "deny" and "nightshift.suite slice" in reason
 
-    def test_allows_the_same_bash_call_when_unarmed(self, monkeypatch):
+    def test_allows_the_same_bash_call_when_unarmed_and_backgrounded(self, monkeypatch):
+        """Proves the worker-only suite denial does not fire when unarmed. Backgrounded,
+        so the foreground-slow-command rule below (which is *not* gated on the fence
+        env var) does not also have an opinion on this same command."""
         from nightshift.hooks import tool_economy
 
         monkeypatch.delenv(tool_economy._env_name(), raising=False)
         assert opencode_bridge.decide(
-            {"tool": "bash", "args": {"command": "python -m pytest -q"}}) == ("allow", "")
+            {"tool": "bash",
+             "args": {"command": "python -m pytest -q", "run_in_background": True}}
+        ) == ("allow", "")
+
+    def test_denies_a_foreground_slow_command_even_when_unarmed(self, monkeypatch):
+        """`blocked-the-session-on-a-foreground-long-command`: an interactive OpenCode
+        session gets the same foreground-block protection Claude Code does."""
+        from nightshift.hooks import tool_economy
+
+        monkeypatch.delenv(tool_economy._env_name(), raising=False)
+        status, reason = opencode_bridge.decide(
+            {"tool": "bash", "args": {"command": "python -m nightshift.preflight"}})
+        assert status == "deny" and "run_in_background" in reason
+
+    def test_the_same_command_backgrounded_is_allowed(self, monkeypatch):
+        from nightshift.hooks import tool_economy
+
+        monkeypatch.delenv(tool_economy._env_name(), raising=False)
+        assert opencode_bridge.decide(
+            {"tool": "bash",
+             "args": {"command": "python -m nightshift.preflight",
+                      "run_in_background": True}}
+        ) == ("allow", "")
 
 
 class TestAfterReport:

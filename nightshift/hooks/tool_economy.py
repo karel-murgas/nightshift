@@ -22,7 +22,7 @@ that is ignored is indistinguishable from one that was never written. Same move
 `worktree_fence` makes for the wrong-checkout write — make the expensive thing
 *impossible* rather than merely discouraged.
 
-**Three rules, two scopes.**
+**Four rules, three scopes.**
 
 * *A dispatched worker* (the project's fence env var is set, which only a
   worker's environment carries) may not run the whole suite at all — serial or
@@ -40,6 +40,16 @@ that is ignored is indistinguishable from one that was never written. Same move
   answer at a fraction of the context, for anyone, which is why it is not gated
   on the env var. Images, PDFs and notebooks are exempt — the Read tool renders
   those rather than dumping text.
+* *Every session* also may not run a small, named list of known-slow commands —
+  a bare pytest invocation of the whole suite, `python -m nightshift.preflight`,
+  `python -m nightshift.runner` — in the foreground without `run_in_background`
+  set. Closes `blocked-the-session-on-a-foreground-long-command` (2026-08-29): a
+  foreground long command renders no output between call and return, so a
+  session running one is indistinguishable from a hung one, and until now that
+  was only prose in the Bash tool's own description and in `CLAUDE.md`, re-decided
+  per call. Not gated on the env var — a person at a prompt gets exactly the same
+  hang, and the harness cannot tell the two apart either. Not a general slowness
+  heuristic: a named list, the same trade the suite rule above makes.
 
 **Denies, and says why.** A `deny` decision returns its reason to the model,
 which then retries differently — it is feedback, not a wedge. That is the
@@ -106,6 +116,13 @@ _TOOL_FOR = {
 #: value — it has a separator or a short extension. `grep -n foo bar.py` trips
 #: this on `bar.py`; `grep -n foo` (reading stdin) does not.
 _PATHISH = re.compile(r"[/\\]|\.\w{1,4}$")
+
+#: The two module invocations the Approach names as "no fence covers": long
+#: enough to make a foreground session look hung, and not already denied to a
+#: worker the way the whole suite is. Matched by the `-m` argument itself, not
+#: a substring search, so a string that merely mentions one of these names in
+#: passing (a commit message, a grep pattern) cannot trip it.
+_SLOW_MODULES = frozenset({"nightshift.preflight", "nightshift.runner"})
 
 
 def _repo_root() -> Path | None:
@@ -175,6 +192,39 @@ def _is_full_suite_pytest(words: list[str]) -> bool:
         if _PATHISH.search(bare) or "::" in bare:
             return False
     return True
+
+
+def _is_known_slow_module(words: list[str]) -> bool:
+    """`python -m nightshift.preflight` / `python -m nightshift.runner`, however
+    the interpreter is spelled (`python`, `python3`, `py`) or quoted."""
+    for i, word in enumerate(words[:-1]):
+        if word.strip("\"'") == "-m" and words[i + 1].strip("\"'") in _SLOW_MODULES:
+            return True
+    return False
+
+
+def _slow_verdict(command: str, run_in_background: bool) -> str | None:
+    """The reason to deny a foreground call to a known-slow command, or None.
+
+    Unlike `_verdict` below, this runs for every session — a person typing the
+    command gets the identical hang a dispatched worker would. `run_in_background`
+    is the one thing that turns it off: the command is still allowed, just not
+    silently in the foreground.
+    """
+    if run_in_background:
+        return None
+    for seg in _SEGMENT.split(command):
+        words = _words(seg)
+        if not words:
+            continue
+        if _is_full_suite_pytest(words) or _is_known_slow_module(words):
+            return (
+                "This command can run for minutes with no output in between, which "
+                "makes a foreground call indistinguishable from a hung session. Set "
+                "run_in_background: true and check back on it, rather than blocking "
+                "the session on it."
+            )
+    return None
 
 
 def _file_reader(words: list[str], piped_into: bool) -> str | None:
@@ -266,9 +316,18 @@ def main() -> int:
     try:
         if tool == "Read":
             reason = _read_verdict(tool_input)
-        elif tool == "Bash" and _armed():
+        elif tool == "Bash":
             command = str(tool_input.get("command", ""))
-            reason = _verdict(command) if command.strip() else None
+            reason = None
+            if command.strip():
+                # The worker-only denial goes first: it refuses the whole suite
+                # outright, and that refusal must not be softened into "just
+                # background it" by the rule below, which would allow exactly
+                # what the suite rule forbids.
+                if _armed():
+                    reason = _verdict(command)
+                if reason is None:
+                    reason = _slow_verdict(command, bool(tool_input.get("run_in_background")))
         else:
             reason = None
     except Exception:
