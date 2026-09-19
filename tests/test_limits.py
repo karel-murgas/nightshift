@@ -467,3 +467,90 @@ def test_no_subprocess_or_network_in_here():
     for forbidden in ("import subprocess", "import requests", "import urllib",
                       "import socket", "os.system", "os.popen"):
         assert forbidden not in source
+
+
+# --------------------------------------------------------------------------
+# The context wall (04_local_runtime.md §5) — a different window, filling
+# --------------------------------------------------------------------------
+#
+# The tension this section adds to the two at the top of the file: a context wall
+# and a usage wall are *structurally the same event* — work stops mid-card with a
+# half-finished worktree, and the handover machinery is identical — and
+# *scheduling opposites*. A usage wall names a clock and the question is whether
+# to wait for it. A context wall names none: a fresh session starts the window
+# empty, so the answer is always "dispatch again, now".
+#
+# Reading one as the other is expensive in both directions. As a usage wall, the
+# runner sleeps five hours for a window that never closed and then retries into
+# the same overflow. As a plain non-zero exit — which is what happened before this
+# existed — the card is charged an attempt and an `## Error` for the model running
+# out of room.
+
+
+def test_a_context_overflow_is_a_context_wall():
+    """llama-server's own wording, verbatim from 04_local_runtime.md §9a's step 3,
+    which died at 38 minutes with no compaction and no verdict."""
+    wall = limits.detect(
+        1, "srv  log_server_r: request (131183 tokens) exceeds the available "
+           "context size (131072 tokens)")
+    assert wall is not None
+    assert wall.scope == limits.CONTEXT
+    assert "131183" in wall.evidence
+
+
+def test_a_context_wall_spends_no_session_and_waits_for_nothing():
+    """The scheduling half, and the reason `retry_now` exists as its own property.
+
+    `waits_out` is False here and must never be *read* as False by the scheduler:
+    "waiting would idle until morning" is right for a weekly cap and exactly wrong
+    for this. `_window_closed` checks `retry_now` first for that reason.
+    """
+    wall = limits.detect(1, "maximum context length exceeded")
+    assert wall.retry_now is True
+    assert wall.spends_a_session is False
+    assert wall.waits_out is False
+
+
+def test_a_usage_wall_is_not_a_context_wall():
+    """The two readings must not bleed. A session limit still schedules as one."""
+    wall = limits.detect(1, "You've hit your session limit · resets 5:50pm")
+    assert wall.scope == limits.SESSION
+    assert wall.retry_now is False
+    assert wall.spends_a_session is True
+
+
+def test_prose_about_context_on_a_clean_run_is_not_a_wall():
+    """The false-positive guard the whole module is built on, extended to the new
+    phrases. A worker that *discusses* its context window in a successful final
+    message must not end the night — and the precondition is what makes the phrase
+    list safe, so it is asserted rather than assumed."""
+    chatter = ("I checked whether the maximum context length exceeded our budget "
+               "and it did not.")
+    assert limits.detect(0, chatter) is None
+
+
+def test_compaction_pressure_needs_two_compactions():
+    """§5 sets the number: one compaction on a card that is nearly done is a good
+    trade; the second is the signal to hand over."""
+    once = '{"type":"step_finish","compaction_continue":true}'
+    assert limits.compactions(once) == 1
+    assert limits.context_pressure(once) is None
+
+    twice = once + "\n" + once
+    wall = limits.context_pressure(twice)
+    assert wall is not None and wall.scope == limits.CONTEXT
+    assert wall.retry_now is True
+
+
+def test_compaction_pressure_is_not_read_by_detect():
+    """Deliberately separate, and this is the test that says why.
+
+    A compacted OpenCode session exits **zero** — it does not error, it compacts
+    and keeps going (§9d) — so `detect`'s refusal to read a clean run as a wall
+    would miss it entirely. Folding it in would mean dropping that precondition,
+    which is what makes every phrase list in this module safe. So the dispatch
+    site asks for it explicitly, and only when there is no verdict to honour.
+    """
+    stream = '\n'.join(['{"compaction_continue":true}'] * 3)
+    assert limits.detect(0, stream) is None
+    assert limits.context_pressure(stream) is not None

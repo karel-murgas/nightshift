@@ -395,6 +395,7 @@ shortfall.
 | `--budget` | optional USD cap for the whole run. |
 | `--card-budget` | optional USD cap handed to each worker process; 0 (default) passes no cap at all |
 | `--test-timeout` | seconds allowed for the test suite (~2 min today) |
+| `--no-local` | run every card on cloud for this run, even on a machine that declares a local model and even for a charter in its allowlist. |
 | `--no-drain` | skip the end-of-night pass that concludes any review this run left owed (up to 4 cards, from whatever window is left after the cards). |
 | `--stale` | after the cards, run the Tier-2 staleness sweep on the N highest-churn docs, spending only leftover window. |
 <!-- /generated:runner-flags -->

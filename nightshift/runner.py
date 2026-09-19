@@ -67,6 +67,7 @@ from nightshift import manifest as _manifest
 from nightshift import memoryfold  # per-card memory records, folded serially on merge
 from nightshift import reconcile
 from nightshift import run_record
+from nightshift import runtimes       # the `runtime` axis: cloud | local (doc 04 §4)
 from nightshift import stale_sweep
 from nightshift import suite          # test policy
 from nightshift import textio         # LF-pinned writes (gate write_newline)
@@ -4712,6 +4713,8 @@ def run_producer(root: Path, card: board.Card, tree: Path, out_dir: Path, branch
                  round_no: int = 1, feedback: str = "", resume_session: str = "",
                  continue_note: str = "", agent: str = "", effort: str = "",
                  slice_cmd: str = suite.SLICE_COMMAND,
+                 runtime: str = runtimes.CLOUD,
+                 local: runtimes.LocalModel | None = None,
                  ) -> tuple[dict, float, int, limits.Wall | None]:
     """One producer round. Its verdict, its cost, its exit code, and the usage
     limit it hit if it hit one.
@@ -4731,10 +4734,28 @@ def run_producer(root: Path, card: board.Card, tree: Path, out_dir: Path, branch
     uncommitted diff. `continue_note` (used without `resume_session`, or by that
     fallback) is a `## Progress`-style addendum telling a fresh worker that the
     worktree already holds interrupted work.
+
+    `runtime` is `04_local_runtime.md` §4's second axis, orthogonal to `tier`, and
+    it is resolved by the caller rather than here — `dispatch` asks
+    `runtimes.resolve` once and hands the answer down, so one dispatch cannot
+    change its mind between rounds. `runtimes.CLOUD` is the ground state and the
+    default, which is why every existing caller needed no change: a machine that
+    declares no local model, a charter §7 has not admitted, an unreachable
+    endpoint and a `--no-local` run all arrive here as `CLOUD` and take exactly
+    the path they took before this parameter existed.
+
+    Under `LOCAL` the *only* things that differ are the argv and how the run's
+    facts are read back off its stream. The prompt, the worktree, the verdict
+    path, the gates, the test slice and the handover are identical — which is the
+    point, and the reason the projected charters must carry the same verdict
+    contract the prompt states (§9c Result 3: the one measured failure here was a
+    charter and a prompt specifying two different schemas, and the model
+    correctly followed the charter it was told to follow).
     """
     verdict_path = out_dir / f"verdict-{round_no}.json"
-    binary = claude_binary()
-    assert binary  # preflight checked this
+    on_local = runtime == runtimes.LOCAL and local is not None
+    binary = runtimes.binary() if on_local else claude_binary()
+    assert binary  # preflight checked this; `resolve` checked the local one
 
     def _cold_prompt() -> str:
         return _PROMPT.format(
@@ -4752,6 +4773,15 @@ def run_producer(root: Path, card: board.Card, tree: Path, out_dir: Path, branch
 
     def _argv(session: str) -> list[str]:
         """Flags only — the prompt reaches the child on stdin (`_run_worker`)."""
+        if on_local:
+            # Nothing from the cloud branch below carries over: OpenCode has no
+            # `--permission-mode` (its config owns permissions), no
+            # `--allowed-tools`, no `--add-dir` and no `--effort`. Building a
+            # shared list and subtracting would be the more compact spelling and
+            # the wrong one — every flag here is a different tool's vocabulary,
+            # and the two lists drifting apart is the thing to want, not the
+            # thing to prevent.
+            return runtimes.worker_argv(local, agent or card.worker, session, cwd=tree)
         out = [
             binary, "-p",
             "--agent", agent or card.worker,
@@ -4786,7 +4816,13 @@ def run_producer(root: Path, card: board.Card, tree: Path, out_dir: Path, branch
         # this file as one object, which a raw JSONL tee would break. Falls
         # back to the raw stdout only when nothing on it parsed at all, so a
         # garbled run still leaves *something* to read on disk.
-        result = _terminal_result(proc.stdout)
+        # Two runtimes, two wire formats, one `worker-N.json` shape on disk.
+        # `stream_facts` normalises OpenCode's `sessionID`/`step_finish` events
+        # onto the keys `_session_id` and the cost accounting already read, so
+        # warm resume and the run record work on a local attempt without either
+        # of them learning a second vocabulary.
+        result = runtimes.stream_facts(proc.stdout) if on_local \
+            else _terminal_result(proc.stdout)
         textio.write_text_lf(
             out_dir / f"worker-{round_no}.json",
             json.dumps(result) if result else proc.stdout)
@@ -4797,8 +4833,19 @@ def run_producer(root: Path, card: board.Card, tree: Path, out_dir: Path, branch
             spent = float(result.get("total_cost_usd", 0.0))
         except (ValueError, AttributeError, TypeError):
             pass
-        return (_read_verdict(verdict_path), spent, proc.returncode,
-                limits.detect(proc.returncode, proc.stdout, proc.stderr))
+        verdict = _read_verdict(verdict_path)
+        wall = limits.detect(proc.returncode, proc.stdout, proc.stderr)
+        if wall is None and not verdict:
+            # The compaction reading, and it is asked here because this is the
+            # only place that holds both the stream and the verdict. §5: one
+            # compaction on a card that is nearly done is a good trade; a card
+            # that compacts twice and *still* has nothing to show is a worker
+            # about to lose its work to a third. `context_pressure` cannot be
+            # folded into `detect` because a compacted session exits zero, and
+            # `detect`'s refusal to read a clean run as a wall is what makes its
+            # phrase list safe at all.
+            wall = limits.context_pressure(proc.stdout)
+        return (verdict, spent, proc.returncode, wall)
 
     if resume_session:
         prompt = _RESUME_PROMPT.format(verdict_path=verdict_path.resolve().as_posix())
@@ -5031,7 +5078,8 @@ def repair_drift(root: Path, tree: Path, card_id: str, branch: str, base: str,
 def dispatch(root: Path, card: board.Card, base: str, model: str,
              card_budget: float, test_timeout: int,
              test_selector: Callable[[set[str], Path], suite.Selection]
-             = suite.touched, *, worker: str = "", effort: str = "") -> Dispatch:
+             = suite.touched, *, worker: str = "", effort: str = "",
+             allow_local: bool = True) -> Dispatch:
     """One attempt, with the effort map stamped onto whatever it returns.
 
     A wrapper and not part of `_dispatch_attempt` because that function has a
@@ -5043,7 +5091,8 @@ def dispatch(root: Path, card: board.Card, base: str, model: str,
     """
     efforts = stage_efforts(root, card.tier, worker=effort)
     result = _dispatch_attempt(root, card, base, model, card_budget, test_timeout,
-                               test_selector, worker=worker, efforts=efforts)
+                               test_selector, worker=worker, efforts=efforts,
+                               allow_local=allow_local)
     result.efforts = efforts
     return result
 
@@ -5052,7 +5101,8 @@ def _dispatch_attempt(root: Path, card: board.Card, base: str, model: str,
                       card_budget: float, test_timeout: int,
                       test_selector: Callable[[set[str], Path], suite.Selection]
                       = suite.touched, *, worker: str = "",
-                      efforts: dict[str, str]) -> Dispatch:
+                      efforts: dict[str, str],
+                      allow_local: bool = True) -> Dispatch:
     """One attempt. Every exit path leaves the card's runner fields consistent.
 
     `test_selector` is how the gates-green diff picks its pytest slice.
@@ -5118,6 +5168,24 @@ def _dispatch_attempt(root: Path, card: board.Card, base: str, model: str,
     # commit above, which is the last legitimate move of `base` before dispatch.
     base_tip = _git(root, "rev-parse", base).stdout.strip()
 
+    # Which runtime this attempt executes on (`04_local_runtime.md` §4). Resolved
+    # **once per attempt, here**, rather than per round: a probe that succeeds for
+    # round 1 and fails for round 2 would move a card's checker onto a different
+    # model mid-attempt, and "which runtime ran this" would stop being a fact the
+    # run record can state.
+    #
+    # Resolved against the *worktree* and not `root`, because the worktree is what
+    # OpenCode will actually run in and therefore what its agent discovery will
+    # actually see. A charter that exists on `test` but not on this card's branch
+    # is not dispatchable for this card, and the listing is the only thing that
+    # knows (§9c Result 4: a wrong `--agent` name does not error, it silently runs
+    # the default agent).
+    #
+    # Every failure below lands on cloud, which is the ground state and the
+    # behaviour this line replaces.
+    runtime, local = runtimes.prepare(
+        root, worker or card.worker, tree, enabled=allow_local, log=_log)
+
     # How a limit-interrupted card continues (runner-worker-handover). Only the
     # first producer round of the attempt resumes/re-enters; later checker rounds
     # are feedback-driven fresh prompts as before. REENTER prefers `--resume` when
@@ -5166,7 +5234,8 @@ def _dispatch_attempt(root: Path, card: board.Card, base: str, model: str,
 
     while round_no < max_rounds:
         round_no += 1
-        _log(f"  dispatching {card.id} → {worker or card.worker} @ {model} "
+        _log(f"  dispatching {card.id} → {worker or card.worker} @ {model}"
+             f"{'' if runtime == runtimes.CLOUD else ' [local]'} "
              f"(attempt {attempt}, round {round_no}/{max_rounds})")
         _status(root, phase="worker", card=card.id, attempt=attempt,
                 round=round_no, of_rounds=max_rounds, worker=worker or card.worker,
@@ -5178,7 +5247,8 @@ def _dispatch_attempt(root: Path, card: board.Card, base: str, model: str,
             resume_session=resume_session if round_no == 1 else "",
             continue_note=continue_note if round_no == 1 else "",
             agent=worker, effort=tier_effort,
-            slice_cmd=suite.slice_command(touched=test_selector is suite.touched))
+            slice_cmd=suite.slice_command(touched=test_selector is suite.touched),
+            runtime=runtime, local=local)
         cost += spent
         # Backstop the worktree fence before anything else this round: if the
         # worker committed to the shared integration branch from the wrong
@@ -7911,7 +7981,8 @@ def run(root: Path, args: argparse.Namespace) -> int:
             the damage rather than containing it.
             """
             result = dispatch(work, candidate.card, base, model,
-                              args.card_budget, args.test_timeout)
+                              args.card_budget, args.test_timeout,
+                              allow_local=args.local)
 
             # The review stage (automate-review-step): a card whose gates+tests
             # passed goes to the diff reviewer before it lands. The reviewer's
@@ -7980,6 +8051,23 @@ def run(root: Path, args: argparse.Namespace) -> int:
             wording — the arithmetic, the caps and the sleep are identical.
             """
             nonlocal walls, hiccups
+            if wall.retry_now:
+                # A context wall, not a usage one: the model's own window filled,
+                # no plan window closed and nothing reopens on a clock. So none of
+                # the accounting below applies — it spends no session, waits out
+                # nothing, and the right move is the next dispatch, now.
+                #
+                # It cannot loop: `_limit_reached` has already given the attempt
+                # back *only* if the working tree moved, and files the card as
+                # stuck after `NO_PROGRESS_STOP` resumes that changed nothing.
+                # That is the brake, and it is the same one a resumed usage wall
+                # has always used (Karel, 2026-09-19: *"dispatch Ornith again — if
+                # he is making progress"*).
+                _log(f"context window filled on {card_id} — dispatching again into "
+                     f"the kept worktree ({wall.evidence})")
+                record.note(f"context window filled on {card_id} — re-dispatched "
+                            f"into the kept worktree; no session spent")
+                return True
             if wall.spends_a_session:
                 walls += 1
                 if walls >= args.sessions:
@@ -8361,6 +8449,19 @@ def run(root: Path, args: argparse.Namespace) -> int:
                 spent_usd=round(spent, 2), since=_now())
         return 0
     finally:
+        # Stop only the local servers *this run* started — `runtimes` records
+        # them, and one the maintainer had running is never in that set, so a
+        # night that merely used their llama-server does not kill it at 4 AM.
+        #
+        # In `finally` rather than beside the `return 0` above, because the paths
+        # that matter are the other ones: a wall, the deadline, the kill switch
+        # and a crash all leave through here, and a ~13.8 GB pinned,
+        # non-reclaimable model outliving the night is exactly
+        # `asset-generation-processes-dont-shut-down` — two orphaned ComfyUI
+        # servers OOM-killed two dispatches days after the run that left them.
+        if stopped_ports := runtimes.stop_started_servers():
+            _log("stopped the local server(s) this run started: "
+                 + ", ".join(str(p) for p in stopped_ports))
         if not args.dry_run:
             release_lock(ctrl)
         # Reset the module globals to avoid leaking state to other tests or runs.
@@ -8407,6 +8508,19 @@ def _parser(root: Path | None = None) -> argparse.ArgumentParser:
                              "passes no cap at all")
     parser.add_argument("--test-timeout", type=int, default=600,
                         help="seconds allowed for the test suite (~2 min today)")
+    parser.add_argument("--no-local", dest="local", action="store_false",
+                        help="run every card on cloud for this run, even on a machine "
+                             "that declares a local model and even for a charter in its "
+                             "allowlist. The narrowest of three independent off "
+                             "switches: this one covers a single run, the Command "
+                             "Center's `Use the local model` tick covers a sitting, and "
+                             f"deleting the `{runtimes.HOST_KEY}` block from "
+                             f"{HOSTS_FILE.as_posix()} covers the machine permanently. "
+                             "Each is sufficient alone; "
+                             "none needs either of the others turned off first. Nothing "
+                             "is lost by passing it — cloud is the ground state, so this "
+                             "asks for the behaviour every card had before the runtime "
+                             "axis existed")
     parser.add_argument("--no-drain", dest="drain", action="store_false",
                         help=f"skip the end-of-night pass that concludes any review this "
                              f"run left owed (up to {DRAIN_CAP} cards, from whatever "

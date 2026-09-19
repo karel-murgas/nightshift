@@ -76,8 +76,8 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import urlopen
 
 from nightshift import (board, branches, chores, corrections, decide, drain, freshness,
-                        ingest, init, jobs, manifest, preflight, run_record, textio,
-                        tiers, update, usage, worker_prompt)
+                        ingest, init, jobs, manifest, preflight, run_record, runtimes,
+                        textio, tiers, update, usage, worker_prompt)
 from nightshift.manifest import ManifestError, find_root
 from nightshift.runner import (
     RUNS,
@@ -270,6 +270,35 @@ class TierChoice:
     frontmatter declares, checked by `hooks/tier_guard.py`; this governs only the
     sessions the panel opens for a person at the keyboard, which is exactly the
     population `unattended: false` describes.
+
+    **Why the local-model toggle beside it *does* reach the runner, and is not a
+    bug.** `LocalChoice` is the panel's other dispatch-shaped control and it
+    deliberately breaks the rule above. Both halves of the reason matter
+    (`04_local_runtime.md` §6, and the card `local-runtime-axis`):
+
+    * *What the rule protects.* §16 argues the worker tier is **the measuring
+      instrument for card quality** — if a card that failed at `worker` could have
+      been silently run at `opus` from this page, no run record would mean
+      anything. A panel that could force a tier onto a dispatched card would
+      destroy that. So `tier` stays sealed off, and this docstring's first
+      paragraph still holds in full.
+    * *Why runtime does not threaten it.* The runtime toggle **does not change the
+      tier**. A card dispatched local runs at exactly the tier its frontmatter
+      declares, judged by exactly the same gates and the same test slice; what
+      moves is which machine executes it. The measuring instrument is untouched.
+
+    And it is safe in the direction that matters because it is **asymmetric**: the
+    toggle may always force *cloud*, and may only permit *local* for a charter
+    already in the host's allowlist. Off is safe by construction — cloud is the
+    ground state, so turning it off asks for the behaviour every card had before
+    the axis existed. On cannot reach a charter `00_architecture.md` §7 has not
+    admitted, because `runtimes.resolve` checks the allowlist *after* it checks
+    this toggle, and no code path skips it.
+
+    So: two controls, two different rules, and the difference is not an oversight.
+    A control that changes *how much judgment* a dispatched card gets is refused;
+    a control that changes *where* it executes is allowed, because only the first
+    one can make a run record lie.
     """
 
     tier: str = ""
@@ -311,6 +340,73 @@ def select_tier(root: Path, tier: str, override: bool) -> TierChoice:
         raise PanelError(f"no tier named {tier!r} — declared: {listed}")
     _TIER = TierChoice(tier=tier, override=bool(override))
     return _TIER
+
+
+@dataclass
+class LocalChoice:
+    """Whether dispatches from this sitting may use the machine's local model.
+
+    The second of `04_local_runtime.md` §6's three off switches — the revocable,
+    this-sitting one, between the permanent per-machine one (no `local_model`
+    block in `.ai/hosts.json`) and the per-run one (`--no-local`). Each is
+    sufficient alone and none needs the others.
+
+    **One field, and it can only ever subtract.** `on` defaults to `True` and that
+    is not "local by default": it means *this control is not the thing saying no*.
+    A box with no host block, a charter outside its allowlist and a server that is
+    down all still resolve to cloud with this `True`, because `runtimes.resolve`
+    checks them independently. So the honest reading of the field is "the
+    maintainer has not switched it off", which is why the default is `True` and
+    why turning it on is not a grant of anything.
+
+    Process-wide and never persisted, exactly like `_ACCOUNT` and `_TIER`: a
+    setting the repo woke up carrying would be a decision nobody made this
+    morning, and this one reaches dispatched work.
+
+    Unlike `TierChoice`, this **does** reach the runner — see that class's
+    docstring for why the two differ and why neither is a bug.
+    """
+
+    on: bool = True
+
+
+_LOCAL = LocalChoice()
+
+
+def select_local(on: bool) -> LocalChoice:
+    """Turn the local runtime off (or back on) for this sitting.
+
+    No validation and no root, unlike `select_tier`: there is no value here that
+    could be a typo. `False` is always meaningful — every machine can decline to
+    use a local model — and `True` is a request that `runtimes.resolve` is still
+    free to refuse for any of its own reasons.
+    """
+    global _LOCAL
+    _LOCAL = LocalChoice(on=bool(on))
+    return _LOCAL
+
+
+def local_enabled() -> bool:
+    """Whether this sitting permits local dispatch. The panel's half of
+    `runtimes.resolve`'s `enabled` argument."""
+    return _LOCAL.on
+
+
+def effective_runtime(root: Path, agent: str) -> str:
+    """The runtime a card dispatched *right now* with `agent` would run on.
+
+    `effective_tier`'s counterpart, and the single place the toggle is applied —
+    so a row's chip and the dispatch it describes cannot disagree, which is the
+    same rule the tier chip follows.
+
+    **Probed with `probe=False`.** This renders once per card row, and opening a
+    socket per row would make every page load wait on the model server. The chip
+    therefore answers the *declared* question — "is this card eligible" — and the
+    real dispatch re-asks it with the probe. A chip saying `local` on a box whose
+    server is down is not a lie the page can avoid without costing every page load
+    a round trip; the run log says what actually happened.
+    """
+    return runtimes.resolve(root, agent, enabled=local_enabled(), probe=False)
 
 
 def effective_tier(card_tier: str = "") -> str:
@@ -1742,7 +1838,36 @@ def _tier_chip(card: board.Card) -> str:
             f'title="{_e(title)}">tier {_e(tier or "none")}</span>')
 
 
-def _card_body(card: board.Card, *, meta: list[str] | None = None, why: str = "",
+def _local_chip(root: Path, card: board.Card) -> str:
+    """A chip on a row whose card would be *dispatched* to the local model.
+
+    Silent in every other case, and that asymmetry is the whole design. A `local`
+    chip is news — this card will not run on the cloud model the rest of the board
+    runs on — while a `cloud` chip on every other row would be noise stating the
+    ground state 40 times a page.
+
+    Rendered unprobed (`effective_runtime`), so it answers *"is this card
+    eligible"* and not *"is the server up"*. The gap is real and it is the cheap
+    side of the trade: the alternative is a socket per row on every page load, and
+    a card that was eligible but found the endpoint down simply runs on cloud,
+    which the run log records and no chip promised otherwise.
+    """
+    worker = (card.worker or "").strip()
+    if not worker or worker == "none":
+        return ""
+    if effective_runtime(root, worker) != runtimes.LOCAL:
+        return ""
+    local = runtimes.local_model(root)
+    title = (f"`worker: {worker}` is in this machine's local-model allowlist, so a "
+             f"dispatch takes {local.model if local else 'the local model'} rather "
+             f"than the cloud — if the endpoint answers at dispatch time. It falls "
+             f"back to cloud if it does not. Untick 'Use the local model' in the "
+             f"rail, or run with `--no-local`, to force cloud.")
+    return f'<span class="chip mute" title="{_e(title)}">local</span>'
+
+
+def _card_body(card: board.Card, *, root: Path | None = None,
+               meta: list[str] | None = None, why: str = "",
                clickable: bool = False) -> str:
     if clickable:
         out = [f'<span class="id clickable" onclick="toggleInfo(\'{_attr(card.id)}\')" '
@@ -1758,7 +1883,8 @@ def _card_body(card: board.Card, *, meta: list[str] | None = None, why: str = ""
     # click from a session too — `/decide/` carries the button — and a fact that
     # appears on some rows and not others reads as a property of the card.
     out.append(_meta(_tag_chips(card) + [_tier_chip(card)]
-                     + [c for c in [_size_chip(card)] if c] + (meta or [])))
+                     + [c for c in [_local_chip(root, card) if root else "",
+                                    _size_chip(card)] if c] + (meta or [])))
     return "".join(out)
 
 
@@ -2293,7 +2419,7 @@ def _account_html(ctx: Context) -> str:
                          'card and no charter — on the account and at the tier named '
                          'just above, like every other session this panel starts."')
     return (f'<p class="account">account <b>{_e(label)}</b>{never}<br>{_e(email)}'
-            f'{selector}</p>{_tier_html(ctx)}'
+            f'{selector}</p>{_tier_html(ctx)}{_local_html(ctx)}'
             f'<div class="acts" style="justify-content:flex-start">'
             f'{switch}{general}{override}</div>')
 
@@ -2348,6 +2474,52 @@ def _tier_html(ctx: Context) -> str:
     )
 
 
+def _local_html(ctx: Context) -> str:
+    """The local-model toggle, in the status rail's top-right beside the tier.
+
+    Karel, 2026-09-19: *"I think that 'use local model' should be a toggle in
+    right upper corner of Command Center. With the information about when it is
+    used."* Both halves are load-bearing. The toggle belongs with `account` and
+    `tier` because it is the same kind of thing — a property of this sitting, held
+    server-side, one control with one state. And it needs the second line more
+    than either of those do, because **"local is on" does not mean "this card runs
+    local"**: four independent terms have to hold, and a toggle that implied
+    otherwise would be read as broken the first time an allowlisted card ran on
+    cloud because the server was down.
+
+    So the control renders nothing at all on a machine that declares no
+    `local_model`. That is not the toggle being hidden — it is §6's first off
+    switch, which is permanent here, and a disabled tick on the laptop would
+    suggest a setting someone could turn on. There is none; the answer is the
+    absence of the block.
+    """
+    local = runtimes.local_model(ctx.root)
+    if local is None:
+        return ""
+    agents = ", ".join(local.agents) or "no charters allowlisted"
+    ticked = " checked" if local_enabled() else ""
+    send = "post('/api/local',{on:document.getElementById('uselocal').checked})"
+    # Everything the "when is it used" line has to carry, in the order someone
+    # reading it wants: which charters (the answer to "why did my card not"),
+    # then which model, then the endpoint, then how to start it when it is down.
+    title = (
+        f"On, a dispatched card whose worker is one of: {agents} — runs on "
+        f"{local.model} at {local.base_url} instead of the cloud, but only when "
+        f"that server answers a probe at dispatch time. Everything else runs on "
+        f"cloud, which is the ground state. Interactive sessions this panel opens "
+        f"are never affected: inline work is always Claude's. "
+        + (f"Start the server with {local.launcher}. " if local.launcher else "")
+        + "Off forces cloud for everything, and so does `--no-local` on a run."
+    )
+    return (
+        f'<label class="override soft" title="{_e(title)}">'
+        f'<input type="checkbox" id="uselocal" data-server="1"{ticked} '
+        f'onchange="this.blur();{send}"> Use the local model</label>'
+        f'<p class="account dim" style="margin:0.25rem 0 0">'
+        f'{_e(agents)} &middot; {_e(local.model)}</p>'
+    )
+
+
 def _statusrail_html(ctx: Context) -> str:
     fresh_class = "" if ctx.rail.freshness_known else "warn"
     return (
@@ -2381,7 +2553,7 @@ def _chores_section(ctx: Context) -> str:
             meta.append(_e(card.surface))
         if card.attempts:
             meta.append(_e(f"{card.attempts} attempt(s)"))
-        rows.append(_row(marker="&middot;", body=_card_body(card, meta=meta),
+        rows.append(_row(marker="&middot;", body=_card_body(card, root=ctx.root, meta=meta),
                          acts=_act("Read card", href=f"/card/{card.id}")))
     bar = ('<div class="barbox">'
            '<p>One batch: a cheap pass per item, then one full suite run over the '
@@ -2419,7 +2591,7 @@ def _render_now(ctx: Context) -> str:
     # The option count rides along as the reassuring half of the same sentence.
     rows = "".join(
         _row(marker="?", body=_card_body(
-                card, meta=[_e(f"in needs-decision/ · {card.fields.get('created', '')}")]
+                card, root=ctx.root, meta=[_e(f"in needs-decision/ · {card.fields.get('created', '')}")]
                      + ([_chip(_asks(questions, options), "warn")] if questions else [])),
              acts=_act("Read card", href=f"/card/{card.id}")
                   # The one row on the page whose action is *answering* rather than
@@ -2465,7 +2637,7 @@ def _render_now(ctx: Context) -> str:
         if card.attempts:
             meta.append(_e(f"{card.attempts} attempt(s)"))
         inline_rows.append(_row(
-            marker="&rsaquo;", body=_card_body(card, meta=meta),
+            marker="&rsaquo;", body=_card_body(card, root=ctx.root, meta=meta),
             acts=_act("Read card", href=f"/card/{card.id}")
                  + _work_act(card=card.id, tier=card.tier, worker=card.worker,
                             lane=board.finished_lane(card))))
@@ -2518,12 +2690,12 @@ def _render_now(ctx: Context) -> str:
                  _act("Dispatch", onclick=f"post('/api/dispatch',{{card_id:'{_attr(card.id)}'}})",
                       primary=True))
         queue_rows.append(_row(grip=True, card_id=card.id, control=control,
-                               marker=str(position), body=_card_body(card, meta=meta),
+                               marker=str(position), body=_card_body(card, root=ctx.root, meta=meta),
                                acts=acts))
 
     elsewhere_rows = "".join(
         _row(marker="&mdash;", body=_card_body(
-                c.card, meta=[_chip(f"requires {c.card.requires}"), _e("waits for the other machine")]),
+                c.card, root=ctx.root, meta=[_chip(f"requires {c.card.requires}"), _e("waits for the other machine")]),
              acts=_act("Read card", href=f"/card/{c.card.id}"))
         for c in ctx.elsewhere
     )
@@ -2647,7 +2819,7 @@ def _blocked_section(ctx: Context) -> str:
                 + _work_act(card=card.id, tier=card.tier, worker=card.worker,
                            lane=board.finished_lane(card), primary=True))
         rows.append(_row(marker="!", acts=acts,
-                         body=_card_body(card, meta=meta, why=why[:400])))
+                         body=_card_body(card, root=ctx.root, meta=meta, why=why[:400])))
     for card in ctx.failed:
         why = (board.section(card.text, "Error") or "").strip()
         meta = [_chip(f"failed · {card.attempts} attempt(s)"
@@ -2656,7 +2828,7 @@ def _blocked_section(ctx: Context) -> str:
                 + _work_act(card=card.id, tier=card.tier, worker=card.worker,
                             lane=board.finished_lane(card), primary=True))
         rows.append(_row(marker="!", acts=acts,
-                         body=_card_body(card, meta=meta, why=why[:400])))
+                         body=_card_body(card, root=ctx.root, meta=meta, why=why[:400])))
     flag = ""
     if ctx.blocked or ctx.failed:
         flag = ('<div class="flag"><h3>Finished work that cannot land, or never turned '
@@ -2701,7 +2873,7 @@ def _review_section(ctx: Context) -> str:
             acts += _act("Review it", onclick=f"post('/api/review',{{card_id:'{_attr(card.id)}'}})",
                          primary=True)
         review_rows.append(_row(marker="!", acts=acts,
-                                body=_card_body(card, meta=meta, why=reason, clickable=True)))
+                                body=_card_body(card, root=ctx.root, meta=meta, why=reason, clickable=True)))
         review_rows.append(_info_box(card))
 
     flag = ""
@@ -2760,7 +2932,7 @@ def _render_verify(ctx: Context) -> str:
                                  'for you to say what was wrong before it fixes anything."')
                     + _act("Mark OK", onclick=f"markOK(this,'{_attr(card.id)}')", primary=True))
             rows.append(_row(control=control, marker="&nbsp;", acts=acts,
-                             body=_card_body(card, meta=meta, clickable=True)))
+                             body=_card_body(card, root=ctx.root, meta=meta, clickable=True)))
             rows.append(_info_box(card, how_to_test=True))
             rows.append(_editor(f"feedback-{card.id}",
                                 save=f"submitFeedback('{_attr(card.id)}')",
@@ -3809,7 +3981,7 @@ def _render_run(ctx: Context) -> str:
     # because a done card is no longer in the lane.
     left_out = ctx.do_now + ctx.elsewhere
     rows = "".join(
-        _row(body=_card_body(c.card, meta=[_e(c.reason.split(";")[0][:80])]),
+        _row(body=_card_body(c.card, root=ctx.root, meta=[_e(c.reason.split(";")[0][:80])]),
              acts=_act("Read card", href=f"/card/{c.card.id}"))
         for c in left_out
     )
@@ -5125,6 +5297,23 @@ class Handler(BaseHTTPRequestHandler):
             return (f"tier: {choice.tier}"
                     + (", overriding every card" if choice.override
                        else ", for cards that declare none"))
+
+        if path == "api/local":
+            # Server-side for the same reason the tier is: every card row renders
+            # a chip saying which runtime a dispatch would take, and a choice held
+            # only in the browser could not be read by the renderer that draws
+            # them. Unlike the tier, this one *does* reach dispatched work — see
+            # `TierChoice`'s docstring for why that is deliberate and why the
+            # asymmetry (always may force cloud, may only permit local for an
+            # allowlisted charter) is what makes it safe.
+            choice = select_local(bool(body.get("on")))
+            if not choice.on:
+                return "local model off — every card this sitting dispatches runs on cloud"
+            described = runtimes.describe(root)
+            return (f"local model on for allowlisted charters — {described}"
+                    if described else
+                    "local model on, but this machine declares none — everything "
+                    "runs on cloud")
 
         if path == "api/switch-account":
             # A browser sign-in against the one config directory. The panel is a
