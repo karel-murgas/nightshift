@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 """Environment-adaptive launcher for the overnight runner.
 
-Both schedulers call *this*, never `runner.py` directly:
+**There is no scheduler, and this docstring used to say there was.** The Task
+Scheduler script was written and then deleted unused (2026-07-23); nothing on
+Karel's box fires on a clock, and a run is started deliberately. The stale line
+survived here for two months and cost something real on 2026-09-19: `--queue
+both` was reported as a default a scheduled job would silently inherit, when the
+only thing that inherits it is a button someone presses.
 
-  * Windows Task Scheduler on Karel's box  — local models, his git creds, deps
-    already installed.
-  * a claude.ai routine in an ephemeral cloud container — mobile-triggered, a
-    fresh `git clone` with nothing set up.
+So the two environments this adapts between are not two schedulers:
+
+  * **Karel's box** — local models, his git creds, deps already installed. A run
+    is started by hand or from the Command Center's `Tonight's run` button, and
+    both of those reach `runner.py` directly, because a known host needs none of
+    the four setup steps below.
+  * **a claude.ai routine in an ephemeral cloud container** — mobile-triggered, a
+    fresh `git clone` with nothing set up. This is the live caller of this
+    module, and the reason it exists.
 
 The two environments differ in exactly four ways, and this script *is* those
 four differences and nothing else. Every argument is forwarded to `runner.py`
@@ -69,7 +79,7 @@ from nightshift.manifest import find_root
 
 # Windows' console defaults to cp1252, which mangles the em-dashes and ellipses
 # in the log lines below into replacement characters once the output is piped
-# (Task Scheduler, a routine transcript). Force UTF-8 like the runner does.
+# (a routine transcript, a redirected terminal). Force UTF-8 like the runner does.
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
@@ -78,7 +88,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 # The consuming project, found rather than derived: since 07_portability.md §8
 # step 4 this module lives in an installed package, so `__file__`'s grandparent
-# is a directory inside the virtualenv. A scheduler invokes this as
+# is a directory inside the virtualenv. A caller invokes this as
 # `python -m nightshift.night` from the project's checkout, which is what
 # `find_root` walks up from.
 ROOT = find_root()
@@ -211,7 +221,7 @@ def main() -> int:
     cmd = [sys.executable, "-m", "nightshift.runner", *args]
     _log(f"launching runner: {' '.join(cmd[1:])}")
     # No capture: stdout/stderr inherit this process's streams so the run is
-    # readable live in the Task Scheduler log or the routine transcript.
+    # readable live in the routine transcript or the terminal that started it.
     return subprocess.run(cmd, cwd=ROOT).returncode
 
 

@@ -7725,8 +7725,8 @@ def _invocation_label(args: argparse.Namespace) -> str:
     with — `night, up to 8 cards, staleness sweep` or `card ice-damage`.
 
     Reconstructed from the parsed args rather than `sys.argv`, so it says the
-    same thing whether the run came from `night.py`'s defaults, Task Scheduler or
-    Karel's own command line. It exists because two runs in one night are not
+    same thing whether the run came from `night.py`'s defaults, the Command
+    Center's button or Karel's own command line. It exists because two runs in one night are not
     interchangeable: on 2026-07-30 an aborted 8-card night and a deliberate
     one-card rerun both landed in the same window, and a report that cannot name
     which was which cannot explain either.

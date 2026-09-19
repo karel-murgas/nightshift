@@ -3414,7 +3414,7 @@ def _running_section(ctx: Context) -> str:
     **"Wherever it was started" is new, and the old scope was a real blind spot.**
     This section used to be documented as "what this panel has started, and nothing
     else" — it listed `jobs` records, which only exist for commands a button here
-    spawned. A night started by Task Scheduler, or a batch started from a terminal,
+    spawned. A night or a batch started from a terminal, or by a cloud routine,
     was therefore absent from the one section on the panel whose whole subject is
     what is running: the heartbeat in `status.json` said a card was mid-dispatch and
     the page said nothing was happening. The run itself is now a row, via the same
