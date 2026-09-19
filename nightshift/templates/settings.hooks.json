@@ -66,6 +66,17 @@
         ]
       },
       {
+        "matcher": "Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m nightshift.hooks.board_branch_fence",
+            "timeout": 10,
+            "statusMessage": "Checking the board branch fence (Board/ is written from the integration branch)..."
+          }
+        ]
+      },
+      {
         "matcher": "Bash",
         "hooks": [
           {
