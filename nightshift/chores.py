@@ -72,9 +72,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import (board, gitmerge, manifest, run_record, runner, runtimes,
-                        suite, textio,
-                        tiers, usage)
+from nightshift import (board, gitmerge, manifest, run_record, runner,
+                        suite, textio, tiers, usage)
 from nightshift.runner import repo_root
 
 #: Written at the repo root next to the digest, because that is the vault root. The
@@ -892,12 +891,13 @@ def execute(root: Path, *, limit: int = DEFAULT_BATCH, allow_paid: bool = False,
     anything was dispatched, 3 the money rule stopped it, 4 work was done but the
     batch did not land and is waiting on a human.
 
-    **The batch opens a run record** (`run_record`), exactly as a night does. Until
-    2026-08-18 it did not, and the consequence was not a missing statistic: the
-    Command Center's Run page reads the newest record to say what ran, so a morning
-    that had just finished a 23-minute batch reported "Last run" as a night from a
-    fortnight earlier. A run that does not testify is indistinguishable from one that
-    never happened, which is the whole argument `run_record`'s docstring makes.
+    **The batch opens a run record** (`run_record`), exactly as a night does — and
+    now by the same code, `runner.run_lifecycle`. Until 2026-08-18 it opened none at
+    all, and the consequence was not a missing statistic: the Command Center's Run
+    page reads the newest record to say what ran, so a morning that had just
+    finished a 23-minute batch reported "Last run" as a night from a fortnight
+    earlier. A run that does not testify is indistinguishable from one that never
+    happened, which is the whole argument `run_record`'s docstring makes.
     """
     now = now or dt.datetime.now()
     try:
@@ -909,132 +909,109 @@ def execute(root: Path, *, limit: int = DEFAULT_BATCH, allow_paid: bool = False,
         print(f"refusing to run - {exc}")
         return 1, Batch()
 
-    check = runner.preflight(root, base, dry_run=False)
-    if not check.ok:
-        for reason in check.reasons:
-            print(f"refusing to run - {reason}")
-        return 1, Batch()
-
-    if not runner.acquire_lock(root):
-        return 1, Batch()
-    record = run_record.null()
     try:
-        work, why = _workspace(root, base)
-        if why:
-            print(f"refusing to run - {why}")
-            return 1, Batch()
-
-        # Opened here for the same reason the runner opens its own after the work root
-        # is fixed and before `select()`: it must land in the checkout whose digest will
-        # read it, and the skip list needs somewhere to go. Every refusal above this
-        # line still holds the no-op record, so a batch that never got as far as looking
-        # at the board does not leave a record claiming it ran.
-        record = run_record.start(work, kind="chores", label=f"batch of up to {limit}",
-                                  host=socket.gethostname())
-
-        chosen, skipped = select(work, limit=limit)
-        batch = Batch(skipped=list(skipped))
-        record.skipped([(entry.card_id, entry.reason) for entry in skipped])
-        print(f"chores: {len(chosen)} selected, {len(skipped)} left out")
-        for entry in skipped:
-            print(f"  - {entry.card_id}: {entry.reason}")
-        if not chosen:
-            textio.write_text_lf(work / OUT, report(batch, now))
-            print(f"  nothing to dispatch; wrote {OUT}")
-            record.stop("nothing to dispatch")
-            record.finish()
-            return 0, batch
-
-        try:
-            model = tiers.resolve(work, CHORE_TIER)
-        except tiers.TierError as exc:
-            print(f"refusing to run - {exc}")
-            record.stop(str(exc))
-            record.finish()
-            return 1, Batch()
-
-        # Headless `-p` has no trust dialog, so an untrusted workspace makes every
-        # dispatch fail with no useful message. Same precondition the runner sets.
-        runner.ensure_workspace_trusted(root)
-        print(f"dispatching {len(chosen)} chore(s) at tier {CHORE_TIER} ({model})")
-
-        # --- phase 1 ---------------------------------------------------------
-        cards: dict[str, board.Card] = {}
-        stopped = ""
-        for index, card in enumerate(chosen):
-            stop = work / runner.STOP_FILE
-            if stop.is_file():
-                # Single-use, same as `runner._stop_requested()`: consumed the
-                # moment it is seen, so this stop does not also block the very
-                # next chore batch (or run) from starting.
-                try:
-                    stop.unlink()
-                except OSError:
-                    pass
-                stopped = "the kill switch appeared"
-            elif not _guard(allow_paid, f"dispatching {card.id}").allow:
-                stopped = "the usage window closed"
-            if stopped:
-                for later in chosen[index:]:
-                    out = _outcome_for(later)
-                    out.state, out.detail = "blocked", stopped
-                    batch.outcomes.append(out)
-                break
-            cards[card.id] = card
-            outcome, result = run_one(work, card, base, model,
-                                      card_budget=card_budget, test_timeout=test_timeout,
-                                      allow_local=allow_local, record=record)
-            outcome.how_to_test = result.how_to_test
-            batch.outcomes.append(outcome)
-            _record_outcomes(record, batch, cards, model)
-            if outcome.state == "blocked":
-                stopped = outcome.detail
-                for later in chosen[index + 1:]:
-                    skipped_out = _outcome_for(later)
-                    skipped_out.state, skipped_out.detail = "blocked", stopped
-                    batch.outcomes.append(skipped_out)
-                break
-
-        survivors = [o.card_id for o in batch.survivors]
-        _record_outcomes(record, batch, cards, model)
-        phase1 = (f"phase 1: {len(survivors)} survivor(s), "
-                  f"{len(batch.by_state('bounced'))} bounced, "
-                  f"{len(batch.by_state('parked'))} parked, "
-                  f"{len(batch.by_state('blocked'))} not reached")
-        print(phase1)
-        record.note(phase1)
-        if not survivors:
-            textio.write_text_lf(work / OUT, report(batch, now))
-            print(f"  nothing survived to merge; wrote {OUT}")
-            record.stop("nothing survived phase 1 to merge")
-            record.finish(dispatched=len(batch.outcomes))
-            return 0, batch
-
-        code = _land_the_batch(work, base, batch, cards, survivors, now,
-                               allow_paid=allow_paid, card_budget=card_budget,
+        with runner.run_lifecycle(root, base, kind="chores",
+                                  label=f"batch of up to {limit}") as ctx:
+            return _run_chores(ctx, limit=limit, allow_paid=allow_paid,
+                               card_budget=card_budget, test_timeout=test_timeout,
                                batch_test_timeout=batch_test_timeout,
-                               stopped_early=bool(stopped), record=record,
-                               model=model)
-        return code, batch
-    finally:
-        # `complete` separates a batch that reached its own end from one that was
-        # killed, so it is set on every path out — including the ones that raise.
-        # Already-finished records are not reopened: `finish` is idempotent enough
-        # for that, and re-stamping would move the finish time of a batch that ended
-        # cleanly minutes earlier.
-        if not record.data.get("complete"):
-            record.stop("the batch ended without reaching its own end")
-            record.finish(dispatched=len(record.data.get("dispatched", [])))
-        # Stop only the local servers *this process* started (`runtimes`
-        # records them; one the maintainer had running is never in that set).
-        # Bounding the lifetime to the batch is what keeps a ~13.8 GB pinned,
-        # non-reclaimable model from outliving it — the shape of
-        # `asset-generation-processes-dont-shut-down`, where two orphaned ComfyUI
-        # servers OOM-killed two dispatches days after the run that left them.
-        if stopped_ports := runtimes.stop_started_servers():
-            print(f"stopped the local server(s) this run started: "
-                  f"{', '.join(str(p) for p in stopped_ports)}")
-        runner.release_lock(root)
+                               allow_local=allow_local, now=now)
+    except runner.RunRefused as exc:
+        return exc.code, Batch()
+
+
+def _run_chores(ctx: runner.RunContext, *, limit: int, allow_paid: bool,
+                card_budget: float, test_timeout: int, batch_test_timeout: int,
+                allow_local: bool, now: dt.datetime) -> tuple[int, Batch]:
+    """The chore queue: select by cost, dispatch cheaply, then land the batch as one.
+
+    Runs inside `runner.run_lifecycle`, which has already established the checkout,
+    the lock and the record that `ctx` carries.
+    """
+    work, base, record = ctx.work, ctx.base, ctx.record
+
+    chosen, skipped = select(work, limit=limit)
+    batch = Batch(skipped=list(skipped))
+    record.skipped([(entry.card_id, entry.reason) for entry in skipped])
+    print(f"chores: {len(chosen)} selected, {len(skipped)} left out")
+    for entry in skipped:
+        print(f"  - {entry.card_id}: {entry.reason}")
+    if not chosen:
+        textio.write_text_lf(work / OUT, report(batch, now))
+        print(f"  nothing to dispatch; wrote {OUT}")
+        record.stop("nothing to dispatch")
+        record.finish()
+        return 0, batch
+
+    try:
+        model = tiers.resolve(work, CHORE_TIER)
+    except tiers.TierError as exc:
+        print(f"refusing to run - {exc}")
+        record.stop(str(exc))
+        record.finish()
+        return 1, Batch()
+
+    print(f"dispatching {len(chosen)} chore(s) at tier {CHORE_TIER} ({model})")
+
+    # --- phase 1 ---------------------------------------------------------
+    cards: dict[str, board.Card] = {}
+    stopped = ""
+    for index, card in enumerate(chosen):
+        stop = work / runner.STOP_FILE
+        if stop.is_file():
+            # Single-use, same as `runner._stop_requested()`: consumed the
+            # moment it is seen, so this stop does not also block the very
+            # next chore batch (or run) from starting.
+            try:
+                stop.unlink()
+            except OSError:
+                pass
+            stopped = "the kill switch appeared"
+        elif not _guard(allow_paid, f"dispatching {card.id}").allow:
+            stopped = "the usage window closed"
+        if stopped:
+            for later in chosen[index:]:
+                out = _outcome_for(later)
+                out.state, out.detail = "blocked", stopped
+                batch.outcomes.append(out)
+            break
+        cards[card.id] = card
+        outcome, result = run_one(work, card, base, model,
+                                  card_budget=card_budget, test_timeout=test_timeout,
+                                  allow_local=allow_local, record=record)
+        outcome.how_to_test = result.how_to_test
+        batch.outcomes.append(outcome)
+        _record_outcomes(record, batch, cards, model)
+        if outcome.state == "blocked":
+            stopped = outcome.detail
+            for later in chosen[index + 1:]:
+                skipped_out = _outcome_for(later)
+                skipped_out.state, skipped_out.detail = "blocked", stopped
+                batch.outcomes.append(skipped_out)
+            break
+
+    survivors = [o.card_id for o in batch.survivors]
+    _record_outcomes(record, batch, cards, model)
+    phase1 = (f"phase 1: {len(survivors)} survivor(s), "
+              f"{len(batch.by_state('bounced'))} bounced, "
+              f"{len(batch.by_state('parked'))} parked, "
+              f"{len(batch.by_state('blocked'))} not reached")
+    print(phase1)
+    record.note(phase1)
+    if not survivors:
+        textio.write_text_lf(work / OUT, report(batch, now))
+        print(f"  nothing survived to merge; wrote {OUT}")
+        record.stop("nothing survived phase 1 to merge")
+        record.finish(dispatched=len(batch.outcomes))
+        return 0, batch
+
+    code = _land_the_batch(work, base, batch, cards, survivors, now,
+                           allow_paid=allow_paid, card_budget=card_budget,
+                           batch_test_timeout=batch_test_timeout,
+                           stopped_early=bool(stopped), record=record,
+                           model=model)
+    return code, batch
+
 
 
 def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.Card],
