@@ -5107,3 +5107,106 @@ def test_the_row_chip_is_silent_for_a_card_with_no_worker(tmp_path):
     card = board.find(root, "no-worker")
     card.fields["worker"] = "none"
     assert panel._local_chip(root, card) == ""
+
+
+# ---------------------------------------------- one roster, whatever it worked
+#
+# The Run page used to reconstruct "what is still coming" by re-reading `tasks/`,
+# which knows nothing of a run's own order and cannot see a chore batch at all —
+# chores are filed under `ctx.chores`, not `ctx.tonight`. Since a run works both
+# queues the roster is written by the run itself, before the first dispatch
+# (`run_record.planned`), and each line fills in as the run reaches it.
+
+
+def _kind_cell(text: str, card_id: str) -> str:
+    """The roster's type cell for `card_id`, scoped the same way `_lane_cell` is."""
+    roster = text.split('id="sec-lastrun"', 1)[1]
+    row = roster.split(f'<td class="card">{card_id}</td>', 1)[1]
+    return row.split('<td class="kind">', 1)[1].split("</td>", 1)[0]
+
+
+def test_the_roster_lists_the_run_plan_before_anything_is_dispatched(server):
+    """The question the page is opened with mid-run is "what is it going to do",
+    and until the plan was recorded the answer was an empty table: every other
+    field is written as it happens."""
+    base, root = server
+    _record(root, "20260919-020000", started="2026-09-19T02:00:00", kind="both",
+            complete=False, dispatched=[],
+            planned=[{"card": "icons-for-ice", "title": "Icons", "queue": "chores"},
+                     {"card": "context-wall", "title": "Walls", "queue": "tasks"}])
+
+    _, text = _get(base, "run")
+    assert "icons-for-ice" in text and "context-wall" in text
+    assert _lane_cell(text, "icons-for-ice") == "queued"
+    assert _lane_cell(text, "context-wall") == "queued"
+
+
+def test_the_roster_names_each_cards_type(server):
+    """Asked for with the unification (Karel, 2026-09-19): *"it should show the
+    list of cards that should be done. Type and status."* One roster is only
+    readable if a chore and a card are tellable apart in it."""
+    base, root = server
+    _record(root, "20260919-020000", started="2026-09-19T02:00:00", kind="both",
+            complete=False, dispatched=[],
+            planned=[{"card": "icons-for-ice", "title": "Icons", "queue": "chores"},
+                     {"card": "context-wall", "title": "Walls", "queue": "tasks"}])
+
+    _, text = _get(base, "run")
+    assert _kind_cell(text, "icons-for-ice") == "chore"
+    assert _kind_cell(text, "context-wall") == "task"
+
+
+def test_a_planned_card_turns_into_its_outcome_without_leaving_the_roster(server):
+    """The line is the card's, start to finish: planned, then in flight, then what
+    came of it. A second row for the same card would make the counts stop adding
+    up and say nothing about which of the two was current."""
+    base, root = server
+    _record(root, "20260919-020000", started="2026-09-19T02:00:00", kind="both",
+            complete=False,
+            dispatched=[{"card": "icons-for-ice", "outcome": "reviewed",
+                         "detail": "landed", "attempt": 1}],
+            planned=[{"card": "icons-for-ice", "title": "Icons", "queue": "chores"},
+                     {"card": "context-wall", "title": "Walls", "queue": "tasks"}])
+
+    _, text = _get(base, "run")
+    roster = text.split('id="sec-lastrun"', 1)[1].split("</table>", 1)[0]
+    assert roster.count('<td class="card">icons-for-ice</td>') == 1
+    assert _lane_cell(text, "context-wall") == "queued"
+    assert _kind_cell(text, "icons-for-ice") == "chore"
+
+
+def test_a_record_with_no_plan_still_renders(server):
+    """Every record already on disk was written before the roster was, and the
+    page must not go blank for them — it falls back to the board read it used to
+    do, which is exactly the reconstruction the plan replaced."""
+    base, root = server
+    _record(root, "20260818-111700", started="2026-08-18T11:17:00",
+            finished="2026-08-18T11:41:00", kind="chores", host="KMu-NTB",
+            dispatched=[{"card": "perks-tinkering", "outcome": "reviewed"}])
+
+    code, text = _get(base, "run")
+    assert code == 200
+    assert "perks-tinkering" in text
+    # Inferred from the record's kind, since no plan names it per card.
+    assert _kind_cell(text, "perks-tinkering") == "chore"
+
+
+def test_every_roster_row_has_the_same_columns(server):
+    """One table, so a row one cell short shifts every column after it — which is
+    exactly what adding the type column did to the batch's phase notes, and did
+    invisibly: every assertion about cell *contents* still passed, because each
+    cell was still found by its own class."""
+    base, root = server
+    _record(root, "20260919-020000", started="2026-09-19T02:00:00", kind="both",
+            dispatched=[{"card": "icons-for-ice", "outcome": "reviewed", "attempt": 1}],
+            planned=[{"card": "icons-for-ice", "title": "Icons", "queue": "chores"},
+                     {"card": "context-wall", "title": "Walls", "queue": "tasks"}],
+            stop_reason="the window closed",
+            notes=[{"at": "2026-09-19T02:40:00",
+                    "message": "batch branch chores/20260919-0200 - suite: green"}])
+
+    _, text = _get(base, "run")
+    roster = text.split('id="sec-lastrun"', 1)[1].split("</table>", 1)[0]
+    widths = {row.count("<td") for row in roster.split("<tr")[1:] if "<td" in row}
+    assert len(widths) == 1, f"ragged roster rows: {sorted(widths)}"
+

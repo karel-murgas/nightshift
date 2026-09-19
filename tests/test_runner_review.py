@@ -2232,7 +2232,7 @@ def test_the_record_carries_the_landing_not_just_the_outcome(tmp_path, monkeypat
     calls: list[str] = []
 
     def fake_dispatch(root_, card, base, model, card_budget, test_timeout,
-                      *, allow_local=True):
+                      *, allow_local=True, worker="", effort=""):
         calls.append(card.id)
         # What the real dispatch does before the worker starts — the attempt is
         # committed first so a crash cannot retry forever. The record reads the
@@ -2364,7 +2364,7 @@ def test_a_crash_in_a_later_stage_is_contained_too(tmp_path, monkeypatch):
     calls: list[str] = []
 
     def fake_dispatch(root_, card, base, model, card_budget, test_timeout,
-                      *, allow_local=True):
+                      *, allow_local=True, worker="", effort=""):
         calls.append(card.id)
         return runner.Dispatch("review", "ok")
 
@@ -2412,7 +2412,7 @@ def test_a_crash_leaves_no_worktree_and_banks_what_the_worker_managed(tmp_path, 
     root = _loaded_board(tmp_path, "a")
 
     def fake_dispatch(root_, card, base, model, card_budget, test_timeout,
-                      *, allow_local=True):
+                      *, allow_local=True, worker="", effort=""):
         tree, _branch, _mode = runner.prepare_worktree(root_, card, base)
         (tree / "half-done.txt").write_text("what the worker managed\n", encoding="utf-8")
         raise RuntimeError("crashed with the checkout still on disk")
@@ -2475,7 +2475,7 @@ def test_a_systematic_crash_is_stopped_by_the_existing_failure_streak(tmp_path, 
     calls: list[str] = []
 
     def fake_dispatch(root_, card, base, model, card_budget, test_timeout,
-                      *, allow_local=True):
+                      *, allow_local=True, worker="", effort=""):
         calls.append(card.id)
         raise FileNotFoundError("[WinError 206] The filename or extension is too long")
 
@@ -2494,12 +2494,12 @@ def test_the_crash_guard_wraps_a_region_rather_than_naming_its_stages(tmp_path):
     is one call to the pipeline helper, and the stages live inside that helper —
     not a `try` listing `dispatch` and `review_stage` by name."""
     source = _RUNNER_SOURCE.read_text(encoding="utf-8")
-    loop = source[source.index("def run(root: Path, args: argparse.Namespace)"):]
+    loop = source[source.index("def _work_queue(ctx: RunContext"):]
     guarded = re.search(r"try:\n\s+result = (\w+)\(candidate, model\)\n"
                         r"\s+except Exception as exc:", loop)
     assert guarded, "the run loop's per-card guard is not a single guarded pipeline call"
     helper = guarded.group(1)
-    body = loop[loop.index(f"def {helper}(candidate"):loop.index("def _settled(")]
+    body = loop[loop.index(f"def {helper}(candidate"):loop.index("def _window_closed(")]
     assert "dispatch(" in body and "review_stage(" in body, \
         f"`{helper}` is not where the per-card stages live, so the guard has stopped " \
         "covering the region it is meant to"

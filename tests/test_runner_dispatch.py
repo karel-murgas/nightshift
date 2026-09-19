@@ -276,7 +276,7 @@ def test_the_retried_card_is_reloaded_so_the_rewind_is_not_undone(tmp_path, monk
     seen: list[int] = []
 
     def fake_dispatch(root_, card, base, model, card_budget, test_timeout,
-                      *, allow_local=True):
+                      *, allow_local=True, worker="", effort=""):
         seen.append(card.attempts)
         # What the real dispatch does before the worker starts.
         card.write({"attempts": str(card.attempts + 1), "started": "now"})
@@ -297,7 +297,7 @@ def test_a_card_moved_off_the_board_while_we_slept_is_left_alone(tmp_path, monke
     root = _loaded_board(tmp_path, "a", "b")
 
     def fake_dispatch(root_, card, base, model, card_budget, test_timeout,
-                      *, allow_local=True):
+                      *, allow_local=True, worker="", effort=""):
         calls.append(card.id)
         if len(calls) == 1:
             board.move(root, board.find(root, "a"), "needs-decision")
@@ -347,7 +347,7 @@ def test_a_needs_fix_that_escalates_ends_the_cards_turn(tmp_path, monkeypatch):
     calls: list[str] = []
 
     def fake_dispatch(root_, card, base, model, card_budget, test_timeout,
-                      *, allow_local=True):
+                      *, allow_local=True, worker="", effort=""):
         calls.append(card.id)
         return runner.Dispatch("needs_fix", "still wrong")
 
@@ -407,7 +407,7 @@ def test_a_needs_fix_does_not_count_toward_the_consecutive_failure_breaker(tmp_p
     calls: list[str] = []
 
     def fake_dispatch(root_, card, base, model, card_budget, test_timeout,
-                      *, allow_local=True):
+                      *, allow_local=True, worker="", effort=""):
         calls.append(card.id)
         # One fix each, then the card lands.
         return (runner.Dispatch("needs_fix", "tidy this")
@@ -600,7 +600,7 @@ def test_one_test_failing_for_two_cards_stops_the_night_and_blames_neither(
     shared = "tests/test_overlay.py::test_tints"
 
     def fake_dispatch(root_, card, base, model, card_budget, test_timeout,
-                      *, allow_local=True):
+                      *, allow_local=True, worker="", effort=""):
         calls.append(card.id)
         _junit_naming(root, card.id, card.attempts + 1, shared)
         card.write({"attempts": str(card.attempts + 1)})
@@ -625,7 +625,7 @@ def test_two_cards_failing_on_different_tests_is_just_two_failures(tmp_path, mon
     calls: list[str] = []
 
     def fake_dispatch(root_, card, base, model, card_budget, test_timeout,
-                      *, allow_local=True):
+                      *, allow_local=True, worker="", effort=""):
         calls.append(card.id)
         _junit_naming(root, card.id, card.attempts + 1,
                       f"tests/test_{card.id}.py::test_its_own")
@@ -650,7 +650,7 @@ def test_the_same_card_failing_twice_is_not_cross_card_drift(tmp_path, monkeypat
     shared = "tests/test_overlay.py::test_tints"
 
     def fake_dispatch(root_, card, base, model, card_budget, test_timeout,
-                      *, allow_local=True):
+                      *, allow_local=True, worker="", effort=""):
         calls.append(card.id)
         _junit_naming(root, card.id, card.attempts + 1, shared)
         card.write({"attempts": str(card.attempts + 1)})
