@@ -1062,3 +1062,25 @@ def test_a_both_run_records_itself_as_both(tmp_path, monkeypatch):
     kinds = [json.loads(rec.read_text(encoding="utf-8")).get("kind")
              for rec in sorted((root / run_record.DIR).glob("*.json"))]
     assert kinds == ["both"], "one run, one record, and it names what it worked"
+
+
+def test_a_both_run_records_its_whole_roster_before_dispatching(tmp_path, monkeypatch):
+    """What the Command Center draws the Run page from.
+
+    Written before the first dispatch, in the order the run will work it, so the
+    page can show the list up front and fill each line in as the run reaches it.
+    Reconstructing it from the board instead cannot see a chore batch at all —
+    chores are not in the night's candidate list — which is what made one run need
+    two different views of itself.
+    """
+    root = _repo(tmp_path, ("a", "review", "x"))
+    _task(root, "t")
+    _Worker(edits={"a": _touch("a"), "t": _touch("t")}).install(monkeypatch)
+
+    _run(root, "--queue", "both")
+
+    record = json.loads(
+        sorted((root / run_record.DIR).glob("*.json"))[0].read_text(encoding="utf-8"))
+    assert [(p["card"], p["queue"]) for p in record["planned"]] == [
+        ("a", "chores"), ("t", "tasks")]
+

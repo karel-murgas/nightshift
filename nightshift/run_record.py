@@ -232,6 +232,29 @@ class Record:
         self.data["skipped"] = [{"card": cid, "reason": reason} for cid, reason in entries]
         self.save()
 
+    def planned(self, entries: list[tuple[str, str, str]]) -> None:
+        """Every card this run intends to work, as `(card_id, title, queue)`, in the
+        order it will take them.
+
+        **Written before the first dispatch, which is the whole point.** Everything
+        else in a record is written as it happens, so until the run was well under
+        way the panel had nothing to show but an empty roster and had to reconstruct
+        "what is still coming" by re-reading `tasks/` — a live board read that knew
+        nothing of the run's own order, and nothing of the chore batch at all, since
+        chores are not in the night's candidate list. A run that works both queues
+        has one roster, and this is it.
+
+        `queue` is the card's type as the page shows it (`chores` / `tasks`), taken
+        from the `runner.Queue` that holds it rather than from the card's own
+        `kind:`, because the queue is what actually decided how it would be worked.
+
+        Appended rather than replaced: `--queue both` builds its queues one at a
+        time and each announces itself as it is built.
+        """
+        self.data.setdefault("planned", []).extend(
+            {"card": cid, "title": title, "queue": queue} for cid, title, queue in entries)
+        self.save()
+
     def oversized(self, entries: list[tuple[str, int, int]]) -> None:
         """Cards that were **dispatched** while over `runner.CARD_COMFORT_BYTES`,
         as `(card_id, bytes, threshold)`.

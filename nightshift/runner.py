@@ -8269,6 +8269,14 @@ def _work_the_run(ctx: RunContext, args: argparse.Namespace, *,
     if args.dry_run:
         return 0
 
+    # The roster, before the first dispatch. The panel draws the run from this and
+    # fills each line in as the run reaches it; without it the page could only show
+    # what had already finished, and had to guess at the rest by re-reading the
+    # board — which cannot see a chore batch at all. One call per queue, in the
+    # order they will be worked.
+    for queue in built:
+        ctx.record.planned([(c.card.id, c.card.title, queue.name) for c in queue.cards])
+
     code = 0
     for queue in built:
         if tally.stopped:

@@ -243,6 +243,16 @@
   }
   .roster td.card { color: var(--ink); white-space: normal; min-width: 12rem; }
   .roster td.mark { width: 1.1rem; padding-right: 0.5rem; }
+  /* The roster's type column: chore or task. Quiet and narrow — it is there to
+     be scanned down, not read, and a run that worked one queue should not have a
+     loud column repeating the same word on every line. */
+  .roster td.kind {
+    width: 3.4rem;
+    color: var(--ink-faint);
+    font-size: var(--step--1);
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+  }
   .roster td.num { font-variant-numeric: tabular-nums; color: var(--ink-dim); text-align: right; }
   .roster td.said { color: var(--ink-faint); white-space: normal; max-width: 34rem; }
   .roster tr.pend td { color: var(--ink-faint); }

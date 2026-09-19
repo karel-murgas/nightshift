@@ -3580,6 +3580,21 @@ _KINDS = {"run": "night", "card": "single card", "chores": "chore batch",
           "both": "chores + night"}
 
 
+#: How a planned entry's `queue` reads in the roster's type column. The record
+#: stores the queue's own name; one row wants the singular noun for one card.
+_QUEUE_LABEL = {"chores": "chore", "tasks": "task"}
+
+
+def _roster_kind(record: dict, entry: dict) -> str:
+    """The type cell for a dispatched row the run's plan does not name.
+
+    Reached only for a `--card` run or a record written before the roster was
+    recorded up front, so it reads the record's own kind rather than guessing per
+    card: a `chores` record dispatched nothing that was not a chore.
+    """
+    return "chore" if str(record.get("kind") or "") == "chores" else "task"
+
+
 def _kind_label(record: dict) -> str:
     kind = str(record.get("kind") or "")
     return _KINDS.get(kind, kind or "run")
@@ -3661,13 +3676,15 @@ def _chores_phase_rows(record: dict) -> str:
     rows = []
     for note in record.get("notes", []):
         rows.append(f'<tr><td class="mark m-wait">&middot;</td>'
-                    f'<td class="card"></td><td class="lane"></td>'
+                    f'<td class="card"></td><td class="kind"></td>'
+                    f'<td class="lane"></td>'
                     f'<td class="num"></td><td class="num"></td>'
                     f'<td class="said">{_e(str(note.get("message", "")))}</td>'
                     f'<td class="num"></td></tr>')
     if reason := str(record.get("stop_reason") or ""):
         rows.append(f'<tr><td class="mark m-bad">&times;</td>'
-                    f'<td class="card"></td><td class="lane"></td>'
+                    f'<td class="card"></td><td class="kind"></td>'
+                    f'<td class="lane"></td>'
                     f'<td class="num"></td><td class="num"></td>'
                     f'<td class="said">{_e(reason)}</td>'
                     f'<td class="num"></td></tr>')
@@ -3890,9 +3907,20 @@ def _render_run(ctx: Context) -> str:
         out.append(_last_job_section(ctx, newest_job))
 
     dispatched = record.get("dispatched", [])
+    # The run's own roster, written before the first dispatch (`run_record.planned`).
+    # Everything else here is written as it happens, so before this existed the page
+    # could only show what had already finished and had to reconstruct "what is still
+    # coming" by re-reading `tasks/` — which knows nothing of the run's order and
+    # cannot see a chore batch at all, because chores are not in the night's
+    # candidate list. One run, one roster, whichever queues it worked.
+    planned = record.get("planned", [])
+    by_card = {str(d.get("card") or ""): d for d in dispatched}
+    live = run_is_live(ctx.rail.run_status, record)
+    status = ctx.rail.run_status
+    active_id = str(status.get("card") or "") if live else ""
 
-    body = []
-    for entry in dispatched:
+    def _settled_row(entry: dict, kind: str) -> str:
+        """One card the run has a verdict for."""
         outcome = str(entry.get("outcome", ""))
         if outcome in run_record.LANDED_OUTCOMES:
             cls = "m-ok"
@@ -3915,39 +3943,61 @@ def _render_run(ctx: Context) -> str:
         talk = (_act("Talk", onclick=f"post('/api/talk',{{session_id:'{_attr(session)}'}})")
                 if session else "")
         took = f"{telemetry['wall_s'] / 60:.0f} min" if telemetry.get("wall_s") else ""
-        body.append(
-            f'<tr>{mark}<td class="card">{_e(entry.get("card", ""))}</td>'
-            f'<td class="lane">{_e(_live_lane(ctx, entry))}</td>'
-            f'<td class="num">{_e(took)}</td>'
-            f'<td class="num">${cost:.2f}</td>'
-            f'<td class="said">{_e(_said(entry))}</td>'
-            f'<td class="num">{talk}</td></tr>'
-        )
-    live = run_is_live(ctx.rail.run_status, record)
-    if live:
-        status = ctx.rail.run_status
-        active_id = str(status.get("card") or "")
-        for candidate in ctx.tonight:
-            if any(d.get("card") == candidate.card.id for d in dispatched):
-                continue
-            # `details-on-run`: a card already in `dispatched` gets a final mark
-            # above; the card the run is *currently* on has no entry there either,
-            # so without this branch it fell into this same "queued" row as every
-            # other card still waiting its turn — even while the heartbeat said it
-            # was mid-`gates` on a retry. The data was already sitting in `status`
-            # a few lines up; it just was not being read here.
-            active = candidate.card.id == active_id
-            lane = _active_row_lane(status) if active else "queued"
-            mark = "m-now" if active else "m-wait"
-            body.append(f'<tr class="pend"><td class="mark {mark}">&middot;</td>'
-                        f'<td class="card">{_e(candidate.card.id)}</td>'
-                        f'<td class="lane">{_e(lane)}</td><td class="num"></td>'
-                        f'<td class="num"></td><td class="said"></td>'
-                        f'<td class="num"></td></tr>')
+        return (f'<tr>{mark}<td class="card">{_e(entry.get("card", ""))}</td>'
+                f'<td class="kind">{_e(kind)}</td>'
+                f'<td class="lane">{_e(_live_lane(ctx, entry))}</td>'
+                f'<td class="num">{_e(took)}</td>'
+                f'<td class="num">${cost:.2f}</td>'
+                f'<td class="said">{_e(_said(entry))}</td>'
+                f'<td class="num">{talk}</td></tr>')
 
-    # `both` as well as `chores`: since the two dispatch paths became one run, a
-    # night can carry a batch's phase notes too, and they are the only account of
-    # what happened between "8 selected" and "the batch landed".
+    def _pending_row(card_id: str, kind: str, *, active: bool) -> str:
+        """One card the run has not reached, or the one it is on right now.
+
+        `details-on-run`: the card currently dispatching has no `dispatched` entry
+        yet, so without the live branch it read as "queued" like every card still
+        waiting its turn — even while the heartbeat said it was mid-`gates` on a
+        retry. The data was already in `status`; it just was not being read here.
+        """
+        lane = _active_row_lane(status) if active else "queued"
+        return (f'<tr class="pend"><td class="mark {"m-now" if active else "m-wait"}">'
+                f'&middot;</td>'
+                f'<td class="card">{_e(card_id)}</td>'
+                f'<td class="kind">{_e(kind)}</td>'
+                f'<td class="lane">{_e(lane)}</td><td class="num"></td>'
+                f'<td class="num"></td><td class="said"></td>'
+                f'<td class="num"></td></tr>')
+
+    body = []
+    seen: set[str] = set()
+    for item in planned:
+        card_id = str(item.get("card") or "")
+        seen.add(card_id)
+        kind = _QUEUE_LABEL.get(str(item.get("queue") or ""), "task")
+        entry = by_card.get(card_id)
+        body.append(_settled_row(entry, kind) if entry is not None
+                    else _pending_row(card_id, kind, active=live and card_id == active_id))
+    # Dispatched but not planned: a `--card` run, or a record written before the
+    # roster was recorded up front.
+    for entry in dispatched:
+        card_id = str(entry.get("card") or "")
+        if card_id not in seen:
+            seen.add(card_id)
+            body.append(_settled_row(entry, _roster_kind(record, entry)))
+    if live and not planned:
+        # A run recorded before `planned` existed. Reconstructed off the board the
+        # old way, which is exactly the reconstruction the plan replaced: it cannot
+        # see a chore batch, and it does not know the order the run chose.
+        for candidate in ctx.tonight:
+            if candidate.card.id in seen:
+                continue
+            seen.add(candidate.card.id)
+            body.append(_pending_row(candidate.card.id, "task",
+                                     active=candidate.card.id == active_id))
+
+    # The batch's phase notes — which branch it built, whether the one suite run
+    # over the merged result was green, why it did not land. Facts about the batch
+    # rather than about any one card, so they sit under the roster rather than in it.
     if str(record.get("kind") or "") in ("chores", "both"):
         body.append(_chores_phase_rows(record))
 
@@ -3973,10 +4023,11 @@ def _render_run(ctx: Context) -> str:
            '<div class="acts">'
            + _act("Stop after this card", onclick="post('/api/stop',{})")
            + '</div></div>') if live else ""
-    out.append(_section(heading, len(dispatched),
+    out.append(_section(heading, len(seen),
                         f'<div class="roster"><table><tbody>{"".join(body)}</tbody></table></div>'
                         if body else "", note=note, bar=bar,
-                        sub="Every card this run dispatched, and what came of it.",
+                        sub="Every card this run set out to work — chores first, "
+                            "then tasks — and where each one is.",
                         empty="No run has been recorded on this machine yet.",
                         sec_id="lastrun"))
 
