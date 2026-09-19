@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import runtimes
+from nightshift import runtimes, suite
 
 _BLOCK = {
     "runtime": "opencode",
@@ -614,3 +614,282 @@ def test_prepare_checks_declared_facts_before_starting_anything(tmp_path, monkey
     assert runtimes.prepare(_repo(tmp_path, block=None), "chore-thread",
                             tmp_path) == (runtimes.CLOUD, None)
     assert started == []
+
+
+# --------------------------------------------------------------------------
+# The mutex. Two consumers, one box, and neither fits beside the other.
+#
+# Every test below is a denial path, in the file's own tradition: the expensive
+# failure is not "the mutex did not fire", it is "it fired on something that was
+# not this run's to stop". `release_for` is the only thing in the module that
+# kills a process, so it gets the most coverage of anything here — including a
+# fixture whose whole job is to fail loudly if a real kill is ever reintroduced.
+# --------------------------------------------------------------------------
+
+_CONFLICT = {"name": "ComfyUI", "port": 8188, "required_by": ["gpu-box"],
+             "needs_gb": 12}
+_MUTEX_BLOCK = {**_BLOCK, "conflicts": [_CONFLICT],
+                "watchdog": r"E:\AI\scripts\llama_idle_watchdog.py"}
+
+
+@pytest.fixture()
+def no_conflict(monkeypatch):
+    """Nothing is listening anywhere. The ordinary state of the box."""
+    monkeypatch.setattr(runtimes, "port_listening", lambda *a, **k: False)
+
+
+@pytest.fixture()
+def never_kills(monkeypatch):
+    """`_stop_port` replaced by a recorder, in every test that can reach it.
+
+    The suite runs on the machine this feature stops servers on, so a regression
+    that reintroduced a real kill would otherwise be discovered by killing
+    someone's running llama-server. Here it shows up as an empty list.
+    """
+    killed: list[int] = []
+    monkeypatch.setattr(runtimes, "_stop_port",
+                        lambda port: killed.append(port) or True)
+    return killed
+
+
+def test_a_resident_conflict_sends_the_card_to_cloud(tmp_path, up, monkeypatch):
+    """The free direction. ComfyUI being up cannot fail a dispatch — it makes the
+    local runtime unavailable, and unavailable has always meant cloud."""
+    root = _repo(tmp_path, _MUTEX_BLOCK)
+    monkeypatch.setattr(runtimes, "port_listening",
+                        lambda port, **k: port == 8188)
+    assert runtimes.resolve(root, "chore-thread") == runtimes.CLOUD
+
+
+def test_the_conflict_check_is_probed_not_declared(tmp_path, up, no_conflict):
+    """`probe=False` is the panel's row chip: what this machine is configured to
+    do, not what happens to be running this instant. A chip that flickered with
+    ComfyUI's lifetime would be answering a question nobody asked it."""
+    root = _repo(tmp_path, _MUTEX_BLOCK)
+    assert runtimes.resolve(root, "chore-thread", probe=False) == runtimes.LOCAL
+
+
+def test_prepare_refuses_before_it_loads_thirteen_gigabytes(tmp_path, monkeypatch):
+    """Term 4 before term 5, and why that is not merely tidy: both orders give the
+    same answer, and only this one gives it without first spending five minutes
+    reading the model off disk into a box with no room for it."""
+    started = []
+    monkeypatch.setattr(runtimes, "port_listening", lambda port, **k: port == 8188)
+    monkeypatch.setattr(runtimes, "ensure_model_server",
+                        lambda *a, **k: started.append("model") or True)
+    monkeypatch.setattr(runtimes, "ensure_server",
+                        lambda *a, **k: started.append("opencode") or True)
+    root = _repo(tmp_path, _MUTEX_BLOCK)
+    assert runtimes.prepare(root, "chore-thread", tmp_path) == (runtimes.CLOUD, None)
+    assert started == []
+
+
+def test_a_machine_declaring_no_conflicts_has_no_mutex(tmp_path, up, monkeypatch):
+    """Every box but the one this was written for. The framework hardcodes neither
+    8188 nor `gpu-box`, so a project without them pays nothing — not even a
+    socket, which is what `probed == []` is asserting."""
+    probed = []
+    monkeypatch.setattr(runtimes, "port_listening",
+                        lambda port, **k: probed.append(port) or True)
+    root = _repo(tmp_path, _BLOCK)
+    assert runtimes.resolve(root, "chore-thread") == runtimes.LOCAL
+    assert probed == []
+    assert runtimes.release_for(root, "gpu-box") is True
+
+
+# --- parsing: a hand-edited block costs the machine its mutex, not its night
+
+def test_a_malformed_conflict_is_dropped_rather_than_raised(tmp_path, up, no_conflict):
+    """`local_model`'s rule, applied to the new field. No gate validates this block
+    and it is hand-edited per machine, so a typo must be the cheap failure."""
+    root = _repo(tmp_path, {**_BLOCK, "conflicts": [
+        "not a dict", {"name": "no port"}, {"port": "eight-one-eight-eight"},
+        {"port": 0}, {"name": "ok", "port": 8188, "required_by": "gpu-box"},
+    ]})
+    model = runtimes.local_model(root)
+    assert model is not None, "a bad conflicts list must not lose the whole block"
+    assert [c.port for c in model.conflicts] == [8188]
+    # `required_by` was a string rather than a list — dropped, not iterated into
+    # its own characters, which would have matched a card requiring "g".
+    assert model.conflicts[0].required_by == ()
+    assert model.conflicts_for("g") == ()
+
+
+def test_conflicts_bind_to_the_capability_that_provokes_them(tmp_path):
+    model = runtimes.local_model(_repo(tmp_path, _MUTEX_BLOCK))
+    assert model is not None
+    assert [c.name for c in model.conflicts_for("gpu-box")] == ["ComfyUI"]
+    assert model.conflicts_for("") == ()
+    assert model.conflicts_for("some-other-capability") == ()
+
+
+def test_the_model_port_is_derived_from_the_base_url(tmp_path):
+    """Not a second field. A port declared twice is a port that can disagree with
+    itself, and the stop path is the worst place to find that out."""
+    model = runtimes.local_model(_repo(tmp_path, _MUTEX_BLOCK))
+    assert model is not None and model.model_port == 8082
+
+
+# --- release_for: the only thing in this module that stops a process
+
+def test_release_refuses_a_server_this_run_did_not_start(tmp_path, never_kills,
+                                                         monkeypatch):
+    """**The one this exists for.** The maintainer's own llama-server, started
+    because they are using it, is not an unattended process's to kill at 4 AM. The
+    card is skipped instead, and nothing dies."""
+    monkeypatch.setattr(runtimes, "port_listening", lambda port, **k: port == 8082)
+    monkeypatch.setattr(runtimes, "_STARTED_PORTS", set())
+    said: list[str] = []
+    assert runtimes.release_for(_repo(tmp_path, _MUTEX_BLOCK), "gpu-box",
+                                log=said.append) is False
+    assert never_kills == []
+    assert any("did not start it" in line for line in said), said
+
+
+def test_release_stops_a_server_this_run_did_start(tmp_path, monkeypatch):
+    """The same rule from the other side, and why this is not new initiative:
+    `stop_started_servers` already had it, at the end of the night. This is the
+    same rule at a finer grain."""
+    listening = {8082: True}
+    killed: list[int] = []
+
+    def _stop(port: int) -> bool:
+        killed.append(port)
+        listening[port] = False          # as the real stop does
+        return True
+
+    monkeypatch.setattr(runtimes, "port_listening",
+                        lambda port, **k: listening.get(port, False))
+    monkeypatch.setattr(runtimes, "_STARTED_PORTS", {8082})
+    monkeypatch.setattr(runtimes, "_stop_port", _stop)
+    monkeypatch.setattr(suite, "available_memory_gb", lambda: 20.0)
+    said: list[str] = []
+    assert runtimes.release_for(_repo(tmp_path, _MUTEX_BLOCK), "gpu-box",
+                                log=said.append) is True
+    assert killed == [8082]
+    assert 8082 not in runtimes._STARTED_PORTS, \
+        "a stopped port must leave the set, or the end-of-run teardown claims it again"
+
+
+def test_release_is_a_no_op_for_a_card_that_provokes_nothing(tmp_path, never_kills,
+                                                             monkeypatch):
+    """A code card on the same box does not want ComfyUI's memory, so the model it
+    is about to use must not be stopped underneath it."""
+    monkeypatch.setattr(runtimes, "port_listening", lambda *a, **k: True)
+    monkeypatch.setattr(runtimes, "_STARTED_PORTS", {8082})
+    root = _repo(tmp_path, _MUTEX_BLOCK)
+    assert runtimes.release_for(root, "") is True
+    assert runtimes.release_for(root, "some-other-capability") is True
+    assert never_kills == []
+
+
+def test_release_is_a_no_op_when_no_model_is_resident(tmp_path, never_kills,
+                                                      no_conflict, monkeypatch):
+    """Nothing to release — the overwhelmingly common case, on every night that
+    ran no local cards at all."""
+    monkeypatch.setattr(runtimes, "_STARTED_PORTS", {8082})
+    assert runtimes.release_for(_repo(tmp_path, _MUTEX_BLOCK), "gpu-box") is True
+    assert never_kills == []
+
+
+def test_release_refuses_when_the_memory_does_not_come_back(tmp_path, monkeypatch):
+    """A stopped process is not reclaimed commit charge — under `mlock` there are
+    ~13 GB of pinned pages to unpin, and `VirtualLock` may silently not have been
+    held at all. So the headroom is *measured*, and a dispatch into a box that
+    still has no room is refused rather than sent to be OOM-killed."""
+    listening = {8082: True}
+    monkeypatch.setattr(runtimes, "port_listening",
+                        lambda port, **k: listening.get(port, False))
+    monkeypatch.setattr(runtimes, "_STARTED_PORTS", {8082})
+    monkeypatch.setattr(runtimes, "_stop_port",
+                        lambda port: (listening.__setitem__(port, False), True)[-1])
+    monkeypatch.setattr(suite, "available_memory_gb", lambda: 3.0)
+    monkeypatch.setattr(runtimes, "RELEASE_TIMEOUT", 0.0)
+    monkeypatch.setattr(runtimes, "RELEASE_POLL", 0.0)
+    said: list[str] = []
+    assert runtimes.release_for(_repo(tmp_path, _MUTEX_BLOCK), "gpu-box",
+                                log=said.append) is False
+    assert any("12.0 GB" in line for line in said), said
+
+
+def test_release_says_so_when_it_cannot_confirm_the_headroom(tmp_path, monkeypatch):
+    """A conflict that declares no `needs_gb` is confirmed only as far as the
+    process being gone. The log states the weaker guarantee rather than letting a
+    morning reader assume the stronger one."""
+    listening = {8082: True}
+    monkeypatch.setattr(runtimes, "port_listening",
+                        lambda port, **k: listening.get(port, False))
+    monkeypatch.setattr(runtimes, "_STARTED_PORTS", {8082})
+    monkeypatch.setattr(runtimes, "_stop_port",
+                        lambda port: (listening.__setitem__(port, False), True)[-1])
+    block = {**_BLOCK, "conflicts": [{"name": "ComfyUI", "port": 8188,
+                                      "required_by": ["gpu-box"]}]}
+    said: list[str] = []
+    assert runtimes.release_for(_repo(tmp_path, block), "gpu-box",
+                                log=said.append) is True
+    assert any("only as far as the process being gone" in line for line in said), said
+
+
+def test_release_refuses_when_the_stop_itself_failed(tmp_path, monkeypatch):
+    """Skipping the card is the conservative answer: the memory is still held, and
+    dispatching an art card into it is the OOM this whole thing prevents."""
+    monkeypatch.setattr(runtimes, "port_listening", lambda port, **k: port == 8082)
+    monkeypatch.setattr(runtimes, "_STARTED_PORTS", {8082})
+    monkeypatch.setattr(runtimes, "_stop_port", lambda port: False)
+    assert runtimes.release_for(_repo(tmp_path, _MUTEX_BLOCK), "gpu-box") is False
+
+
+# --- the watchdog bargain, kept by construction rather than by a gate
+
+def test_a_server_we_started_gets_a_watchdog_bound_to_its_pid(tmp_path, monkeypatch):
+    """`comfy_server_teardown` enforces this pair by reading instruction docs,
+    because there the launcher is a document. Here the launcher is
+    `ensure_model_server`, so the pair cannot be split by an author at all.
+
+    `--pid` is the part worth asserting: without it, a watchdog outliving its
+    server reaps whatever holds the port next."""
+    watchdog = tmp_path / "llama_idle_watchdog.py"
+    watchdog.write_text("", encoding="utf-8")
+    argv: list[list[str]] = []
+    monkeypatch.setattr(runtimes, "_pid_on_port", lambda port: 4242)
+    monkeypatch.setattr(runtimes.subprocess, "Popen",
+                        lambda args, **k: argv.append(args))
+    model = runtimes.LocalModel(base_url="http://127.0.0.1:8082/v1", model="m",
+                                watchdog=str(watchdog), watchdog_idle_minutes=30)
+    assert runtimes.start_watchdog(model, 8082) is True
+    assert argv, "the watchdog was never spawned"
+    assert argv[0][1] == str(watchdog)
+    for flag, value in (("--pid", "4242"), ("--port", "8082"),
+                        ("--idle-minutes", "30")):
+        assert flag in argv[0], f"{flag} missing from {argv[0]}"
+        assert argv[0][argv[0].index(flag) + 1] == value
+
+
+def test_no_watchdog_declared_and_nothing_breaks(tmp_path, monkeypatch):
+    """A box that declares no watchdog still dispatches. The end-of-run teardown
+    is the guarantee that does not depend on this one."""
+    spawned = []
+    monkeypatch.setattr(runtimes.subprocess, "Popen",
+                        lambda *a, **k: spawned.append(a))
+    model = runtimes.LocalModel(base_url="http://127.0.0.1:8082/v1", model="m")
+    assert runtimes.start_watchdog(model, 8082) is False
+    assert spawned == []
+
+
+def test_a_hand_started_server_never_gets_a_watchdog(tmp_path, monkeypatch):
+    """The asymmetry Karel chose (2026-09-19): a script that reaps the
+    maintainer's own session after half an hour of them thinking is a worse
+    failure than the one being prevented. `ensure_model_server` starts the
+    watchdog only on the path that also records the port as ours."""
+    watchdog = tmp_path / "wd.py"
+    watchdog.write_text("", encoding="utf-8")
+    started: list[str] = []
+    monkeypatch.setattr(runtimes, "reachable", lambda *a, **k: True)
+    monkeypatch.setattr(runtimes, "start_watchdog",
+                        lambda *a, **k: started.append("wd") or True)
+    monkeypatch.setattr(runtimes, "_STARTED_PORTS", set())
+    model = runtimes.LocalModel(base_url="http://127.0.0.1:8082/v1", model="m",
+                                watchdog=str(watchdog))
+    assert runtimes.ensure_model_server(model) is True
+    assert started == [], "an already-up server is not ours and gets no watchdog"
+    assert runtimes._STARTED_PORTS == set()

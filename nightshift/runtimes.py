@@ -40,9 +40,34 @@ represented here; when it lands it becomes a fifth term, narrowing this further
 and never widening it.
 
 > local <=> the host declares a `local_model` AND the agent is in its allowlist
-> AND the run has not disabled it AND the endpoint answers.
+> AND the run has not disabled it AND no declared conflict is resident
+> AND the endpoint answers.
 
 Any term false -> cloud, silently and at no cost.
+
+## The mutex, and why only one of its directions is free
+
+Two consumers on one box, neither of which fits beside the other: llama-server
+under `--load-mode mlock` holds ~13.8 GB of *pinned* pages, and ComfyUI holds ~12
+GB of Windows commit charge for its whole lifetime. Pinned pages cannot be
+reclaimed by another process, so the second one to start does not run slowly — it
+runs out of commit charge, and on Windows that kills whichever process asks for
+memory next rather than the one that took it.
+
+The two directions look symmetric and are not:
+
+- **ComfyUI resident -> do not go local** is the conjunction term above
+  (`conflict_up`). Cloud is the ground state, so this direction is free by
+  construction and cannot fail a dispatch.
+- **The model resident -> an art card needs the RAM** cannot be answered that
+  way, because the art cards are the reason the GPU box exists and there is
+  nowhere else to send them. Something has to *stop*, which is `release_for`,
+  which is the only thing in this module that does. Its rule is the one
+  `stop_started_servers` already had: **stop what this run started, refuse what
+  it did not.**
+
+Both directions are configured from one `conflicts` entry per neighbour, because
+they are one fact seen from either end.
 
 ## Declared versus probed, and the line was drawn before this module
 
@@ -79,7 +104,9 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -128,6 +155,53 @@ SERVER_PORT = 4096
 SERVER_START_TIMEOUT = 30.0
 
 
+#: Minutes of no inference before a runner-started llama-server is reaped. Handed
+#: to the declared `watchdog`; that script has its own, longer-than-ComfyUI's
+#: default and the reason for it.
+WATCHDOG_IDLE_MINUTES = 30
+
+#: How long `release_for` waits for a stopped model's memory to come back, and
+#: how often it looks. Commit charge is returned by the kernel as the process
+#: tears down, not at the instant `taskkill` returns — and under `--load-mode
+#: mlock` there are ~13 GB of pinned pages to unpin, which is not instant.
+RELEASE_TIMEOUT = 60.0
+RELEASE_POLL = 2.0
+
+
+@dataclass(frozen=True)
+class Conflict:
+    """Another process on this box that cannot be resident beside the local model.
+
+    **Declared per machine, never inferred**, for `hosts.json`'s own
+    `declarative-because-of-initiative` reason: a probe answers "is ComfyUI
+    installed?", and an agent with initiative answers "no" by installing it. This
+    answers "what is this box not allowed to run at the same time", which is a
+    decision already made.
+
+    `port` identifies it, because a port has exactly one listener and an image
+    name has as many as there are copies running (doc 04 §9e). `required_by` is
+    the other direction of the same fact: the card capabilities whose work will
+    *start* this process, so the runner knows a `requires: gpu-box` card is about
+    to want the RAM Ornith is holding. Both halves of the mutex from one entry —
+    they are the same conflict seen from either end, and splitting them into two
+    config blocks is how they drift apart.
+
+    The framework hardcodes neither the port nor the slug: 8188 and `gpu-box` are
+    facts about Mithlond, and another project's box has neither.
+    """
+
+    name: str
+    port: int
+    required_by: tuple[str, ...] = ()
+    #: GB of headroom this process needs to start. Optional, and what makes
+    #: `release_for` able to *confirm* a release rather than assume one: a
+    #: stopped process is not the same as reclaimed commit charge, and under
+    #: `mlock` there is no graceful degradation to fall back on. Absent means the
+    #: release is confirmed only as far as "the process is gone", which the log
+    #: then says in as many words rather than implying more.
+    needs_gb: float = 0.0
+
+
 @dataclass(frozen=True)
 class LocalModel:
     """One machine's declared local model. Frozen — it is configuration, not state.
@@ -144,6 +218,29 @@ class LocalModel:
     launcher: str = ""
     context_limit: int = 0
     server_port: int = 0
+    conflicts: tuple[Conflict, ...] = ()
+    watchdog: str = ""
+    watchdog_idle_minutes: int = WATCHDOG_IDLE_MINUTES
+
+    @property
+    def model_port(self) -> int:
+        """The port llama-server listens on, read off `base_url`.
+
+        Derived rather than declared: it is already in `base_url`, and a second
+        field saying the same thing is a field that can disagree with the first.
+        """
+        return _port_of(self.base_url)
+
+    def conflicts_for(self, requires: str) -> tuple[Conflict, ...]:
+        """The declared conflicts a card with this `requires:` will provoke.
+
+        Empty for every card on a machine that declares no conflicts, which is
+        every machine but the one this was written for — so the boundary check
+        costs nothing where it does not apply.
+        """
+        if not requires:
+            return ()
+        return tuple(c for c in self.conflicts if requires in c.required_by)
 
     @property
     def probe_url(self) -> str:
@@ -227,6 +324,11 @@ def local_model(root: Path) -> LocalModel | None:
         server_port = int(block.get("server_port", 0) or 0)
     except (TypeError, ValueError):
         server_port = 0
+    try:
+        idle_minutes = int(block.get("watchdog_idle_minutes", 0)
+                           or WATCHDOG_IDLE_MINUTES)
+    except (TypeError, ValueError):
+        idle_minutes = WATCHDOG_IDLE_MINUTES
     return LocalModel(
         base_url=base_url,
         server_port=server_port,
@@ -235,7 +337,53 @@ def local_model(root: Path) -> LocalModel | None:
         runtime=str(block.get("runtime", "opencode") or "opencode"),
         launcher=str(block.get("launcher", "") or ""),
         context_limit=context_limit,
+        conflicts=_conflicts(block.get("conflicts", [])),
+        watchdog=str(block.get("watchdog", "") or ""),
+        watchdog_idle_minutes=idle_minutes,
     )
+
+
+def _conflicts(declared: object) -> tuple[Conflict, ...]:
+    """The `conflicts` list, parsed. A malformed entry is **dropped, not raised**.
+
+    Same reasoning as `local_model`'s: this block is hand-edited per machine and
+    no gate validates it, so a typo must cost the machine its mutex rather than
+    its night. That is the one place the module's "every failure is cloud" rule
+    does not straightforwardly apply — a dropped conflict makes local *more*
+    available, not less — so it is stated rather than left to be noticed:
+
+    **A conflict that fails to parse is a conflict that is not enforced.** The
+    port is the required field and the reason: an entry without one names a
+    process nothing can find, and a mutex that cannot identify its other half is
+    worse than no mutex, because it reads in a log as though it were guarding
+    something.
+    """
+    if not isinstance(declared, list):
+        return ()
+    out: list[Conflict] = []
+    for entry in declared:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            port = int(entry.get("port", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if port <= 0:
+            continue
+        required_by = entry.get("required_by", [])
+        if not isinstance(required_by, list):
+            required_by = []
+        try:
+            needs_gb = float(entry.get("needs_gb", 0) or 0)
+        except (TypeError, ValueError):
+            needs_gb = 0.0
+        out.append(Conflict(
+            name=str(entry.get("name", "") or f"port {port}"),
+            port=port,
+            required_by=tuple(str(r) for r in required_by),
+            needs_gb=max(0.0, needs_gb),
+        ))
+    return tuple(out)
 
 
 def permits(local: LocalModel | None, agent: str) -> bool:
@@ -269,6 +417,49 @@ def reachable(local: LocalModel | None, timeout: float = PROBE_TIMEOUT) -> bool:
         return False
 
 
+def port_listening(port: int, timeout: float = PROBE_TIMEOUT) -> bool:
+    """Whether anything at all holds `127.0.0.1:port` right now.
+
+    A TCP connect rather than an HTTP request, because the question is "is that
+    process resident", not "is it healthy". ComfyUI answers `/queue` only once it
+    has finished loading its models — and it is holding the ~12 GB the whole time
+    it loads, which is exactly the window a health check would call "not up" and
+    dispatch a local card into.
+
+    Every failure is `False`, which here means *no conflict detected* — so a
+    broken probe makes local more available rather than less. That is the
+    inversion `_conflicts` flags, and it is why this is a connect that can only
+    fail by the port genuinely refusing.
+    """
+    if port <= 0:
+        return False
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except (OSError, ValueError, TimeoutError):
+        return False
+
+
+def conflict_up(local: LocalModel | None) -> Conflict | None:
+    """The first declared conflict that is resident right now, or `None`.
+
+    The cheap half of the mutex, and the one the note that asked for this called
+    "free by construction": ComfyUI being up makes the local runtime unavailable,
+    and unavailable resolves to `CLOUD`, which is what every card did before this
+    module existed. It cannot fail a dispatch — there is no configuration in
+    which this term turns a card into a failure rather than a cloud run.
+
+    Both directions of the mutex live in `Conflict`, but only this one is
+    symmetric-and-free. The other (`release_for`) has to *stop* something.
+    """
+    if local is None:
+        return None
+    for conflict in local.conflicts:
+        if port_listening(conflict.port):
+            return conflict
+    return None
+
+
 def resolve(root: Path, agent: str, *, enabled: bool = True,
             probe: bool = True) -> str:
     """`CLOUD` or `LOCAL` for one dispatch. Never raises.
@@ -293,12 +484,17 @@ def resolve(root: Path, agent: str, *, enabled: bool = True,
 
     `probe=False` answers the *declared* question alone — "would this be eligible
     if the server were up" — for the panel's row chips, which render many rows per
-    page load and must not open a socket per row.
+    page load and must not open a socket per row. The conflict check is part of
+    the probed half for the same reason: whether ComfyUI happens to be up is a
+    fact about this instant, not about what the machine is configured to do, and
+    a row chip that flickered with it would be reporting the wrong question.
     """
     if not enabled:
         return CLOUD
     local = local_model(root)
     if not permits(local, agent):
+        return CLOUD
+    if probe and conflict_up(local) is not None:
         return CLOUD
     if probe and not reachable(local):
         return CLOUD
@@ -596,10 +792,70 @@ def ensure_model_server(local: LocalModel | None,
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if reachable(local):
-            _STARTED_PORTS.add(_port_of(local.base_url))
+            port = _port_of(local.base_url)
+            _STARTED_PORTS.add(port)
+            start_watchdog(local, port)
             return True
         time.sleep(2.0)
     return False
+
+
+def start_watchdog(local: LocalModel, port: int) -> bool:
+    """Start the declared idle watchdog for a server **this process just started**.
+
+    `comfy_server_teardown` enforces the same bargain for ComfyUI by reading the
+    instruction docs: a document that launches the server must also start the
+    watchdog, because the pair was split once and nothing noticed for a month.
+    Here the launcher is not a document — it is this function — so the bargain is
+    kept by construction instead, and there is nothing for a gate to read. That is
+    the better version of the same guarantee, and it is why no gate was written
+    for it (`.ai/CLAUDE.md`: a gate is earned by an observed failure).
+
+    **Only ever for a server we started**, which is the caller's invariant and not
+    one this function can check — `ensure_model_server` calls it on exactly the
+    path that adds the port to `_STARTED_PORTS`. A hand-started llama-server gets
+    no watchdog, because a script that reaps the maintainer's own session after
+    half an hour of them thinking is a worse failure than the one being prevented
+    (Karel, 2026-09-19).
+
+    `--pid` binds it to this listener, so a server restarted on the same port
+    later tonight is not reaped by its predecessor's watchdog. Failure to start it
+    is logged nowhere and returns `False`: the server is up and the card can run,
+    and refusing a working dispatch because its janitor did not start would trade
+    a real capability for a tidiness the end-of-run teardown already provides.
+    """
+    if not local.watchdog or not Path(local.watchdog).is_file():
+        return False
+    pid = _pid_on_port(port)
+    if pid <= 0:
+        return False
+    log_path = Path(local.launcher).parent / "llama_idle_watchdog.log" \
+        if local.launcher else Path(local.watchdog).with_suffix(".log")
+    try:
+        # The watchdog's own log is the "a human can read it the morning after"
+        # half of this — a file, not a console nobody was watching at 4 AM. Same
+        # shape as the ComfyUI watchdog's `-RedirectStandardOutput`.
+        # Binary append: this handle is never written to from here, only handed
+        # to the child as its stdout, so text mode would buy newline translation
+        # and an encoding for a stream this process does not touch. The watchdog
+        # flushes its own lines.
+        handle = open(log_path, "ab")  # noqa: SIM115
+    except OSError:
+        handle = subprocess.DEVNULL  # type: ignore[assignment]
+    try:
+        # gate-ok(subprocess_result_checked): a watchdog that returns has already
+        # done its job or given up, and either way this call is over by then.
+        # There is no readiness signal to poll and nothing downstream depends on
+        # it having started, which is the whole reason its failure is tolerated.
+        subprocess.Popen(
+            [sys.executable, local.watchdog,
+             "--port", str(port),
+             "--pid", str(pid),
+             "--idle-minutes", str(local.watchdog_idle_minutes)],
+            stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    return True
 
 
 def _port_of(url: str) -> int:
@@ -623,30 +879,158 @@ def stop_started_servers() -> list[int]:
     touched. Failures are swallowed: a teardown that raises would turn a finished
     night into a failed one, and the worst case is a process someone can close.
     """
-    stopped = []
-    for port in sorted(_STARTED_PORTS):
-        pid = _pid_on_port(port)
-        if pid <= 0:
-            continue
-        try:
-            if os.name == "nt":
-                # /T so the launcher's child dies with it: `run_ornith.bat` is a
-                # cmd wrapper, and killing only the wrapper orphans the server.
-                done = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                                      capture_output=True, timeout=30, check=False)
-                # A non-zero code here means the process was already gone — which
-                # is the outcome we wanted — but it is *not* a port this call
-                # stopped, and reporting it as one would put a line in the run log
-                # claiming an action nobody took.
-                if done.returncode != 0:
-                    continue
-            else:
-                os.kill(pid, signal.SIGTERM)
-        except (OSError, subprocess.SubprocessError, ValueError):
-            continue
-        stopped.append(port)
+    stopped = [port for port in sorted(_STARTED_PORTS) if _stop_port(port)]
     _STARTED_PORTS.clear()
     return stopped
+
+
+def _stop_port(port: int) -> bool:
+    """Stop whatever is listening on `port`. True only if this call did it.
+
+    **The one kill in this module**, shared by the end-of-run teardown and the
+    mid-night release so they cannot drift into two answers. Neither caller may
+    reach it for a port outside `_STARTED_PORTS`; that check belongs to them
+    because they have different things to say about refusing.
+    """
+    pid = _pid_on_port(port)
+    if pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            # /T so the launcher's child dies with it: `run_ornith.bat` is a
+            # cmd wrapper, and killing only the wrapper orphans the server.
+            done = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                                  capture_output=True, timeout=30, check=False)
+            # A non-zero code here means the process was already gone — which
+            # is the outcome we wanted — but it is *not* a port this call
+            # stopped, and reporting it as one would put a line in the run log
+            # claiming an action nobody took.
+            return done.returncode == 0
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+
+
+def release_for(root: Path, requires: str,
+                log: Callable[[str], None] | None = None) -> bool:
+    """Free the box for a card that `requires:` something the local model blocks.
+
+    The hard half of the mutex, and the only place in this module that *stops*
+    anything mid-night. `conflict_up` is free because its answer is "run this card
+    on cloud"; there is no equivalent here — the art cards are the reason the GPU
+    box exists, so "run it somewhere else" is not an option and something has to
+    give up the RAM.
+
+    Returns whether the card may now be dispatched. **False is never a failure**:
+    the caller logs it and moves to the next card, which stays in `tasks/` and is
+    picked up by the next run, exactly as a card whose capability this host does
+    not declare already behaves.
+
+    ## Stop what you started; refuse what you did not
+
+    `_STARTED_PORTS` is the whole rule, and it is the same one the end-of-run
+    teardown uses — this extends it from the end of the night to a boundary inside
+    it, rather than introducing a new kind of initiative. A llama-server the
+    maintainer started, because they are *using* it, is not the runner's to kill
+    at 4 AM; `hosts.json`'s `declarative-because-of-initiative` comment is about
+    exactly this class of thing, and an unattended process taking a machine-wide
+    action on a human's running work is the version of it that actually costs
+    something. So the runner skips the card and says why (Karel, 2026-09-19).
+
+    ## A stopped process is not reclaimed memory
+
+    Under `--load-mode mlock` the model's ~13 GB are *pinned*, which the stack doc
+    puts as trading graceful degradation for a predictable ceiling: they cannot be
+    paged out for whoever needs them next, so a ComfyUI that starts too early does
+    not run slowly, it runs out of commit charge. And `mlock` may silently not
+    have been taken at all — Windows `VirtualLock` needs a privilege it can fall
+    back from without logging anything. Both are reasons the confirmation below
+    reads *measured headroom* (`suite.available_memory_gb`, the scarcer of free
+    physical memory and commit headroom) rather than the footprint the model was
+    supposed to have.
+    """
+    say = log or (lambda _msg: None)
+    local = local_model(root)
+    if local is None:
+        return True
+    blocked = local.conflicts_for(requires)
+    if not blocked:
+        return True
+    port = local.model_port
+    if port <= 0 or not port_listening(port):
+        return True
+
+    names = ", ".join(c.name for c in blocked)
+    if port not in _STARTED_PORTS:
+        say(f"    {local.model} is resident on port {port} and this run did not "
+            f"start it, so it is not this run's to stop — a card needing {names} "
+            f"cannot have the memory tonight. Stop it by hand and re-run, or let "
+            f"its idle watchdog reap it.")
+        return False
+
+    say(f"    stopping {local.model} on port {port} — the next card needs {names}")
+    if not _stop_port(port):
+        say(f"    port {port} could not be stopped; skipping this card rather than "
+            f"dispatching it into a box that has no room for it")
+        return False
+    _STARTED_PORTS.discard(port)
+    return _await_headroom(port, max((c.needs_gb for c in blocked), default=0.0),
+                           names, say)
+
+
+def _await_headroom(port: int, needs_gb: float, names: str,
+                    say: Callable[[str], None]) -> bool:
+    """Wait for a stopped server's memory to actually come back.
+
+    Two questions, and the second is the one the note that asked for this cared
+    about: has the process gone, and is the headroom it held available to whoever
+    needs it next. The first alone would be the assumption `mlock` makes wrong.
+
+    `needs_gb` of 0 means nothing declared how much room it wants, so this
+    confirms only the process. That is a weaker guarantee and the log says so
+    instead of implying the stronger one.
+    """
+    from nightshift import suite
+
+    deadline = time.monotonic() + RELEASE_TIMEOUT
+    # Look before checking the clock, both times below. A budget that has already
+    # run out is not a reason to ignore a port that is *already* free — and on a
+    # box fast enough to tear the process down inside one poll, the clock-first
+    # spelling reports a failure that did not happen.
+    while True:
+        if not port_listening(port):
+            break
+        if time.monotonic() >= deadline:
+            say(f"    port {port} is still held {RELEASE_TIMEOUT:.0f}s after "
+                f"being stopped; skipping this card")
+            return False
+        time.sleep(RELEASE_POLL)
+
+    if needs_gb <= 0:
+        say(f"    port {port} is free. Nothing declares how much memory {names} "
+            f"needs, so this is confirmed only as far as the process being gone")
+        return True
+
+    while True:
+        free = suite.available_memory_gb()
+        if free is None:
+            say(f"    port {port} is free, but this platform reports no memory "
+                f"figure, so the headroom {names} needs ({needs_gb:.1f} GB) is "
+                f"unconfirmed — dispatching anyway, which is what happened before "
+                f"this check existed")
+            return True
+        if free >= needs_gb:
+            say(f"    {free:.1f} GB available, {names} needs {needs_gb:.1f} GB — "
+                f"released")
+            return True
+        if time.monotonic() >= deadline:
+            say(f"    {free:.1f} GB available {RELEASE_TIMEOUT:.0f}s after "
+                f"stopping the model, and {names} needs {needs_gb:.1f} GB. "
+                f"Something else on this box is holding it; skipping this card "
+                f"rather than OOM-killing the dispatch.")
+            return False
+        time.sleep(RELEASE_POLL)
 
 
 def worker_argv(local: LocalModel, agent: str, session: str = "",
@@ -742,18 +1126,24 @@ def prepare(root: Path, agent: str, tree: Path, *, enabled: bool = True,
     The chore batch is not an edge case here — `chore-thread` is one of the two
     allowlisted charters, so it is the path most likely to take the local branch.
 
-    Seven terms, checked in cost order — declared facts first, because a laptop
+    Eight terms, checked in cost order — declared facts first, because a laptop
     with no host block must reach `CLOUD` without opening a socket or starting
     anything:
 
     1. the run has not disabled it (`--no-local`, or the panel toggle)
     2. the host declares a `local_model`
     3. the agent is in its allowlist (§7)
-    4. llama-server is up, or the declared `launcher` can bring it up
-    5. OpenCode knows this charter (a wrong `--agent` runs the default agent
+    4. no declared conflict is resident — ComfyUI being up means this box has no
+       room for a 13.8 GB pinned model, and the card runs on cloud
+    5. llama-server is up, or the declared `launcher` can bring it up
+    6. OpenCode knows this charter (a wrong `--agent` runs the default agent
        *silently*, so this is asserted rather than assumed)
-    6. OpenCode's own server is up, or can be started
-    7. …and only then, `LOCAL`
+    7. OpenCode's own server is up, or can be started
+    8. …and only then, `LOCAL`
+
+    **Term 4 is before term 5 on purpose.** Both orders give the same answer, and
+    only this one gives it without first spending five minutes reading 13 GB off
+    disk into a box that has no room for it.
 
     Returns `(CLOUD, None)` for any false term, and **never raises**. The caller
     passes the pair straight to `run_producer`; a `None` model is what makes the
@@ -766,6 +1156,10 @@ def prepare(root: Path, agent: str, tree: Path, *, enabled: bool = True,
     if not permits(local, agent):
         return CLOUD, None
     assert local is not None  # `permits` is False for None
+    if (blocker := conflict_up(local)) is not None:
+        say(f"    local: {blocker.name} is resident on port {blocker.port} and "
+            f"cannot share this box with {local.model} — running on cloud")
+        return CLOUD, None
     if not ensure_model_server(local):
         say(f"    local: {local.model} is not answering at {local.base_url} and "
             f"{'no launcher is declared' if not local.launcher else 'the launcher did not bring it up'}"

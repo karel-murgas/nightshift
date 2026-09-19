@@ -8508,6 +8508,29 @@ def _work_queue(ctx: RunContext, args: argparse.Namespace, queue: Queue,
             index += 1
             continue
 
+        # The other direction of the local/GPU mutex (`runtimes.release_for`).
+        # A card whose `requires:` names work that needs the box's memory — an
+        # art or audio card on the ComfyUI machine — cannot start while a local
+        # model is resident holding 13.8 GB of pinned pages. The model is stopped
+        # here if this run started it, and the card is skipped if it did not,
+        # because the maintainer's own llama-server is not the runner's to kill.
+        #
+        # Between cards rather than inside `dispatch`, for the same reason the
+        # tier check above is: a card that cannot run must not have had a
+        # worktree cut or an attempt spent on it. It stays in `tasks/` and the
+        # next run picks it up, exactly like a capability this host lacks.
+        if not runtimes.release_for(work, candidate.card.requires, log=_log):
+            _log(f"  skipping {candidate.card.id} — the box cannot give it the "
+                 f"memory it needs right now")
+            # `note`, not `skipped`: that one *replaces* the selection-time list
+            # — one call per run, by contract — and appending here would erase
+            # the very thing the digest reads to explain a quiet night.
+            record.note(f"{candidate.card.id} was not dispatched: a local model "
+                        f"is resident, this run did not start it, and its memory "
+                        f"could not be released")
+            index += 1
+            continue
+
         # `Exception`, never a bare `except`: `KeyboardInterrupt` and
         # `SystemExit` are not this card's failure and must still end the
         # night — a Ctrl-C that filed an `## Error` against whatever card was
