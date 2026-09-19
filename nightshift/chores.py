@@ -72,7 +72,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import (board, gitmerge, manifest, run_record, runner, suite, textio,
+from nightshift import (board, gitmerge, manifest, run_record, runner, runtimes,
+                        suite, textio,
                         tiers, usage)
 from nightshift.runner import repo_root
 
@@ -457,6 +458,7 @@ def chore_agent(work: Path) -> str:
 
 
 def run_one(work: Path, card: board.Card, base: str, model: str, *,
+            allow_local: bool = True,
             card_budget: float, test_timeout: int,
             record: run_record.Record) -> tuple[Outcome, runner.Dispatch]:
     """Dispatch one chore and judge it on the gates plus the tests it can reach.
@@ -479,7 +481,7 @@ def run_one(work: Path, card: board.Card, base: str, model: str, *,
     out = _outcome_for(card)
     result = runner.dispatch(work, card, base, model, card_budget, test_timeout,
                              test_selector=suite.touched, worker=chore_agent(work),
-                             effort=chore_effort(work))
+                             effort=chore_effort(work), allow_local=allow_local)
 
     if result.outcome in ("limited", "blocked", "interrupted"):
         out.state, out.detail = "blocked", result.detail
@@ -882,6 +884,7 @@ def _now_iso() -> str:
 def execute(root: Path, *, limit: int = DEFAULT_BATCH, allow_paid: bool = False,
             card_budget: float = 0.0, test_timeout: int = 600,
             batch_test_timeout: int = BATCH_TEST_TIMEOUT_S,
+            allow_local: bool = True,
             now: dt.datetime | None = None) -> tuple[int, Batch]:
     """Run one batch end to end. Returns `(exit code, batch)`.
 
@@ -980,7 +983,7 @@ def execute(root: Path, *, limit: int = DEFAULT_BATCH, allow_paid: bool = False,
             cards[card.id] = card
             outcome, result = run_one(work, card, base, model,
                                       card_budget=card_budget, test_timeout=test_timeout,
-                                      record=record)
+                                      allow_local=allow_local, record=record)
             outcome.how_to_test = result.how_to_test
             batch.outcomes.append(outcome)
             _record_outcomes(record, batch, cards, model)
@@ -1022,6 +1025,15 @@ def execute(root: Path, *, limit: int = DEFAULT_BATCH, allow_paid: bool = False,
         if not record.data.get("complete"):
             record.stop("the batch ended without reaching its own end")
             record.finish(dispatched=len(record.data.get("dispatched", [])))
+        # Stop only the local servers *this process* started (`runtimes`
+        # records them; one the maintainer had running is never in that set).
+        # Bounding the lifetime to the batch is what keeps a ~13.8 GB pinned,
+        # non-reclaimable model from outliving it — the shape of
+        # `asset-generation-processes-dont-shut-down`, where two orphaned ComfyUI
+        # servers OOM-killed two dispatches days after the run that left them.
+        if stopped_ports := runtimes.stop_started_servers():
+            print(f"stopped the local server(s) this run started: "
+                  f"{', '.join(str(p) for p in stopped_ports)}")
         runner.release_lock(root)
 
 
@@ -1383,6 +1395,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="optional USD cap handed to each worker process")
     parser.add_argument("--test-timeout", type=int, default=600,
                         help="seconds allowed for one chore's own test slice")
+    parser.add_argument("--no-local", dest="local", action="store_false",
+                        help="run every chore on cloud for this batch, even on a "
+                             "machine that declares a local model. The batch's own "
+                             "copy of the runner's flag, and it matters here more "
+                             "than there: `chore-thread` is one of the charters a "
+                             "host allowlist is most likely to name, so the batch is "
+                             "the path most likely to take the local branch")
     args = parser.parse_args(argv)
 
     if hasattr(sys.stdout, "reconfigure"):
@@ -1391,7 +1410,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.plan:
         return execute(args.root or repo_root(), limit=args.limit,
                        allow_paid=args.allow_paid, card_budget=args.card_budget,
-                       test_timeout=args.test_timeout)[0]
+                       test_timeout=args.test_timeout, allow_local=args.local)[0]
 
     root = args.root or repo_root()
     # `--plan` must describe the batch `execute()` would run, which means reading the

@@ -112,13 +112,39 @@ GRACE_MINUTES = 2
 # TRANSIENT a service-side 429. Reopens in *seconds* — treating one as a session
 #           wall would throw away five hours of a good night over a hiccup, so it
 #           gets a short wait and does not count against `--sessions`.
+# CONTEXT   the *model's* context window filled, not the plan's usage window.
+#           04_local_runtime.md §5: structurally the same event as a usage wall —
+#           the work stops mid-card with a half-finished worktree — so it reuses
+#           the handover machinery wholesale, and structurally the *opposite* of
+#           one in every scheduling respect. Nothing reopens, so there is nothing
+#           to sleep for; no plan window closed, so it spends no session; and the
+#           right response is to dispatch again *immediately*, which is what
+#           `retry_now` says. The only thing that stops the retry loop is the
+#           pre-existing one: `NO_PROGRESS_STOP` consecutive resumes that leave
+#           the working tree byte-identical. Karel, 2026-09-19: *"Runner should
+#           keep an attempt and dispatch Ornith again — if he is making
+#           progress."* That proviso is `_limit_reached`'s `progressed` flag and
+#           needed no new mechanism.
 SESSION = "session"
 WEEKLY = "weekly"
 MONTHLY = "monthly"
 TRANSIENT = "transient"
+CONTEXT = "context"
 
 # How long to wait out a TRANSIENT wall that named no retry time.
 TRANSIENT_MINUTES = 5
+
+#: Compactions in one dispatch that mean "hand over" rather than "carry on".
+#:
+#: §5 sets the number and the reasoning: *"One compaction on a card that is nearly
+#: done is a good trade. A card that compacts twice is a card that should have
+#: handed over, and the second compaction is the signal to do it."* Compaction is
+#: free and automatic under OpenCode, but it invalidates the server's prefix cache
+#: — a cold 128k refill is ~6 minutes at the measured 376 tok/s — and the tool's
+#: own warning is that repeated compaction reduces accuracy. So the second one is
+#: read as the wall it is about to become, while the worktree still holds work
+#: worth handing over.
+COMPACTIONS_BEFORE_HANDOVER = 2
 
 # Matched case-insensitively against stdout+stderr, and only past the
 # precondition in `detect`. Grow this list from `.ai/runs/` evidence when a wall
@@ -225,12 +251,46 @@ _CLOCK = re.compile(
 )
 _WEEKLY_WORD = re.compile(r"\bweek(?:ly)?\b", re.IGNORECASE)
 
+#: The model's context window overflowing, as the server says it.
+#:
+#: The first entry is `llama-server`'s own wording, measured verbatim in
+#: `04_local_runtime.md` §9a: *"request (131183 tokens) exceeds the available
+#: context size (131072 tokens)"*. That dispatch died at 38 minutes with no
+#: compaction and no verdict, and §9a named the reason the CLI could not survive
+#: it — *"the CLI has no compaction path for a 400 from the endpoint, so it does
+#: not degrade, it dies"*. Recognising the sentence is what turns that death into
+#: a handover.
+#:
+#: The rest are the same condition from the other servers a local endpoint may be:
+#: OpenAI-compatible wrappers say "maximum context length", and Anthropic-shaped
+#: ones "prompt is too long". Listed rather than generalised to a bare "context"
+#: for the reason the module docstring gives about every phrase list here — a word
+#: that common appears in ordinary prose and would match a worker *discussing* its
+#: context window.
+_CONTEXT_OVERFLOW = re.compile(
+    r"exceeds the available context size"
+    r"|maximum context length"
+    r"|context (?:window|length|size) (?:has been )?(?:exceeded|full)"
+    r"|prompt is too long",
+    re.IGNORECASE)
+
+#: A compaction event in OpenCode's `--format json` stream.
+#:
+#: Read off a real run rather than the config schema (§9d): the stream carries
+#: `compaction_continue: true` on the turn where the session compacted and kept
+#: going. This is the signal §11's open question 4 asked for — *"a compaction
+#: event in the stream, or a turn-over-turn input-token threshold"* — and it is
+#: the first of the two because it is a fact the runtime states rather than a
+#: threshold someone has to pick.
+_COMPACTION = re.compile(
+    r'"compaction_continue"\s*:\s*true|"type"\s*:\s*"(?:session\.)?compact(?:ion|ed)?"')
+
 
 @dataclass(frozen=True)
 class Wall:
     """One recognised usage limit. Frozen — it is evidence, not state."""
 
-    scope: str                      # SESSION | WEEKLY | MONTHLY | TRANSIENT
+    scope: str                      # SESSION | WEEKLY | MONTHLY | TRANSIENT | CONTEXT
     resets_at: dt.datetime | None   # None when the CLI did not say
     evidence: str                   # the matched line, for the run log and the card
 
@@ -242,14 +302,36 @@ class Wall:
         because what the runner is waiting for is the session window reopening —
         past that the subscription's own allowance covers the work and the
         overage the cap governs is not needed. See the scope table above.
+
+        CONTEXT is `False` and must never be *read* as False by the scheduler:
+        "waiting would idle until morning" is the right conclusion for a weekly
+        cap and exactly the wrong one here, where the answer is to retry at once.
+        `retry_now` is checked first for that reason.
         """
         return self.scope in (SESSION, MONTHLY, TRANSIENT)
 
     @property
     def spends_a_session(self) -> bool:
         """Whether this counts against `--sessions`. A 429 does not — it is a
-        hiccup in the window, not the window closing."""
-        return self.scope != TRANSIENT
+        hiccup in the window, not the window closing. Neither does a CONTEXT
+        wall: the plan's window never closed, and charging a night's session for
+        a local model filling its own 128k would end a run over something that
+        cost no tokens at all."""
+        return self.scope not in (TRANSIENT, CONTEXT)
+
+    @property
+    def retry_now(self) -> bool:
+        """Whether the right response is another dispatch immediately, with no
+        sleep and no window accounting.
+
+        True only for CONTEXT. Every other scope is a statement about a *clock* —
+        some window reopens at some time — and the scheduler's job is to decide
+        whether to wait for it. A context wall names no clock: the window that
+        filled is the model's own, a fresh session starts it empty, and the work
+        already on disk is what the next dispatch continues from. Waiting buys
+        nothing; retrying buys the whole remaining card.
+        """
+        return self.scope == CONTEXT
 
 
 def _epoch(text: str) -> dt.datetime | None:
@@ -416,6 +498,55 @@ def _error_terminal(text: str) -> dict | None:
     return None
 
 
+def _context_line(text: str) -> str | None:
+    """The line saying the model's context overflowed, or `None`.
+
+    Returns the matched line rather than a bool because it is the only account a
+    6 AM reader gets of why the card handed itself over, and the server's own
+    sentence carries the two numbers that make it obvious (*"request (131183
+    tokens) exceeds the available context size (131072 tokens)"*).
+    """
+    if not _CONTEXT_OVERFLOW.search(text):
+        return None
+    line = next((raw.strip() for raw in text.splitlines()
+                 if _CONTEXT_OVERFLOW.search(raw)), "")
+    return (line or "the model's context window overflowed")[:200]
+
+
+def compactions(text: str) -> int:
+    """How many times the session compacted during this dispatch."""
+    return len(_COMPACTION.findall(text))
+
+
+def context_pressure(text: str,
+                     threshold: int = COMPACTIONS_BEFORE_HANDOVER) -> Wall | None:
+    """A CONTEXT wall when the session compacted its way to the edge, else `None`.
+
+    **Deliberately not folded into `detect`, and the reason is the precondition
+    `detect` rests on.** That function answers "did this run hit a wall" from the
+    text alone, and it is safe to do so because it first refuses every clean run
+    — a zero exit with no error terminal is never a wall, whatever prose it
+    contains. Compaction breaks that: under OpenCode a session that fills its
+    window does not error, it compacts and keeps going (§9d, `compaction_continue:
+    true`), so the pressure is visible on runs that exit zero. Reading it inside
+    `detect` would mean either dropping the precondition — which is what makes a
+    phrase list safe at all — or missing the case entirely.
+
+    So the caller asks this **only when there is no usable verdict**. A dispatch
+    that compacted twice and still finished its card is a good trade that paid
+    off, not a wall; one that compacted twice and produced nothing is a worker
+    about to lose its work, and the worktree it leaves behind is the handover. The
+    verdict is the thing that tells those apart and only the dispatch site has it.
+    """
+    count = compactions(text)
+    if count < threshold:
+        return None
+    return Wall(
+        scope=CONTEXT, resets_at=None,
+        evidence=f"the session compacted {count} times and finished without a "
+                 f"verdict — handing the worktree over rather than compacting again")
+
+
 def detect(returncode: int, stdout: str = "", stderr: str = "",
            now: dt.datetime | None = None) -> Wall | None:
     """The wall this CLI run hit, or `None` if it did not hit one.
@@ -428,6 +559,16 @@ def detect(returncode: int, stdout: str = "", stderr: str = "",
     terminal = _error_terminal(text)
     if returncode == 0 and terminal is None:
         return None
+
+    # Before the usage readings, because the two are told apart by *which* window
+    # filled and nothing else about the failure says so. A context overflow is a
+    # 400 from the model server; a usage wall is a 429 from the service. Reading
+    # the first as the second would sleep five hours for a window that never
+    # closed and then retry into the same overflow — and reading it as a plain
+    # non-zero exit, which is what happened before this branch existed, charges
+    # the card an attempt and an `## Error` for the model running out of room.
+    if (line := _context_line(text)) is not None:
+        return Wall(scope=CONTEXT, resets_at=None, evidence=line)
 
     # A 429 the CLI reported in its own status field *is* "too many requests",
     # whatever prose came with it. Reading it here rather than adding another

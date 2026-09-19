@@ -170,9 +170,11 @@ def _reset_account():
     same shape of state for the same reason."""
     panel._ACCOUNT = panel.AccountState()
     panel._TIER = panel.TierChoice()
+    panel._LOCAL = panel.LocalChoice()
     yield
     panel._ACCOUNT = panel.AccountState()
     panel._TIER = panel.TierChoice()
+    panel._LOCAL = panel.LocalChoice()
 
 
 # ------------------------------------------------------ no logic in the server
@@ -4996,3 +4998,112 @@ def test_a_card_with_only_the_diff_reviewers_verdict_reads_as_no_checker_verdict
 
     assert "no checker verdict on disk" in text
     assert "the diff is fine" not in text
+
+
+# ------------------------------------------- the local-model toggle, and its rule
+#
+# The control that deliberately breaks `TierChoice`'s "nothing here reaches the
+# runner". What makes that safe is not a promise — it is the **asymmetry**: the
+# toggle may always force cloud, and may only permit local for a charter already
+# in the host allowlist. So the tests that matter are the ones that try to use it
+# as a grant.
+
+_LOCAL_BLOCK = {
+    "runtime": "opencode",
+    "base_url": "http://127.0.0.1:8082/v1",
+    "model": "llamacpp-ornith/ornith-1.5-35b-a3b",
+    "agents": ["chore-thread"],
+}
+
+
+def _declare_local(root: Path, block=_LOCAL_BLOCK) -> Path:
+    """Give the repo a machine that declares a local model, via the untracked
+    per-machine override `host_config` prefers — so the test does not depend on
+    what the box running it is called."""
+    entry = {"capabilities": []}
+    if block is not None:
+        entry["local_model"] = block
+    (root / ".ai").mkdir(parents=True, exist_ok=True)
+    (root / ".ai" / "host.json").write_text(json.dumps(entry), encoding="utf-8")
+    return root
+
+
+def test_the_toggle_defaults_to_on_which_grants_nothing(tmp_path):
+    """`on` defaults to `True` and that is not "local by default".
+
+    It means *this control is not the thing saying no*. With no host block, the
+    default-on toggle still resolves every charter to cloud — which is the whole
+    reason the default is safe.
+    """
+    root = _repo(tmp_path)
+    assert panel.local_enabled() is True
+    assert panel.effective_runtime(root, "chore-thread") == "cloud"
+
+
+def test_the_toggle_can_always_force_cloud(tmp_path):
+    root = _declare_local(_repo(tmp_path))
+    assert panel.effective_runtime(root, "chore-thread") == "local"
+    panel.select_local(False)
+    assert panel.effective_runtime(root, "chore-thread") == "cloud"
+
+
+def test_the_toggle_cannot_permit_an_unallowlisted_charter(tmp_path):
+    """The acceptance criterion in one line: *attempting to turn it on for a
+    `worker:` absent from the allowlist has no effect.*
+
+    There is no "more on" than this — `select_local(True)` is the strongest
+    request the UI can make — and it still does not reach a charter §7 has not
+    admitted, because the allowlist is checked after the toggle and nothing skips
+    it.
+    """
+    root = _declare_local(_repo(tmp_path))
+    panel.select_local(True)
+    for refused in ("stale-hunter", "classifier", "code-reviewer", "triage"):
+        assert panel.effective_runtime(root, refused) == "cloud"
+
+
+def test_the_toggle_renders_only_where_a_local_model_is_declared(tmp_path):
+    """On a machine with no block there is no setting to offer — the answer is
+    the absence of the block, and a disabled tick would suggest otherwise."""
+    root = _repo(tmp_path)
+    ctx = panel.read_context(root)
+    assert panel._local_html(ctx) == ""
+
+
+def test_the_toggle_names_the_charters_and_the_model(tmp_path):
+    """Karel, 2026-09-19: *"With the information about when it is used."*
+
+    "Local is on" does not mean "this card runs local", so the control has to say
+    which charters it covers — otherwise it reads as broken the first time an
+    ordinary card runs on cloud.
+    """
+    root = _declare_local(_repo(tmp_path))
+    html = panel._local_html(panel.read_context(root))
+    assert "Use the local model" in html
+    assert "chore-thread" in html
+    assert "ornith" in html
+    # and it must say the part that is easy to assume away
+    assert "inline work is always Claude" in html.replace("&#x27;", "'")
+
+
+def test_the_row_chip_appears_only_for_a_card_that_would_go_local(tmp_path):
+    """A `local` chip is news; a `cloud` chip on every other row would be noise
+    stating the ground state forty times a page."""
+    root = _declare_local(_repo(tmp_path))
+    _card(root, "tasks", "chore-card")
+    allowed = board.find(root, "chore-card")
+    allowed.fields["worker"] = "chore-thread"
+    assert "local" in panel._local_chip(root, allowed)
+
+    _card(root, "tasks", "other-card")
+    other = board.find(root, "other-card")
+    other.fields["worker"] = "stale-hunter"
+    assert panel._local_chip(root, other) == ""
+
+
+def test_the_row_chip_is_silent_for_a_card_with_no_worker(tmp_path):
+    root = _declare_local(_repo(tmp_path))
+    _card(root, "tasks", "no-worker")
+    card = board.find(root, "no-worker")
+    card.fields["worker"] = "none"
+    assert panel._local_chip(root, card) == ""
