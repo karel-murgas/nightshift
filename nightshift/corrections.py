@@ -312,6 +312,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     entries, _ = parse(root)
+    archived, _ = parse_archive(root)
+    entries = entries + archived
     if args.since:
         entries = [e for e in entries if e.date >= args.since]
 
