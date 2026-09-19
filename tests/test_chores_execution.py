@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import board, chores, runner, suite, usage
+from nightshift import board, chores, run_record, runner, suite, usage
 
 import _fixtures
 
@@ -541,15 +541,17 @@ def test_the_kill_switch_stops_the_batch_and_is_cleared_for_the_next_call(
     root = _repo(tmp_path, ("a", "review", "x"), ("b", "review", "x"))
     worker = _Worker(edits={"a": _touch("a"), "b": _touch("b")}).install(monkeypatch)
 
-    real_run_one = chores.run_one
+    # `BatchLanding.settle` is the per-item hook `run_one` used to be, since the
+    # batch and the night were given one dispatch loop.
+    real_settle = chores.BatchLanding.settle
 
-    def then_stop(work, card, *args, **kwargs):
-        out = real_run_one(work, card, *args, **kwargs)
+    def then_stop(self, ctx, candidate, result, model):
+        out = real_settle(self, ctx, candidate, result, model)
         (root / runner.STOP_FILE).parent.mkdir(parents=True, exist_ok=True)
         (root / runner.STOP_FILE).write_text("stop\n", encoding="utf-8")
         return out
 
-    monkeypatch.setattr(chores, "run_one", then_stop)
+    monkeypatch.setattr(chores.BatchLanding, "settle", then_stop)
     _, batch = chores.execute(root)
 
     assert worker.dispatched == ["a"]
@@ -812,7 +814,12 @@ def test_nothing_merges_without_a_review(tmp_path, monkeypatch):
     _Worker(edits={"a": _touch("a")}, review={}).install(monkeypatch)
     code, _ = chores.execute(root)
     assert code == 4
-    assert board.find(root, "a").lane == "review"
+    # The batch leaves it in `review/` — and a run now drains the reviews it left
+    # owed, chores included, so the same unreachable reviewer is asked once more
+    # for this card's own diff, cannot conclude either, and it comes to rest in
+    # `blocked/`. What this test is about is what did *not* happen to it: no green
+    # suite merged it unreviewed.
+    assert board.find(root, "a").lane == "blocked"
 
 
 # ------------------------------------------------------------------ red batches
@@ -920,3 +927,138 @@ def test_the_bisect_names_the_culprit_wherever_it_sits_and_terminates(size):
         named, probes = _scripted_bisect(order, culprit)
         assert named == culprit, (size, culprit)
         assert probes <= size, (size, culprit, probes)
+
+
+# ------------------------------------------------------- one run, both queues
+#
+# The chore batch and the night used to be two commands with two dispatch spines.
+# They are one run now, with `--queue` choosing which work it takes on, so what
+# these cover is the seam: the order, the isolation of each mode, and the fact
+# that one stop ends the whole run rather than one queue of it.
+
+#: A `tasks/` card that is *not* a chore, so `runner.select` takes it and
+#: `chores.select` does not. `## Approach` is the one section `card_schema`
+#: relaxes for a chore and requires of everything else.
+TASK_CARD = CARD.replace("kind: chore\n", "").replace(
+    "## Acceptance", "## Approach\n\nDo the obvious thing.\n\n## Acceptance")
+
+
+def _task(root: Path, card_id: str) -> Path:
+    (root / "Board" / "tasks" / f"{card_id}.md").write_text(
+        TASK_CARD.format(id=card_id, title=f"{card_id} task", verify="review",
+                         surface="x"), encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", f"seed task {card_id}")
+    return root
+
+
+def _run(root: Path, *argv: str) -> int:
+    return runner.run(root, runner._parser(root).parse_args(
+        ["--base", "development_team", *argv]))
+
+
+def test_both_works_the_chore_batch_before_the_task_queue(tmp_path, monkeypatch):
+    """Chores first, and the order is load-bearing rather than aesthetic.
+
+    `_land_the_batch` refuses to review a batch whose phase 1 stopped early, so a
+    task queue that ran first and spent the window would leave every chore handed
+    over unreviewed — worse than running the two as separate commands, which is the
+    one outcome unifying them had to avoid.
+    """
+    root = _repo(tmp_path, ("a", "review", "x"))
+    _task(root, "t")
+    worker = _Worker(edits={"a": _touch("a"), "t": _touch("t")}).install(monkeypatch)
+
+    assert _run(root, "--queue", "both") == 0
+    assert worker.dispatched == ["a", "t"]
+
+
+def test_both_is_the_default(tmp_path, monkeypatch):
+    """Asked for by name (Karel, 2026-09-19): *"I would also like to be able to run
+    both during one night."* A night that ignored the chore board by default would
+    make the unification something you have to remember to ask for."""
+    root = _repo(tmp_path, ("a", "review", "x"))
+    _task(root, "t")
+    worker = _Worker(edits={"a": _touch("a"), "t": _touch("t")}).install(monkeypatch)
+
+    assert _run(root) == 0
+    assert worker.dispatched == ["a", "t"]
+
+
+def test_queue_tasks_leaves_the_chore_board_alone(tmp_path, monkeypatch):
+    root = _repo(tmp_path, ("a", "review", "x"))
+    _task(root, "t")
+    worker = _Worker(edits={"a": _touch("a"), "t": _touch("t")}).install(monkeypatch)
+
+    assert _run(root, "--queue", "tasks") == 0
+    assert worker.dispatched == ["t"]
+    assert board.find(root, "a").lane == "tasks", "the chore was not touched"
+
+
+def test_queue_chores_leaves_the_task_queue_alone(tmp_path, monkeypatch):
+    root = _repo(tmp_path, ("a", "review", "x"))
+    _task(root, "t")
+    worker = _Worker(edits={"a": _touch("a"), "t": _touch("t")}).install(monkeypatch)
+
+    assert _run(root, "--queue", "chores") == 0
+    assert worker.dispatched == ["a"]
+    assert board.find(root, "t").lane == "tasks", "the task was not touched"
+
+
+def test_a_stop_in_the_chore_queue_ends_the_run_rather_than_the_queue(
+        tmp_path, monkeypatch):
+    """One `Tally` for the whole run, which is the substantive gain from working
+    both in one process: a kill switch, a spent budget or a closed window is a fact
+    about the *night*, and the task queue must not start as though it had its own.
+    """
+    root = _repo(tmp_path, ("a", "review", "x"))
+    _task(root, "t")
+    worker = _Worker(edits={"a": _touch("a"), "t": _touch("t")}).install(monkeypatch)
+
+    real_settle = chores.BatchLanding.settle
+
+    def then_stop(self, ctx, candidate, result, model):
+        out = real_settle(self, ctx, candidate, result, model)
+        (root / runner.STOP_FILE).parent.mkdir(parents=True, exist_ok=True)
+        (root / runner.STOP_FILE).write_text("stop\n", encoding="utf-8")
+        return out
+
+    monkeypatch.setattr(chores.BatchLanding, "settle", then_stop)
+    _run(root, "--queue", "both")
+
+    assert worker.dispatched == ["a"], "the task queue started after the kill switch"
+    assert board.find(root, "t").lane == "tasks"
+
+
+def test_a_batch_survivor_is_drained_in_the_same_run(tmp_path, monkeypatch):
+    """The lane a batch hands its survivors to is the lane the run drains.
+
+    `_hand_over` puts a green-but-unreviewed survivor in `review/`, and the run's
+    drain phase takes every `review/` card with commits on its branch — so a batch
+    that did not land no longer waits for someone to notice and type
+    `nightshift.drain` by hand. Asked for with the unification (Karel, 2026-09-19):
+    *"if there is any unfinished review, it should be picked up by the run."*
+    """
+    root = _repo(tmp_path, ("a", "review", "x"))
+    worker = _Worker(edits={"a": _touch("a")}, review={}).install(monkeypatch)
+
+    chores.execute(root)
+
+    # Two: the batch's own review over the merged diff, which returned nothing
+    # usable, and then the drain's over `ai/a` alone.
+    assert len(worker.reviews) == 2
+
+
+def test_a_both_run_records_itself_as_both(tmp_path, monkeypatch):
+    """`panel._KINDS` reads this to title the Run page, and `_chores_phase_rows`
+    keys off it to show the batch's phase notes. A run that worked a batch and then
+    a task queue is neither of the two words that existed before it."""
+    root = _repo(tmp_path, ("a", "review", "x"))
+    _task(root, "t")
+    _Worker(edits={"a": _touch("a"), "t": _touch("t")}).install(monkeypatch)
+
+    _run(root, "--queue", "both")
+
+    kinds = [json.loads(rec.read_text(encoding="utf-8")).get("kind")
+             for rec in sorted((root / run_record.DIR).glob("*.json"))]
+    assert kinds == ["both"], "one run, one record, and it names what it worked"

@@ -387,6 +387,9 @@ shortfall.
 | `--dry-run` | report what would be dispatched and why not; no LLM, no writes |
 | `--status` | print where a run currently is (card, phase, elapsed) from `.ai/runs/status.json` and exit. |
 | `--base` | branch to build on (default <your-integration-branch>) |
+| `--queue` | which work this run takes on. |
+| `--chore-limit` | chores per batch; 0 takes `chores.DEFAULT_BATCH` |
+| `--allow-paid` | proceed even if a dispatch would draw on paid credits (the explicit 'continue nevertheless' decision). |
 | `--card` | dispatch only this card id. |
 | `--max-cards` | stop after N dispatches |
 | `--until` | stop dispatching at this local time, HH:MM |

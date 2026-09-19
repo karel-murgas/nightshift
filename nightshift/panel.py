@@ -1013,8 +1013,9 @@ class Context:
         """The chore batch's work — which the night skips by *routing*, not refusal.
 
         `runner.select` is explicit that this is "not a refusal — a routing fact":
-        a chore is dispatched by `python -m nightshift.chores` as a batch, because
-        the per-card treatment is exactly what the batch exists to avoid. Filing it
+        a chore is dispatched as a *batch* — by the run's `chores` queue, which
+        `--queue both` works before the task queue — because the per-card treatment
+        is exactly what the batch exists to avoid. Filing it
         under "Do now" therefore said something false — it told you a person was
         needed at the keyboard for work that has its own button two sections down,
         under a chip that truncated the explanation mid-sentence at seventy
@@ -3571,10 +3572,12 @@ def _job_history_section(ctx: Context) -> str:
 
 
 #: How a run record's `kind` reads on the page. The record's own vocabulary is the
-#: runner's argv (`run` is a night, `card` is one named card, `chores` is a batch);
-#: none of those three words says on its own what it was, which is precisely how the
-#: heading managed to present a fortnight-old night as the thing that just happened.
-_KINDS = {"run": "night", "card": "single card", "chores": "chore batch"}
+#: runner's argv (`run` is a night, `card` is one named card, `chores` is a batch,
+#: `both` is one run that worked the chore batch and then the task queue); none of
+#: those words says on its own what it was, which is precisely how the heading
+#: managed to present a fortnight-old night as the thing that just happened.
+_KINDS = {"run": "night", "card": "single card", "chores": "chore batch",
+          "both": "chores + night"}
 
 
 def _kind_label(record: dict) -> str:
@@ -3650,9 +3653,10 @@ def _chores_phase_rows(record: dict) -> str:
 
     A batch's story is not told by its dispatch list alone: which branch it built,
     whether the one suite run over the merged result was green, and why it did not
-    land are all facts about the *batch*, and `chores` records them as notes. The
-    night has no equivalent — it merges card by card — so this is chores-only rather
-    than something every record grows a section for.
+    land are all facts about the *batch*, and the batch records them as notes. A
+    task queue has no equivalent — it merges card by card — so this is rendered for
+    the two kinds that carry a batch (`chores`, and `both` since one run can work
+    the batch and then the tasks) rather than for every record.
     """
     rows = []
     for note in record.get("notes", []):
@@ -3941,7 +3945,10 @@ def _render_run(ctx: Context) -> str:
                         f'<td class="num"></td><td class="said"></td>'
                         f'<td class="num"></td></tr>')
 
-    if str(record.get("kind") or "") == "chores":
+    # `both` as well as `chores`: since the two dispatch paths became one run, a
+    # night can carry a batch's phase notes too, and they are the only account of
+    # what happened between "8 selected" and "the batch landed".
+    if str(record.get("kind") or "") in ("chores", "both"):
         body.append(_chores_phase_rows(record))
 
     # "This run" is a claim about *now*, and the newest record can be weeks old —

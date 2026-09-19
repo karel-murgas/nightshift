@@ -19,9 +19,17 @@ only state is where a card sits plus four runner-owned frontmatter fields
 incremented and committed *before* dispatch, so a crash loop is bounded even if
 the crash happens mid-worker.
 
+**A run works one or more queues, and `--queue` picks which.** `chores` is the
+`kind: chore` batch — dispatched cheaply, merged as one unit, reviewed once;
+`tasks` is the board's own queue, each card reviewed and merged on its own; `both`
+is the default and works the batch first. They are the same loop with different
+policy (`Queue`, `Landing`), on one budget and one set of session windows, which is
+the whole point of running them in one process rather than two.
+
 Usage:
     python -m nightshift.runner --dry-run       # what would be dispatched, and why not
     python -m nightshift.runner --max-cards 1   # one card, then stop
+    python -m nightshift.runner --queue tasks   # the task queue only; leave chores alone
     python -m nightshift.runner --until 06:30   # overnight; stop before the morning
     python -m nightshift.runner --sessions 2 --until 07:00   # spend two session windows
 
@@ -949,8 +957,8 @@ def select(root: Path, capabilities: set[str], bad_schema: dict[str, list[str]],
             # the full per-card treatment the batch exists to avoid, and three
             # attempts instead of one. Waived for `--card`, which is a human
             # asking for this one item by name.
-            no("kind: chore — dispatched as part of a batch by `python -m "
-               "nightshift.chores`, not one card at a time")
+            no("kind: chore — dispatched as part of a batch (the `chores` queue, "
+               "which `--queue both` works first), not one card at a time")
         elif not card.unattended and not forced_now:
             no("unattended: false — declared as needing a human")
         elif card.worker == "none":
@@ -8030,63 +8038,297 @@ def run_lifecycle(ctrl: Path, base: str, *, kind: str, label: str,
         _WORK_ROOT = None
 
 
-def run(root: Path, args: argparse.Namespace) -> int:
-    """One night: open the run, work the task queue, close it.
+# ------------------------------------------------------------------- the queues
+#
+# A run works one or more *queues*. A queue is a body of work plus the policy that
+# distinguishes it: which cards, at which tier, to which charter, and — the only
+# difference that is not a single value — how a card lands once it has a verdict.
+#
+# There are two, and naming what actually separates them is most of the point:
+#
+#   tasks   — the board's own order, each card's own `tier:`/`worker:`, three
+#             attempts, reviewed and merged one at a time as the loop goes.
+#   chores  — `kind: chore` cards only, one tier by name for all of them, one
+#             attempt each, and *held* when green: the batch merges its survivors
+#             as a single unit and reviews that unit once. `chores.py` owns it.
+#
+# Everything else the loop does — the kill switch, the deadline, the budget, the
+# usage walls and their sleeps, the crash guard, the two breakers, publishing — is
+# a fact about a run and not about which queue it is working, so it is written
+# once here and both get it. The chore batch had none of the wall handling before
+# this; a wall used to end a batch where it puts a night to sleep.
 
-    Everything around the queue — the refusals, the working checkout, the lock, the
-    record and the teardown — is `run_lifecycle`, which the chore batch enters too.
+
+@dataclass
+class Tally:
+    """The accounting a run keeps across every queue it works.
+
+    One object for the whole run rather than one per queue, and that is the
+    substantive gain from working chores and tasks in one process instead of two:
+    `--budget`, `--sessions` and the transient-hiccup cap are facts about the
+    *night*. Two processes get two of each and neither can see the other's spend.
+
+    `stopped` is the reason the run may not go on to another queue — a spent
+    budget, a closed window, the kill switch. Set through `_stop`, so it cannot
+    disagree with what the log and the record were told.
+    """
+
+    spent: float = 0.0
+    done: int = 0
+    walls: int = 0       # usage-limit windows this run has spent
+    hiccups: int = 0     # transient 429s waited out, which do not spend a window
+    stopped: str = ""
+
+
+class Landing:
+    """What a queue does with a card once its dispatch has a verdict.
+
+    This class *is* the per-card landing — the night's — rather than an abstract
+    base with the night's version somewhere else, because the per-card case is the
+    ordinary one and an empty subclass named after it would be ceremony. The other
+    implementation is `chores.BatchLanding`, which holds green cards back instead
+    of settling them and merges them as one unit in `close`.
+
+    The three hooks are exactly the three places the two genuinely differ. Anything
+    a future queue needs that is a *value* rather than a behaviour belongs on
+    `Queue` instead.
+    """
+
+    #: Whether a green card goes to the diff reviewer on its own, inside the
+    #: dispatch pipeline. False for a batch, which reviews the merged diff once —
+    #: `chores`' opening argument, and the reason chores are cheap.
+    reviews_each_card = True
+
+    def may_dispatch(self, ctx: RunContext, card: board.Card) -> str:
+        """`""` to go ahead, or the reason this queue stops before this card.
+
+        Checked before *every* dispatch rather than once for the queue: a fan-out
+        that starts with headroom can lose it partway, and a dispatch cannot be
+        un-started.
+        """
+        return ""
+
+    def settle(self, ctx: RunContext, candidate: Candidate, result: Dispatch,
+               model: str) -> str:
+        """Land one dispatch, record it, and return the account the run log prints.
+
+        Settling and recording are one hook because the record must carry the
+        *landing*, not just the outcome: `failed` alone does not say whether the
+        card is back in the queue for another attempt or has reached `failed/`,
+        and that is the difference between "look at this tomorrow" and "this is
+        dead until you look".
+        """
+        landed = settle(ctx.work, candidate.card.id, result)
+        # The three wall cases must be tellable apart at a glance, which is the
+        # whole complaint on `wall-on-review-wrapup-discards-a-verdict`: "walled
+        # with nothing" is `limited` and already says *not attempted, attempt
+        # given back*; "the gate harness crashed" is `blocked` and says so; this
+        # third one used to be indistinguishable from the first and now names
+        # itself. Appended here rather than inside `settle` because it is a fact
+        # about the run, not about the card's lane — and this is the one place the
+        # run log line is produced.
+        #
+        # Excludes every give-back outcome, not just `limited`. A card can be
+        # honoured at the checker and *then* meet a crashed gate harness or a
+        # drifted gate, and `settle` files that as `blocked` with "not attempted,
+        # attempt given back" — onto which "the card landed" would be a flat
+        # contradiction in the one line a 6 AM reader trusts.
+        if result.wall is not None and result.outcome not in (
+                "limited", "blocked", "interrupted"):
+            landed += (" — the stage walled on its wrap-up after writing a complete "
+                       "verdict, so the verdict was honoured and the card landed; "
+                       "the night's window is still closed")
+        ctx.record.dispatched(
+            candidate.card.id, title=candidate.card.title,
+            worker=candidate.card.worker, model=model,
+            attempt=candidate.card.attempts, outcome=result.outcome,
+            detail=result.detail, cost_usd=result.cost_usd, landed=landed,
+            evidence=result.evidence)
+        # The full per-stage breakdown behind the one `cost_usd` float above
+        # (`token-economy.md` phase 0.1) — a read of `out_dir`, not a second
+        # dispatch, so it costs nothing to take even on a card that failed.
+        record_usage(ctx.record,
+                     run_dir(ctx.work, candidate.card, candidate.card.attempts),
+                     card_id=candidate.card.id, model=model, efforts=result.efforts)
+        return landed
+
+    def close(self, ctx: RunContext, queue: Queue, tally: Tally) -> int:
+        """Whatever must happen once the queue drains, and the run's exit code.
+
+        Nothing, for a night: every card has already landed on its own way past.
+        """
+        return 0
+
+
+@dataclass
+class Queue:
+    """One body of work a run takes on, and the policy that distinguishes it.
+
+    Every field but `landing` is a *value* the dispatch loop reads — which is the
+    shape the note that prompted this asked for, and the test of whether a
+    difference between a night and a batch has been named properly. A difference
+    that cannot be written as one of these is a behaviour, and belongs on
+    `Landing` where there are exactly three of them.
+    """
+
+    name: str                       # "tasks" | "chores" — what the log calls it
+    cards: list[Candidate]
+    landing: Landing
+    #: The tier every card in this queue runs at, by *name*, or `""` to take each
+    #: card's own `tier:`. The batch names one (`chores.CHORE_TIER`) precisely so a
+    #: hand-edited `tier:` cannot pull it onto the expensive model.
+    tier: str = ""
+    #: The charter every card is dispatched to, or `""` for each card's `worker:`.
+    worker: str = ""
+    effort: str = ""
+    #: How much of the suite one card's own verification runs. `None` leaves
+    #: `dispatch`'s own default.
+    test_selector: Callable[[set[str], Path], suite.Selection] | None = None
+
+
+def _record_kind(args: argparse.Namespace) -> str:
+    """What `run_record` calls this run.
+
+    The panel reads it to decide what to show — `_chores_phase_rows` is keyed off
+    it — so `both` is its own kind rather than either of the two it contains.
+    """
+    if args.card:
+        return "card"
+    return {"tasks": "run", "chores": "chores", "both": "both"}[args.queue]
+
+
+def run(root: Path, args: argparse.Namespace, *,
+        queues: Callable[[RunContext], list[Queue]] | None = None) -> int:
+    """One run: open it, work the queues it was asked for, close it.
+
+    Everything around the queues — the refusals, the working checkout, the lock,
+    the record and the teardown — is `run_lifecycle`. What a queue *is* is `Queue`
+    and `Landing` above.
+
+    `queues` overrides which ones this run works, and exists for exactly one
+    caller: `chores.execute` builds its own so it can keep a reference to the
+    `BatchLanding` and hand the finished `Batch` back to its CLI. Without the seam
+    that function would need its own copy of `_work_the_run`, which is the second
+    spine this whole change removes.
     """
     try:
         with run_lifecycle(root, args.base,
-                           kind="card" if args.card else "run",
+                           kind=_record_kind(args),
                            label=_invocation_label(args),
                            dry_run=args.dry_run,
                            named_card=bool(args.card)) as ctx:
-            return _run_tasks(ctx, args)
+            return _work_the_run(ctx, args, queues=queues)
     except RunRefused as exc:
         return exc.code
 
 
-def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
-    """The task queue: select from `tasks/`, dispatch, and land each card as it goes.
+def _queues_for(ctx: RunContext, args: argparse.Namespace) -> list[Queue]:
+    """The queues this run works, in the order it works them.
 
-    Runs inside `run_lifecycle`, which has already established the checkout, the
-    lock and the record that `ctx` carries — so every name this unpacks was a local
-    of `run()` before the two run paths were given one lifecycle.
+    **Chores first, then tasks, and the order is load-bearing.** Three reasons,
+    worst consequence first:
+
+      * `chores._land_the_batch` refuses to review a batch whose phase 1 stopped
+        early, on the grounds that the window can no longer be trusted to hold a
+        review. A task queue that ran first and spent the window would therefore
+        leave every chore handed over unreviewed — strictly worse than running the
+        two separately, which is the one outcome this change must not produce.
+      * A batch branch cannot stay open across hours of per-card merges onto
+        `base`: every task that landed would make the batch's own suite run stale,
+        and its green a statement about a tree that no longer exists.
+      * Chores are cheap and bounded — one attempt each, one suite run for the set
+        — so putting them first means the cheap wins land even when the run dies
+        early.
+
+    Interleaving them was considered and is the same argument as the second point,
+    only continuously rather than once.
+
+    `chores` is imported here rather than at module scope because it imports *this*
+    module for the dispatch path, so the dependency only works in one direction at
+    import time — the same reason `drain` is imported at its call site below.
     """
-    work, base, record = ctx.work, ctx.base, ctx.record
-    publish_remote, capabilities, bad = ctx.publish_remote, ctx.capabilities, ctx.bad_schema
+    if args.card:
+        # A named card is a person asking for one item; a queue mode would only
+        # confuse what they asked for.
+        return [_tasks_queue(ctx, args)]
+    queues: list[Queue] = []
+    if args.queue in ("chores", "both"):
+        from nightshift import chores
+        queues.append(chores.queue(ctx, args))
+    if args.queue in ("tasks", "both"):
+        queues.append(_tasks_queue(ctx, args))
+    return queues
 
-    candidates = select(work, capabilities, bad, forced=args.card)
+
+def _work_the_run(ctx: RunContext, args: argparse.Namespace, *,
+                  queues: Callable[[RunContext], list[Queue]] | None = None) -> int:
+    """Work each queue in turn on one shared budget, then the run-level phases."""
+    deadline = _deadline(args.until, args.max_minutes)
+    tally = Tally()
+    built = (queues or (lambda c: _queues_for(c, args)))(ctx)
+    if args.dry_run:
+        return 0
+
+    code = 0
+    for queue in built:
+        if tally.stopped:
+            # Said out loud: a `both` run that worked chores and then skipped tasks
+            # otherwise looks identical to one that found no tasks to work.
+            _log(f"not starting the {queue.name} queue — {tally.stopped}")
+            break
+        if queue.cards:
+            _work_queue(ctx, args, queue, tally, deadline)
+        # Even with no cards: a batch with nothing to dispatch still owes its
+        # report, and `close` is where that is written.
+        code = queue.landing.close(ctx, queue, tally) or code
+
+    _drain_phase(ctx, args, tally, deadline)
+    _stale_phase(ctx, args, tally, deadline)
+    return _wrapup(ctx, args, tally) or code
+
+
+def _tasks_queue(ctx: RunContext, args: argparse.Namespace) -> Queue:
+    """The `tasks/` queue: the board's own order, each card's own tier and charter."""
+    work, record = ctx.work, ctx.record
+    candidates = select(work, ctx.capabilities, ctx.bad_schema, forced=args.card)
     ready = [c for c in candidates if c.dispatchable]
     _log(f"board: {len(candidates)} card(s) in tasks/, {len(ready)} dispatchable")
     for c in candidates:
         _log(f"  {'YES' if c.dispatchable else ' no'}  {c.card.id} — {c.reason}")
-    # Why a card did NOT run is a fact only the run knows: nothing moves, so
-    # no lane diff can recover it, and five art cards stalled on a capability
-    # this host does not have looked exactly like an empty night for a week.
+    # Why a card did NOT run is a fact only the run knows: nothing moves, so no lane
+    # diff can recover it, and five art cards stalled on a capability this host does
+    # not have looked exactly like an empty night for a week.
     record.skipped([(c.card.id, c.reason) for c in candidates if not c.dispatchable])
-    # And the ones that DID run while over `CARD_COMFORT_BYTES`. A separate
-    # field because an oversized card is dispatchable by design, so it is
-    # absent from the list above — which left the digest silent about the
-    # one case the signal exists for, a card dispatched over and over while
-    # it grows.
+    # And the ones that DID run while over `CARD_COMFORT_BYTES`. A separate field
+    # because an oversized card is dispatchable by design, so it is absent from the
+    # list above — which left the digest silent about the one case the signal exists
+    # for, a card dispatched over and over while it grows.
     record.oversized(oversized_entries(candidates))
 
     if args.card:
         ready, why = resolve_named(work, args.card, candidates)
         if why:
             _log(f"refusing to run — {why}")
-            return 1
-        # Said out loud because `--card` narrows a list the lines above just
-        # printed in full; without this, "which one is it actually going to
-        # run?" is answered only by re-reading them.
+            raise RunRefused(1)
+        # Said out loud because `--card` narrows a list the lines above just printed
+        # in full; without this, "which one is it actually going to run?" is
+        # answered only by re-reading them.
         _log(f"narrowed to `{args.card}` — {ready[0].reason}")
 
-    if args.dry_run:
-        return 0
+    return Queue(name="tasks", cards=ready, landing=Landing())
 
-    deadline = _deadline(args.until, args.max_minutes)
+
+def _work_queue(ctx: RunContext, args: argparse.Namespace, queue: Queue,
+                tally: Tally, deadline: dt.datetime | None) -> None:
+    """Work one queue to its end: dispatch each card, land it by the queue's
+    policy, and stop the whole run when the run-level accounting says to.
+
+    This is the loop that used to be the night's alone. The chore batch had its
+    own, thirty lines long, with no deadline, no budget, no wall handling and no
+    breakers — so a usage limit ended a batch where it puts a night to sleep.
+    """
+    work, base, record = ctx.work, ctx.base, ctx.record
+    publish_remote = ctx.publish_remote
 
     def _stop(reason: str) -> None:
         """End-of-loop reason, said once to both readers.
@@ -8099,6 +8341,9 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
         """
         _log(f"stopping — {reason}")
         record.stop(reason)
+        # Also the gate on any queue after this one: a run that stopped for a
+        # spent budget or a closed window has nothing more to give the next.
+        tally.stopped = reason
 
     def _pipeline(candidate: Candidate, model: str) -> Dispatch:
         """Every stage that turns a ready card into a `Dispatch`.
@@ -8115,8 +8360,10 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
         the card's lane indeterminate, and carrying on past that compounds
         the damage rather than containing it.
         """
+        selector = (queue.test_selector,) if queue.test_selector else ()
         result = dispatch(work, candidate.card, base, model,
-                          args.card_budget, args.test_timeout,
+                          args.card_budget, args.test_timeout, *selector,
+                          worker=queue.worker, effort=queue.effort,
                           allow_local=args.local)
 
         # The review stage (automate-review-step): a card whose gates+tests
@@ -8124,54 +8371,11 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
         # verdict routes it — needs-decision/ or (merge → testing/) — replacing
         # the old unconditional landing in review/. Only a `review` outcome
         # reaches it; a wall/failure/park is untouched. `review_stage` carries
-        # the dispatch cost forward and adds its own, so `spent +=` stays once.
-        if result.outcome == "review":
+        # the dispatch cost forward and adds its own, so `tally.spent +=` stays once.
+        if result.outcome == "review" and queue.landing.reviews_each_card:
             result = review_stage(work, candidate.card, result, base,
                                   args.card_budget, args.test_timeout)
         return result
-
-    def _settled(candidate: Candidate, result: Dispatch, model: str) -> str:
-        """Settle one dispatch, record it, and return `settle`'s own account.
-
-        Wrapped together because the record must carry the *landing*, not
-        just the outcome: `failed` alone does not say whether the card is
-        back in the queue for another attempt or has reached `failed/`, and
-        that is the difference between "look at this tomorrow" and "this is
-        dead until you look".
-        """
-        landed = settle(work, candidate.card.id, result)
-        # The three wall cases must be tellable apart at a glance, which is
-        # the whole complaint on `wall-on-review-wrapup-discards-a-verdict`:
-        # "walled with nothing" is `limited` and already says *not attempted,
-        # attempt given back*; "the gate harness crashed" is `blocked` and
-        # says so; this third one used to be indistinguishable from the first
-        # and now names itself. Appended here rather than inside `settle`
-        # because it is a fact about the *night*, not about the card's lane —
-        # and this is the one place the run log line is produced.
-        #
-        # Excludes every give-back outcome, not just `limited`. A card can be
-        # honoured at the checker and *then* meet a crashed gate harness or a
-        # drifted gate, and `settle` files that as `blocked` with "not
-        # attempted, attempt given back" — onto which "the card landed" would
-        # be a flat contradiction in the one line a 6 AM reader trusts.
-        if result.wall is not None and result.outcome not in (
-                "limited", "blocked", "interrupted"):
-            landed += (" — the stage walled on its wrap-up after writing a complete "
-                       "verdict, so the verdict was honoured and the card landed; "
-                       "the night's window is still closed")
-        record.dispatched(
-            candidate.card.id, title=candidate.card.title,
-            worker=candidate.card.worker, model=model,
-            attempt=candidate.card.attempts, outcome=result.outcome,
-            detail=result.detail, cost_usd=result.cost_usd, landed=landed,
-            evidence=result.evidence)
-        # The full per-stage breakdown behind the one `cost_usd` float above
-        # (`token-economy.md` phase 0.1) — a read of `out_dir`, not a second
-        # dispatch, so it costs nothing to take even on a card that failed.
-        record_usage(record, run_dir(work, candidate.card, candidate.card.attempts),
-                    card_id=candidate.card.id, model=model,
-                    efforts=result.efforts)
-        return landed
 
     def _window_closed(wall: limits.Wall, card_id: str, *, retrying: bool) -> bool:
         """Spend one of the night's windows on `wall`, and say whether the run
@@ -8185,7 +8389,6 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
         already advanced. `retrying` is the only difference, and it is only
         wording — the arithmetic, the caps and the sleep are identical.
         """
-        nonlocal walls, hiccups
         if wall.retry_now:
             # A context wall, not a usage one: the model's own window filled,
             # no plan window closed and nothing reopens on a clock. So none of
@@ -8204,9 +8407,9 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
                         f"into the kept worktree; no session spent")
             return True
         if wall.spends_a_session:
-            walls += 1
-            if walls >= args.sessions:
-                _stop(f"{walls} session limit(s) used, which is "
+            tally.walls += 1
+            if tally.walls >= args.sessions:
+                _stop(f"{tally.walls} session limit(s) used, which is "
                       f"--sessions {args.sessions}")
                 return False
         else:
@@ -8214,9 +8417,9 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
             # short wait instead of one of the night's sessions. Capped
             # all the same: a hiccup that never clears is indistinguishable
             # from a wall we misread, and must not retry until morning.
-            hiccups += 1
-            if hiccups > TRANSIENT_RETRIES:
-                _stop(f"{hiccups} transient rate limits tonight; that is "
+            tally.hiccups += 1
+            if tally.hiccups > TRANSIENT_RETRIES:
+                _stop(f"{tally.hiccups} transient rate limits tonight; that is "
                       f"no longer a hiccup. See `.ai/runs/` for what the CLI said")
                 return False
         if not wall.waits_out:
@@ -8228,8 +8431,8 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
             _stop(f"the window reopens at {resume:%H:%M}, past "
                   f"{deadline:%H:%M}")
             return False
-        counted = f"{walls} of {args.sessions}" if wall.spends_a_session \
-            else f"transient, {hiccups} of {TRANSIENT_RETRIES}"
+        counted = f"{tally.walls} of {args.sessions}" if wall.spends_a_session \
+            else f"transient, {tally.hiccups} of {TRANSIENT_RETRIES}"
         then = f"then retrying {card_id}" if retrying \
             else f"then going on from {card_id}, which landed"
         _log(f"usage limit reached ({counted}) — sleeping until "
@@ -8249,10 +8452,6 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
             return False
         return True
 
-    spent = 0.0
-    done = 0
-    walls = 0            # usage-limit windows this night has spent
-    hiccups = 0          # transient 429s waited out, which do not spend a window
     in_a_row = 0         # consecutive failures, the net under limits.detect
 
     # An index rather than `for candidate in ready`, because a card that met
@@ -8270,25 +8469,32 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
     # Every test id that has failed for some *already-settled* card this run.
     # A new failure intersecting this set is the baseline, not the card.
     red_elsewhere: set[str] = set()
-    while index < len(ready):
-        candidate = ready[index]
+    while index < len(queue.cards):
+        candidate = queue.cards[index]
         if fix_rounds_for != index:
             fix_rounds_for, fix_rounds = index, 0
-        if args.max_cards and done >= args.max_cards:
+        if args.max_cards and tally.done >= args.max_cards:
             _stop(f"reached --max-cards {args.max_cards}")
             break
         if deadline and dt.datetime.now() >= deadline:
             _stop(f"past {deadline:%H:%M}")
             break
-        if args.budget and spent >= args.budget:
+        if args.budget and tally.spent >= args.budget:
             _stop(f"run budget ${args.budget:.2f} spent")
             break
         if _stop_requested():
             _stop("kill switch appeared mid-run")
             break
+        # The money rule, checked before every dispatch and not once for the
+        # queue: a fan-out that starts with headroom can lose it partway, and a
+        # dispatch cannot be un-started. A night spends `--budget` instead and
+        # defines none of this.
+        if refusal := queue.landing.may_dispatch(ctx, candidate.card):
+            _stop(refusal)
+            break
 
         try:
-            model = tiers.resolve(work, candidate.card.tier)
+            model = tiers.resolve(work, queue.tier or candidate.card.tier)
         except tiers.TierError as exc:
             _log(f"  skipping {candidate.card.id} — {exc}")
             index += 1
@@ -8303,14 +8509,14 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
         except Exception as exc:       # noqa: BLE001 — see `crashed_dispatch`
             result = crashed_dispatch(work, candidate.card, exc)
             _log(f"  ! {candidate.card.id} — {result.detail}")
-        spent += result.cost_usd
+        tally.spent += result.cost_usd
 
         # Before every other outcome: neither a broken harness nor a drifted
         # gate is a verdict on this card, and continuing would walk the rest
         # of the queue spending an attempt on each for a defect none of them
         # caused.
         if result.outcome == "blocked":
-            _log("  " + _settled(candidate, result, model))
+            _log("  " + queue.landing.settle(ctx, candidate, result, model))
             if result.repo_drift:
                 # Reached only after `repair_drift` was tried and failed, so
                 # this is no longer "the runner met drift" but "the runner met
@@ -8328,7 +8534,7 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
             break
 
         if result.outcome == "limited":
-            _log("  " + _settled(candidate, result, model))
+            _log("  " + queue.landing.settle(ctx, candidate, result, model))
             if not _window_closed(result.wall, candidate.card.id, retrying=True):
                 break
 
@@ -8366,7 +8572,7 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
         # out of attempts it escalates to `needs-decision/` instead of coming
         # back to `tasks/`, and the lane check below is what sees that.
         if result.outcome == "needs_fix":
-            _log("  " + _settled(candidate, result, model))
+            _log("  " + queue.landing.settle(ctx, candidate, result, model))
             publish(work, publish_remote, base,
                     trusted_branch=f"ai/{candidate.card.id}")
             # Before the retry, not after: a wall means the window that would
@@ -8387,7 +8593,7 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
                      f"rounds this run without settling — moving on rather than "
                      f"spending another; it keeps its lane and its attempts")
                 index += 1
-                done += 1
+                tally.done += 1
                 in_a_row = 0
                 continue
             # Reloaded for the same reason the `limited` branch reloads: the
@@ -8397,7 +8603,7 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
                 # Out of attempts (escalated to `needs-decision/`), or moved
                 # by hand. Either way this card is finished for tonight.
                 index += 1
-                done += 1
+                tally.done += 1
                 in_a_row = 0
                 continue
             candidate.card = fresh
@@ -8448,7 +8654,7 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
             red_elsewhere.update(fresh_red)
 
         index += 1
-        done += 1
+        tally.done += 1
         # `interrupted` counts too, and not as a courtesy: before that
         # outcome existed an `api_error` dispatch was `failed`, so a
         # connection dropping card after card tripped this breaker on the
@@ -8459,7 +8665,7 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
         # which is exactly the shape "not about the cards" takes.
         in_a_row = (in_a_row + 1
                     if result.outcome in ("failed", "interrupted") else 0)
-        _log("  " + _settled(candidate, result, model))
+        _log("  " + queue.landing.settle(ctx, candidate, result, model))
         # Idempotent, and after every settled card rather than only at the end
         # of the night — a cloud container can be killed between cards, and
         # this is what keeps that from losing already-settled work with it.
@@ -8470,7 +8676,7 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
         # against every other (dormant) card branch.
         publish(work, publish_remote, base, trusted_branch=f"ai/{candidate.card.id}")
         if args.budget:
-            _log(f"  spent ${spent:.2f} of ${args.budget:.2f}")
+            _log(f"  spent ${tally.spent:.2f} of ${args.budget:.2f}")
         # Three unrelated cards failing back to back is not about the cards.
         # Most likely it is a wall `limits.detect` did not recognise, and the
         # damage of guessing wrong here (one quiet night) is far below the
@@ -8498,8 +8704,18 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
                 result.wall, candidate.card.id, retrying=False):
             break
 
-    # Before the stale sweep and after the cards: conclude any review this
-    # night left owed.
+
+def _drain_phase(ctx: RunContext, args: argparse.Namespace, tally: Tally,
+                 deadline: dt.datetime | None) -> None:
+    """Conclude the reviews this run left owed, whichever queue left them."""
+    work, base, record = ctx.work, ctx.base, ctx.record
+    publish_remote = ctx.publish_remote
+
+    # Before the stale sweep and after every queue: conclude any review this run
+    # left owed — a card the reviewer walled on, and (since the chore batch and
+    # the night became one run) a batch survivor handed to `review/` because the
+    # batch itself did not land. Both rest in the same lane, so one pass drains
+    # both and neither queue needs its own.
     #
     # `drain.py` records the decision NOT to do this, on three grounds, and
     # names what would have to change: *"there would have to be evidence that
@@ -8526,7 +8742,7 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
         owed = [c.id for c in drain.waiting(work)
                 if not drain.skip_reason(work, base, c)]
         if owed:
-            _log(f"draining {len(owed)} card(s) whose review this night left owed: "
+            _log(f"draining {len(owed)} card(s) whose review this run left owed: "
                  f"{', '.join(owed[:DRAIN_CAP])}"
                  + (f" (+{len(owed) - DRAIN_CAP} beyond tonight's cap)"
                     if len(owed) > DRAIN_CAP else ""))
@@ -8535,11 +8751,17 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
                                   test_timeout=args.test_timeout)
             for line in drain.describe(drained):
                 _log(line)
-            spent += drained.cost_usd
+            tally.spent += drained.cost_usd
             record.note(f"drained {len(owed)} review-owed card(s): "
                         + "; ".join(f"{o.card_id} {o.state}"
                                     for o in drained.outcomes))
             publish(work, publish_remote, base)
+
+
+def _stale_phase(ctx: RunContext, args: argparse.Namespace, tally: Tally,
+                 deadline: dt.datetime | None) -> None:
+    """Spend whatever window is left on staleness — never before the cards."""
+    work, record = ctx.work, ctx.record
 
     # After the cards, spend whatever window is left on staleness — never
     # before, so a card that produces real work always wins the budget over
@@ -8557,11 +8779,18 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
             _log(f"stale sweep skipped — {exc}")
             record.note(f"stale sweep skipped — {exc}")
 
+
+def _wrapup(ctx: RunContext, args: argparse.Namespace, tally: Tally) -> int:
+    """Close the record, commit the board, push, and say how the run ended."""
+    work, base, record = ctx.work, ctx.base, ctx.record
+    publish_remote = ctx.publish_remote
+
     # Closed before the wrap-up commit, never after, so the record on disk
     # already says how the night ended by the time anything reads it —
     # Command Center reads these records live, and a record still open while
     # its run commits and pushes reads as a night in flight.
-    record.finish(cost_usd=spent, walls=walls, dispatched=done)
+    record.finish(cost_usd=tally.spent, walls=tally.walls,
+                  dispatched=tally.done)
 
     # `wrapup` covers the board commit and the push below. It is a real phase,
     # not a formality: `publish` is a network round-trip, and a status that
@@ -8578,10 +8807,11 @@ def _run_tasks(ctx: RunContext, args: argparse.Namespace) -> int:
     # The final sweep, and the one publish reached by every early `break` above
     # — `blocked`, a wall, the deadline, the kill switch all fall through here.
     publish(work, publish_remote, base)
-    _log(f"run complete — {done} card(s) dispatched, "
-         f"{walls} session limit(s) hit, ${spent:.2f} equivalent")
-    _status(work, phase="finished", cards_dispatched=done, session_limits=walls,
-            spent_usd=round(spent, 2), since=_now())
+    _log(f"run complete — {tally.done} card(s) dispatched, "
+         f"{tally.walls} session limit(s) hit, ${tally.spent:.2f} equivalent")
+    _status(work, phase="finished", cards_dispatched=tally.done,
+            session_limits=tally.walls,
+            spent_usd=round(tally.spent, 2), since=_now())
     return 0
 
 
@@ -8600,6 +8830,20 @@ def _parser(root: Path | None = None) -> argparse.ArgumentParser:
                              "no git — safe to run while a night is in flight")
     base = default_base(root)
     parser.add_argument("--base", default=base, help=f"branch to build on (default {base})")
+    parser.add_argument("--queue", choices=("tasks", "chores", "both"), default="both",
+                        help="which work this run takes on. `tasks` is the board's own "
+                             "queue, each card reviewed and merged on its own; `chores` "
+                             "is the `kind: chore` batch, dispatched cheaply and merged "
+                             "as one unit; `both` works chores first and then tasks, on "
+                             "one budget and one set of sessions (default). Ignored with "
+                             "`--card`, which names one item.")
+    parser.add_argument("--chore-limit", type=int, default=0,
+                        help="chores per batch; 0 takes `chores.DEFAULT_BATCH`")
+    parser.add_argument("--allow-paid", action="store_true",
+                        help="proceed even if a dispatch would draw on paid credits "
+                             "(the explicit 'continue nevertheless' decision). Read "
+                             "by the chore queue, which asks `usage` before every "
+                             "item; a task queue bounds itself with `--budget`.")
     parser.add_argument("--card", help="dispatch only this card id. Naming a card is an "
                                        "explicit human request, so `unattended: false` and "
                                        "the attempt limit are waived for it; "

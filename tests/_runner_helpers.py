@@ -442,7 +442,7 @@ def _night(monkeypatch, root: Path, outcomes: list[runner.Dispatch]) -> list[str
     script = list(outcomes)
 
     def fake_dispatch(root_, card, base, model, card_budget, test_timeout,
-                      *, allow_local=True):
+                      *, allow_local=True, worker="", effort=""):
         calls.append(card.id)
         return script.pop(0) if script else runner.Dispatch("review", "ok")
 
@@ -997,7 +997,7 @@ def _crashing_night(monkeypatch, root: Path, boom: BaseException,
     calls: list[str] = []
 
     def fake_dispatch(root_, card, base, model, card_budget, test_timeout,
-                      *, allow_local=True):
+                      *, allow_local=True, worker="", effort=""):
         calls.append(card.id)
         # What the real dispatch commits before the worker starts. The attempt is
         # spent by then, so a crash past that point has spent it whatever the

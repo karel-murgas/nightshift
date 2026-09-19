@@ -26,6 +26,17 @@ Two shape decisions, recorded here because both were real choices
 
 **1. The night does not drain the lane. This is a command, run deliberately.**
 
+*Superseded, 2026-08-25 and again 2026-09-19.* The grounds below named what would
+have to change — *"there would have to be evidence that cards actually pile up
+faster than they are looked at"* — and two cards parked in one night by a walled
+reviewer were that evidence. `runner._drain_phase` now runs this pass at the end of
+every run, after the cards and before the stale sweep, capped at `DRAIN_CAP`. Since
+the chore batch and the night became one run it covers a batch's survivors too:
+`chores._hand_over` files them in this same lane. The second and third grounds
+below still hold and still shape it — the lane is unbounded, so the phase is
+capped; a card in `review/` is already green, so it never competes with `tasks/`
+for the window. This remains a command as well, for a deliberate pass between runs.
+
 The tempting alternative — draining before the night takes its queue — makes the
 night self-healing, and it was rejected on three grounds:
 
