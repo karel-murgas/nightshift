@@ -186,6 +186,13 @@ _BOOLS = frozenset({"true", "false"})
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _SECTION = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)
 
+# The sentinel a checker charter's own frontmatter must carry as
+# `checker_contract:` to be nameable as a card's `checker:` (see the
+# `checker-dispatch-wrong-template` note below, where it is checked). Matched
+# against `runner._CHECKER_PROMPT`'s fixed shape — a charter declares this only
+# once it has actually promised to answer that exact contract.
+_CHECKER_LOOP_CONTRACT = "producer-loop"
+
 
 _BLOCK_ITEM = re.compile(r"^\s+-\s*(.+?)\s*$")
 
@@ -436,11 +443,34 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
     # a typo would otherwise mean the loop silently never runs.
     checker = fields.get("checker", "none")
     if checker != "none":
-        if not (repo_root / ".claude" / "agents" / f"{checker}.md").is_file():
+        checker_path = repo_root / ".claude" / "agents" / f"{checker}.md"
+        if not checker_path.is_file():
             bad("checker", f"`checker: {checker}` has no charter at .claude/agents/{checker}.md")
         if checker == worker:
             bad("checker", f"`checker: {checker}` is the same agent as `worker:` — an agent "
                            f"reviewing its own output sees what it intended, not what it made (§16)")
+        # `checker-dispatch-wrong-template` (2026-09-16): `runner.run_checker` sends
+        # every checker the *same fixed prompt* (`runner._CHECKER_PROMPT`), asking for
+        # `{"verdict": "pass"|"revise"|"reject", "best": ..., "notes": ...}` against an
+        # artefacts directory. That is `art-reviewer`'s contract, not a generic one —
+        # there is no per-checker template selection to get right or wrong, only this
+        # one template, sent unconditionally. A charter built for a different job (e.g.
+        # `code-reviewer`, which is the separate, always-on diff-review stage and answers
+        # `ok`/`needs_fix`/`needs_decision`) still resolves here, still gets spawned, and
+        # still gets asked a question its own instructions never promise to answer — the
+        # checker improvises, and a plausible-looking verdict ships with no test able to
+        # catch that the premise was wrong. `checker_contract: producer-loop` in a
+        # charter's own frontmatter is that charter vouching for this exact prompt shape;
+        # naming a charter that never says so is the mismatch this correction logged.
+        if checker_path.is_file():
+            checker_fields, _ = _frontmatter(checker_path.read_text(encoding="utf-8"))
+            if checker_fields.get("checker_contract") != _CHECKER_LOOP_CONTRACT:
+                bad("checker",
+                    f"`checker: {checker}` has no `checker_contract: {_CHECKER_LOOP_CONTRACT}` "
+                    f"in its own charter frontmatter — the runner's producer/checker loop sends "
+                    f"every checker the identical fixed prompt (verdict pass/revise/reject, an "
+                    f"artefacts directory, a `best` field), and a charter that never declares it "
+                    f"accepts that exact contract should not be spawned into it (§16)")
     recipe = fields.get("recipe", "none")
     if recipe != "none" and not (repo_root / ".ai" / "recipes" / f"{recipe}.md").is_file():
         # gate-ok(source_reference_liveness): `.ai/recipes/` is a per-consuming-project

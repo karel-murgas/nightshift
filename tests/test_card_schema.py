@@ -129,6 +129,39 @@ def test_unresolvable_worker_and_recipe_are_caught(tmp_path):
     assert "has no spine" in rules
 
 
+# --- card_schema: checker_contract (checker-dispatch-wrong-template) ------
+
+def test_checker_with_no_charter_is_caught(tmp_path):
+    body = _GOOD.format(id="probe", lane="tasks").replace(
+        "recipe: none", "recipe: none\nchecker: nobody"
+    )
+    assert "has no charter" in _rules(card_schema.check(_board(tmp_path, "tasks", body)))
+
+
+def test_checker_charter_missing_the_contract_is_caught(tmp_path):
+    """A charter built for a different job (here standing in for `code-reviewer`,
+    which answers ok/needs_fix/needs_decision on the separate diff-review stage)
+    that never declares `checker_contract: producer-loop` must not be nameable
+    as `checker:` — `runner.run_checker` would still send it the fixed
+    pass/revise/reject prompt regardless of what its own charter promises."""
+    root = _board(tmp_path, "tasks", _GOOD.format(id="probe", lane="tasks").replace(
+        "recipe: none", "recipe: none\nchecker: diff-reviewer"
+    ))
+    (root / ".claude" / "agents" / "diff-reviewer.md").write_text(
+        "---\nname: diff-reviewer\ntier: lead\n---\ncharter", encoding="utf-8")
+    assert "checker_contract" in _rules(card_schema.check(root))
+
+
+def test_checker_charter_declaring_the_contract_passes(tmp_path):
+    root = _board(tmp_path, "tasks", _GOOD.format(id="probe", lane="tasks").replace(
+        "recipe: none", "recipe: none\nchecker: art-reviewer"
+    ))
+    (root / ".claude" / "agents" / "art-reviewer.md").write_text(
+        "---\nname: art-reviewer\ntier: worker\nchecker_contract: producer-loop\n---\ncharter",
+        encoding="utf-8")
+    assert card_schema.check(root) == []
+
+
 def test_a_live_open_question_may_not_sit_in_tasks(tmp_path):
     """The rule that keeps the lanes meaningful. needs-decision/ is a success
     state (§13), so this is a misfiling, not a bad card."""

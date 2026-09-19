@@ -2340,6 +2340,12 @@ Previous rounds already tried: {history}
 Change **one thing** this round, and do not repeat a change from that list.
 """
 
+# One fixed prompt, sent to whichever charter a card names as `checker:` — there is
+# no per-checker template selection. `gates.card_schema` requires that charter's own
+# frontmatter carry `checker_contract: producer-loop` before it may be named here at
+# all (`checker-dispatch-wrong-template`, 2026-09-16); if this prompt's shape ever
+# changes, every charter that declares that contract (art-reviewer today) has to
+# change with it, or the gate is vouching for a promise the runner no longer keeps.
 _CHECKER_PROMPT = """\
 Judge the artefacts below against the acceptance criteria, at **tier: {tier}** (resolved to \
 model `{model}`).
