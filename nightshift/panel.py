@@ -5685,7 +5685,26 @@ def _work_feedback_verb(root: Path, body: dict) -> str:
 
 
 def read_body(root: Path, target: str) -> str:
-    """One board file's text, for the person editing it in their own browser.
+    """One board file's **body**, for the person editing it in their own browser.
+
+    Body and not the whole file, and the distinction is the bug this is named
+    after. `boardcmd.edit_body` — the one write this read feeds — keeps the file's
+    existing frontmatter verbatim and replaces everything after it with the text
+    it is handed. So handing the textarea the whole file made the round trip
+    asymmetric: whatever the person saved was spliced in *after* a frontmatter
+    block the file already had, and the block appeared twice.
+
+    Nothing complained, because a doubled block is only malformed to a reader that
+    parses past the first one: the note rendered, its lane was right, and the
+    duplication surfaced days later on `boardcmd.close_note`, the one verb that
+    inspects a note's fields (Karel, 2026-09-19: *"Close the note, I can't do it in
+    this state."*). Measured on `unify-runner-and-chores`: one edit through this
+    page, +7 lines, four of them a byte-identical second block.
+
+    Editing the frontmatter here never worked in the first place — `edit_body`
+    preserves it by contract — so showing it in the textarea offered an edit that
+    could not land, and this is also what `/card/<id>` has always done with the
+    same text (`split_frontmatter`, the fields rendered as their own strip).
 
     **This is the human's own read, and it is the only one.** `hooks.ideas_fence`
     stops an *agent* opening a private note, and `boardcmd edit` exists because of
@@ -5705,7 +5724,7 @@ def read_body(root: Path, target: str) -> str:
         raise PanelError(f"{target} is not inside the board")
     if not path.is_file():
         raise PanelError(f"{target} does not exist")
-    return path.read_text(encoding="utf-8")
+    return split_frontmatter(path.read_text(encoding="utf-8"))[1]
 
 
 def _reorder_many(root: Path, writes: list) -> str:
