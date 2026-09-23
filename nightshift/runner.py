@@ -7292,6 +7292,10 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
         # reaches testing/ carries a brief "what happened" a human can read without
         # opening `.ai/runs/` or the verbose `## Thread` prose (menu-summary-on-card).
         card.write_section("Summary", result.detail)
+        # gate-ok(review_lane_producer): reached only via `review_stage`'s own
+        # `Dispatch("review", ...)`, which already asserted owed-and-obtainable —
+        # window still open, a diff exists, and either no verdict landed yet or the
+        # card is the artefact-only case whose reviewer is Karel.
         board.move(root, card, "review")
         return f"{card_id}: → review/ ({result.detail})"
 
