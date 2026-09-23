@@ -57,7 +57,6 @@ from nightshift.gates import scope
 from nightshift.gates.base import Violation
 
 NAME = "prompt_not_in_argv"
-FAST = True
 DESCRIPTION = "no argv carries a worker prompt on `-p`; it goes down the child's stdin"
 
 # Both spellings the CLI accepts. `--print` is the long form and takes no value

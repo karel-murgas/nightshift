@@ -7571,8 +7571,7 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
 # Everything above commits locally: the board, merged cards on `base`, and each
 # card's `ai/<id>` branch. That was always enough on Karel's laptop, where the
 # checkout *is* his repo — the branch is already somewhere he can reach it. It
-# is not enough in the cloud topology (`night.py`'s "known host" test): a
-# claude.ai routine runs in an ephemeral clone, and a card parked in
+# is not enough when the run happens in an ephemeral clone (a cloud routine): and a card parked in
 # `needs-decision/` leaves its `ai/<id>` work stranded in a container Karel has
 # no way to open. Publishing closes that gap by pushing what the run produced
 # to a remote, so `git fetch && git checkout ai/<id>` from any other machine is
@@ -7735,7 +7734,7 @@ def _invocation_label(args: argparse.Namespace) -> str:
     with — `night, up to 8 cards, staleness sweep` or `card ice-damage`.
 
     Reconstructed from the parsed args rather than `sys.argv`, so it says the
-    same thing whether the run came from `night.py`'s defaults, the Command
+    same thing whether the run came from the Command
     Center's button or Karel's own command line. It exists because two runs in one night are not
     interchangeable: on 2026-07-30 an aborted 8-card night and a deliberate
     one-card rerun both landed in the same window, and a report that cannot name
@@ -8013,9 +8012,8 @@ def run_lifecycle(ctrl: Path, base: str, *, kind: str, label: str,
             work, kind=kind, label=label, host=socket.gethostname())
 
         # `publish_remote` is empty on any host that doesn't declare it (a laptop's
-        # normal state — the branch already lives in the maintainer's own repo), and
-        # `origin` on a cloud checkout (`night.py` writes it into the gitignored
-        # `.ai/host.json` override). See `publish()`.
+        # normal state — the branch already lives in the maintainer's own repo), and set
+        # in the gitignored `.ai/host.json` override where a remote copy is wanted. See `publish()`.
         publish_remote = str(host_setting(work, "publish_remote", "")).strip()
         _log(f"publish: {'pushing to ' + publish_remote if publish_remote else 'off (no publish_remote for this host)'}")
 

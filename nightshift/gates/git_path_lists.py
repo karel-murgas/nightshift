@@ -50,7 +50,6 @@ from nightshift.gates import scope
 from nightshift.gates.base import Violation
 
 NAME = "git_path_lists"
-FAST = True
 DESCRIPTION = "a git command that lists paths lists them NUL-separated"
 
 #: The module that owns the reading, and the only place these argvs belong.

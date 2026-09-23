@@ -58,7 +58,6 @@ from nightshift import conflictmarkers
 from nightshift.gates.base import Violation
 
 NAME = "conflict_markers"
-FAST = True
 DESCRIPTION = "no tracked text file carries a git conflict marker"
 
 #: A file-scope appeal. `appeal_markers.MIN_REASON` is mirrored here as a length

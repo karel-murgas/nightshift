@@ -22,7 +22,6 @@ from nightshift import readme_gen
 from nightshift.gates.base import Violation
 
 NAME = "readme_generated"
-FAST = True
 DESCRIPTION = ("README.md's generated blocks (gate list, runner flags, manifest fields) "
               "match a fresh generation")
 

@@ -43,7 +43,6 @@ from nightshift.gates.base import Violation
 from nightshift.manifest import AI_DIR, ManifestError
 
 NAME = "branch_role_prose"
-FAST = True
 DESCRIPTION = "docs naming the integration branch must agree with .ai/manifest.toml [branches]"
 
 _SOURCE = ".ai/manifest.toml [branches].integration"

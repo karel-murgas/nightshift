@@ -56,7 +56,6 @@ from nightshift.gates import scope
 from nightshift.gates.base import Violation
 
 NAME = "pytest_invocation"
-FAST = True
 DESCRIPTION = "only suite.py may spell pytest's parallel flags; callers use parallel_args()"
 
 # Scope: `.ai/` plus `[project].tooling_dirs` — see `gates/scope.py`.

@@ -46,7 +46,6 @@ from nightshift.gates import scope
 from nightshift.gates.base import Violation
 
 NAME = "subprocess_encoding"
-FAST = True
 DESCRIPTION = "no subprocess call in the tooling decodes output with the locale codec"
 
 # Scope: `.ai/` plus `[project].tooling_dirs` — see `gates/scope.py`.

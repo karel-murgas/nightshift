@@ -56,7 +56,6 @@ from nightshift.manifest import ManifestError, manifest_path
 from nightshift.manifest import load as load_manifest
 
 NAME = "lint"
-FAST = True
 DESCRIPTION = "ruff reports no lint findings in the project's source at the configured rule selection"
 
 # ruff's own exit codes: 0 clean, 1 findings reported, 2 a CLI/config error

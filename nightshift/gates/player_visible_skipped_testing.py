@@ -80,7 +80,9 @@ from nightshift.manifest import ManifestError
 from nightshift.manifest import load as load_manifest
 
 NAME = "player_visible_skipped_testing"
-FAST = True
+# Walks `git log` for every done/ card (~12 s on Project Tigress); an edit cannot
+# change a finished card's history, so this runs in the full suite only.
+ON_EDIT = False
 DESCRIPTION = "a done/ card touching a declared player-visible path carries verify: play and ## How to test"
 
 _HOW_TO_TEST = re.compile(r"^##\s+how to test\s*$", re.MULTILINE | re.IGNORECASE)

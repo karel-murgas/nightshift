@@ -70,7 +70,6 @@ from nightshift import branches
 from nightshift.gates.base import Violation
 
 NAME = "coreference_sweep"
-FAST = True
 DESCRIPTION = ("a numeric series or SCREAMING_SNAKE symbol this diff replaced "
                "must not survive in a live doc")
 
@@ -173,8 +172,14 @@ def replaced_tokens(repo_root: Path) -> dict[str, str]:
             # A file the diff deleted outright is `deletion_sweep`'s subject, not
             # this one: every token in it is "removed", which would be noise.
             continue
+        # A source file that still carries the token elsewhere used it less; it did
+        # not replace it. (A doc still naming the old value is "was X, now Y" and
+        # stays reported here -- see `check`'s same-file exemption.)
+        still = ((repo_root / path).read_text(encoding="utf-8", errors="replace")
+                 if path.endswith(".py") else "")
         for token in removed - added - all_added:
-            gone.setdefault(token, path)
+            if token not in still:
+                gone.setdefault(token, path)
     return gone
 
 

@@ -882,15 +882,6 @@ def test_commit_board_stages_the_board_when_no_view_exists_yet(tmp_path):
     assert "moved" in log.stdout
 
 
-def test_the_correction_prompt_hook_ignores_every_generated_view():
-    """The third consumer of the same list. A regenerated report is not evidence
-    that work happened, so it must not trip the correction nudge."""
-    from nightshift.hooks import correction_prompt
-
-    for view in board.GENERATED_VIEWS:
-        assert view in correction_prompt._IGNORED
-
-
 def test_no_host_config_means_no_capabilities(tmp_path):
     """The safe default: a card that requires something never dispatches,
     rather than being dispatched onto a machine that cannot run it."""

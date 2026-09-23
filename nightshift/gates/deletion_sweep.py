@@ -29,7 +29,6 @@ from nightshift import branches, gitpaths
 from nightshift.gates.base import Violation
 
 NAME = "deletion_sweep"
-FAST = True
 DESCRIPTION = "a removed file or top-level class/def must not still be named by any live doc"
 
 
@@ -164,12 +163,22 @@ def removed_names(repo_root: Path) -> dict[str, str]:
     }
 
 
+def _pattern(name: str) -> re.Pattern[str]:
+    """A plain-word name (`night`, `panel`) is matched only where prose writes it as
+    code — backticked or after a dot — because the same word in a sentence is not a
+    reference. Anything identifier-shaped (`hack_scene`, `GameApp`, `night.py`) is
+    matched bare, as before."""
+    if name.isalpha() and name.islower():
+        return re.compile(rf"`{re.escape(name)}`|(?<=\.){re.escape(name)}(?![\w])")
+    return re.compile(rf"(?<![\w.]){re.escape(name)}(?![\w])")
+
+
 def check(repo_root: Path) -> list[Violation]:
     dead = removed_names(repo_root)
     if not dead:
         return []
 
-    patterns = {name: re.compile(rf"(?<![\w.]){re.escape(name)}(?![\w])") for name in dead}
+    patterns = {name: _pattern(name) for name in dead}
     violations: list[Violation] = []
 
     for path in doc_scan.doc_files(repo_root):

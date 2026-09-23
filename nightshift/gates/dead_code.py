@@ -76,7 +76,6 @@ from nightshift.manifest import ManifestError, manifest_path
 from nightshift.manifest import load as load_manifest
 
 NAME = "dead_code"
-FAST = True
 DESCRIPTION = "vulture reports no dead code in the project's source at the configured confidence"
 
 # vulture's exit codes. 1 is invalid input (a path that does not exist, a file it

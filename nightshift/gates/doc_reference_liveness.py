@@ -27,7 +27,6 @@ from nightshift.gates import doc_scan
 from nightshift.gates.base import Violation
 
 NAME = "doc_reference_liveness"
-FAST = False  # builds an AST index of the whole source tree (~1 s)
 DESCRIPTION = "docs must not name files or symbols that no longer exist"
 
 # §3.3: "~60% of total resolved references". Below this the individual lines

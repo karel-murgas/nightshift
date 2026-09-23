@@ -901,8 +901,8 @@ def _advance_on_remote(bare: Path, tmp_path: Path, branch: str, name: str, body:
 #
 # The runner commits everything locally — the board, merged cards on
 # `development_team`, and each card's `ai/<id>` branch — which was always
-# enough on Karel's laptop, where the checkout *is* his repo. In the cloud
-# topology (`night.py`) the checkout is an ephemeral clone: a card parked in
+# enough on Karel's laptop, where the checkout *is* his repo. In a cloud
+# topology the checkout is an ephemeral clone: a card parked in
 # `needs-decision/` leaves its branch stranded in a container he cannot reach.
 # `publish()` closes that gap; these tests are against a bare `origin` so a
 # push is a real, checkable git operation, not a mock.

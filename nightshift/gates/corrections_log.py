@@ -37,7 +37,6 @@ from pathlib import Path
 from nightshift.gates.base import Violation
 
 NAME = "corrections_log"
-FAST = True
 DESCRIPTION = "the correction log parses and its class/channel values are in vocabulary"
 
 _LOG = Path(".ai") / "corrections.log"

@@ -285,6 +285,24 @@ def test_deletion_sweep_reports_a_dead_name_still_named_by_a_live_doc(tmp_path, 
     doc_scan.clear_caches()
 
 
+def test_a_plain_word_module_is_matched_only_where_written_as_code(tmp_path, monkeypatch):
+    """Deleting `night.py` must not flag every sentence about "a night"; it must
+    still flag `night` and `nightshift.night`."""
+    (tmp_path / ".claude" / "memory").mkdir(parents=True)
+    (tmp_path / ".claude" / "memory" / "prose.md").write_text(
+        "A night is measured in session windows.\n", encoding="utf-8")
+    (tmp_path / ".claude" / "memory" / "code.md").write_text(
+        "Run `night` or python -m nightshift.night.\n", encoding="utf-8")
+    monkeypatch.setattr(
+        deletion_sweep, "removed_names",
+        lambda root: {"night": "deleted in this branch (night.py)"},
+    )
+    doc_scan.clear_caches()
+    files = [v.file for v in deletion_sweep.check(tmp_path)]
+    assert files == [".claude/memory/code.md"]
+    doc_scan.clear_caches()
+
+
 def test_a_file_edited_then_deleted_does_not_crash_the_sweep(tmp_path):
     """`removed_names` reads a modified file from disk, and a path modified in the
     committed range can be *gone* — the normal mid-change state of any removal.

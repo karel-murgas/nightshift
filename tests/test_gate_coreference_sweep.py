@@ -120,6 +120,18 @@ def test_a_symbol_the_diff_deleted_but_a_doc_still_teaches_is_caught(tmp_path):
 
 # --- and the ones it must stay quiet about -----------------------------------
 
+def test_a_symbol_the_file_still_uses_elsewhere_was_not_replaced(tmp_path):
+    """Deleting one *use* of a name is not replacing it: the file still carries it,
+    so a doc naming it is still right."""
+    root = _repo(tmp_path, {
+        "demo/roster.py": "EXPECTED_IDS = (1, 2)\nFIRST = EXPECTED_IDS[0]\n",
+        "NOTES.md": "# Notes\n\nThe roster is pinned by EXPECTED_IDS.\n",
+    })
+    _card(root, {"demo/roster.py": "EXPECTED_IDS = (1, 2)\n"})
+
+    assert coreference_sweep.check(root) == []
+
+
 def test_a_token_moved_within_one_file_is_not_a_survivor(tmp_path):
     """The commonest honest edit there is. A doc that rewrites the paragraph
     around a value has not stopped saying it, and reporting that would fire on

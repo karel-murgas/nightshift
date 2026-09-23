@@ -45,7 +45,6 @@ from nightshift.manifest import ManifestError
 from nightshift.manifest import load as load_manifest
 
 NAME = "orientation_budget"
-FAST = True
 DESCRIPTION = "the declared orientation files stay under [memory].budget_bytes"
 
 

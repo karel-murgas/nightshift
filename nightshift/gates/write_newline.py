@@ -66,7 +66,6 @@ from nightshift.gates import scope
 from nightshift.gates.base import Violation
 
 NAME = "write_newline"
-FAST = True
 DESCRIPTION = "no text-mode write in the tooling leaves newline translation unpinned"
 
 # Scope: `.ai/` plus `[project].tooling_dirs` — see `gates/scope.py`.

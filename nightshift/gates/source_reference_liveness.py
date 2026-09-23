@@ -154,7 +154,6 @@ from nightshift.gates.base import Violation
 from nightshift.manifest import AI_DIR
 
 NAME = "source_reference_liveness"
-FAST = False  # builds the same whole-tree file index doc_reference_liveness does
 DESCRIPTION = "a source string literal that looks like a repo path must resolve to something real"
 
 # Extensions a source literal plausibly names. Deliberately a superset of
@@ -362,8 +361,8 @@ def _gitignored(repo_root: Path, tokens: list[str]) -> set[str]:
     so it is absent from a clean checkout by definition. Without the second
     probe, `.ai/runs` fails to match this repo's own `.ai/runs/` pattern — which
     is how the module docstring came to name `.ai/runs/` as *the* structural
-    case while the gate reported ten violations on it, in `runner.py`,
-    `digest.py` and `hooks/correction_prompt.py`. `git check-ignore .ai/runs`
+    case while the gate reported ten violations on it, in `runner.py`
+    and two since-deleted modules. `git check-ignore .ai/runs`
     says no; `git check-ignore '.ai/runs/'` says yes.
     """
     if not tokens:

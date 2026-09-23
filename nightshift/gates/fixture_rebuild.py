@@ -57,7 +57,6 @@ from nightshift.gates import corpus
 from nightshift.gates.base import Violation
 
 NAME = "fixture_rebuild"
-FAST = True
 DESCRIPTION = "tests copy the shared fixture template instead of running `git init` themselves"
 
 #: The module that owns the policy, and the only file allowed to spell `git init`.

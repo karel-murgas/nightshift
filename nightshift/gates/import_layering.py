@@ -38,7 +38,6 @@ from nightshift.manifest import ManifestError
 from nightshift.manifest import load as load_manifest
 
 NAME = "import_layering"
-FAST = True
 DESCRIPTION = "a declared one-way dependency between packages stays one-way"
 
 

@@ -28,8 +28,8 @@ log their correction, however obviously right it was.
 > already recorded two days earlier as `deferred-instead-of-fixed`. **They are the only one
 > who knows whether they will have to say it again**, which is the definition of systematic.
 >
-> This replaced a `UserPromptSubmit` hook that asked on every prompt. The hook file is
-> still at `nightshift/hooks/correction_prompt.py`, unwired, if the decision reverses.
+> This replaced a `UserPromptSubmit` hook that asked on every prompt. The unwired hook
+> was deleted in 2026-09 (`git log -- nightshift/hooks/correction_prompt.py` recovers it).
 
 **Claude's, a gate's or a test's catches: log them without asking.** `channel: claude`,
 `gate` or `test` means {{maintainer}} was not involved, so a marginal entry costs them nothing and

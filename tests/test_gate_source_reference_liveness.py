@@ -260,8 +260,8 @@ def test_a_runtime_dir_matches_its_directory_only_gitignore_pattern(tmp_path):
     `git check-ignore` cannot tell a path is a directory when nothing exists at
     it, which is the normal case for a path created at runtime. So probing the
     candidate exactly as the source wrote it (`.ai/runs`, no slash) missed, and
-    the gate reported ten violations in `runner.py`, `digest.py` and
-    `hooks/correction_prompt.py` — on the very path its own module docstring
+    the gate reported ten violations in `runner.py` and two since-deleted
+    modules — on the very path its own module docstring
     names as the structural case."""
     root = _ignoring_repo(tmp_path, 'LOGS = ".ai/runs"\n', ".ai/runs/")
     assert not gate.check(root), (
