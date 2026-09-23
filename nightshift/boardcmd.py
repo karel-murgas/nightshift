@@ -24,8 +24,7 @@ second parser with none of that care.
 **The private lane may be moved, never read.** `promote` relocates a file and
 `edit` replaces a body it was handed; neither summarises, parses or reasons
 about what is inside. `edit` splices at the frontmatter boundary — it never
-looks at the body it drops, and it never prints it — which is the same boundary
-`reconcile` keeps when it reads one field and nothing else. `hooks.ideas_fence`
+looks at the body it drops, and it never prints it. `hooks.ideas_fence`
 derives "private" from a lane's absence from `board.LANES` and permits exactly
 the git subcommands that relocate without printing; a helper here that read a
 private note to decide anything is precisely what that fence exists to stop.
@@ -42,6 +41,7 @@ what makes every verb testable.
 
 No LLM anywhere in here (`00_architecture.md` §12) — it is a file mover.
 
+    python -m nightshift.boardcmd move <card-id> <lane>
     python -m nightshift.boardcmd reorder <card-id> <order>
     python -m nightshift.boardcmd verified <card-id>
     python -m nightshift.boardcmd rejected <card-id> --note "<what was wrong>"
@@ -65,7 +65,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from nightshift import board, reconcile, run_record, textio
+from nightshift import board, run_record, textio
 from nightshift.manifest import find_root
 
 #: Where a promoted note lands. The inbox is the only lane that takes an
@@ -151,16 +151,27 @@ def reorder(root: Path, card_id: str, order: str) -> str:
             f"(in {card.lane}/)")
 
 
-def mark_verified(root: Path, card_id: str) -> str:
-    """Verb 2 — `testing/` → `done/`, with the reconcile, as one act.
+def move_card(root: Path, card_id: str, lane: str) -> str:
+    """Verb — move a card to another lane through `board.move`, and commit.
 
-    The reconcile is not decoration. A card reaching `done/` is the point at
-    which a human signed off, and `reconcile` is what makes the board's own view
-    agree — Base Board groups on the `state:` property and never moves a file,
-    so a lane change that skips it leaves the Kanban showing a card in a lane it
-    has left. That is the same half-done transition the digest's attributed-
-    answer nudge exists to catch, and it is invisible from the lane alone.
+    The general lane change for a person at the keyboard. It keeps every
+    precondition `board.move` enforces (a move into `review/` needs a reason a
+    review is owed, so it is refused here — the runner and `drain` own that lane).
     """
+    card = _find(root, card_id)
+    if lane not in board.LANES:
+        raise BoardCommandError(f"{lane!r} is not a lane — one of {', '.join(board.LANES)}")
+    if card.lane == lane:
+        raise BoardCommandError(f"{card.id} is already in {lane}/")
+    try:
+        board.move(root, card, lane)
+    except board.TransitionRefused as exc:
+        raise BoardCommandError(str(exc)) from exc
+    return f"{card.id}: {card.lane}/ → {lane}/"
+
+
+def mark_verified(root: Path, card_id: str) -> str:
+    """Verb 2 — `testing/` → `done/`: the sign-off after a play-through."""
     card = _find(root, card_id)
     if card.lane != VERIFIED_FROM:
         raise BoardCommandError(
@@ -168,15 +179,7 @@ def mark_verified(root: Path, card_id: str) -> str:
             f"sign-off on a card that was waiting to be played, and any other lane "
             f"reaching done/ through it would be a transition nobody made")
     board.move(root, card, "done")
-    actions = reconcile.plan(root)
-    errors = [a for a in actions if a.kind == "error"]
-    reconcile.apply(root, actions, commit=True)
-    tail = ""
-    if actions:
-        tail = f"; reconciled {len(actions) - len(errors)} further change(s)"
-    if errors:
-        tail += f", {len(errors)} of which need a human"
-    return f"{card.id}: {VERIFIED_FROM}/ → done/{tail}"
+    return f"{card.id}: {VERIFIED_FROM}/ → done/"
 
 
 def mark_rejected(root: Path, card_id: str, note: str) -> str:
@@ -234,11 +237,10 @@ def mark_rejected(root: Path, card_id: str, note: str) -> str:
 def promote(root: Path, name: str) -> str:
     """Verb 3 — move one note out of the private lane and into `inbox/`.
 
-    Reads nothing. The file is relocated and committed by name; what is inside
-    it becomes visible to the routing machinery only because it is now in a lane
-    that machinery is allowed to open. Nothing here opens it, prints it, or
-    stamps a `state:` into it — the next `reconcile` does that, exactly as it
-    does for a note typed straight into the inbox.
+    Reads nothing while the note is private. The file is relocated by name; what
+    is inside it becomes visible to the routing machinery only because it is now
+    in a lane that machinery is allowed to open. Once there, a legacy `state:`
+    line is dropped from its frontmatter, since `card_schema` refuses the field.
     """
     filename = _bare_name(name)
     source = board.board_dir(root) / board.PRIVATE_LANE / filename
@@ -249,6 +251,9 @@ def promote(root: Path, name: str) -> str:
     if target.exists():
         raise BoardCommandError(f"{INBOX}/{filename} already exists — rename one of them")
     _move_file(root, source, target)
+    text = target.read_text(encoding="utf-8")
+    if "state" in board.parse_fields(text):
+        textio.write_text_lf(target, board.set_fields(text, {"state": None}))
     board.commit_board(root, f"board: promoted {filename} to {INBOX}/")
     return f"{filename}: {board.PRIVATE_LANE}/ → {INBOX}/"
 
@@ -269,15 +274,14 @@ def promote(root: Path, name: str) -> str:
 #: the fact. An inline note is one the classifier sent to a person *because* a card
 #: would have been overhead — writing machine-checkable criteria for it now would
 #: be fabricating the brief that deliberately never existed.
-#: Frontmatter a *bare note* may carry without having been triaged. `state:` is the
-#: lane, which `reconcile` reads and every note in an Obsidian-backed board has;
-#: `kanban_order:` is written by the Kanban plugin every time the vault opens.
+#: Frontmatter a *bare note* may carry without having been triaged.
+#: `kanban_order:` is the panel's ordering within a lane.
 #:
 #: The guard below used to refuse on *any* frontmatter, on the reasoning that a bare
 #: note has none. That is true of a note typed straight into the filesystem and false
 #: of every note on a board somebody opens in Obsidian — which is the only kind of
 #: board this verb exists for. Measured 2026-08-18 on the origin project: all 7 inbox
-#: notes carried `state` + `kanban_order`, so `close` refused every one of them and
+#: notes carried bookkeeping frontmatter, so `close` refused every one of them and
 #: the panel's `Done` gesture — the sole route out of `inline` — could not close
 #: anything at all. A triaged card is told apart by the fields triage actually adds
 #: (`id`, `title`, `tier`, `worker`, …), never by the presence of a frontmatter block.
@@ -297,13 +301,12 @@ def promote(root: Path, name: str) -> str:
 #: state."*). Every field that means a card has actually been triaged — `id`,
 #: `title`, `tier`, `worker`, `recipe`, `unattended`, `verify`, `kind`, `attempts`,
 #: `branch` — still refuses, which is the whole of what the guard is for.
-_NOTE_BOOKKEEPING = frozenset({"state", "kanban_order", "route", "created"})
+_NOTE_BOOKKEEPING = frozenset({"kanban_order", "route", "created"})
 
 _CLOSED_INLINE = """\
 ---
 id: {ident}
 title: "{title}"
-state: done
 tier: worker
 worker: none
 recipe: none
@@ -474,12 +477,10 @@ def land(root: Path, card_id: str, *, lane: str = "", no_branch: bool = False) -
 def create_note(root: Path, name: str, body: str, lane: str = INBOX) -> str:
     """Verb 4 — write a new bare note into `inbox/` (or, by request, `ideas/`).
 
-    Bare on purpose: no frontmatter, no `state:`, no schema. That is what a note
-    typed into the lane by hand looks like (`03_board.md` §1), and a note that
-    arrived through a panel must be indistinguishable from one that did not —
-    otherwise the classifier is looking at two shapes of the same thing. The
-    next `reconcile` stamps `state: inbox` on it, same as any other — `ideas/`
-    is never reconciled, matching every other private-lane rule here.
+    Bare on purpose: no frontmatter, no schema. That is what a note typed into
+    the lane by hand looks like (`03_board.md` §1), and a note that arrived
+    through a panel must be indistinguishable from one that did not — otherwise
+    the classifier is looking at two shapes of the same thing.
 
     `lane` defaults to `inbox/` for every existing caller; `ideas/` is additive.
     The body is written and committed sight-unseen either way — this verb reads
@@ -538,7 +539,7 @@ def edit_body(root: Path, target: str | Path, body: str) -> str:
     block ends, everything before that point is kept verbatim, everything after
     it is replaced by the text handed in. The old body is never parsed, never
     printed and never judged — which is what makes this verb safe to point at a
-    private note, and it is the same boundary `reconcile` keeps.
+    private note.
 
     A file with no frontmatter is replaced whole; that is the ordinary shape of
     a bare inbox note, and inventing a block for it would be this module writing
@@ -604,12 +605,16 @@ def _parser() -> argparse.ArgumentParser:
                         help="repo to write in (default: found from the working directory)")
     subs = parser.add_subparsers(dest="verb", required=True)
 
+    moving = subs.add_parser("move", help="move a card to another lane, through board.move")
+    moving.add_argument("card_id")
+    moving.add_argument("lane", choices=board.LANES)
+
     order = subs.add_parser("reorder", help="set a card's kanban_order within its lane")
     order.add_argument("card_id")
     order.add_argument("order", help="the fractional index to write; it sorts "
                                      "lexicographically, as Obsidian's own writes do")
 
-    verified = subs.add_parser("verified", help=f"{VERIFIED_FROM}/ → done/, and reconcile")
+    verified = subs.add_parser("verified", help=f"{VERIFIED_FROM}/ → done/")
     verified.add_argument("card_id")
 
     rejected = subs.add_parser("rejected", help=f"{REJECTED_FROM}/ → tasks/, with feedback")
@@ -662,7 +667,9 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     root = (args.root or find_root()).resolve()
     try:
-        if args.verb == "reorder":
+        if args.verb == "move":
+            print(move_card(root, args.card_id, args.lane))
+        elif args.verb == "reorder":
             print(reorder(root, args.card_id, args.order))
         elif args.verb == "verified":
             print(mark_verified(root, args.card_id))

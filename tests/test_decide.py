@@ -26,7 +26,6 @@ from nightshift import board, decide, worker_prompt
 _CARD = """---
 id: {id}
 title: A parked card
-state: needs-decision
 tier: worker
 worker: code-thread
 recipe: none
@@ -76,8 +75,11 @@ def _question(text: str) -> str:
 
 
 def _text(root: Path, card_id: str = "parked") -> str:
-    return (root / "Board" / "needs-decision" / f"{card_id}.md").read_text(
-        encoding="utf-8")
+    return board.find(root, card_id).text
+
+
+def _lane(root: Path, card_id: str = "parked") -> str:
+    return board.find(root, card_id).lane
 
 
 # ---------------------------------------------------------------------- parsing
@@ -304,7 +306,6 @@ def test_the_card_is_not_moved(tmp_path):
     decide.write_answer(root, "parked", ["A"], "", today=dt.date(2026, 8, 18))
     assert (root / "Board" / "needs-decision" / "parked.md").is_file()
     assert not (root / "Board" / "tasks" / "parked.md").exists()
-    assert "state: needs-decision" in _text(root)
 
 
 def test_the_card_keeps_lf_endings(tmp_path):
@@ -408,7 +409,7 @@ def test_a_settled_card_is_promoted_whatever_its_route_says(tmp_path):
     that satisfies it moves. The route is the parker's expectation, not a lock."""
     root = _repo(tmp_path, "- A\n- B\n", open_questions="none", route="triage")
     decide.promote_to_tasks(root, "parked")
-    assert "state: tasks" in _text(root)
+    assert _lane(root) == "tasks"
 
 
 def test_an_answered_tasks_card_settles_its_own_questions_on_the_way(tmp_path):
@@ -422,7 +423,7 @@ def test_an_answered_tasks_card_settles_its_own_questions_on_the_way(tmp_path):
     decide.promote_to_tasks(root, "parked", today=dt.date(2026, 8, 23))
 
     text = _text(root)
-    assert "state: tasks" in text
+    assert _lane(root) == "tasks"
     assert board.open_questions_settled(text)
     assert "none — answered on 2026-08-23" in text
     assert "> - should the damage be 3-6 or 4-7?" in text, "the question is kept"
@@ -434,7 +435,7 @@ def test_a_tasks_card_is_not_promoted_before_it_is_answered(tmp_path):
                  open_questions="- should the damage be 3-6 or 4-7?")
     with pytest.raises(decide.DecideError, match="no answer of yours is on record"):
         decide.promote_to_tasks(root, "parked")
-    assert "state: needs-decision" in _text(root)
+    assert _lane(root) == "needs-decision"
 
 
 def test_a_triage_card_with_a_live_question_is_refused_with_its_route(tmp_path):
@@ -444,7 +445,7 @@ def test_a_triage_card_with_a_live_question_is_refused_with_its_route(tmp_path):
     decide.write_answer(root, "parked", ["A"], "", today=dt.date(2026, 8, 23))
     with pytest.raises(decide.DecideError, match="re-triage"):
         decide.promote_to_tasks(root, "parked")
-    assert "state: needs-decision" in _text(root)
+    assert _lane(root) == "needs-decision"
 
 
 def test_a_card_with_no_route_and_a_live_question_says_so(tmp_path):
@@ -473,7 +474,6 @@ def test_a_promoted_chore_at_its_attempt_cap_gets_a_fresh_budget(tmp_path):
         "---\n"
         "id: a-chore\n"
         "title: A parked chore\n"
-        "state: needs-decision\n"
         "tier: worker\n"
         "worker: code-thread\n"
         "kind: chore\n"
@@ -515,18 +515,17 @@ def test_settling_twice_does_not_stack_two_headers(tmp_path):
 
 # --------------------------------------------------------- closing as done
 
-def test_closing_records_the_answer_and_sets_state_done(tmp_path):
-    """`close_parked` writes the answer and the `state:` flip; the panel's endpoint
-    runs `reconcile --apply` afterwards to actually move the file, same as `api/tasks`
-    does for `write_answer` — this function does not touch the filesystem layout."""
+def test_closing_records_the_answer_and_moves_the_card_to_done(tmp_path):
+    """`close_parked` writes the answer and moves the card, through `board.move`."""
     root = _repo(tmp_path, "- Close as not-applicable\n- Re-file against the other repo\n")
     message = decide.close_parked(root, "parked", ["Close as not-applicable"], "",
                                   today=dt.date(2026, 8, 22))
     text = _text(root)
     assert "### 2026-08-22 · karel" in text
     assert "> Close as not-applicable" in text
-    assert "state: done" in text
-    assert (root / "Board" / "needs-decision" / "parked.md").is_file()
+    assert "state:" not in text
+    assert (root / "Board" / "done" / "parked.md").is_file()
+    assert not (root / "Board" / "needs-decision" / "parked.md").exists()
     assert "parked" in message and "done/" in message
 
 
@@ -537,7 +536,7 @@ def test_closing_with_only_a_note_still_records_it(tmp_path):
     assert "> Not applicable here." in _text(root)
 
 
-def test_closing_with_nothing_ticked_or_typed_still_sets_state_done(tmp_path):
+def test_closing_with_nothing_ticked_or_typed_still_moves_it_to_done(tmp_path):
     """Unlike `write_answer`, an empty pick/note is not refused here — the card may
     already carry its answer from an earlier `Record the answer` click, and Close is
     then just the move half of the job."""
@@ -545,12 +544,12 @@ def test_closing_with_nothing_ticked_or_typed_still_sets_state_done(tmp_path):
     decide.close_parked(root, "parked", ["", ""], "", today=dt.date(2026, 8, 22))
     text = _text(root)
     assert "> already answered earlier" in text
-    assert "state: done" in text
+    assert _lane(root) == "done"
 
 
 def test_closing_a_card_not_in_needs_decision_is_refused(tmp_path):
     root = _repo(tmp_path, "- A\n- B\n")
-    text = _text(root).replace("state: needs-decision", "state: tasks")
+    text = _text(root)
     (root / "Board" / "tasks").mkdir(parents=True, exist_ok=True)
     (root / "Board" / "needs-decision" / "parked.md").unlink()
     (root / "Board" / "tasks" / "parked.md").write_text(text, encoding="utf-8")
@@ -567,7 +566,7 @@ def test_closing_an_unknown_card_is_refused(tmp_path):
 def test_closing_keeps_lf_endings(tmp_path):
     root = _repo(tmp_path, "- A\n- B\n")
     decide.close_parked(root, "parked", ["A"], "", today=dt.date(2026, 8, 22))
-    assert b"\r\n" not in (root / "Board" / "needs-decision" / "parked.md").read_bytes()
+    assert b"\r\n" not in (root / "Board" / "done" / "parked.md").read_bytes()
 
 
 # --------------------------------------------------------- reopening a re-parked card

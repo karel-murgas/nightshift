@@ -399,13 +399,7 @@ def write_answer(root: Path, card_id: str, picks: list[str], note: str,
 
 def close_parked(root: Path, card_id: str, picks: list[str], note: str,
                  *, today: dt.date | None = None) -> str:
-    """Record an answer, if there is one, and flip `state:` to `done`.
-
-    **Sets the field, does not move the file.** Same split as `api/tasks`'s handling
-    of `write_answer`: this function is a pure text edit, and the caller runs
-    `reconcile --apply` to make the folder catch up — reconcile is the one thing that
-    moves a card, everywhere on the board, and duplicating that here would be a second
-    place a move could go wrong.
+    """Record an answer, if there is one, and move the card to `done/` (`board.move`).
 
     **Why this doesn't inherit `write_answer`'s park-over-promote policy.** That
     policy is about `tasks/`: promoting there hands the answer to a worker who will
@@ -430,8 +424,7 @@ def close_parked(root: Path, card_id: str, picks: list[str], note: str,
     if any(picks) or note.strip():
         write_answer(root, card_id, picks, note, today=today)
         card = board.find(root, card_id)
-    text = re.sub(r"^state:.*$", "state: done", card.text, count=1, flags=re.MULTILINE)
-    textio.write_text_lf(card.path, text)
+    board.move(root, card, "done")
     return f"{card_id} closed → done/"
 
 
@@ -653,9 +646,7 @@ def reopen(card_text: str) -> str:
 def promote_to_tasks(root: Path, card_id: str, *, today: dt.date | None = None) -> str:
     """Send a parked card to `tasks/`, settling its questions if that is its route.
 
-    The `state:` flip only — the caller runs `reconcile --apply` to move the file,
-    same split as `close_parked`, because reconcile is the one thing on the board that
-    moves a card.
+    Rewrites the card, then moves it through `board.move`, which commits.
 
     **Three ways in, and the middle one is the point of `after_answer:`.**
 
@@ -715,8 +706,8 @@ def promote_to_tasks(root: Path, card_id: str, *, today: dt.date | None = None) 
     # over from an earlier round is exactly the card that must not reach `tasks/` still
     # looking like it is asking something.
     text = mark_decided(text, on=(today or dt.date.today()).isoformat())
-    text = re.sub(r"^state:.*$", "state: tasks", text, count=1, flags=re.MULTILINE)
     if card.attempts:
         text = board.set_fields(text, {"retry_from": str(card.attempts)})
     textio.write_text_lf(card.path, text)
+    board.move(root, card, "tasks")
     return f"{card_id} → tasks/"

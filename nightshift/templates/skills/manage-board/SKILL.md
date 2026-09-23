@@ -42,8 +42,8 @@ whole reason the skill exists.
 ## Never do these
 
 - **Never open or read `Board/ideas/`.** It is {{maintainer}}'s private lane. Not "avoid unless
-  useful" — never. `doc_scan` and triage do not touch it; neither do you. The only code that
-  may is `nightshift/reconcile.py`, reading one field.
+  useful" — never. `doc_scan` and triage do not touch it; neither do you, and no code reads
+  it either — `boardcmd promote` moves a note out by name without opening it.
   **You may commit and push those files** — `git add`/`commit`/`push` naming
   `{{board}}/{{private_lane}}/…` goes through the fence, because moving a note is not reading
   it. Write the commit message from the filenames and `git status`, never from a diff:
@@ -54,9 +54,9 @@ whole reason the skill exists.
   no generated *report* file left to mistake for a place to answer — the digest and its
   `Digest.md` were removed in 2026-09. Answers go in a card's `## Thread`, which is the only
   place anything reads them from.
-- **Never hand-drag a card file between lanes**, and never tell {{maintainer}} to. State changes go
-  through `## Thread` + `state:` + `reconcile` (below). A raw file move leaves `state:`
-  behind and reconcile reads it as a drag.
+- **Never hand-drag a card file between lanes**, and never tell {{maintainer}} to. Lane changes go
+  through `## Thread` + `boardcmd move` (below), which moves and commits in one step. There
+  is no `state:` field — the lane is the directory, and `card_schema` refuses the field.
 - **Never invent frontmatter {{maintainer}} would not write.** They never write any; triage fits it.
   If a card needs `tier`/`worker`/`unattended`, that is a triage judgment — make it as one,
   do not guess to fill the field.
@@ -84,8 +84,8 @@ whole reason the skill exists.
 
 ### "Put this on the board" / a new idea
 
-Write it to `Board/inbox/<slug>.md` with a `state: inbox` frontmatter and the idea as the
-body — nothing more. It is now triage's input. **Never straight to `tasks/`**: dictation
+Write it to `Board/inbox/<slug>.md` with the idea as the body and no frontmatter —
+nothing more (`python -m nightshift.boardcmd note <slug>.md --body-file -` writes and commits it). It is now triage's input. **Never straight to `tasks/`**: dictation
 does not skip triage. If {{maintainer}} is clearly ready to have it triaged now, dispatch the
 `triage` agent on it (see below); otherwise leave it in `inbox/` for the next triage pass.
 
@@ -145,7 +145,7 @@ bookkeeping can quietly corrupt the board, so:
      remains, which is the normal outcome for `after_answer: tasks`: restate `##
      Acceptance`/`## Steps` for the chosen branch, set `## Open questions` to `none`
      (keeping the question as a quote under it, so nothing is lost), re-evaluate `tier:` if
-     the answer changed it, `state: tasks`, move (below). The panel's `Send to tasks` does
+     the answer changed it, then move it to `tasks/` (below). The panel's `Send to tasks` does
      exactly this for you on an answered `after_answer: tasks` card.
    - **The answer opened a new question, or settled only part of a batched one:** keep it in
      `needs-decision/`, add the new question (batched, picker-shaped), and tell {{maintainer}} what is
@@ -167,15 +167,14 @@ bookkeeping can quietly corrupt the board, so:
 
 ### Move a card between lanes
 
-Edit `state:` to the target lane, then run reconcile to move the file:
-
 ```bash
-python -m nightshift.reconcile --apply
+python -m nightshift.boardcmd move <id> <lane>
 ```
 
-Reconcile is deterministic (§1): a card whose `state:` disagrees with its
-folder gets its file moved to match. Commit the result with the message
-`board: <id> <from> → <to>`. If several cards changed, one reconcile handles them all.
+It moves the file through `board.move` and commits it as `board: <id> <from> → <to>`. The
+lane is the directory; there is no field to edit. A move into `review/` is refused — that
+lane belongs to the runner and `drain`. To close out a card you worked yourself, use
+`boardcmd land` (below) instead: it merges the branch as well.
 
 One thing still breaks on a move, caught by the gates on save: **a doc citing a card by
 its lane path breaks the moment the card moves.** That is why the cross-reference rule is

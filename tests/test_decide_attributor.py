@@ -37,7 +37,6 @@ def _card(thread: str) -> board.Card:
     text = (
         "---\n"
         "id: c\n"
-        "state: needs-decision\n"
         "---\n\n"
         "## Question\n\n"
         "### Decision 1 — DECIDED (2026-08-04)\n"

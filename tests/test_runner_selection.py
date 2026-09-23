@@ -559,7 +559,6 @@ def test_a_green_run_moves_the_card_to_review(tmp_path):
     runner.settle(root, "good", runner.Dispatch("review", "2 commits on ai/good"))
     card = board.find(root, "good")
     assert card.lane == "review"
-    assert card.fields["state"] == "review"
     assert not card.fields.get("started")
 
 
@@ -1093,7 +1092,7 @@ def test_setting_a_field_preserves_order_and_the_body(tmp_path):
     card = board.Card.load(path, "tasks")
     card.write({"attempts": "1"})
     after = path.read_text(encoding="utf-8")
-    assert after.index("id:") < after.index("title:") < after.index("state:")
+    assert after.index("id:") < after.index("title:") < after.index("tier:")
     assert "## Intent" in after and "A probe card." in after
     assert before.split("---")[2] == after.split("---")[2]  # body untouched
 
@@ -1117,15 +1116,13 @@ def test_setting_a_field_to_none_removes_it(tmp_path):
     assert "started:" not in path.read_text(encoding="utf-8")
 
 
-def test_a_move_rewrites_state_to_match_the_new_lane(tmp_path):
-    """The lane is the truth and `state:` is the denormalised copy; a move that
-    updated only one of them is the half-done move `card_schema` exists to
-    catch, and the runner must never be the one producing it."""
+def test_a_move_relocates_the_card_and_writes_no_state_field(tmp_path):
+    """The lane directory is the card's only state; a move writes no copy of it."""
     root = _repo(tmp_path)
     _card(root, "tasks", "probe")
     board.move(root, board.find(root, "probe"), "review", review_owed="a test fixture")
     card = board.find(root, "probe")
-    assert card.lane == "review" and card.fields["state"] == "review"
+    assert card.lane == "review" and "state" not in card.fields
     assert not (root / "Board" / "tasks" / "probe.md").exists()
 
 

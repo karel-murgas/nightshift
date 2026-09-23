@@ -43,7 +43,6 @@ CARD = """\
 ---
 id: {id}
 title: "{title}"
-state: tasks
 kind: chore
 tier: worker
 worker: code-thread

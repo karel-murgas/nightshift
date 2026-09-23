@@ -1,11 +1,10 @@
 """Gate: every card on the board matches the schema (03_board.md).
 
 The board is `Board/<lane>/<id>.md`; a transition is a file move plus a
-commit, so the two things worth checking mechanically are (a) the frontmatter
-the dispatcher reads is present and resolvable, and (b) `state:` still agrees
-with the lane the file is actually sitting in — a disagreement is a half-done
-move, which is exactly the failure a crash-safe board is supposed to make
-visible.
+commit, so the lane directory is a card's only state. What is worth checking
+mechanically is that the frontmatter the dispatcher reads is present and
+resolvable — and that no card carries a `state:` field, the retired copy of
+the lane that could only ever disagree with it.
 
 Unknown frontmatter keys are violations on purpose. 03_board.md §2 dropped two
 fields that were written twice and read never; a schema that silently tolerates
@@ -34,11 +33,11 @@ from nightshift import board as _board
 from nightshift.gates.base import Violation
 
 NAME = "card_schema"
-DESCRIPTION = "cards on the board match the card schema, and `state:` agrees with the lane"
+DESCRIPTION = "cards on the board match the card schema, and carry no `state:` field"
 
 # Where the board sits comes from `[board].root`, via the module that owns the
 # fact. It was `Path("Board")` — a second home for a manifest field `board.py`,
-# `reconcile.py`, the runner and `ideas_fence` all already honoured. A project that
+# the runner and `ideas_fence` all already honoured. A project that
 # renamed its board therefore got a gate scanning a directory that was not there,
 # and `check()` opens with "no board → no violations": measured 2026-08-02, a card
 # with an invalid `tier:` and a missing required section reported **All clear**
@@ -79,7 +78,6 @@ _DISPATCHED = frozenset({"blocked", "testing", "done", "failed"})
 _AUTHOR_FIELDS: tuple[str, ...] = (
     "id",
     "title",
-    "state",
     "tier",
     "worker",
     "recipe",
@@ -326,13 +324,14 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
 
     known = set(_AUTHOR_FIELDS) | _OPTIONAL_FIELDS | _RUNNER_FIELDS | _TOOL_FIELDS
     for key in fields:
-        if key not in known:
+        if key == "state":
+            bad(key, "`state:` is retired — the lane directory is the card's state; "
+                     "delete the line (and move the card with `boardcmd move`)")
+        elif key not in known:
             bad(key, f"unknown field `{key}` — nothing reads it, so the runner would drop it silently")
 
     if "id" in fields and fields["id"] != path.stem:
         bad("id", f"`id: {fields['id']}` does not match the filename stem `{path.stem}`")
-    if "state" in fields and fields["state"] != lane:
-        bad("state", f"`state: {fields['state']}` but the card is in `{lane}/` — half-done move")
     if "tier" in fields and fields["tier"] not in _TIERS:
         bad("tier", f"`tier: {fields['tier']}` — must be one of {sorted(_TIERS)}; the dispatcher resolves the tier to a model and never guesses one")
     if "unattended" in fields and fields["unattended"].lower() not in _BOOLS:
@@ -639,9 +638,7 @@ def _duplicates(found: list[tuple[Path, str]], repo_root: Path) -> list[Violatio
     unstaged and never landed: `grid-distance-metric` was committed into `testing/`
     while its `review/` copy stayed on the branch. All 45 gates passed — this one
     walked both copies, validated each against its own lane, and had nothing to say
-    about there being two. The half-done *move* is already covered (`state:`
-    disagreeing with the folder is the crash check `board.move` is ordered around);
-    what was uncovered is the half-done *commit*, which leaves both copies internally
+    about there being two: a half-done *commit* leaves both copies internally
     consistent and only wrong in relation to each other.
     """
     seen: dict[str, list[str]] = {}

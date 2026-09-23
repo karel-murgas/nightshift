@@ -42,31 +42,19 @@ just not expected, not configured, and not required by anything here.
 | `inbox/` | shared | "I've decided I want this. Help me refine it." Raw is fine — {{maintainer}} never writes frontmatter; triage fits it. |
 | `tasks/` | the system | actionable, dispatchable, no further human input needed |
 
-**Readying an idea: set `state: inbox` on the note** (or click it over in Command
-Center's *Ideas* page, which writes the same field). It appears in the inbox at once,
-and the next reconcile run moves the file. A note with no `state:` is invisible to
-everything — not on the board, not read by any agent, not scanned for staleness.
+**Readying an idea: click it over in Command Center's *Ideas* page**, or run
+`python -m nightshift.boardcmd promote <note.md>`. Either moves the file into `inbox/`
+without anyone reading it. A note left in `ideas/` is invisible to everything — not on
+the board, not read by any agent, not scanned for staleness.
 
-## Two copies of one fact, and the script that keeps them honest
+## Moving a card
 
-The lane directory is the truth. `state:` is a denormalised copy — worth keeping
-because it is the one thing that tells you a card's lane when you open the raw file,
-and because the schema gate uses the two disagreeing as a crash check. Anything that
-writes `state:` without moving the file leaves that disagreement behind, so
-`python -m nightshift.reconcile` makes the folder catch up:
-
-| Situation | Signal | What reconcile does |
-|---|---|---|
-| a note you just placed | no `state:` | folder wins → stamp `state:` |
-| a card something re-lane'd by field | `state:` ≠ folder | state wins → move the file |
-| an idea you flagged ready | `state:` on an `ideas/` note | move it out to that lane |
-
-It reports by default and changes nothing; `--apply` performs, `--commit` commits.
-
-**One habit this asks of you:** once a card is on the board, move it through Command
-Center rather than by dragging the file in a file manager — the panel writes both halves
-through `board.move`. A manual file move leaves the old `state:` behind, which reads as
-a re-lane request, and the next reconcile pulls the card back.
+The lane directory is a card's state, and the only copy of it — there is no `state:`
+field, and `card_schema` refuses one. A card changes lane through `board.move` (`git mv`
+plus one commit, `board: <id> <from> → <to>`): the runner, Command Center's buttons and
+`python -m nightshift.boardcmd move <id> <lane>` all go through it, and
+`python -m nightshift.boardcmd land <id>` closes out a card worked by hand. A file
+dragged in a file manager moves too, but lands uncommitted — commit it with that message.
 
 ## The rest
 

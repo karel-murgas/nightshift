@@ -39,7 +39,6 @@ CARD = """\
 ---
 id: {id}
 title: "{id}, waiting on a reviewer"
-state: review
 tier: worker
 worker: code-thread
 recipe: none
@@ -533,8 +532,7 @@ def test_a_card_outside_the_lane_is_not_reviewed_by_name(tmp_path, monkeypatch):
     root = _repo(tmp_path, ("waiting", "review"))
     (root / "Board" / "tasks").mkdir(parents=True)
     (root / "Board" / "tasks" / "queued.md").write_text(
-        CARD.format(id="queued", verify="review").replace("state: review",
-                                                          "state: tasks"),
+        CARD.format(id="queued", verify="review"),
         encoding="utf-8", newline="")
     reviewer = _Reviewer().install(monkeypatch)
 

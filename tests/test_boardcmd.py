@@ -9,11 +9,9 @@ quoting produces a diff on every touch and the board's git history stops being
 readable. Asserted as *byte equality* of the frontmatter block, not as a field
 lookup — a lookup passes on a file that was rewritten from scratch.
 
-**A lane change is two writes, and both have to happen.** Base Board groups on
-`state:` and never moves a file. A verb that moved a card without reconciling
-leaves the Kanban showing it where it no longer is, which is invisible from the
-lane alone — so the reconcile is asserted through a *second, unrelated* card
-that only a real reconcile pass would move.
+**A lane change is one committed move.** The lane directory is the card's only
+state; a verb that moved a file without committing it is a move the next machine
+cannot see.
 
 **The private lane is moved, never read.** The whole output of `promote` is
 checked for the note's own text, because the failure mode is not a refusal, it
@@ -43,7 +41,6 @@ CARD = """\
 ---
 id: {id}
 title: "A card, with a comma"
-state: {state}
 worker: code-thread
 kanban_order: {order}
 tier: worker
@@ -88,10 +85,9 @@ def _repo(tmp_path: Path) -> Path:
     return _fixtures.repo_copy("board-every-lane", tmp_path / "repo", _build)
 
 
-def _card(root: Path, lane: str, card_id: str, *, state: str | None = None,
-          order: str = "VN") -> Path:
+def _card(root: Path, lane: str, card_id: str, *, order: str = "VN") -> Path:
     path = root / "Board" / lane / f"{card_id}.md"
-    path.write_text(CARD.format(id=card_id, state=state or lane, order=order),
+    path.write_text(CARD.format(id=card_id, order=order),
                     encoding="utf-8", newline="")
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", f"card {card_id}")
@@ -136,12 +132,12 @@ def test_reorder_appends_the_field_when_a_card_never_had_one(tmp_path):
     normal and must not be an error."""
     root = _repo(tmp_path)
     path = root / "Board" / "tasks" / "plain.md"
-    path.write_text("---\nid: plain\nstate: tasks\n---\n\nbody\n",
+    path.write_text("---\nid: plain\ntier: worker\n---\n\nbody\n",
                     encoding="utf-8", newline="")
 
     boardcmd.reorder(root, "plain", "VA")
 
-    assert _frontmatter(path) == "---\nid: plain\nstate: tasks\nkanban_order: VA\n---\n"
+    assert _frontmatter(path) == "---\nid: plain\ntier: worker\nkanban_order: VA\n---\n"
 
 
 def test_reorder_refuses_an_empty_value(tmp_path):
@@ -162,25 +158,63 @@ def test_a_verb_on_a_card_that_does_not_exist_refuses_by_id(tmp_path):
 # ------------------------------------------------------------------ verb 2
 
 
-def test_marking_a_card_verified_lands_it_in_done_and_reconciles(tmp_path):
-    """Both halves, and the reconcile is asserted through a *different* card.
-
-    Asserting it through the marked card proves nothing — `board.move` already
-    stamps `state:` — so the board carries a second card whose `state:` and lane
-    disagree, and only a real reconcile pass moves it.
-    """
+def test_marking_a_card_verified_lands_it_in_done(tmp_path):
+    """The move and nothing else: no `state:` is written, and no other card moves."""
     root = _repo(tmp_path)
     _card(root, "testing", "played")
-    _card(root, "tasks", "dragged", state="review")   # dragged in the Kanban, not moved
+    _card(root, "tasks", "bystander")
 
     message = boardcmd.mark_verified(root, "played")
 
     assert _lane_of(root, "played") == "done"
-    assert board.find(root, "played").fields["state"] == "done"
-    assert _lane_of(root, "dragged") == "review", (
-        "the second card was left where it was — the verb moved a file and skipped "
-        "the reconcile, which is the half-done transition this exists to prevent")
+    assert "state" not in board.find(root, "played").fields
+    assert _lane_of(root, "bystander") == "tasks"
     assert "done/" in message
+
+
+# ------------------------------------------------------------------ move
+
+
+def test_move_relocates_a_card_and_commits_it(tmp_path):
+    root = _repo(tmp_path)
+    _card(root, "needs-decision", "parked")
+
+    message = boardcmd.move_card(root, "parked", "tasks")
+
+    assert _lane_of(root, "parked") == "tasks"
+    assert "state" not in board.find(root, "parked").fields
+    assert not _git(root, "status", "--porcelain", "--", "Board").stdout.strip()
+    assert "board: parked needs-decision → tasks" in \
+        _git(root, "log", "-1", "--format=%s").stdout
+    assert "needs-decision/ → tasks/" in message
+
+
+def test_move_keeps_board_moves_review_precondition(tmp_path):
+    """A card nobody can review belongs in `blocked/`; the verb must not open a side
+    door into `review/` that `board.move` refuses."""
+    root = _repo(tmp_path)
+    _card(root, "tasks", "t")
+    with pytest.raises(boardcmd.BoardCommandError, match="review"):
+        boardcmd.move_card(root, "t", "review")
+    assert _lane_of(root, "t") == "tasks"
+
+
+def test_move_refuses_an_unknown_lane_a_same_lane_move_and_a_missing_card(tmp_path):
+    root = _repo(tmp_path)
+    _card(root, "tasks", "t")
+    with pytest.raises(boardcmd.BoardCommandError, match="not a lane"):
+        boardcmd.move_card(root, "t", "ideas")
+    with pytest.raises(boardcmd.BoardCommandError, match="already in"):
+        boardcmd.move_card(root, "t", "tasks")
+    with pytest.raises(boardcmd.BoardCommandError, match="no card"):
+        boardcmd.move_card(root, "ghost", "done")
+
+
+def test_move_is_reachable_from_the_command_line(tmp_path):
+    root = _repo(tmp_path)
+    _card(root, "tasks", "t")
+    assert boardcmd.main(["--root", str(root), "move", "t", "done"]) == 0
+    assert _lane_of(root, "t") == "done"
 
 
 def test_marking_a_card_verified_refuses_from_any_other_lane(tmp_path):
@@ -217,7 +251,7 @@ def test_rejecting_a_card_sends_it_back_to_tasks_with_the_feedback(tmp_path):
 
     assert _lane_of(root, "played") == "tasks"
     card = board.find(root, "played")
-    assert card.fields["state"] == "tasks"
+    assert "state" not in card.fields
     assert card.fields["last_outcome"] == "needs_fix"
     assert "the door never opens" in card.text
     assert "## Feedback" in card.text
@@ -308,6 +342,21 @@ def test_promoting_an_idea_moves_the_file_and_prints_nothing_from_inside_it(
         assert "second paragraph" not in stream, stream
 
 
+def test_promoting_drops_a_legacy_state_line_and_keeps_the_rest(tmp_path):
+    """`card_schema` refuses `state:`, so a note flagged the old way must not turn
+    the gate red the moment it reaches `inbox/`."""
+    root = _repo(tmp_path)
+    (root / "Board" / board.PRIVATE_LANE / "old.md").write_text(
+        "---\nstate: inbox\nkanban_order: VA\n---\n\nprose\n", encoding="utf-8", newline="")
+
+    boardcmd.promote(root, "old.md")
+
+    text = (root / "Board" / "inbox" / "old.md").read_text(encoding="utf-8")
+    assert text == "---\nkanban_order: VA\n---\n\nprose\n"
+    assert not _git(root, "status", "--porcelain", "--", "Board").stdout.strip()
+    assert not [v for v in card_schema.check(root) if "old.md" in v.file]
+
+
 def test_promoting_leaves_the_notes_text_out_of_the_commit_message_too(tmp_path):
     """git log is output as much as stdout is, and it is the copy that persists."""
     root = _repo(tmp_path)
@@ -344,7 +393,7 @@ def test_a_verb_refuses_a_filename_that_is_a_path(tmp_path):
 
 
 def test_a_new_note_is_bare_and_indistinguishable_from_a_typed_one(tmp_path):
-    """No frontmatter, no `state:`. A note that arrived through a panel must look
+    """No frontmatter. A note that arrived through a panel must look
     exactly like one typed into the lane, or the classifier sees two shapes."""
     root = _repo(tmp_path)
 
@@ -657,7 +706,7 @@ def test_closing_an_inline_note_files_it_in_done(tmp_path):
     assert card.is_file(), said
     text = card.read_text(encoding="utf-8")
     assert "id: tidy-the-hotbar" in text
-    assert "state: done" in text
+    assert "state:" not in text
     assert "The hotbar spacing is off by a pixel." in text, "the note is the intent"
 
 
@@ -696,26 +745,20 @@ def test_closing_a_note_that_is_already_a_card_is_refused(tmp_path):
     through its own lanes rather than being stamped into a new one."""
     root = _repo(tmp_path)
     (root / "Board" / "inbox" / "half.md").write_text(
-        "---\nid: half\nstate: inbox\n---\n\nbody\n", encoding="utf-8")
+        "---\nid: half\n---\n\nbody\n", encoding="utf-8")
 
     with pytest.raises(boardcmd.BoardCommandError, match="carries triage field"):
         boardcmd.close_note(root, "half.md")
     assert (root / "Board" / "inbox" / "half.md").exists()
 
 
-def test_a_note_carrying_only_lane_and_kanban_bookkeeping_still_closes(tmp_path):
-    """The bug that made this verb unusable on a real board.
-
-    The guard refused on *any* frontmatter, reasoning that a bare note has none.
-    True of a note typed into the filesystem; false of every note on a board opened
-    in Obsidian, whose Kanban plugin stamps `state:` and `kanban_order:` on all of
-    them. Measured 2026-08-18 on the origin project: 7 of 7 inbox notes carried
-    exactly these two keys, so `close` refused every one and the panel's `Done`
-    gesture — the only route out of `inline` — could close nothing at all.
-    """
+def test_a_note_carrying_only_kanban_bookkeeping_still_closes(tmp_path):
+    """The guard once refused on *any* frontmatter, so the panel's `Done` gesture —
+    the only route out of `inline` — could close nothing on a real board, where
+    notes carry `kanban_order:`."""
     root = _repo(tmp_path)
     (root / "Board" / "inbox" / "n.md").write_text(
-        "---\nstate: inbox\nkanban_order: VL\n---\n\nthe real prose\n",
+        "---\nkanban_order: VL\n---\n\nthe real prose\n",
         encoding="utf-8")
 
     boardcmd.close_note(root, "n.md")
@@ -727,7 +770,6 @@ def test_a_note_carrying_only_lane_and_kanban_bookkeeping_still_closes(tmp_path)
     # survive inside `## Intent`, or Obsidian reads the file as having two.
     assert text.count("---\n") == 2, text
     assert "kanban_order" not in text
-    assert "state: done" in text
 
 
 def test_a_closed_note_that_had_bookkeeping_still_satisfies_the_schema(tmp_path):
@@ -737,7 +779,7 @@ def test_a_closed_note_that_had_bookkeeping_still_satisfies_the_schema(tmp_path)
 
     root = _repo(tmp_path)
     (root / "Board" / "inbox" / "n.md").write_text(
-        "---\nstate: inbox\nkanban_order: VL\n---\n\nbody\n", encoding="utf-8")
+        "---\nkanban_order: VL\n---\n\nbody\n", encoding="utf-8")
     boardcmd.close_note(root, "n.md")
 
     offending = [str(v) for v in card_schema.check(root) if "n.md" in v.file]
@@ -794,11 +836,11 @@ def test_editing_a_note_through_the_panels_editor_does_not_duplicate_frontmatter
 
     root = _repo(tmp_path)
     note = root / "Board" / "inbox" / "n.md"
-    note.write_text("---\nstate: inbox\ncreated: 2026-09-19\n---\n\nthe original prose\n",
+    note.write_text("---\nkanban_order: VL\ncreated: 2026-09-19\n---\n\nthe original prose\n",
                     encoding="utf-8")
 
     shown = panel.read_body(root, "Board/inbox/n.md")
-    assert "state: inbox" not in shown, "the editor is handed the body, not the file"
+    assert "kanban_order" not in shown, "the editor is handed the body, not the file"
     boardcmd.edit_body(root, "Board/inbox/n.md", shown.rstrip("\n") + "\n\nand a new paragraph\n")
 
     text = note.read_text(encoding="utf-8")
@@ -818,7 +860,7 @@ def test_a_note_carrying_created_still_closes(tmp_path):
     """
     root = _repo(tmp_path)
     (root / "Board" / "inbox" / "n.md").write_text(
-        "---\nstate: inbox\ncreated: 2026-08-01\n---\n\nthe real prose\n",
+        "---\ncreated: 2026-08-01\n---\n\nthe real prose\n",
         encoding="utf-8")
 
     boardcmd.close_note(root, "n.md")
@@ -837,7 +879,7 @@ def test_close_still_refuses_a_card_that_has_actually_been_triaged(tmp_path):
     something to lose."""
     root = _repo(tmp_path)
     (root / "Board" / "inbox" / "n.md").write_text(
-        "---\nstate: inbox\ncreated: 2026-08-01\ntier: worker\nworker: code-thread\n"
+        "---\ncreated: 2026-08-01\ntier: worker\nworker: code-thread\n"
         "---\n\nthe real prose\n", encoding="utf-8")
 
     with pytest.raises(boardcmd.BoardCommandError) as refusal:

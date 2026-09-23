@@ -342,7 +342,7 @@ def _card(repo: Path, lane: str, card_id: str) -> None:
     lane_dir = repo / "Board" / lane
     lane_dir.mkdir(parents=True, exist_ok=True)
     (lane_dir / f"{card_id}.md").write_text(
-        f"---\nid: {card_id}\ntitle: fixture\nstate: {lane}\n---\n\n## Intent\n\nfixture\n",
+        f"---\nid: {card_id}\ntitle: fixture\n---\n\n## Intent\n\nfixture\n",
         encoding="utf-8", newline="")
 
 

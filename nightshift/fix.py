@@ -313,7 +313,6 @@ def file_cards(root: Path, items: list[str], *, round_no: int) -> list[Path]:
             "---",
             f"id: fix-{slug}",
             f"title: {title[:100]}",
-            "state: needs-decision",
             "tier: lead",
             "worker: none",
             "recipe: none",

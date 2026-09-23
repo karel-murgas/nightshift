@@ -24,8 +24,7 @@ from the card alone.
 
 **You may never open `Board/ideas/`.** It is {{maintainer}}'s private lane — half-thoughts they have
 not chosen to show anyone. Not "avoid unless useful": never. If a note references
-something you think is in there, ask; do not go and look. (`nightshift/reconcile.py` reads one
-field there and nothing else reads it at all — §1.)
+something you think is in there, ask; do not go and look. (Nothing reads it at all — §1.)
 
 Notes are usually in **Czech**. Cards you write are in **English** — they are read by
 workers and by gates. Keep {{maintainer}}'s Czech verbatim in `## Thread` if you quote them.
@@ -236,7 +235,6 @@ a finding about this charter, not about the schema.
 Frontmatter (§2) — **you write these; {{maintainer}} never does:**
 
 - `id` must equal the filename stem. If you rename the file, rename both.
-- `state` must equal the lane it sits in.
 - `tier`: `worker` unless the card genuinely needs judgment. Never a model name.
 - `worker`: a stem in `.claude/agents/`, or `none`. `recipe`: a stem in `.ai/recipes/`, or
   `none` — most work types have no recipe and an invented name is worse than an honest
@@ -397,11 +395,11 @@ opposite were true.
 
 ## What the gates and the charters already prove — this section outranks the thoroughness ones
 
-`card_schema` checks required fields, `id`/filename agreement, `state`/lane agreement,
-tier validity, unknown fields, that `worker:` and `recipe:` resolve to real files, that
+`card_schema` checks required fields, `id`/filename agreement, that no `state:` field is
+present (the lane is the directory), tier validity, unknown fields, that `worker:` and `recipe:` resolve to real files, that
 `tasks/` has no live open question, and that a parked card has a `## Question` and an
 `after_answer:`.
-`nightshift/reconcile.py` handles the file move.
+The lane is the directory: move the card with `git mv`, and write no `state:` field.
 
 **This is a rule, not advice, and it beats every other section in this charter when they
 pull against each other.** The sections above demand thoroughness — be no worse than a chat,

@@ -21,7 +21,6 @@ import _fixtures
 _CARD = """---
 id: probe
 title: A probe card
-state: tasks
 kanban_order: a0
 ---
 
@@ -80,7 +79,7 @@ def test_a_move_follows_the_declared_root(tmp_path):
     moved = board.move(root, card, "review", review_owed="a test fixture")
 
     assert moved.path == root / "kanban" / "review" / "probe.md"
-    assert moved.fields["state"] == "review"
+    assert "state" not in moved.fields
     status = subprocess.run(["git", "status", "--porcelain"], cwd=root,
                             capture_output=True, text=True, check=True)
     assert status.stdout.strip() == ""
@@ -92,10 +91,10 @@ def test_a_move_follows_the_declared_root(tmp_path):
 def test_field_order_is_preserved_and_values_are_not_requoted():
     """Karel hand-writes frontmatter and Obsidian rewrites it; a writer that
     normalised quoting would produce a diff on every touch."""
-    text = '---\nid: probe\ntitle: "A: quoted title"\nstate: tasks\n---\n\nbody\n'
-    out = board.set_fields(text, {"state": "review"})
+    text = '---\nid: probe\ntitle: "A: quoted title"\ntier: worker\n---\n\nbody\n'
+    out = board.set_fields(text, {"tier": "lead"})
     assert out.splitlines()[:4] == [
-        "---", "id: probe", 'title: "A: quoted title"', "state: review"]
+        "---", "id: probe", 'title: "A: quoted title"', "tier: lead"]
 
 
 def test_runner_fields_are_appended_never_interleaved():
@@ -117,7 +116,7 @@ def test_a_replaced_section_does_not_stack(tmp_path):
 
 def test_setting_fields_on_a_card_with_no_frontmatter_raises():
     with pytest.raises(ValueError, match="frontmatter"):
-        board.set_fields("no frontmatter here\n", {"state": "tasks"})
+        board.set_fields("no frontmatter here\n", {"tier": "worker"})
 
 
 # --- ordering -----------------------------------------------------------------
@@ -129,9 +128,9 @@ def test_dispatch_order_puts_dragged_cards_first(tmp_path):
     root = _repo(tmp_path)
     lane = root / "Board" / "tasks"
     (lane / "undragged.md").write_text(
-        "---\nid: undragged\nstate: tasks\n---\n\nbody\n", encoding="utf-8")
+        "---\nid: undragged\ntier: worker\n---\n\nbody\n", encoding="utf-8")
     (lane / "dragged.md").write_text(
-        "---\nid: dragged\nstate: tasks\nkanban_order: a1\n---\n\nbody\n", encoding="utf-8")
+        "---\nid: dragged\ntier: worker\nkanban_order: a1\n---\n\nbody\n", encoding="utf-8")
 
     assert [c.id for c in board.cards(root, "tasks")] == ["probe", "dragged", "undragged"]
 
@@ -144,14 +143,14 @@ def test_dispatch_order_buckets_by_last_outcome_before_kanban_order(tmp_path):
     root = _repo(tmp_path)
     lane = root / "Board" / "tasks"
     (lane / "dragged.md").write_text(
-        "---\nid: dragged\nstate: tasks\nkanban_order: a1\n---\n\nbody\n", encoding="utf-8")
+        "---\nid: dragged\ntier: worker\nkanban_order: a1\n---\n\nbody\n", encoding="utf-8")
     (lane / "undragged.md").write_text(
-        "---\nid: undragged\nstate: tasks\n---\n\nbody\n", encoding="utf-8")
+        "---\nid: undragged\ntier: worker\n---\n\nbody\n", encoding="utf-8")
     (lane / "fixable.md").write_text(
-        "---\nid: fixable\nstate: tasks\nlast_outcome: needs_fix\n---\n\nbody\n",
+        "---\nid: fixable\ntier: worker\nlast_outcome: needs_fix\n---\n\nbody\n",
         encoding="utf-8")
     (lane / "flaky.md").write_text(
-        "---\nid: flaky\nstate: tasks\nkanban_order: a0\nlast_outcome: failed\n"
+        "---\nid: flaky\ntier: worker\nkanban_order: a0\nlast_outcome: failed\n"
         "---\n\nbody\n", encoding="utf-8")
 
     assert [c.id for c in board.cards(root, "tasks")] == [
@@ -168,30 +167,30 @@ def test_a_block_list_reads_the_same_as_an_inline_one():
     module disagreed with `card_schema`, which has folded the form since
     `tag-parser-blind-to-block-form`."""
     block = board.parse_fields(
-        "---\nid: x\ntags:\n  - nightshift\n  - art\nstate: tasks\n---\n\nbody\n")
+        "---\nid: x\ntags:\n  - nightshift\n  - art\ntier: worker\n---\n\nbody\n")
     inline = board.parse_fields(
-        "---\nid: x\ntags: [nightshift, art]\nstate: tasks\n---\n\nbody\n")
+        "---\nid: x\ntags: [nightshift, art]\ntier: worker\n---\n\nbody\n")
     assert block["tags"] == inline["tags"] == "[nightshift, art]"
-    assert block["state"] == "tasks", "the field after the block list was lost"
+    assert block["tier"] == "worker", "the field after the block list was lost"
 
 
 def test_an_empty_value_that_is_not_a_block_list_stays_empty():
-    fields = board.parse_fields("---\nid: x\nchecker:\nstate: tasks\n---\n\nbody\n")
+    fields = board.parse_fields("---\nid: x\nchecker:\ntier: worker\n---\n\nbody\n")
     assert fields["checker"] == ""
-    assert fields["state"] == "tasks"
+    assert fields["tier"] == "worker"
 
 
 def test_tags_are_read_in_either_form(tmp_path):
     root = _repo(tmp_path)
     lane = root / "Board" / "tasks"
     (lane / "block.md").write_text(
-        "---\nid: block\nstate: tasks\ntags:\n  - nightshift\n---\n\nbody\n",
+        "---\nid: block\ntier: worker\ntags:\n  - nightshift\n---\n\nbody\n",
         encoding="utf-8")
     (lane / "inline.md").write_text(
-        "---\nid: inline\nstate: tasks\ntags: [nightshift]\n---\n\nbody\n",
+        "---\nid: inline\ntier: worker\ntags: [nightshift]\n---\n\nbody\n",
         encoding="utf-8")
     (lane / "none.md").write_text(
-        "---\nid: none\nstate: tasks\n---\n\nbody\n", encoding="utf-8")
+        "---\nid: none\ntier: worker\n---\n\nbody\n", encoding="utf-8")
 
     tags = {c.id: c.tags for c in board.cards(root, "tasks")}
 
@@ -226,7 +225,7 @@ def test_a_board_commit_leaves_no_crlf_in_the_working_tree(tmp_path):
     root = _repo(tmp_path)
     _pin_lf(root)
     card = root / "Board" / "tasks" / "crlf-card.md"
-    card.write_bytes(b"---\r\nid: crlf-card\r\nstate: tasks\r\n---\r\n\r\nbody\r\n")
+    card.write_bytes(b"---\r\nid: crlf-card\r\ntier: worker\r\n---\r\n\r\nbody\r\n")
 
     board.commit_board(root, "board: a card written by something in text mode")
 

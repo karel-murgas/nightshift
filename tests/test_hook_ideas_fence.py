@@ -15,7 +15,6 @@ its own tree, and the mechanism lives here.
 """
 from __future__ import annotations
 
-import pathlib
 from pathlib import Path
 
 import pytest
@@ -212,21 +211,11 @@ def test_a_lane_named_as_a_substring_of_another_word_is_not_matched():
     assert ideas_fence.evaluate(payload, "Board", ("ideas",)) is None
 
 
-def test_the_denial_names_the_one_permitted_reader(tmp_path):
-    """A refusal that does not say who *is* allowed to read the lane reads as a bug,
-    and the next person's fix is to remove the fence."""
+def test_the_denial_names_the_way_a_note_leaves_the_lane(tmp_path):
+    """A refusal that does not say how a note *does* get out of the lane reads as a
+    bug, and the next person's fix is to remove the fence."""
     root = _project(tmp_path)
     reason = ideas_fence.evaluate(_read("Board/ideas/note.md"), "Board",
                                   ideas_fence.private_lanes(root))
     assert reason is not None
-    assert "reconcile.py" in reason
-
-
-def test_reconcile_is_still_allowed_to_read_the_lane():
-    """The fence intercepts *tool calls*. `reconcile.py` reaches the lane as Python
-    code, so the one permitted reader is unaffected by construction — asserted rather
-    than assumed, since a fence that broke reconcile would break the board."""
-    from nightshift import reconcile
-
-    source = pathlib.Path(reconcile.__file__).read_text(encoding="utf-8")
-    assert "ideas" in source, "reconcile no longer names the lane it is permitted to read"
+    assert "boardcmd promote" in reason

@@ -76,7 +76,7 @@ def test_the_board_and_its_generated_views_are_exempt(repo):
     while it runs. The exemption is `board.GENERATED_VIEWS`, whichever views that is —
     it named `Digest.md` alone once, and two views that shipped later joined neither
     this list nor `commit_board`'s and blocked `chores` outright."""
-    (repo / "Board" / "tasks" / "a.md").write_text("---\nid: a\nstate: tasks\n---\n",
+    (repo / "Board" / "tasks" / "a.md").write_text("---\nid: a\n---\n",
                                                    encoding="utf-8")
     (repo / "Routing.md").write_text("# Routing\n\nchanged\n", encoding="utf-8")
     assert runner.dirty_outside_board(repo) == []
