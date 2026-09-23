@@ -36,7 +36,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import board, gitpaths, preflight, runner, textio, tiers
+from nightshift import board, git, preflight, textio, tiers
+from nightshift import hostconfig, startup, telemetry, worker
 from nightshift.manifest import AI_DIR, find_root
 
 for _stream in (sys.stdout, sys.stderr):
@@ -123,7 +124,7 @@ def _dirty(root: Path) -> str:
     path is a spelling git can change under it: the same file, edited so its name
     stops being printable ASCII, would read as a different tree for the wrong
     reason."""
-    out = gitpaths.git(root, "status", "--porcelain", "-z")
+    out = git.run(root, "status", "--porcelain", "-z")
     return out.stdout if out.returncode == 0 else ""
 
 
@@ -202,7 +203,7 @@ def prompt(root: Path, diagnosis: Diagnosis) -> str:
 
 
 def _permission_mode(root: Path, override: str | None) -> str:
-    return override or str(runner.host_setting(root, "permission_mode", "default"))
+    return override or str(hostconfig.host_setting(root, "permission_mode", "default"))
 
 
 def can_dispatch(root: Path, permission_mode: str) -> str:
@@ -216,7 +217,7 @@ def can_dispatch(root: Path, permission_mode: str) -> str:
                 f"agent could not run a gate, let alone fix one. Add "
                 f"`--permission-mode bypassPermissions` for this pass only, or change it "
                 f"in {AI_DIR}/hosts.json to make it standing.")
-    if runner.claude_binary() is None:
+    if startup.claude_binary() is None:
         return ("the `claude` CLI was not found (checked $CLAUDE_BIN, PATH and "
                 "~/.local/bin). Install it, or set CLAUDE_BIN.")
     return ""
@@ -238,7 +239,7 @@ def dispatch(root: Path, text: str, round_no: int, *, permission_mode: str,
              timeout: int = ROUND_TIMEOUT_S) -> tuple[int, str]:
     """One round. Returns (exit code, the agent's final text).
 
-    Goes through `runner._run_worker`, which is documented as the one place the Claude
+    Goes through `worker._run_worker`, which is documented as the one place the Claude
     CLI is executed. A second call site would make that claim false, along with the test
     asserting it.
     """
@@ -246,12 +247,12 @@ def dispatch(root: Path, text: str, round_no: int, *, permission_mode: str,
     out_dir.mkdir(parents=True, exist_ok=True)
     textio.write_text_lf(out_dir / "prompt.md", text)
 
-    binary = runner.claude_binary()
+    binary = startup.claude_binary()
     assert binary, "can_dispatch() checked this"
     argv = [binary, "-p", "--model", _model(root),
-            *runner._STREAM_ARGV, "--permission-mode", permission_mode]
-    done = runner._run_worker(argv, root, timeout, out_dir / "stream.jsonl", prompt=text)
-    result = runner._terminal_result(done.stdout or "")
+            *worker._STREAM_ARGV, "--permission-mode", permission_mode]
+    done = worker._run_worker(argv, root, timeout, out_dir / "stream.jsonl", prompt=text)
+    result = telemetry._terminal_result(done.stdout or "")
     return done.returncode, str(result.get("result") or "").strip()
 
 

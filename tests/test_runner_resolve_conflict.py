@@ -1,4 +1,4 @@
-"""Tests for `runner._resolve_conflict` — the merge resolver's guardrails.
+"""Tests for `review._resolve_conflict` — the merge resolver's guardrails.
 
 **What is under test is the containment, not the resolving.** The agent is a
 subprocess boundary and is stubbed here, exactly as every other worker is in this
@@ -22,7 +22,8 @@ import re
 import subprocess
 from pathlib import Path
 
-from nightshift import board, gitmerge, runner
+from nightshift import board, gitmerge
+from nightshift import hostconfig, review, startup, worker
 
 import _fixtures  # noqa: E402
 
@@ -67,7 +68,7 @@ def _pause_rebase(repo: Path, base: str) -> None:
     """Start the rebase and leave it stopped on the conflict, as the runner does."""
     out = _git(repo, "rebase", *gitmerge.STRATEGY_ARGS, base)
     assert out.returncode != 0, "fixture must actually conflict"
-    assert runner._unmerged_paths(repo), "fixture must leave an unmerged path"
+    assert review._unmerged_paths(repo), "fixture must leave an unmerged path"
 
 
 def _verdict_path(prompt: str) -> Path:
@@ -104,14 +105,14 @@ def _resolver(monkeypatch, *, write: str | None, verdict: dict | None,
             _verdict_path(prompt).write_text(json.dumps(verdict), encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-    monkeypatch.setattr(runner, "host_setting",
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(hostconfig, "host_setting",
                         lambda root, key, default=None: default)
 
 
 def _run(repo: Path, tmp_path: Path, branch: str, base: str) -> tuple[bool, str]:
-    return runner._resolve_conflict(repo, repo, _card(), branch, base, tmp_path / "out",
+    return review._resolve_conflict(repo, repo, _card(), branch, base, tmp_path / "out",
                                     model="test-model", timeout=60, card_budget=0.0)
 
 
@@ -129,7 +130,7 @@ def test_a_kept_both_resolution_replays_and_lands(tmp_path, monkeypatch):
     assert replayed, detail
     assert "kept both entries" in detail
     assert (repo / "log.md").read_text(encoding="utf-8") == BOTH_LOG
-    assert not runner._unmerged_paths(repo)
+    assert not review._unmerged_paths(repo)
     # The rebase finished: `feature` now sits on top of the sibling's commit.
     assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() != "HEAD"
 
@@ -148,7 +149,7 @@ def test_a_declined_resolution_aborts_and_reports_the_reason(tmp_path, monkeypat
     assert not replayed
     assert "declined" in detail
     assert "same constant" in detail
-    assert not runner._unmerged_paths(repo), "the rebase must have been aborted"
+    assert not review._unmerged_paths(repo), "the rebase must have been aborted"
 
 
 def test_a_resolution_that_leaves_a_conflict_marker_is_thrown_away(tmp_path, monkeypatch):
@@ -165,7 +166,7 @@ def test_a_resolution_that_leaves_a_conflict_marker_is_thrown_away(tmp_path, mon
 
     assert not replayed
     assert "conflict marker" in detail
-    assert not runner._unmerged_paths(repo)
+    assert not review._unmerged_paths(repo)
 
 
 def test_a_resolver_that_edits_outside_the_conflict_is_thrown_away(tmp_path, monkeypatch):
@@ -211,7 +212,7 @@ def test_a_missing_verdict_counts_as_a_decline(tmp_path, monkeypatch):
 
     assert not replayed
     assert "declined" in detail
-    assert not runner._unmerged_paths(repo)
+    assert not review._unmerged_paths(repo)
 
 
 def test_the_resolver_is_bounded(tmp_path, monkeypatch):
@@ -228,14 +229,14 @@ def test_the_resolver_is_bounded(tmp_path, monkeypatch):
             json.dumps({"resolved": True, "summary": "done"}), encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, "{}", "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-    monkeypatch.setattr(runner, "host_setting", lambda root, key, default=None: default)
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(hostconfig, "host_setting", lambda root, key, default=None: default)
 
     replayed, _ = _run(repo, tmp_path, branch, base)
 
     assert not replayed
-    assert len(calls) <= runner.MAX_RESOLVE_ROUNDS
+    assert len(calls) <= hostconfig.MAX_RESOLVE_ROUNDS
 
 
 # --- git's own auto-merge is not the resolver's edit (`taser-cyberware`) -------
@@ -303,7 +304,7 @@ def test_git_s_own_auto_merged_files_are_not_called_stray_edits(tmp_path, monkey
     _pause_rebase(repo, base)
     # The premise the old check got wrong: git has these dirty already, before any
     # agent has run. If this ever stops being true the test below proves nothing.
-    dirty = set(runner._porcelain_paths(repo))
+    dirty = set(review._porcelain_paths(repo))
     assert {"settings.py", "tests.py"} <= dirty, dirty
 
     _resolver(monkeypatch, write=BOTH_LOG,
@@ -312,7 +313,7 @@ def test_git_s_own_auto_merged_files_are_not_called_stray_edits(tmp_path, monkey
     replayed, detail = _run(repo, tmp_path, branch, base)
 
     assert replayed, detail
-    assert not runner._unmerged_paths(repo)
+    assert not review._unmerged_paths(repo)
     # The replayed commit still carries all four files' changes — the point of not
     # aborting is that the card's own work survives intact.
     assert (repo / "log.md").read_text(encoding="utf-8") == BOTH_LOG
@@ -332,7 +333,7 @@ def test_an_auto_merged_file_the_resolver_rewrites_is_still_a_stray_edit(tmp_pat
     """
     repo, branch, base = _conflicted_multifile(tmp_path)
     _pause_rebase(repo, base)
-    assert "settings.py" in runner._porcelain_paths(repo)
+    assert "settings.py" in review._porcelain_paths(repo)
 
     _resolver(monkeypatch, write=BOTH_LOG, also_touch="settings.py",
               verdict={"resolved": True, "summary": "kept both, and retuned the tempo"})
@@ -342,7 +343,7 @@ def test_an_auto_merged_file_the_resolver_rewrites_is_still_a_stray_edit(tmp_pat
     assert not replayed
     assert "settings.py" in detail
     assert "not part of the conflict" in detail
-    assert not runner._unmerged_paths(repo), "the rebase must have been aborted"
+    assert not review._unmerged_paths(repo), "the rebase must have been aborted"
 
 
 def test_a_file_dropped_into_an_already_untracked_directory_is_still_a_stray(
@@ -361,7 +362,7 @@ def test_a_file_dropped_into_an_already_untracked_directory_is_still_a_stray(
     (scratch / "already-here.txt").write_bytes(b"present before the resolver ran\n")
     _pause_rebase(repo, base)
     # git really does collapse it, so the digest is the only thing that can tell.
-    assert "scratch/" in runner._porcelain_paths(repo)
+    assert "scratch/" in review._porcelain_paths(repo)
 
     _resolver(monkeypatch, write=BOTH_LOG, also_touch="scratch/snuck-in.txt",
               verdict={"resolved": True, "summary": "kept both"})

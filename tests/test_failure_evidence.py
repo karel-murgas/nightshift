@@ -1,4 +1,4 @@
-"""Tests for the failure-evidence path — `runner._error_section`, the record field
+"""Tests for the failure-evidence path — `settle._error_section`, the record field
 and the run record's own field (2026-07-31).
 
 The hole these close. When a card failed, the only thing written anywhere the
@@ -8,7 +8,7 @@ direction:
 
   * `.ai/runs/` is gitignored — machine-local by design — so a night run on the
     desktop leaves nothing at all behind on the laptop the board is read from; and
-  * `runner.prune_run_dir` deleted the card's whole run directory the moment the
+  * `worktree.prune_run_dir` deleted the card's whole run directory the moment the
     card was retired to `failed/`, two lines after the pointer to it was written
     — so for a terminal failure the pointer was dead on the producing host too.
     (Narrowed by `resume-open-inline`, 2026-08-28: only the no-progress `stuck`
@@ -34,13 +34,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from nightshift.gates import doc_scan
-from nightshift import runner
-from nightshift import suite
 
 from nightshift import run_record
+from nightshift import outcome, settle, telemetry
 
 _REPO = Path(__file__).resolve().parent.parent
 
@@ -49,8 +47,8 @@ _EVIDENCE = ("    tests/test_stairs.py::test_remnants_cleared — assert 3 == 0\
              "    E       assert 3 == 0")
 
 
-def _failed(evidence: str = _EVIDENCE, detail: str = "pytest: 1 failure(s)") -> runner.Dispatch:
-    return runner.Dispatch("failed", detail, evidence=evidence)
+def _failed(evidence: str = _EVIDENCE, detail: str = "pytest: 1 failure(s)") -> outcome.Dispatch:
+    return outcome.Dispatch("failed", detail, evidence=evidence)
 
 
 # --- the card's `## Error` ----------------------------------------------------
@@ -59,7 +57,7 @@ def _failed(evidence: str = _EVIDENCE, detail: str = "pytest: 1 failure(s)") -> 
 def test_the_error_section_carries_the_evidence_inline():
     """The point of the whole change: the reason is *in* the card, not behind a
     pointer to a directory that may not exist on this machine."""
-    body = runner._error_section("stair-remnants-removal", 1, _failed(), retiring=False)
+    body = settle._error_section("stair-remnants-removal", 1, _failed(), retiring=False)
     assert "tests/test_stairs.py::test_remnants_cleared" in body
     assert "assert 3 == 0" in body
 
@@ -68,7 +66,7 @@ def test_a_retrying_card_is_told_where_the_full_log_is_and_on_which_host():
     """`.ai/runs/` is meaningful on exactly one machine, so the text says which.
     Without the hostname "the logs are not here" reads as "the logs are gone"."""
     import socket
-    body = runner._error_section("card-x", 1, _failed(), retiring=False)
+    body = settle._error_section("card-x", 1, _failed(), retiring=False)
     assert "`.ai/runs/card-x/attempt-1/`" in body
     assert socket.gethostname() in body
     assert "gitignored" in body
@@ -80,7 +78,7 @@ def test_a_retired_card_promises_a_directory_that_is_still_there():
     inline` can resume the session that actually tried. The section must not
     claim it is gone, and must not use the old bare `Full output:` phrasing
     that reads as "go look here" without saying whether it still can be."""
-    body = runner._error_section("card-x", 3, _failed(), retiring=True)
+    body = settle._error_section("card-x", 3, _failed(), retiring=True)
     assert "deleted" not in body
     assert "Full output:" not in body
     assert "kept" in body
@@ -90,7 +88,7 @@ def test_the_section_survives_having_no_evidence_at_all():
     """A timeout produces no JUnit report, so there is nothing to quote. The
     section must still be the ordinary two-paragraph shape, with no stray
     exemption marker sitting over an empty block."""
-    body = runner._error_section("card-x", 1,
+    body = settle._error_section("card-x", 1,
                                  _failed(evidence="", detail="pytest: timed out after 3600s"),
                                  retiring=False)
     assert "timed out" in body
@@ -123,7 +121,7 @@ def test_evidence_naming_a_file_that_does_not_exist_is_exempt_from_liveness():
     assert not (_REPO / dangling).exists(), "pick a name that really is absent"
 
     evidence = f"    {dangling}::test_thing — assert 3 == 0\n    E       assert 3 == 0"
-    text = _card_text(runner._error_section("card-x", 1, _failed(evidence), retiring=False))
+    text = _card_text(settle._error_section("card-x", 1, _failed(evidence), retiring=False))
 
     exempt = doc_scan.exempt_lines(text)
     offending = [i for i, line in enumerate(text.splitlines(), start=1)
@@ -162,13 +160,13 @@ def test_a_dead_worker_puts_its_reason_in_the_error_section(tmp_path):
                  permission_denials=[{"tool": "Bash"}], is_error=True,
                  result="API error: 500 Internal Server Error")
 
-    evidence = runner.worker_exit_evidence(tmp_path)
+    evidence = telemetry.worker_exit_evidence(tmp_path)
     assert "api_error" in evidence
     assert "permission denials: 1" in evidence
     assert "500 Internal Server Error" in evidence
 
-    text = runner._error_section("stair-remnants-removal", 3,
-                                 runner.Dispatch("failed", "worker exited 1", 0.96, 1,
+    text = settle._error_section("stair-remnants-removal", 3,
+                                 outcome.Dispatch("failed", "worker exited 1", 0.96, 1,
                                                  evidence=evidence),
                                  retiring=True)
     assert "api_error" in text, "the retiring card must still say WHY, not just that"
@@ -180,7 +178,7 @@ def test_worker_evidence_lines_are_indented_like_every_other_excerpt(tmp_path):
     `doc_scan._HEADING` and truncate the exemption that covers the block."""
     _worker_json(tmp_path, terminal_reason="api_error", is_error=True,
                  result="# fatal: something\nsecond line")
-    for line in runner.worker_exit_evidence(tmp_path).splitlines():
+    for line in telemetry.worker_exit_evidence(tmp_path).splitlines():
         assert line.startswith("    "), line
 
 
@@ -188,22 +186,22 @@ def test_worker_evidence_is_bounded(tmp_path):
     """A worker can die printing a very long message; the card is read as prose."""
     _worker_json(tmp_path, is_error=True,
                  result="\n".join(f"line {i}" for i in range(200)))
-    body = [ln for ln in runner.worker_exit_evidence(tmp_path).splitlines()
+    body = [ln for ln in telemetry.worker_exit_evidence(tmp_path).splitlines()
             if ln.strip().startswith("line ")]
-    assert len(body) == runner._WORKER_EVIDENCE_LINES
+    assert len(body) == telemetry._WORKER_EVIDENCE_LINES
 
 
 def test_no_worker_json_yields_no_evidence_rather_than_a_crash(tmp_path):
     """An attempt that died before the CLI wrote anything is the one case where
     there genuinely is nothing to say. It must degrade, not raise."""
-    assert runner.worker_exit_evidence(tmp_path) == ""
+    assert telemetry.worker_exit_evidence(tmp_path) == ""
 
 
 def test_a_clean_exit_record_still_reports_what_it_knows(tmp_path):
     """No `is_error` and no terminal reason — a worker killed by a timeout, say.
     Turn count and wall time are still worth more than silence."""
     _worker_json(tmp_path)
-    evidence = runner.worker_exit_evidence(tmp_path)
+    evidence = telemetry.worker_exit_evidence(tmp_path)
     assert "29 turns" in evidence
 
 
@@ -211,14 +209,14 @@ def test_the_exemption_marker_carries_a_written_reason():
     """`test_every_exemption_carries_a_written_reason` scans the whole repo for
     markers and requires a reason of at least ten characters. A machine-written
     marker with a thin reason would fail that gate on every failed card."""
-    found = doc_scan._STALE_OK_OPEN.search(runner._EVIDENCE_EXEMPTION)
+    found = doc_scan._STALE_OK_OPEN.search(settle._EVIDENCE_EXEMPTION)
     assert found and len((found.group(1) or "").strip()) >= 10
 
 
 def test_the_exemption_covers_the_rest_of_the_section_but_not_the_next_one():
     """A marker runs to the next `##` heading. It must not leak past `## Error`
     and quietly exempt a following section from liveness for good."""
-    text = (_card_text(runner._error_section("card-x", 1, _failed(), retiring=False))
+    text = (_card_text(settle._error_section("card-x", 1, _failed(), retiring=False))
             + "\n## Thread\n\nSee `dungeoneer/does_not_exist.py` for the rest.\n")
     exempt = doc_scan.exempt_lines(text)
     leaked = [i for i, line in enumerate(text.splitlines(), start=1)
@@ -233,7 +231,7 @@ def test_a_hash_in_pytest_output_cannot_end_the_exemption_early():
     evidence = ("    tests/test_a.py::test_x — boom\n"
                 "    ## pytest printed this\n"
                 "    tests/test_never_committed.py::test_y — boom")
-    text = _card_text(runner._error_section("card-x", 1, _failed(evidence), retiring=False))
+    text = _card_text(settle._error_section("card-x", 1, _failed(evidence), retiring=False))
     exempt = doc_scan.exempt_lines(text)
     offending = [i for i, line in enumerate(text.splitlines(), start=1)
                  if "test_never_committed" in line]

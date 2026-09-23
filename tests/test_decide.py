@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from nightshift import board, decide, worker_prompt
+from nightshift import dispatch, review
 
 
 _CARD = """---
@@ -214,10 +215,9 @@ def test_the_example_every_agent_is_shown_parses_as_a_picker():
 
 
 def test_every_prompt_that_can_park_a_card_carries_the_format():
-    from nightshift import runner
-    for name, template in [("runner._PROMPT", runner._PROMPT),
-                           ("runner._REVIEW_PROMPT", runner._REVIEW_PROMPT),
-                           ("runner._BATCH_REVIEW_PROMPT", runner._BATCH_REVIEW_PROMPT),
+    for name, template in [("dispatch._PROMPT", dispatch._PROMPT),
+                           ("review._REVIEW_PROMPT", review._REVIEW_PROMPT),
+                           ("review._BATCH_REVIEW_PROMPT", review._BATCH_REVIEW_PROMPT),
                            ("INTERACTIVE_CARD", worker_prompt.INTERACTIVE_CARD),
                            ("INTERACTIVE_CARD_FEEDBACK", worker_prompt.INTERACTIVE_CARD_FEEDBACK)]:
         assert "{question_format}" in template, name

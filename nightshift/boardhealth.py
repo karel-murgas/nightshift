@@ -18,7 +18,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from nightshift import board, branches, gitpaths
+from nightshift import board, branches, git
 from nightshift.manifest import ManifestError, find_root
 
 RUNS = Path(".ai/runs")
@@ -41,7 +41,7 @@ class Finding:
 
 
 def _branch_set(root: Path, *args: str) -> set[str] | None:
-    result = gitpaths.git(root, "branch", "--format=%(refname:short)", *args)
+    result = git.run(root, "branch", "--format=%(refname:short)", *args)
     if result.returncode != 0:
         return None
     return {line.strip() for line in result.stdout.splitlines() if line.strip()}

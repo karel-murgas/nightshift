@@ -31,7 +31,7 @@ def _no_xdist_in_child_runs(monkeypatch):
 
     The same fixture exists in `_runner_helpers.py`, `test_merge_check.py`,
     `test_drain.py` and `test_chores_execution.py` — they patch
-    `runner._PYTEST_PARALLEL`, which is the seam their code path reads; this one
+    `verify._PYTEST_PARALLEL`, which is the seam their code path reads; this one
     goes through `suite.parallel_args` because preflight's does.
     """
     monkeypatch.setattr(suite, "parallel_args", lambda *a, **k: ())

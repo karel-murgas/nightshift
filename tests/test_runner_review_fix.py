@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import runner
+from nightshift import review
 
 
 def _repo(tmp_path: Path) -> Path:
@@ -84,7 +84,7 @@ def test_a_markdown_only_fix_lands_on_the_branch(landed):
     (tree / "notes.md").write_text("The limit is 5.\n", encoding="utf-8")
     head = _commit_in(tree, "review: correct the limit in notes.md")
 
-    out = runner._land_review_fix(root, tree, "ai/probe", _verdict(), tip)
+    out = review._land_review_fix(root, tree, "ai/probe", _verdict(), tip)
 
     assert out["verdict"] == "ok"
     moved = subprocess.run(["git", "rev-parse", "ai/probe"], cwd=root,
@@ -101,7 +101,7 @@ def test_a_comment_only_change_to_python_is_prose(landed):
         encoding="utf-8")
     head = _commit_in(tree, "review: correct a comment")
 
-    out = runner._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
+    out = review._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
 
     assert out["verdict"] == "ok"
     assert subprocess.run(["git", "rev-parse", "ai/probe"], cwd=root,
@@ -119,7 +119,7 @@ def test_a_changed_constant_is_refused_and_becomes_needs_fix(landed):
                                  encoding="utf-8")
     _commit_in(tree, "review: 'fix' the constant")
 
-    out = runner._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
+    out = review._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
 
     assert out["verdict"] == "needs_fix"
     assert out["fixed"] == []
@@ -142,7 +142,7 @@ def test_a_reworded_docstring_is_prose(landed):
         encoding="utf-8")
     head = _commit_in(tree, "review: add a docstring")
 
-    out = runner._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
+    out = review._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
 
     assert out["verdict"] == "ok"
     assert subprocess.run(["git", "rev-parse", "ai/probe"], cwd=root,
@@ -158,7 +158,7 @@ def test_a_reworded_module_docstring_is_prose(landed):
         'def f(x):\n    return x + LIMIT\n', encoding="utf-8")
     head = _commit_in(tree, "review: correct the module docstring")
 
-    out = runner._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
+    out = review._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
 
     assert out["verdict"] == "ok"
     assert subprocess.run(["git", "rev-parse", "ai/probe"], cwd=root,
@@ -177,7 +177,7 @@ def test_a_comment_that_shifts_the_lines_below_it_is_prose(landed):
         "LIMIT = 5\n\n\ndef f(x):\n    return x + LIMIT\n", encoding="utf-8")
     head = _commit_in(tree, "review: add a clarifying comment")
 
-    out = runner._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
+    out = review._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
 
     assert out["verdict"] == "ok"
     assert subprocess.run(["git", "rev-parse", "ai/probe"], cwd=root,
@@ -194,7 +194,7 @@ def test_a_string_that_is_not_in_the_docstring_slot_is_refused(landed):
         '    return x + LIMIT if msg else 0\n', encoding="utf-8")
     _commit_in(tree, "review: 'just a string'")
 
-    out = runner._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
+    out = review._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
 
     assert out["verdict"] == "needs_fix"
     assert out["fixed"] == []
@@ -211,7 +211,7 @@ def test_a_behaviour_edit_hidden_behind_a_docstring_reword_is_refused(landed):
         encoding="utf-8")
     _commit_in(tree, "review: docstring, and quietly the constant")
 
-    out = runner._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
+    out = review._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
 
     assert out["verdict"] == "needs_fix"
     assert "executable content" in out["notes"]
@@ -226,7 +226,7 @@ def test_a_file_that_will_not_parse_is_refused(landed):
     (tree / "mod.py").write_text("LIMIT = 5\n\n\ndef f(x:\n", encoding="utf-8")
     _commit_in(tree, "review: broke the file")
 
-    out = runner._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
+    out = review._land_review_fix(root, tree, "ai/probe", _verdict(fixed=["mod.py"]), tip)
 
     assert out["verdict"] == "needs_fix"
     assert subprocess.run(["git", "rev-parse", "ai/probe"], cwd=root,
@@ -242,7 +242,7 @@ def test_a_rewritten_history_is_refused(landed):
     (tree / "notes.md").write_text("The limit is 5.\n", encoding="utf-8")
     _commit_in(tree, "review: correct it, on the wrong parent")
 
-    out = runner._land_review_fix(root, tree, "ai/probe", _verdict(), tip)
+    out = review._land_review_fix(root, tree, "ai/probe", _verdict(), tip)
 
     assert out["verdict"] == "needs_fix"
     assert "descend" in out["notes"]
@@ -250,7 +250,7 @@ def test_a_rewritten_history_is_refused(landed):
 
 def test_claiming_a_fix_without_committing_one_is_refused(landed):
     root, tree, tip = landed
-    out = runner._land_review_fix(root, tree, "ai/probe", _verdict(), tip)
+    out = review._land_review_fix(root, tree, "ai/probe", _verdict(), tip)
     assert out["verdict"] == "needs_fix"
     assert "committed nothing" in out["notes"]
 
@@ -262,7 +262,7 @@ def test_a_fix_with_no_finding_is_refused(landed):
     (tree / "notes.md").write_text("The limit is 5.\n", encoding="utf-8")
     _commit_in(tree, "review: silent correction")
 
-    out = runner._land_review_fix(root, tree, "ai/probe", _verdict(finding="  "), tip)
+    out = review._land_review_fix(root, tree, "ai/probe", _verdict(finding="  "), tip)
 
     assert out["verdict"] == "needs_fix"
     assert "no finding" in out["notes"]
@@ -280,6 +280,6 @@ def test_an_ordinary_verdict_passes_through_untouched(landed, verdict):
     """No `fixed`, no involvement. The common case must not be reshaped by a path
     it never takes."""
     root, tree, tip = landed
-    assert runner._land_review_fix(root, tree, "ai/probe", dict(verdict), tip) == verdict
+    assert review._land_review_fix(root, tree, "ai/probe", dict(verdict), tip) == verdict
     assert subprocess.run(["git", "rev-parse", "ai/probe"], cwd=root,
                           capture_output=True, text=True).stdout.strip() == tip

@@ -36,6 +36,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from nightshift import git
 from nightshift import manifest as _manifest
 from nightshift.manifest import ManifestError
 from nightshift.textio import write_text_lf  # cards are committed; write_text would CRLF them
@@ -105,7 +106,7 @@ LANES: tuple[str, ...] = (
 #: is being asked; something is being blocked. Distinct from `failed/` too: the work
 #: is good and reviewed, only the landing is stuck.
 #:
-#: `runner.settle` routes here when `rebase_and_merge` returns `False`, which now
+#: `settle.settle` routes here when `rebase_and_merge` returns `False`, which now
 #: happens only after `_resolve_conflict` has tried and could not.
 BLOCKED_LANE = "blocked"
 
@@ -155,7 +156,7 @@ PRIVATE_LANE = "ideas"
 # on one machine only is a decision the other machine cannot see, and a generated file
 # is not exempt from that — being regenerable is not a reason to leave it out of git.
 # So every consumer needs the same list, and there are two of them: `commit_board`
-# stages them and `runner.dirty_outside_board` exempts them (they are rewritten on every
+# stages them and `hostconfig.dirty_outside_board` exempts them (they are rewritten on every
 # run, and a dirty tree refuses a dispatch).
 #
 # Written down once because it was written down once before, wrong: the exemption and
@@ -177,7 +178,7 @@ RUNNER_FIELDS: tuple[str, ...] = ("attempts", "branch", "started", "finished")
 # before either of these existed changes meaning.
 KIND_CHORE = "chore"
 #: A card whose process is a person at the keyboard. It carries `unattended: false`,
-#: so `runner.select` and `chores.select` both refuse it — the night cannot take it
+#: so `dispatch.select` and `chores.select` both refuse it — the night cannot take it
 #: and is not meant to. Written by `ingest` when the classifier routes a note
 #: `inline`, and it is the field that tells such a card apart from one a worker
 #: would run, wherever the two sit in the same lane.
@@ -733,10 +734,7 @@ def _git_commit(root: Path, message: str, what: str) -> bool:
     — a board move failing hard at 3 AM is worse than one that is loud about
     being incomplete.
     """
-    result = subprocess.run(
-        ["git", "commit", "-m", message], cwd=root, check=False,
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
+    result = git.run(root, "commit", "-m", message)
     if result.returncode == 0:
         return True
     if _NOTHING_STAGED.search(f"{result.stdout or ''}\n{result.stderr or ''}"):
@@ -781,16 +779,13 @@ def move(root: Path, card: Card, to_lane: str, commit: bool = True, *,
     target = board_dir(root) / to_lane / card.path.name
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    if subprocess.run(["git", "mv", str(card.path), str(target)], cwd=root,
-                      capture_output=True).returncode != 0:
+    if git.run(root, "mv", str(card.path), str(target)).returncode != 0:
         card.path.rename(target)
 
     moved = Card.load(target, to_lane)
 
     if commit:
-        staged = subprocess.run(["git", "add", "-A", str(board_rel(root))], cwd=root, check=False,
-                                capture_output=True, text=True,
-                                encoding="utf-8", errors="replace")
+        staged = git.run(root, "add", "-A", str(board_rel(root)))
         _warn_if_failed(staged, f"staging the move of {card.id}")
         _git_commit(root, f"board: {card.id} {card.lane} → {to_lane}",
                     f"the move of {card.id}")
@@ -819,9 +814,7 @@ def commit_board(root: Path, message: str, extra_paths: tuple[str, ...] = ()) ->
     paths = ([str(board_rel(root))]
             + [v for v in GENERATED_VIEWS if (root / v).exists()]
             + [p for p in extra_paths if (root / p).exists()])
-    staged = subprocess.run(["git", "add", "-A", "--", *paths], cwd=root,
-                            check=False, capture_output=True, text=True,
-                            encoding="utf-8", errors="replace")
+    staged = git.run(root, "add", "-A", "--", *paths)
     _warn_if_failed(staged, f"staging {', '.join(paths)}")
     _git_commit(root, message, ", ".join(paths))
     _normalize_after_write(root)

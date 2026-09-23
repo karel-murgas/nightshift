@@ -102,24 +102,24 @@ def test_the_prompt_keeps_one_violation_per_line(tmp_path):
 def test_a_mode_that_cannot_run_bash_is_refused_before_dispatch(repo, mode, monkeypatch):
     """A session that cannot run Bash cannot run a gate, so it cannot fix one. Checked
     before spending a round and a budget on finding that out."""
-    monkeypatch.setattr(fix.runner, "claude_binary", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(fix.startup, "claude_binary", lambda: "/usr/bin/claude")
     reason = fix.can_dispatch(repo, mode)
     assert mode in reason and "Bash" in reason
 
 
 def test_a_missing_cli_is_refused_with_where_it_looked(repo, monkeypatch):
-    monkeypatch.setattr(fix.runner, "claude_binary", lambda: None)
+    monkeypatch.setattr(fix.startup, "claude_binary", lambda: None)
     reason = fix.can_dispatch(repo, "bypassPermissions")
     assert "CLAUDE_BIN" in reason
 
 
 def test_bypass_with_a_cli_present_is_allowed(repo, monkeypatch):
-    monkeypatch.setattr(fix.runner, "claude_binary", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(fix.startup, "claude_binary", lambda: "/usr/bin/claude")
     assert fix.can_dispatch(repo, "bypassPermissions") == ""
 
 
 def test_main_refuses_rather_than_dispatching_and_exits_two(repo, monkeypatch, capsys):
-    monkeypatch.setattr(fix.runner, "claude_binary", lambda: None)
+    monkeypatch.setattr(fix.startup, "claude_binary", lambda: None)
     monkeypatch.setattr(fix, "loop", lambda *a, **k: pytest.fail("must not dispatch"))
     code = fix.main(["--root", str(repo), "--skip-tests",
                      "--permission-mode", "bypassPermissions"])

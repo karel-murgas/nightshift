@@ -706,7 +706,7 @@ def main(argv: list[str] | None = None) -> int:
     selector item 13 adds: a raw override directory, or a label resolved
     through this project's `[[accounts]]` config — neither one sets
     `CLAUDE_CONFIG_DIR` for anything else. Selecting an account for a *dispatch*
-    is the caller's job (`runner._worker_env` already inherits whatever
+    is the caller's job (`worker._worker_env` already inherits whatever
     `CLAUDE_CONFIG_DIR` is in this process's environment); this flag only
     changes which account's meters this one invocation reads.
     """

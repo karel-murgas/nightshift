@@ -13,7 +13,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
-import socket
 import subprocess
 from pathlib import Path
 
@@ -21,8 +20,8 @@ import pytest
 
 from nightshift import board
 from nightshift import worker_prompt
-from nightshift import runner
 from nightshift import tiers
+from nightshift import dispatch, hostconfig, outcome, settle, startup, telemetry, worker, worktree
 
 from _runner_helpers import (  # noqa: F401  (fixtures register by name)
     _binding_repo,
@@ -116,7 +115,7 @@ def test_a_card_that_fails_the_schema_is_not_dispatched(tmp_path):
 def test_a_card_at_the_attempt_limit_is_skipped(tmp_path):
     root = _repo(tmp_path)
     _charter(root, "code-thread")
-    _card(root, "tasks", "burnt", attempts=str(runner.MAX_ATTEMPTS))
+    _card(root, "tasks", "burnt", attempts=str(hostconfig.MAX_ATTEMPTS))
     assert not _select(root)["burnt"].dispatchable
 
 
@@ -124,12 +123,12 @@ def test_a_rejected_card_counts_its_budget_from_retry_from(tmp_path):
     """A play-test rejection resets the budget without rewinding `attempts`."""
     root = _repo(tmp_path)
     _charter(root, "code-thread")
-    _card(root, "tasks", "sent-back", attempts=str(runner.MAX_ATTEMPTS),
-          retry_from=str(runner.MAX_ATTEMPTS))
+    _card(root, "tasks", "sent-back", attempts=str(hostconfig.MAX_ATTEMPTS),
+          retry_from=str(hostconfig.MAX_ATTEMPTS))
     assert _select(root)["sent-back"].dispatchable
     card = board.find(root, "sent-back")
-    assert runner.attempt_limit(card) == 2 * runner.MAX_ATTEMPTS
-    assert runner.attempt_budget(card) == runner.MAX_ATTEMPTS
+    assert dispatch.attempt_limit(card) == 2 * hostconfig.MAX_ATTEMPTS
+    assert dispatch.attempt_budget(card) == hostconfig.MAX_ATTEMPTS
 
 
 # --- chores are a different queue, not a different kind of night ------------
@@ -157,7 +156,7 @@ def test_naming_a_chore_by_name_still_runs_it(tmp_path):
     root = _repo(tmp_path)
     _charter(root, "code-thread")
     _card(root, "tasks", "small", kind="chore")
-    forced = {c.card.id: c for c in runner.select(root, set(), {}, forced="small")}
+    forced = {c.card.id: c for c in dispatch.select(root, set(), {}, forced="small")}
     assert forced["small"].dispatchable
 
 
@@ -166,8 +165,8 @@ def test_a_chore_gets_one_attempt_and_a_full_card_gets_three(tmp_path):
     _charter(root, "code-thread")
     _card(root, "tasks", "small", kind="chore")
     _card(root, "tasks", "big")
-    assert runner.attempt_limit(board.find(root, "small")) == runner.CHORE_MAX_ATTEMPTS
-    assert runner.attempt_limit(board.find(root, "big")) == runner.MAX_ATTEMPTS
+    assert dispatch.attempt_limit(board.find(root, "small")) == hostconfig.CHORE_MAX_ATTEMPTS
+    assert dispatch.attempt_limit(board.find(root, "big")) == hostconfig.MAX_ATTEMPTS
 
 
 def test_a_failed_chore_retires_instead_of_waiting_in_tasks_for_a_retry(tmp_path):
@@ -177,7 +176,7 @@ def test_a_failed_chore_retires_instead_of_waiting_in_tasks_for_a_retry(tmp_path
     root = _repo(tmp_path)
     _charter(root, "code-thread")
     _card(root, "tasks", "small", kind="chore", attempts="1")
-    runner.settle(root, "small", runner.Dispatch("failed", "the tests went red"))
+    settle.settle(root, "small", outcome.Dispatch("failed", "the tests went red"))
     assert board.find(root, "small").lane == "failed"
 
 
@@ -194,9 +193,9 @@ def test_a_chores_prompt_tells_the_worker_to_bounce_and_a_full_cards_does_not(
 
     prompts = {}
     for card_id in ("small", "big"):
-        runner.dispatch(root, board.find(root, card_id), "development_team",
+        dispatch.dispatch(root, board.find(root, card_id), "development_team",
                         "sonnet", 0.0, 120)
-        out = runner.run_dir(root, board.find(root, card_id), 1)
+        out = telemetry.run_dir(root, board.find(root, card_id), 1)
         prompts[card_id] = (out / "prompt-1.md").read_text(encoding="utf-8")
     assert seen["argv"]
     assert "one-prompter" in prompts["small"]
@@ -227,7 +226,7 @@ def test_dispatch_order_sinks_a_failed_card_behind_healthy_ones(tmp_path):
     _card(root, "tasks", "a-flaky", attempts="1",
           finished=dt.datetime.now().isoformat(), last_outcome="failed")
     _card(root, "tasks", "z-healthy")
-    ready = [c.card.id for c in runner.select(root, set(), {}) if c.dispatchable]
+    ready = [c.card.id for c in dispatch.select(root, set(), {}) if c.dispatchable]
     assert ready == ["z-healthy", "a-flaky"]
 
 
@@ -240,7 +239,7 @@ def test_dispatch_order_promotes_a_needs_fix_card_ahead_of_kanban_order(tmp_path
     _card(root, "tasks", "dragged-to-top", kanban_order="a0")
     _card(root, "tasks", "needs-a-fix", attempts="1",
           finished=dt.datetime.now().isoformat(), last_outcome="needs_fix")
-    ready = [c.card.id for c in runner.select(root, set(), {}) if c.dispatchable]
+    ready = [c.card.id for c in dispatch.select(root, set(), {}) if c.dispatchable]
     assert ready == ["needs-a-fix", "dragged-to-top"]
 
 
@@ -261,7 +260,7 @@ def test_selection_reports_every_card_not_just_the_ready_ones(tmp_path):
     _charter(root, "code-thread")
     _card(root, "tasks", "yes")
     _card(root, "tasks", "no", unattended="false")
-    candidates = runner.select(root, set(), {})
+    candidates = dispatch.select(root, set(), {})
     assert len(candidates) == 2
     assert all(c.reason for c in candidates)
 
@@ -274,7 +273,7 @@ def test_an_oversized_card_still_dispatches(tmp_path):
     stops on a card whose only fault is being long."""
     root = _repo(tmp_path)
     _charter(root, "code-thread")
-    _grow(_card(root, "tasks", "fat"), runner.CARD_COMFORT_BYTES + 2000)
+    _grow(_card(root, "tasks", "fat"), dispatch.CARD_COMFORT_BYTES + 2000)
     candidate = _select(root)["fat"]
     assert candidate.dispatchable
     # and for the ordinary reason, unchanged — the note is an addition, not a
@@ -293,7 +292,7 @@ def test_an_oversized_card_says_its_size_the_threshold_and_what_to_do(tmp_path):
     adjustment while proving nothing about the mechanism."""
     root = _repo(tmp_path)
     _charter(root, "code-thread")
-    path = _grow(_card(root, "tasks", "fat"), runner.CARD_COMFORT_BYTES + 2000)
+    path = _grow(_card(root, "tasks", "fat"), dispatch.CARD_COMFORT_BYTES + 2000)
     size = len(path.read_text(encoding="utf-8"))
     reason = _select(root)["fat"].reason
 
@@ -301,7 +300,7 @@ def test_an_oversized_card_says_its_size_the_threshold_and_what_to_do(tmp_path):
     assert "compact" in reason and "split" in reason   # what to do
     stated, limit = (float(n) for n in re.findall(r"([\d.]+) KB", reason))
     assert abs(stated * 1024 - size) < 100     # its own size, in KB
-    assert limit * 1024 == runner.CARD_COMFORT_BYTES   # the threshold it passed
+    assert limit * 1024 == dispatch.CARD_COMFORT_BYTES   # the threshold it passed
 
 
 def test_a_card_under_the_threshold_says_nothing_about_its_size(tmp_path):
@@ -322,7 +321,7 @@ def test_an_oversized_card_that_is_also_skipped_carries_both_reasons(tmp_path):
     root = _repo(tmp_path)
     _charter(root, "code-thread")
     _grow(_card(root, "tasks", "fat", unattended="false"),
-          runner.CARD_COMFORT_BYTES + 2000)
+          dispatch.CARD_COMFORT_BYTES + 2000)
     candidate = _select(root)["fat"]
     assert not candidate.dispatchable
     assert "unattended" in candidate.reason
@@ -338,10 +337,10 @@ def test_the_size_signal_measures_the_tasks_shape_only(tmp_path):
     root = _repo(tmp_path)
     for lane in ("testing", "done", "failed", "review", "needs-decision"):
         path = _grow(_card(root, lane, f"fat-{lane}"),
-                     runner.CARD_COMFORT_BYTES + 8000)
+                     dispatch.CARD_COMFORT_BYTES + 8000)
         card = board.Card.load(path, lane)
-        assert len(card.text.encode("utf-8")) > runner.CARD_COMFORT_BYTES
-        assert runner.oversize_note(card) == ""
+        assert len(card.text.encode("utf-8")) > dispatch.CARD_COMFORT_BYTES
+        assert dispatch.oversize_note(card) == ""
 
 
 def test_the_threshold_clears_a_normal_dense_card(tmp_path):
@@ -353,7 +352,7 @@ def test_the_threshold_clears_a_normal_dense_card(tmp_path):
     root = _repo(tmp_path)
     _charter(root, "code-thread")
     path = _grow(_card(root, "tasks", "dense"), 12_500)
-    assert 12_000 < len(path.read_text(encoding="utf-8")) < runner.CARD_COMFORT_BYTES
+    assert 12_000 < len(path.read_text(encoding="utf-8")) < dispatch.CARD_COMFORT_BYTES
     assert "CARD_COMFORT_BYTES" not in _select(root)["dense"].reason
 
 
@@ -371,12 +370,12 @@ def test_a_card_that_ran_while_oversized_is_reported_to_the_digest(tmp_path):
     the morning would mention it."""
     root = _repo(tmp_path)
     _charter(root, "code-thread")
-    path = _grow(_card(root, "tasks", "fat"), runner.CARD_COMFORT_BYTES + 2000)
-    candidates = runner.select(root, set(), {})
+    path = _grow(_card(root, "tasks", "fat"), dispatch.CARD_COMFORT_BYTES + 2000)
+    candidates = dispatch.select(root, set(), {})
 
     assert [c.card.id for c in candidates if not c.dispatchable] == []
-    assert runner.oversized_entries(candidates) == [
-        ("fat", len(path.read_text(encoding="utf-8")), runner.CARD_COMFORT_BYTES)]
+    assert dispatch.oversized_entries(candidates) == [
+        ("fat", len(path.read_text(encoding="utf-8")), dispatch.CARD_COMFORT_BYTES)]
 
 
 def test_a_normal_card_is_reported_to_the_digest_not_at_all(tmp_path):
@@ -385,7 +384,7 @@ def test_a_normal_card_is_reported_to_the_digest_not_at_all(tmp_path):
     root = _repo(tmp_path)
     _charter(root, "code-thread")
     _card(root, "tasks", "lean")
-    assert runner.oversized_entries(runner.select(root, set(), {})) == []
+    assert dispatch.oversized_entries(dispatch.select(root, set(), {})) == []
 
 
 def test_an_oversized_card_that_was_skipped_is_not_also_reported_as_dispatched(tmp_path):
@@ -396,12 +395,12 @@ def test_an_oversized_card_that_was_skipped_is_not_also_reported_as_dispatched(t
     root = _repo(tmp_path)
     _charter(root, "code-thread")
     _grow(_card(root, "tasks", "fat", unattended="false"),
-          runner.CARD_COMFORT_BYTES + 2000)
-    candidates = runner.select(root, set(), {})
+          dispatch.CARD_COMFORT_BYTES + 2000)
+    candidates = dispatch.select(root, set(), {})
 
     assert not candidates[0].dispatchable
     assert "CARD_COMFORT_BYTES" in candidates[0].reason   # reported, via the skip
-    assert runner.oversized_entries(candidates) == []     # and not a second time
+    assert dispatch.oversized_entries(candidates) == []     # and not a second time
 
 
 def test_the_size_the_digest_shows_is_the_size_the_message_quotes(tmp_path):
@@ -410,10 +409,10 @@ def test_the_size_the_digest_shows_is_the_size_the_message_quotes(tmp_path):
     `card_bytes` exists rather than each caller measuring for itself."""
     root = _repo(tmp_path)
     _charter(root, "code-thread")
-    _grow(_card(root, "tasks", "fat"), runner.CARD_COMFORT_BYTES + 2000)
-    candidates = runner.select(root, set(), {})
+    _grow(_card(root, "tasks", "fat"), dispatch.CARD_COMFORT_BYTES + 2000)
+    candidates = dispatch.select(root, set(), {})
 
-    (_, size, _), = runner.oversized_entries(candidates)
+    (_, size, _), = dispatch.oversized_entries(candidates)
     stated, _ = (float(n) for n in re.findall(r"([\d.]+) KB", candidates[0].reason))
     assert f"{size / 1024:.1f}" == f"{stated:.1f}"
 
@@ -433,7 +432,7 @@ def test_naming_a_card_waives_unattended_false(tmp_path):
     _charter(root, "code-thread")
     _card(root, "tasks", "attended", unattended="false")
     assert not _select(root)["attended"].dispatchable
-    forced = {c.card.id: c for c in runner.select(root, set(), {}, forced="attended")}
+    forced = {c.card.id: c for c in dispatch.select(root, set(), {}, forced="attended")}
     assert forced["attended"].dispatchable
     assert "waived" in forced["attended"].reason
 
@@ -441,10 +440,10 @@ def test_naming_a_card_waives_unattended_false(tmp_path):
 def test_naming_a_card_waives_the_attempt_limit(tmp_path):
     root = _repo(tmp_path)
     _charter(root, "code-thread")
-    _card(root, "tasks", "burnt", attempts=str(runner.MAX_ATTEMPTS),
+    _card(root, "tasks", "burnt", attempts=str(hostconfig.MAX_ATTEMPTS),
           finished=dt.datetime.now().isoformat())
     assert not _select(root)["burnt"].dispatchable
-    forced = {c.card.id: c for c in runner.select(root, set(), {}, forced="burnt")}
+    forced = {c.card.id: c for c in dispatch.select(root, set(), {}, forced="burnt")}
     assert forced["burnt"].dispatchable
 
 
@@ -453,7 +452,7 @@ def test_naming_a_card_does_not_conjure_hardware(tmp_path):
     root = _repo(tmp_path)
     _charter(root, "art")
     _card(root, "tasks", "icon", worker="art", requires="gpu-box")
-    forced = runner.select(root, set(), {}, forced="icon")
+    forced = dispatch.select(root, set(), {}, forced="icon")
     assert not forced[0].dispatchable
     assert "gpu-box" in forced[0].reason
 
@@ -465,9 +464,9 @@ def test_naming_a_card_does_not_bypass_a_broken_schema_or_a_missing_worker(tmp_p
     _card(root, "tasks", "broken")
     _card(root, "tasks", "manual", worker="none")
     bad = {"broken": ["Board/tasks/broken.md:1 — card_schema: nope"]}
-    forced = {c.card.id: c for c in runner.select(root, set(), bad, forced="broken")}
+    forced = {c.card.id: c for c in dispatch.select(root, set(), bad, forced="broken")}
     assert not forced["broken"].dispatchable
-    forced = {c.card.id: c for c in runner.select(root, set(), {}, forced="manual")}
+    forced = {c.card.id: c for c in dispatch.select(root, set(), {}, forced="manual")}
     assert not forced["manual"].dispatchable
 
 
@@ -476,7 +475,7 @@ def test_an_unknown_card_id_is_an_error_not_a_quiet_no_op(tmp_path):
     clean, quiet, entirely successful run in which nothing happened — the same
     silent-nothing shape that has bitten this project four times."""
     root = _repo(tmp_path)
-    picked, why = runner.resolve_named(root, "no-such-card", [])
+    picked, why = dispatch.resolve_named(root, "no-such-card", [])
     assert picked == []
     assert "no card `no-such-card`" in why
 
@@ -487,7 +486,7 @@ def test_naming_a_card_in_another_lane_says_which_lane(tmp_path):
     instruction."""
     root = _repo(tmp_path)
     _card(root, "review", "already-built")
-    picked, why = runner.resolve_named(root, "already-built", [])
+    picked, why = dispatch.resolve_named(root, "already-built", [])
     assert picked == []
     assert "review/" in why
 
@@ -497,8 +496,8 @@ def test_naming_a_dispatchable_card_narrows_the_run_to_it(tmp_path):
     _charter(root, "code-thread")
     _card(root, "tasks", "wanted")
     _card(root, "tasks", "other")
-    candidates = runner.select(root, set(), {}, forced="wanted")
-    picked, why = runner.resolve_named(root, "wanted", candidates)
+    candidates = dispatch.select(root, set(), {}, forced="wanted")
+    picked, why = dispatch.resolve_named(root, "wanted", candidates)
     assert why == ""
     assert [c.card.id for c in picked] == ["wanted"]
 
@@ -511,7 +510,7 @@ def test_an_interrupted_attempt_is_recovered_and_already_counted(tmp_path):
     this is what bounds a reboot loop."""
     root = _repo(tmp_path)
     _card(root, "tasks", "crashed", attempts="1", started="2026-07-23T03:00:00")
-    notes = runner.recover(root)
+    notes = startup.recover(root)
     assert len(notes) == 1
     card = board.find(root, "crashed")
     assert card.attempts == 1
@@ -523,7 +522,7 @@ def test_an_interrupted_attempt_is_recovered_and_already_counted(tmp_path):
 def test_recovery_leaves_a_finished_attempt_alone(tmp_path):
     root = _repo(tmp_path)
     _card(root, "tasks", "clean", attempts="1", finished="2026-07-23T03:10:00")
-    assert runner.recover(root) == []
+    assert startup.recover(root) == []
 
 
 def test_recovery_is_idempotent(tmp_path):
@@ -531,8 +530,8 @@ def test_recovery_is_idempotent(tmp_path):
     burn another attempt."""
     root = _repo(tmp_path)
     _card(root, "tasks", "crashed", attempts="1", started="2026-07-23T03:00:00")
-    runner.recover(root)
-    assert runner.recover(root) == []
+    startup.recover(root)
+    assert startup.recover(root) == []
     assert board.find(root, "crashed").attempts == 1
 
 
@@ -545,9 +544,9 @@ def test_a_recovered_card_sinks_behind_healthy_ones_but_is_dispatchable(tmp_path
     _charter(root, "code-thread")
     _card(root, "tasks", "crashed", attempts="1", started="2026-07-23T03:00:00")
     _card(root, "tasks", "z-healthy")
-    runner.recover(root)
+    startup.recover(root)
     assert _select(root)["crashed"].dispatchable
-    ready = [c.card.id for c in runner.select(root, set(), {}) if c.dispatchable]
+    ready = [c.card.id for c in dispatch.select(root, set(), {}) if c.dispatchable]
     assert ready == ["z-healthy", "crashed"]
 
 
@@ -556,7 +555,7 @@ def test_a_recovered_card_sinks_behind_healthy_ones_but_is_dispatchable(tmp_path
 def test_a_green_run_moves_the_card_to_review(tmp_path):
     root = _repo(tmp_path)
     _card(root, "tasks", "good", attempts="1", started="2026-07-23T03:00:00")
-    runner.settle(root, "good", runner.Dispatch("review", "2 commits on ai/good"))
+    settle.settle(root, "good", outcome.Dispatch("review", "2 commits on ai/good"))
     card = board.find(root, "good")
     assert card.lane == "review"
     assert not card.fields.get("started")
@@ -568,7 +567,7 @@ def test_a_green_run_writes_the_workers_summary_onto_the_card(tmp_path):
     card that reaches testing/ carries a brief account of what was done."""
     root = _repo(tmp_path)
     _card(root, "tasks", "good", attempts="1", started="2026-07-23T03:00:00")
-    runner.settle(root, "good", runner.Dispatch(
+    settle.settle(root, "good", outcome.Dispatch(
         "review", "Added the grid layout; 9 new tests; gates green."))
     text = board.find(root, "good").text
     assert "## Summary" in text
@@ -578,10 +577,10 @@ def test_a_green_run_writes_the_workers_summary_onto_the_card(tmp_path):
 def test_a_later_attempts_summary_replaces_the_earlier_one(tmp_path):
     root = _repo(tmp_path)
     _card(root, "tasks", "good", attempts="1", started="2026-07-23T03:00:00")
-    runner.settle(root, "good", runner.Dispatch("review", "first pass"))
+    settle.settle(root, "good", outcome.Dispatch("review", "first pass"))
     card = board.find(root, "good")
     card.write({"attempts": "2", "started": "2026-07-24T03:00:00"})
-    runner.settle(root, "good", runner.Dispatch("review", "second pass, addressed feedback"))
+    settle.settle(root, "good", outcome.Dispatch("review", "second pass, addressed feedback"))
     text = board.find(root, "good").text
     assert text.count("## Summary") == 1
     assert "second pass, addressed feedback" in text and "first pass" not in text
@@ -591,7 +590,7 @@ def test_a_parked_card_goes_to_needs_decision_with_its_question(tmp_path):
     """Parking is a success state (§13). The question is what makes it one."""
     root = _repo(tmp_path)
     _card(root, "tasks", "unclear", attempts="1", started="2026-07-23T03:00:00")
-    runner.settle(root, "unclear", runner.Dispatch("parked", "Damage in HP or heat?"))
+    settle.settle(root, "unclear", outcome.Dispatch("parked", "Damage in HP or heat?"))
     card = board.find(root, "unclear")
     assert card.lane == "needs-decision"
     assert "Damage in HP or heat?" in card.text
@@ -606,7 +605,7 @@ def test_a_card_parked_mid_dispatch_declares_that_it_resumes_in_tasks(tmp_path):
     the guess was wrong for exactly this case."""
     root = _repo(tmp_path)
     _card(root, "tasks", "unclear", attempts="1", started="2026-07-23T03:00:00")
-    runner.settle(root, "unclear", runner.Dispatch("parked", "Damage in HP or heat?"))
+    settle.settle(root, "unclear", outcome.Dispatch("parked", "Damage in HP or heat?"))
     assert board.find(root, "unclear").after_answer == board.AFTER_ANSWER_TASKS
 
 
@@ -621,7 +620,7 @@ def test_settle_does_not_clobber_a_question_the_worker_already_wrote(tmp_path):
     card = board.find(root, "unclear")
     card.write_section("Question", "Pick (A) re-arming or (B) permanent-once-seen dismissal.")
     truncated_summary = "Shipped points 1 & 2 of the note. Tiger unt"
-    runner.settle(root, "unclear", runner.Dispatch("parked", truncated_summary))
+    settle.settle(root, "unclear", outcome.Dispatch("parked", truncated_summary))
     text = board.find(root, "unclear").text
     assert "Pick (A) re-arming or (B) permanent-once-seen dismissal." in text
     assert truncated_summary not in text
@@ -661,7 +660,7 @@ def test_settle_recovers_a_parked_question_written_on_the_branch_over_a_stale_on
                    cwd=seed, check=True)
     subprocess.run(["git", "worktree", "remove", "--force", str(seed)], cwd=root, check=True)
 
-    runner.settle(root, "unclear", runner.Dispatch("parked", "truncated attempt summary"))
+    settle.settle(root, "unclear", outcome.Dispatch("parked", "truncated attempt summary"))
     result_text = board.find(root, "unclear").text
     assert "New question the worker actually asked this attempt." in result_text
     assert "Old, already-answered question from a prior attempt." in result_text
@@ -682,7 +681,7 @@ def test_settle_leaves_an_unchanged_question_alone(tmp_path):
 
     subprocess.run(["git", "branch", "ai/unclear"], cwd=root, check=True)
 
-    runner.settle(root, "unclear", runner.Dispatch("parked", "truncated attempt summary"))
+    settle.settle(root, "unclear", outcome.Dispatch("parked", "truncated attempt summary"))
     result_text = board.find(root, "unclear").text
     assert result_text.count("Same question, never touched by the worker.") == 1
     assert "truncated attempt summary" not in result_text
@@ -691,7 +690,7 @@ def test_settle_leaves_an_unchanged_question_alone(tmp_path):
 def test_a_failure_below_the_limit_stays_in_tasks_for_a_retry(tmp_path):
     root = _repo(tmp_path)
     _card(root, "tasks", "flaky", attempts="1", started="2026-07-23T03:00:00")
-    runner.settle(root, "flaky", runner.Dispatch("failed", "pytest: FAILED test_x"))
+    settle.settle(root, "flaky", outcome.Dispatch("failed", "pytest: FAILED test_x"))
     card = board.find(root, "flaky")
     assert card.lane == "tasks"
     assert "pytest: FAILED test_x" in card.text
@@ -700,9 +699,9 @@ def test_a_failure_below_the_limit_stays_in_tasks_for_a_retry(tmp_path):
 
 def test_a_failure_at_the_limit_moves_to_failed(tmp_path):
     root = _repo(tmp_path)
-    _card(root, "tasks", "doomed", attempts=str(runner.MAX_ATTEMPTS),
+    _card(root, "tasks", "doomed", attempts=str(hostconfig.MAX_ATTEMPTS),
           started="2026-07-23T03:00:00")
-    runner.settle(root, "doomed", runner.Dispatch("failed", "gates: import_layering"))
+    settle.settle(root, "doomed", outcome.Dispatch("failed", "gates: import_layering"))
     assert board.find(root, "doomed").lane == "failed"
 
 
@@ -711,10 +710,10 @@ def test_repeated_failures_leave_one_current_error_not_a_stack(tmp_path):
     history lives in `.ai/runs/`; the card carries the current state."""
     root = _repo(tmp_path)
     _card(root, "tasks", "flaky", attempts="1", started="2026-07-23T03:00:00")
-    runner.settle(root, "flaky", runner.Dispatch("failed", "first failure"))
+    settle.settle(root, "flaky", outcome.Dispatch("failed", "first failure"))
     card = board.find(root, "flaky")
     card.write({"attempts": "2", "started": "2026-07-23T04:00:00"})
-    runner.settle(root, "flaky", runner.Dispatch("failed", "second failure"))
+    settle.settle(root, "flaky", outcome.Dispatch("failed", "second failure"))
     text = board.find(root, "flaky").text
     assert text.count("## Error") == 1
     assert "second failure" in text and "first failure" not in text
@@ -724,7 +723,7 @@ def test_settling_a_card_the_worker_moved_does_not_crash(tmp_path):
     """The runner rescans before settling because the disk, not its memory, is
     the state. A card that vanished entirely is reported, not raised."""
     root = _repo(tmp_path)
-    note = runner.settle(root, "ghost", runner.Dispatch("review", "x"))
+    note = settle.settle(root, "ghost", outcome.Dispatch("review", "x"))
     assert "vanished" in note
 
 
@@ -733,8 +732,8 @@ def test_settling_a_card_the_worker_moved_does_not_crash(tmp_path):
 def test_the_kill_switch_stops_the_runner(tmp_path):
     root = _repo(tmp_path)
     (root / ".ai").mkdir(exist_ok=True)
-    (root / runner.STOP_FILE).write_text("Karel is testing tonight\n", encoding="utf-8")
-    check = runner.preflight(root, "development_team", dry_run=True)
+    (root / hostconfig.STOP_FILE).write_text("Karel is testing tonight\n", encoding="utf-8")
+    check = startup.startup_checks(root, "development_team", dry_run=True)
     assert not check.ok
     assert any("kill switch" in r for r in check.reasons)
     assert any("Karel is testing tonight" in r for r in check.reasons)
@@ -745,9 +744,9 @@ def test_dry_run_only_reports_the_kill_switch_never_deletes_it(tmp_path):
     to show, not something even this path may clear away."""
     root = _repo(tmp_path)
     (root / ".ai").mkdir(exist_ok=True)
-    (root / runner.STOP_FILE).write_text("note\n", encoding="utf-8")
-    assert not runner.preflight(root, "development_team", dry_run=True).ok
-    assert (root / runner.STOP_FILE).is_file()
+    (root / hostconfig.STOP_FILE).write_text("note\n", encoding="utf-8")
+    assert not startup.startup_checks(root, "development_team", dry_run=True).ok
+    assert (root / hostconfig.STOP_FILE).is_file()
 
 
 def test_a_named_card_still_refuses_on_a_stale_kill_switch(tmp_path):
@@ -757,11 +756,11 @@ def test_a_named_card_still_refuses_on_a_stale_kill_switch(tmp_path):
     delete STOP")."""
     root = _repo(tmp_path)
     (root / ".ai").mkdir(exist_ok=True)
-    (root / runner.STOP_FILE).write_text("note\n", encoding="utf-8")
-    check = runner.preflight(root, "development_team", dry_run=False, named_card=True)
+    (root / hostconfig.STOP_FILE).write_text("note\n", encoding="utf-8")
+    check = startup.startup_checks(root, "development_team", dry_run=False, named_card=True)
     assert not check.ok
     assert any("kill switch" in r for r in check.reasons)
-    assert (root / runner.STOP_FILE).is_file()
+    assert (root / hostconfig.STOP_FILE).is_file()
 
 
 def test_a_plain_start_clears_a_stale_kill_switch_and_proceeds(tmp_path):
@@ -770,10 +769,10 @@ def test_a_plain_start_clears_a_stale_kill_switch_and_proceeds(tmp_path):
     2026-08-22: "runner should clear at the start of the run")."""
     root = _repo(tmp_path)
     (root / ".ai").mkdir(exist_ok=True)
-    (root / runner.STOP_FILE).write_text("note\n", encoding="utf-8")
-    check = runner.preflight(root, "development_team", dry_run=False)
+    (root / hostconfig.STOP_FILE).write_text("note\n", encoding="utf-8")
+    check = startup.startup_checks(root, "development_team", dry_run=False)
     assert not any("kill switch" in r for r in check.reasons)
-    assert not (root / runner.STOP_FILE).is_file()
+    assert not (root / hostconfig.STOP_FILE).is_file()
 
 
 # The fixture repo's own forbidden set, not this repo's. They differed the moment
@@ -787,7 +786,7 @@ def test_the_runner_refuses_to_build_on_dev_or_main(tmp_path, base):
     """SESSIONS.md's standing rule is 'never commit to dev'. An unattended
     process is exactly who would."""
     root = _repo(tmp_path)
-    check = runner.preflight(root, base, dry_run=True)
+    check = startup.startup_checks(root, base, dry_run=True)
     assert not check.ok
     assert any("forbidden" in r for r in check.reasons)
 
@@ -799,21 +798,21 @@ def test_the_runner_reads_the_base_branch_from_the_manifest_it_is_pointed_at(tmp
     exercised the post-swap configuration. `--base dev` is refused today and
     accepted the moment the manifest says `dev` holds the role."""
     root = _repo(tmp_path)
-    assert not runner.preflight(root, "dev", dry_run=True).ok
+    assert not startup.startup_checks(root, "dev", dry_run=True).ok
 
     _write_manifest(root, integration="dev", forbidden_extra=("development_team", "master"))
-    assert "dev" not in runner.forbidden_bases(root)
-    assert runner.default_base(root) == "dev"
+    assert "dev" not in hostconfig.forbidden_bases(root)
+    assert hostconfig.default_base(root) == "dev"
     # main stays protected across the swap; that fact is not migration-dependent.
-    assert "main" in runner.forbidden_bases(root)
+    assert "main" in hostconfig.forbidden_bases(root)
 
 
 def test_a_dirty_tree_blocks_a_real_run_but_not_a_dry_run(tmp_path):
     root = _repo(tmp_path)
     (root / "scratch.py").write_text("x = 1\n", encoding="utf-8")
-    assert not runner.preflight(root, "master", dry_run=False).ok
+    assert not startup.startup_checks(root, "master", dry_run=False).ok
     # dry-run's only remaining objection is the forbidden base, not the dirt
-    assert not any("dirty" in r for r in runner.preflight(root, "x", dry_run=True).reasons)
+    assert not any("dirty" in r for r in startup.startup_checks(root, "x", dry_run=True).reasons)
 
 
 def test_board_edits_alone_do_not_count_as_a_dirty_tree(tmp_path):
@@ -821,7 +820,7 @@ def test_board_edits_alone_do_not_count_as_a_dirty_tree(tmp_path):
     could never take a second card in one night."""
     root = _repo(tmp_path)
     _card(root, "tasks", "edited")
-    assert runner.dirty_outside_board(root) == []
+    assert hostconfig.dirty_outside_board(root) == []
 
 
 # --- the generated views are committed AND exempt ---------------------------
@@ -840,7 +839,7 @@ def test_a_generated_view_does_not_count_as_a_dirty_tree(tmp_path, view):
     somebody's work in progress refuses the run that just wrote it."""
     root = _repo(tmp_path)
     (root / view).write_text(f"# {view}\n", encoding="utf-8")
-    assert runner.dirty_outside_board(root) == []
+    assert hostconfig.dirty_outside_board(root) == []
 
 
 def test_every_generated_view_together_still_leaves_a_clean_tree(tmp_path):
@@ -850,7 +849,7 @@ def test_every_generated_view_together_still_leaves_a_clean_tree(tmp_path):
     root = _repo(tmp_path)
     for view in board.GENERATED_VIEWS:
         (root / view).write_text(f"# {view}\n", encoding="utf-8")
-    assert runner.dirty_outside_board(root) == []
+    assert hostconfig.dirty_outside_board(root) == []
 
 
 @pytest.mark.parametrize("view", board.GENERATED_VIEWS)
@@ -884,7 +883,7 @@ def test_commit_board_stages_the_board_when_no_view_exists_yet(tmp_path):
 def test_no_host_config_means_no_capabilities(tmp_path):
     """The safe default: a card that requires something never dispatches,
     rather than being dispatched onto a machine that cannot run it."""
-    assert runner.host_capabilities(tmp_path) == set()
+    assert hostconfig.host_capabilities(tmp_path) == set()
 
 
 def test_capabilities_are_keyed_by_hostname(tmp_path):
@@ -892,7 +891,7 @@ def test_capabilities_are_keyed_by_hostname(tmp_path):
     a box is configured once rather than per clone."""
     import socket
     _hosts(tmp_path, {socket.gethostname(): {"capabilities": ["gpu-box"]}})
-    assert runner.host_capabilities(tmp_path) == {"gpu-box"}
+    assert hostconfig.host_capabilities(tmp_path) == {"gpu-box"}
 
 
 def test_an_unknown_hostname_gets_no_capabilities(tmp_path):
@@ -900,21 +899,21 @@ def test_an_unknown_hostname_gets_no_capabilities(tmp_path):
     nothing, so `requires:` cards stay in tasks/ at zero cost until someone adds
     a row."""
     _hosts(tmp_path, {"some-other-box": {"capabilities": ["gpu-box"]}})
-    assert runner.host_capabilities(tmp_path) == set()
+    assert hostconfig.host_capabilities(tmp_path) == set()
 
 
 def test_the_local_override_wins_over_the_shared_file(tmp_path):
     import socket
     _hosts(tmp_path, {socket.gethostname(): {"capabilities": ["gpu-box"]}})
-    (tmp_path / runner.HOST_FILE).write_text(
+    (tmp_path / hostconfig.HOST_FILE).write_text(
         json.dumps({"capabilities": []}), encoding="utf-8")
-    assert runner.host_capabilities(tmp_path) == set()
+    assert hostconfig.host_capabilities(tmp_path) == set()
 
 
 def test_a_corrupt_host_file_degrades_to_no_capabilities(tmp_path):
     (tmp_path / ".ai").mkdir()
-    (tmp_path / runner.HOSTS_FILE).write_text("{not json", encoding="utf-8")
-    assert runner.host_capabilities(tmp_path) == set()
+    (tmp_path / hostconfig.HOSTS_FILE).write_text("{not json", encoding="utf-8")
+    assert hostconfig.host_capabilities(tmp_path) == set()
 
 
 # --- harvesting artefacts that were never meant to be commits ---------------
@@ -937,7 +936,7 @@ def test_artefacts_are_rescued_before_the_worktree_is_destroyed(tmp_path):
     (tmp_path / ".ai" / "manifest.toml").write_text(
         '[worker]\nharvest_dirs = ["dungeoneer/assets/.tmp"]\n', encoding="utf-8")
 
-    assert runner.harvest(tmp_path, tree, out) == 2
+    assert worktree.harvest(tmp_path, tree, out) == 2
     assert (out / "artefacts" / ".tmp" / "icon_a.png").is_file()
     assert (out / "artefacts" / ".tmp" / "raw" / "icon_b.png").is_file()
 
@@ -945,7 +944,7 @@ def test_artefacts_are_rescued_before_the_worktree_is_destroyed(tmp_path):
 def test_harvest_is_silent_when_there_is_nothing_to_rescue(tmp_path):
     (tmp_path / "tree").mkdir()
     (tmp_path / "out").mkdir()
-    assert runner.harvest(tmp_path, tmp_path / "tree", tmp_path / "out") == 0
+    assert worktree.harvest(tmp_path, tmp_path / "tree", tmp_path / "out") == 0
 
 
 def test_a_project_declaring_no_harvest_dirs_rescues_nothing(tmp_path):
@@ -954,8 +953,8 @@ def test_a_project_declaring_no_harvest_dirs_rescues_nothing(tmp_path):
     (tmp_path / "tree" / "assets" / ".tmp").mkdir(parents=True)
     (tmp_path / 'tree' / 'assets' / '.tmp' / 'x.png').write_bytes(b'fake-png')
     (tmp_path / "out").mkdir()
-    assert runner.harvest_dirs(tmp_path) == ()
-    assert runner.harvest(tmp_path, tmp_path / "tree", tmp_path / "out") == 0
+    assert hostconfig.harvest_dirs(tmp_path) == ()
+    assert worktree.harvest(tmp_path, tmp_path / "tree", tmp_path / "out") == 0
 
 
 def test_an_artefact_counts_as_output_even_with_no_commit(tmp_path, monkeypatch):
@@ -971,10 +970,10 @@ def test_an_artefact_counts_as_output_even_with_no_commit(tmp_path, monkeypatch)
         (tmp / "candidate_1.png").write_bytes(b"\x89PNG")
         return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.4}), "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
-    result = runner.dispatch(root, board.find(root, "icon"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "icon"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "review"
     assert (root / ".ai" / "runs" / "icon" / "attempt-1" / "artefacts" / ".tmp"
@@ -1000,10 +999,10 @@ def test_artefacts_are_kept_when_the_card_parks(tmp_path, monkeypatch):
             encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, "{}", "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
-    result = runner.dispatch(root, board.find(root, "icon"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "icon"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "parked"
     assert (root / ".ai" / "runs" / "icon" / "attempt-1" / "artefacts" / ".tmp"
@@ -1026,10 +1025,10 @@ def test_an_uncommitted_diff_is_banked_not_dropped(tmp_path, monkeypatch):
         (Path(cwd) / "seed.txt").write_text("edited by the worker\n", encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
-    result = runner.dispatch(root, board.find(root, "forgot-commit"),
+    result = dispatch.dispatch(root, board.find(root, "forgot-commit"),
                              "development_team", "sonnet", 5.0, 120)
 
     assert result.outcome == "review", result.detail
@@ -1052,10 +1051,10 @@ def test_a_worker_that_truly_did_nothing_still_fails(tmp_path, monkeypatch):
     def fake(argv, cwd, timeout, stream_path=None, env=None, prompt=""):
         return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
-    result = runner.dispatch(root, board.find(root, "did-nothing"),
+    result = dispatch.dispatch(root, board.find(root, "did-nothing"),
                              "development_team", "sonnet", 5.0, 120)
     assert result.outcome == "failed"
     assert "neither a commit nor an artefact" in result.detail
@@ -1064,23 +1063,23 @@ def test_a_worker_that_truly_did_nothing_still_fails(tmp_path, monkeypatch):
 # --- the single-instance lock -----------------------------------------------
 
 def test_the_lock_is_taken_and_released(tmp_path):
-    assert runner.acquire_lock(tmp_path)
-    assert (tmp_path / runner.LOCK_FILE).is_file()
-    runner.release_lock(tmp_path)
-    assert not (tmp_path / runner.LOCK_FILE).is_file()
+    assert hostconfig.acquire_lock(tmp_path)
+    assert (tmp_path / hostconfig.LOCK_FILE).is_file()
+    hostconfig.release_lock(tmp_path)
+    assert not (tmp_path / hostconfig.LOCK_FILE).is_file()
 
 
 def test_a_live_lock_blocks_a_second_runner(tmp_path):
-    runner.acquire_lock(tmp_path)  # writes our own, live, PID
-    assert not runner.acquire_lock(tmp_path)
+    hostconfig.acquire_lock(tmp_path)  # writes our own, live, PID
+    assert not hostconfig.acquire_lock(tmp_path)
 
 
 def test_a_stale_lock_is_taken_over(tmp_path):
     """The 3 AM reboot leaves exactly this. A runner that refused to start
     because of a dead PID's lock would need a human, which defeats the point."""
     (tmp_path / ".ai" / "runs").mkdir(parents=True)
-    (tmp_path / runner.LOCK_FILE).write_text("999999 2026-07-23T03:00:00\n", encoding="utf-8")
-    assert runner.acquire_lock(tmp_path)
+    (tmp_path / hostconfig.LOCK_FILE).write_text("999999 2026-07-23T03:00:00\n", encoding="utf-8")
+    assert hostconfig.acquire_lock(tmp_path)
 
 
 # --- the card writer --------------------------------------------------------
@@ -1188,7 +1187,7 @@ def test_the_prompt_states_a_resolved_tier(tmp_path):
     hook enforces on interactive spawns."""
     from nightshift.hooks import tier_guard
 
-    prompt = runner._PROMPT.format(
+    prompt = dispatch._PROMPT.format(
         tier="worker", model="sonnet", branch="ai/x", base="development_team",
         card_path="Board/tasks/x.md", verdict_path="v.json",
         tool_economy=worker_prompt.TOOL_ECONOMY,
@@ -1200,7 +1199,7 @@ def test_the_prompt_states_a_resolved_tier(tmp_path):
 
 
 def test_the_prompt_forbids_moving_the_card_and_touching_dev(tmp_path):
-    prompt = runner._PROMPT.format(
+    prompt = dispatch._PROMPT.format(
         tier="worker", model="sonnet", branch="ai/x", base="development_team",
         card_path="Board/tasks/x.md", verdict_path="v.json",
         tool_economy=worker_prompt.TOOL_ECONOMY,
@@ -1225,7 +1224,7 @@ def test_a_park_that_asks_nothing_reaches_the_board_saying_so(tmp_path):
         "### Decided (2026-09-16): How should the bonus be shown?\n\n"
         "- **A — beside the row** — matches perks.\n"), encoding="utf-8")
 
-    runner.settle(root, "unclear", runner.Dispatch("parked", "re-checked cold"))
+    settle.settle(root, "unclear", outcome.Dispatch("parked", "re-checked cold"))
     question = board.section(board.find(root, "unclear").text, "Question")
     assert "This park asked nothing." in question
     assert ".ai/runs/unclear/" in question
@@ -1242,7 +1241,7 @@ def test_a_park_on_a_question_still_live_is_an_ordinary_park(tmp_path):
         "### Decide: How should the bonus be shown?\n\n"
         "- **A — beside the row** — matches perks.\n"), encoding="utf-8")
 
-    runner.settle(root, "unclear", runner.Dispatch("parked", "re-checked cold"))
+    settle.settle(root, "unclear", outcome.Dispatch("parked", "re-checked cold"))
     question = board.section(board.find(root, "unclear").text, "Question")
     assert "This park asked nothing." not in question
     assert "### Decide: How should the bonus be shown?" in question

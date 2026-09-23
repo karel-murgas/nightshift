@@ -15,12 +15,11 @@ only, and the chore batch — which "called the merge" — skipped the fold
 from __future__ import annotations
 
 import datetime as dt
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from nightshift import board, gitmerge, gitpaths, memoryfold
+from nightshift import board, git, gitmerge, memoryfold
 from nightshift.manifest import ManifestError
 from nightshift.manifest import load as _load_manifest
 
@@ -56,16 +55,12 @@ def _log(message: str) -> None:
     _sink(message)
 
 
-def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
-    return gitpaths.git(root, *args)
-
-
 def _current_branch(root: Path) -> str:
-    return _git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    return git.run(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
 
 
 def _is_ancestor(root: Path, ancestor: str, ref: str) -> bool:
-    return _git(root, "merge-base", "--is-ancestor", ancestor, ref).returncode == 0
+    return git.run(root, "merge-base", "--is-ancestor", ancestor, ref).returncode == 0
 
 
 # --------------------------------------------------------------------------- the lane
@@ -81,7 +76,7 @@ def player_visible_hit(root: Path, branch: str, base: str) -> str:
         return ""
     if not prefixes:
         return ""
-    for changed in gitpaths.changed(root, f"{base}...{branch}"):
+    for changed in git.changed(root, f"{base}...{branch}"):
         if any(changed == p or changed.startswith(p.rstrip("/") + "/") for p in prefixes):
             return changed
     return ""
@@ -115,18 +110,18 @@ def _merge(root: Path, ref: str, base: str, *, label: str = "", message: str = "
     head = _current_branch(root)
     if head != base:
         return False, f"the checkout is on `{head}`, not the integration branch `{base}`"
-    if _git(root, "rev-parse", "--verify", ref).returncode != 0:
+    if git.run(root, "rev-parse", "--verify", ref).returncode != 0:
         return False, f"`{name}` no longer exists"
     if ff_only:
-        done = _git(root, "merge", "--ff-only", ref)
+        done = git.run(root, "merge", "--ff-only", ref)
         if done.returncode == 0:
             return True, "fast-forwarded"
         return False, (done.stderr or done.stdout or "").strip()[:150]
-    merged = _git(root, "merge", *gitmerge.STRATEGY_ARGS, "--no-ff", "-m",
+    merged = git.run(root, "merge", *gitmerge.STRATEGY_ARGS, "--no-ff", "-m",
                   message or f"merge {name}: reviewed ok by the runner", ref)
     if merged.returncode == 0:
         return True, "merged"
-    if _git(root, "merge", "--abort").returncode != 0:
+    if git.run(root, "merge", "--abort").returncode != 0:
         # Expected when git refused before starting: there is no merge to abort.
         _log(f"  ! merge --abort of {name} found no merge in progress — git refused the "
              f"merge before starting it; the checkout is untouched")
@@ -162,12 +157,12 @@ def fold_memory(root: Path, card_id: str, base: str) -> None:
     if any("LEFT IN PLACE" in line for line in report):
         return
     paths = [str(root / target.path) for target in memoryfold.targets(root)]
-    added = _git(root, "add", "--", str(fragment), *paths)
+    added = git.run(root, "add", "--", str(fragment), *paths)
     if added.returncode != 0:
         _log(f"  ! folded {card_id}'s memory record but could not stage it — "
              f"{(added.stderr or added.stdout or '').strip()[:150]}")
         return
-    committed = _git(root, "commit", "-m", f"memory: fold {card_id}'s record",
+    committed = git.run(root, "commit", "-m", f"memory: fold {card_id}'s record",
                      "--", str(fragment), *paths)
     if committed.returncode != 0:
         _log(f"  ! folded {card_id}'s memory record but could not commit it — "
@@ -185,18 +180,18 @@ def delete_remote_branch(root: Path, remote: str, branch: str, *,
     """
     if not remote:
         return
-    if _git(root, "remote", "get-url", remote).returncode != 0:
+    if git.run(root, "remote", "get-url", remote).returncode != 0:
         return
-    if _git(root, "fetch", remote, branch).returncode != 0:
+    if git.run(root, "fetch", remote, branch).returncode != 0:
         return  # never published — the ordinary case, and nothing to report
-    remote_tip = _git(root, "rev-parse", "FETCH_HEAD").stdout.strip()
+    remote_tip = git.run(root, "rev-parse", "FETCH_HEAD").stdout.strip()
     if not remote_tip or not _is_ancestor(root, remote_tip, branch):
         _log(f"  ! {action} {branch} but did NOT delete it on {remote} — the remote "
              f"carries commits this checkout does not have (pushed from elsewhere "
              f"since the last fetch); deleting would destroy them. Reconcile "
              f"`{remote}/{branch}` by hand.")
         return
-    deleted = _git(root, "push", remote, "--delete", branch)
+    deleted = git.run(root, "push", remote, "--delete", branch)
     if deleted.returncode != 0:
         detail = (deleted.stderr or deleted.stdout or "").strip().splitlines()
         _log(f"  ! {action} {branch} but could not delete it on {remote} — "
@@ -207,9 +202,9 @@ def _delete_local_branch(root: Path, branch: str, *, force: bool) -> None:
     """`-D` only when the caller landed a rebased copy (the branch's own tip is then
     never an ancestor of the base); `-d` everywhere else, which refuses an unmerged
     branch."""
-    if _git(root, "rev-parse", "--verify", f"refs/heads/{branch}").returncode != 0:
+    if git.run(root, "rev-parse", "--verify", f"refs/heads/{branch}").returncode != 0:
         return
-    deleted = _git(root, "branch", "-D" if force else "-d", branch)
+    deleted = git.run(root, "branch", "-D" if force else "-d", branch)
     if deleted.returncode != 0:
         _log(f"  ! merged {branch} but could not delete it — "
              f"{(deleted.stderr or deleted.stdout or '').strip()[:150]}")

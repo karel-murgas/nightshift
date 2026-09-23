@@ -79,11 +79,10 @@ from __future__ import annotations
 import json
 import re
 import shlex
-import subprocess
 import sys
 from pathlib import Path
 
-from nightshift import gitpaths
+from nightshift import git
 from nightshift.hooks import session_memo
 
 NAME = "commit_pathspec"
@@ -105,22 +104,6 @@ def _tokens(segment: str) -> list[str]:
             return shlex.split(segment, posix=False)
         except ValueError:
             return []
-
-
-def _git(args: list[str], cwd: Path | None) -> str | None:
-    """`git <args>` stdout, or None if git could not answer. `encoding=` is mandatory —
-    `text=True` alone decodes with the locale codec and returns None on the first byte
-    cp1252 cannot map, which is the `subprocess_encoding` defect."""
-    try:
-        result = subprocess.run(
-            ["git", *args], cwd=str(cwd) if cwd else None, capture_output=True,
-            text=True, encoding="utf-8", errors="replace", check=False,
-        )
-    except (OSError, ValueError):
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout
 
 
 def commit_segments(command: str) -> list[list[str]]:
@@ -152,9 +135,13 @@ def _repo_dir(tokens: list[str], cwd: Path) -> Path:
 
 
 def _sequencer_busy(repo: Path) -> bool:
-    git_dir = _git(["rev-parse", "--git-dir"], repo)
-    if git_dir is None:
+    try:
+        result = git.run(repo, "rev-parse", "--git-dir")
+    except (OSError, ValueError):
         return False
+    if result.returncode != 0:
+        return False
+    git_dir = result.stdout
     base = Path(git_dir.strip())
     if not base.is_absolute():
         base = repo / base
@@ -162,10 +149,10 @@ def _sequencer_busy(repo: Path) -> bool:
 
 
 def _staged(repo: Path) -> list[str] | None:
-    out = gitpaths.git(repo, "diff", "--cached", "--name-only", "-z")
+    out = git.run(repo, "diff", "--cached", "--name-only", "-z")
     if out.returncode != 0:
         return None
-    return gitpaths.split(out.stdout)
+    return git.split(out.stdout)
 
 
 def _has_untrack_in_index(repo: Path) -> bool:
@@ -184,7 +171,7 @@ def _has_untrack_in_index(repo: Path) -> bool:
     pathspec, because `git commit -- <path>` records that deletion correctly.
     """
     return any((repo / path).exists()
-               for path in gitpaths.changed(repo, "--cached", "--diff-filter=D"))
+               for path in git.changed(repo, "--cached", "--diff-filter=D"))
 
 
 def _flags(tokens: list[str]) -> tuple[bool, bool, bool]:

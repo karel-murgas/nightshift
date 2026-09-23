@@ -130,7 +130,7 @@ def test_a_record_that_is_not_a_dict_is_skipped(tmp_path):
 
 def test_an_unwritable_record_does_not_raise(tmp_path, monkeypatch):
     """The record is an observer, and an observer that can kill the run is worse
-    than none — the same rule `runner._status` and the log tee follow."""
+    than none — the same rule `hostconfig._status` and the log tee follow."""
     record = run_record.start(tmp_path, kind="run")
 
     def _boom(*_a, **_k):

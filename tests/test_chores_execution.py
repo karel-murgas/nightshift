@@ -35,7 +35,12 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import board, chores, run_record, runner, suite, usage
+from nightshift import board, chores, run_record, runner, usage
+from nightshift import hostconfig, startup, verify, worktree
+# Aliased: this file's own fixture instances are conventionally named `worker`
+# throughout (a `_Worker(...).install(monkeypatch)` result), which would shadow
+# a bare `worker` import in every test that assigns one.
+from nightshift import worker as worker_module
 
 import _fixtures
 
@@ -171,13 +176,13 @@ def _no_meter(monkeypatch):
 def _gates_pass(monkeypatch):
     """A gate harness that always passes, substituted at the argv rather than by
     writing a `run.py` the fixture alone would have."""
-    monkeypatch.setattr(runner, "GATE_ARGV", ["python", "-c", "pass"])
+    monkeypatch.setattr(verify, "GATE_ARGV", ["python", "-c", "pass"])
 
 
 @pytest.fixture(autouse=True)
 def _serial_pytest(monkeypatch):
     """xdist's startup dwarfs a two-test suite, and these run pytest many times."""
-    monkeypatch.setattr(runner, "_PYTEST_PARALLEL", ())
+    monkeypatch.setattr(verify, "_PYTEST_PARALLEL", ())
     _fixtures.serial_child_pytest(monkeypatch)
 
 
@@ -185,7 +190,7 @@ def _serial_pytest(monkeypatch):
 def _leave_the_real_config_alone(monkeypatch):
     """`ensure_workspace_trusted` edits `~/.claude.json`, which is the developer's
     own file. A test must not leave a dozen temp directories in it."""
-    monkeypatch.setattr(runner, "ensure_workspace_trusted", lambda root: None)
+    monkeypatch.setattr(startup, "ensure_workspace_trusted", lambda root: None)
 
 
 # `_review_context` numbers each item as `### N. title (`card_id`)`, in both the
@@ -229,8 +234,8 @@ class _Worker:
         self.argvs: list[list[str]] = []
 
     def install(self, monkeypatch):
-        monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-        monkeypatch.setattr(runner, "_run_worker", self)
+        monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+        monkeypatch.setattr(worker_module, "_run_worker", self)
         return self
 
     def _review_payload(self, prompt: str) -> dict:
@@ -257,7 +262,7 @@ class _Worker:
         self.models.append(model)
         target = Path(next(line.strip() for line in prompt.splitlines()
                            if line.strip().endswith(".json")))
-        if agent == runner.REVIEWER_AGENT:
+        if agent == hostconfig.REVIEWER_AGENT:
             self.reviews.append(str(cwd))
             target.write_text(json.dumps(self._review_payload(prompt)), encoding="utf-8")
             return subprocess.CompletedProcess(argv, 0, json.dumps({}), "")
@@ -287,13 +292,13 @@ def _count_full_suite_runs(monkeypatch) -> list[list[str]]:
     """Record every pytest invocation's path arguments, so a test can tell a
     whole-suite run from a narrowed one by what it was pointed at."""
     seen: list[list[str]] = []
-    real = runner._run_tests
+    real = verify._run_tests
 
     def spy(cwd, log, timeout, junit, pytest_args):
         seen.append(list(pytest_args))
         return real(cwd, log, timeout, junit, pytest_args)
 
-    monkeypatch.setattr(runner, "_run_tests", spy)
+    monkeypatch.setattr(verify, "_run_tests", spy)
     return seen
 
 
@@ -325,7 +330,7 @@ def test_a_chore_dispatches_on_the_cheap_tier_as_a_short_alias(tmp_path, monkeyp
 
 
 def _worker_argvs(worker: _Worker) -> list[list[str]]:
-    return [a for a in worker.argvs if a[a.index("--agent") + 1] != runner.REVIEWER_AGENT]
+    return [a for a in worker.argvs if a[a.index("--agent") + 1] != hostconfig.REVIEWER_AGENT]
 
 
 def test_a_chore_runs_under_the_chore_charter_at_medium_effort(tmp_path, monkeypatch):
@@ -366,7 +371,7 @@ def test_a_chore_worker_is_told_to_verify_with_the_touched_slice(tmp_path, monke
     def recording(argv, cwd, timeout, stream_path=None, env=None, prompt=""):
         prompts.append(prompt)
         return worker(argv, cwd, timeout, stream_path, env, prompt)
-    monkeypatch.setattr(runner, "_run_worker", recording)
+    monkeypatch.setattr(worker_module, "_run_worker", recording)
     chores.execute(root)
     assert "python -m nightshift.suite slice --touched" in prompts[0]
 
@@ -474,7 +479,7 @@ def test_a_refusal_before_the_board_is_read_leaves_no_record(tmp_path, monkeypat
     from nightshift import run_record
 
     root = _repo(tmp_path, ("a", "review", "inner"))
-    monkeypatch.setattr(chores.runner, "acquire_lock", lambda root: False)
+    monkeypatch.setattr(chores.hostconfig, "acquire_lock", lambda root: False)
     chores.execute(root)
     assert run_record.read_all(root) == []
 
@@ -536,7 +541,7 @@ def test_the_kill_switch_stops_the_batch_and_is_cleared_for_the_next_call(
         tmp_path, monkeypatch):
     """Left on disk, `.ai/STOP` used to stop every later `chores`/`drain` call
     too, with nothing on screen saying why (Karel, 2026-08-22, found via
-    `nightshift.drain`). Single-use, the same as `runner._stop_requested()`."""
+    `nightshift.drain`). Single-use, the same as `hostconfig._stop_requested()`."""
     root = _repo(tmp_path, ("a", "review", "x"), ("b", "review", "x"))
     worker = _Worker(edits={"a": _touch("a"), "b": _touch("b")}).install(monkeypatch)
 
@@ -546,8 +551,8 @@ def test_the_kill_switch_stops_the_batch_and_is_cleared_for_the_next_call(
 
     def then_stop(self, ctx, candidate, result, model):
         out = real_settle(self, ctx, candidate, result, model)
-        (root / runner.STOP_FILE).parent.mkdir(parents=True, exist_ok=True)
-        (root / runner.STOP_FILE).write_text("stop\n", encoding="utf-8")
+        (root / hostconfig.STOP_FILE).parent.mkdir(parents=True, exist_ok=True)
+        (root / hostconfig.STOP_FILE).write_text("stop\n", encoding="utf-8")
         return out
 
     monkeypatch.setattr(chores.BatchLanding, "settle", then_stop)
@@ -555,7 +560,7 @@ def test_the_kill_switch_stops_the_batch_and_is_cleared_for_the_next_call(
 
     assert worker.dispatched == ["a"]
     assert {o.card_id for o in batch.by_state("blocked")} == {"b"}
-    assert not (root / runner.STOP_FILE).exists()
+    assert not (root / hostconfig.STOP_FILE).exists()
 
 
 def test_a_green_chore_lands_however_many_turns_it_took(tmp_path, monkeypatch):
@@ -653,7 +658,7 @@ def test_a_chore_that_installed_none_of_its_candidates_owes_a_pick(tmp_path,
                         + '\n[worker]\nharvest_dirs = ["myapp/assets/.tmp"]\n',
                         encoding="utf-8")
     _git(root, "commit", "-qam", "declare a harvest dir")
-    monkeypatch.setattr(runner, "harvest", lambda *a, **k: 2)
+    monkeypatch.setattr(worktree, "harvest", lambda *a, **k: 2)
     _Worker(edits={"seen": _touch("seen")}).install(monkeypatch)
 
     code, batch = chores.execute(root)
@@ -755,7 +760,7 @@ def test_a_needs_decision_flagged_on_every_item_stops_the_whole_batch(tmp_path,
 
 def test_a_needs_fix_flagged_on_every_item_stops_the_whole_batch(tmp_path, monkeypatch):
     """Same split as `needs_decision` above, for the other flagged verdict. A chore
-    gets exactly one dispatch attempt (`runner.CHORE_MAX_ATTEMPTS`) and it is already
+    gets exactly one dispatch attempt (`hostconfig.CHORE_MAX_ATTEMPTS`) and it is already
     spent here, so — like the per-card runner path once its own attempt limit is
     exhausted — this escalates straight to `needs-decision/` rather than bouncing to
     `tasks/` for a retry nothing is left to spend."""
@@ -935,7 +940,7 @@ def test_the_bisect_names_the_culprit_wherever_it_sits_and_terminates(size):
 # these cover is the seam: the order, the isolation of each mode, and the fact
 # that one stop ends the whole run rather than one queue of it.
 
-#: A `tasks/` card that is *not* a chore, so `runner.select` takes it and
+#: A `tasks/` card that is *not* a chore, so `dispatch.select` takes it and
 #: `chores.select` does not. `## Approach` is the one section `card_schema`
 #: relaxes for a chore and requires of everything else.
 TASK_CARD = CARD.replace("kind: chore\n", "").replace(
@@ -1018,8 +1023,8 @@ def test_a_stop_in_the_chore_queue_ends_the_run_rather_than_the_queue(
 
     def then_stop(self, ctx, candidate, result, model):
         out = real_settle(self, ctx, candidate, result, model)
-        (root / runner.STOP_FILE).parent.mkdir(parents=True, exist_ok=True)
-        (root / runner.STOP_FILE).write_text("stop\n", encoding="utf-8")
+        (root / hostconfig.STOP_FILE).parent.mkdir(parents=True, exist_ok=True)
+        (root / hostconfig.STOP_FILE).write_text("stop\n", encoding="utf-8")
         return out
 
     monkeypatch.setattr(chores.BatchLanding, "settle", then_stop)

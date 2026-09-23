@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 
 from nightshift import boardhealth, panel, runner
+from nightshift import hostconfig
 
 import _runner_helpers  # noqa: F401
 from _runner_helpers import _card, _worktree_repo
@@ -106,7 +107,7 @@ def test_the_runner_logs_findings_at_startup(tmp_path, monkeypatch):
     _commit_board(root)
     _branch(root, "ai/probe")
     logged: list[str] = []
-    monkeypatch.setattr(runner, "_log", logged.append)
+    monkeypatch.setattr(hostconfig, "_log", logged.append)
     runner._startup_housekeeping(root, root)
     assert any(line.startswith("board health — tasks/probe") for line in logged), logged
 

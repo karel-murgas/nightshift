@@ -19,7 +19,7 @@ half.** `dirty_outside_board` carried a hardcoded `.obsidian/` exemption alongsi
 real shared config into that directory and it had to stay tracked. Nothing provisions
 any editor since `remove-obsidian` (2026-09), so the template ignores `.obsidian/`
 wholesale and the exemption went: a gitignored directory never appears in
-`gitpaths.status` at all, so it cannot make a tree dirty, and there is no list of
+`git.status` at all, so it cannot make a tree dirty, and there is no list of
 blessed paths here to keep in step with anybody's choice of editor. The tests below
 assert the property through the ignore rule, which is where it now lives.
 """
@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import runner
+from nightshift import hostconfig, worktree
 
 import _fixtures
 
@@ -61,14 +61,14 @@ def repo(tmp_path: Path) -> Path:
 
 
 def test_a_clean_tree_is_clean(repo):
-    assert runner.dirty_outside_board(repo) == []
+    assert hostconfig.dirty_outside_board(repo) == []
 
 
 def test_real_uncommitted_work_still_refuses(repo):
     """The rule this is all protecting: a half-finished source change means a
     worktree branched off HEAD is not what anybody intended."""
     (repo / "pkg" / "core.py").write_text("x = 2\n", encoding="utf-8")
-    assert runner.dirty_outside_board(repo) == ["pkg/core.py"]
+    assert hostconfig.dirty_outside_board(repo) == ["pkg/core.py"]
 
 
 def test_the_board_and_its_generated_views_are_exempt(repo):
@@ -79,7 +79,7 @@ def test_the_board_and_its_generated_views_are_exempt(repo):
     (repo / "Board" / "tasks" / "a.md").write_text("---\nid: a\n---\n",
                                                    encoding="utf-8")
     (repo / "Routing.md").write_text("# Routing\n\nchanged\n", encoding="utf-8")
-    assert runner.dirty_outside_board(repo) == []
+    assert hostconfig.dirty_outside_board(repo) == []
 
 
 def test_editor_state_does_not_block_a_dispatch(repo):
@@ -92,7 +92,7 @@ def test_editor_state_does_not_block_a_dispatch(repo):
     extend for every editor anyone ever uses."""
     (repo / ".obsidian" / "workspace.json").write_text('{"active": "b"}\n',
                                                        encoding="utf-8")
-    assert runner.dirty_outside_board(repo) == []
+    assert hostconfig.dirty_outside_board(repo) == []
 
 
 def test_editor_state_is_skipped_without_hiding_real_work(repo):
@@ -102,14 +102,14 @@ def test_editor_state_is_skipped_without_hiding_real_work(repo):
     (repo / ".obsidian" / "workspace.json").write_text('{"active": "c"}\n',
                                                        encoding="utf-8")
     (repo / "pkg" / "core.py").write_text("x = 3\n", encoding="utf-8")
-    assert runner.dirty_outside_board(repo) == ["pkg/core.py"]
+    assert hostconfig.dirty_outside_board(repo) == ["pkg/core.py"]
 
 
 def test_a_new_untracked_file_outside_the_board_still_refuses(repo):
     """`--porcelain` reports untracked files too, and a stray new module is exactly
     the "HEAD is not what you left" case."""
     (repo / "pkg" / "extra.py").write_text("y = 1\n", encoding="utf-8")
-    assert runner.dirty_outside_board(repo) == ["pkg/extra.py"]
+    assert hostconfig.dirty_outside_board(repo) == ["pkg/extra.py"]
 
 
 # ------------------------------------------------------------------------------
@@ -140,8 +140,8 @@ def _work_elsewhere(repo: Path) -> Path:
 
 def test_an_uncommitted_board_edit_strands_when_the_run_reads_another_checkout(repo):
     _card(repo, "tasks", "answered")
-    assert runner.stranded_board_edits(repo, "main") == ["Board/tasks/answered.md"]
-    refusal = runner.stranded_board_refusal(repo, _work_elsewhere(repo), "main")
+    assert worktree.stranded_board_edits(repo, "main") == ["Board/tasks/answered.md"]
+    refusal = worktree.stranded_board_refusal(repo, _work_elsewhere(repo), "main")
     assert "Board/tasks/answered.md" in refusal
     assert str(repo) in refusal and str(_work_elsewhere(repo)) in refusal
 
@@ -151,7 +151,7 @@ def test_the_same_edit_is_not_stranded_when_the_run_works_in_place(repo):
     it. Refusing here would break every in-place run for the ordinary act of
     editing a card — exactly what `dirty_outside_board` exempts `Board/` for."""
     _card(repo, "tasks", "answered")
-    assert runner.stranded_board_refusal(repo, repo, "main") == ""
+    assert worktree.stranded_board_refusal(repo, repo, "main") == ""
 
 
 def test_a_board_commit_on_the_launch_branch_strands_too(repo):
@@ -162,7 +162,7 @@ def test_a_board_commit_on_the_launch_branch_strands_too(repo):
     _card(repo, "tasks", "b")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "board: promote b")
-    assert runner.stranded_board_edits(repo, "main") == ["Board/tasks/b.md"]
+    assert worktree.stranded_board_edits(repo, "main") == ["Board/tasks/b.md"]
 
 
 def test_what_base_moved_on_past_the_launch_branch_is_not_stranded(repo):
@@ -175,12 +175,12 @@ def test_what_base_moved_on_past_the_launch_branch_is_not_stranded(repo):
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "board: later")
     _git(repo, "checkout", "-q", "feat")
-    assert runner.stranded_board_edits(repo, "main") == []
+    assert worktree.stranded_board_edits(repo, "main") == []
 
 
 def test_a_clean_launch_checkout_strands_nothing(repo):
-    assert runner.stranded_board_edits(repo, "main") == []
-    assert runner.stranded_board_refusal(repo, _work_elsewhere(repo), "main") == ""
+    assert worktree.stranded_board_edits(repo, "main") == []
+    assert worktree.stranded_board_refusal(repo, _work_elsewhere(repo), "main") == ""
 
 
 def test_the_obsidian_rewrite_at_the_repo_root_does_not_cry_wolf(repo):
@@ -190,4 +190,4 @@ def test_the_obsidian_rewrite_at_the_repo_root_does_not_cry_wolf(repo):
     failure this file already exists for, arriving one directory over."""
     (repo / "Board.base").write_text("views: []\n", encoding="utf-8")
     (repo / "Digest.md").write_text("# Digest\n\nrewritten\n", encoding="utf-8")
-    assert runner.stranded_board_edits(repo, "main") == []
+    assert worktree.stranded_board_edits(repo, "main") == []

@@ -2,7 +2,7 @@
 
 The gate exists because a hand-resolved rebase left a trailing `>>>>>>> 0c5905f (...)`
 behind on 2026-08-09 and it shipped; the predicate is shared with
-`runner._resolve_conflict`, which checks an *agent's* resolution before letting the
+`review._resolve_conflict`, which checks an *agent's* resolution before letting the
 rebase continue. So the two things worth testing are that a real marker is caught in
 either position, and that the near-misses which would make the gate un-runnable —
 a setext heading underline, an indented example — are not.

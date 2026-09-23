@@ -6,7 +6,7 @@ catch live in the disagreement between what git stored, what is on disk, and
 what this particular box has — and a mock of any of those three is a mock of the
 thing under test.
 
-The one thing deliberately patched is `runner.claude_binary`. Doctor's contract
+The one thing deliberately patched is `startup.claude_binary`. Doctor's contract
 there is "ask the resolver that already owns the question and report its answer,
 do not grow a second one"; whether that function handles `CLAUDE_BIN`, PATH and
 `~/.local/bin` correctly is tested where it lives. Asserting it *here* would mean
@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import doctor, freshness, preflight, runner
+from nightshift import doctor, freshness, git, preflight, worktree
 
 import _fixtures
 
@@ -121,7 +121,7 @@ def test_a_crlf_working_tree_fails_and_names_the_per_machine_fix(tmp_path, monke
 
 
 def test_an_unresolvable_claude_binary_fails_and_names_claude_bin(tmp_path, monkeypatch):
-    monkeypatch.setattr(doctor.runner, "claude_binary", lambda: None)
+    monkeypatch.setattr(doctor.startup, "claude_binary", lambda: None)
     repo = _project(tmp_path)
 
     check = _named(doctor.checks(repo), "claude-bin")
@@ -131,7 +131,7 @@ def test_an_unresolvable_claude_binary_fails_and_names_claude_bin(tmp_path, monk
 
 
 def test_a_resolved_claude_binary_is_reported(tmp_path, monkeypatch):
-    monkeypatch.setattr(doctor.runner, "claude_binary", lambda: "/opt/bin/claude")
+    monkeypatch.setattr(doctor.startup, "claude_binary", lambda: "/opt/bin/claude")
     repo = _project(tmp_path)
 
     check = _named(doctor.checks(repo), "claude-bin")
@@ -145,12 +145,12 @@ def test_the_check_asks_the_runners_own_resolver(tmp_path, monkeypatch):
     by patching that one function and watching the check follow it — which is
     also what stops the two answers drifting apart."""
     calls: list[int] = []
-    monkeypatch.setattr(doctor.runner, "claude_binary",
+    monkeypatch.setattr(doctor.startup, "claude_binary",
                         lambda: calls.append(1) or "/somewhere/claude")
     repo = _project(tmp_path)
 
     assert _named(doctor.checks(repo), "claude-bin").detail == "/somewhere/claude"
-    assert calls, "the check must go through runner.claude_binary()"
+    assert calls, "the check must go through startup.claude_binary()"
 
 
 # --- hosts.json ---------------------------------------------------------------
@@ -171,7 +171,7 @@ def test_an_unlisted_hostname_fails_and_names_the_host_and_the_file(tmp_path, mo
 
 def test_a_listed_hostname_passes_even_with_an_empty_entry(tmp_path, monkeypatch):
     """An entry of `{}` is a configured box with no capabilities — a decision
-    someone made. `runner.host_config` cannot tell it from an absent one (both
+    someone made. `hostconfig.host_config` cannot tell it from an absent one (both
     resolve to `{}`), which is why this check asks the file for key presence."""
     monkeypatch.setattr(doctor.socket, "gethostname", lambda: "spartan-box")
     repo = _project(tmp_path, hosts={"spartan-box": {}})
@@ -451,7 +451,7 @@ def test_worktree_headroom_fails_when_slack_is_negative(tmp_path, monkeypatch):
     green_warn_fail` — never by actually creating a 260-character path."""
     monkeypatch.setattr(doctor.os, "name", "nt")
     repo = _project(tmp_path)
-    monkeypatch.setattr(doctor.runner, "worktree_root", lambda root: Path("x" * 200))
+    monkeypatch.setattr(doctor.worktree, "worktree_root", lambda root: Path("x" * 200))
     monkeypatch.setattr(doctor, "worst_worktree_name", lambda root: (40, "_review-x"))
     monkeypatch.setattr(doctor, "worst_relative", lambda root: (40, "some/long/path.py"))
 
@@ -466,7 +466,7 @@ def test_worktree_headroom_fails_when_slack_is_negative(tmp_path, monkeypatch):
 def test_worktree_headroom_warns_twenty_chars_from_the_edge(tmp_path, monkeypatch):
     monkeypatch.setattr(doctor.os, "name", "nt")
     repo = _project(tmp_path)
-    monkeypatch.setattr(doctor.runner, "worktree_root", lambda root: Path("x" * 10))
+    monkeypatch.setattr(doctor.worktree, "worktree_root", lambda root: Path("x" * 10))
     # used = 10 + 1 + 10 + 1 + rel_len; rel_len=217 makes used=239, slack=20.
     monkeypatch.setattr(doctor, "worst_worktree_name", lambda root: (10, "_review-x"))
     monkeypatch.setattr(doctor, "worst_relative", lambda root: (217, "a" * 217))
@@ -492,7 +492,7 @@ def test_worktree_headroom_reports_not_applicable_on_posix(tmp_path, monkeypatch
     assert "not applicable" in check.detail
 
 
-# --- the Windows long-path backstop (`runner._worktree_add`) ------------------
+# --- the Windows long-path backstop (`worktree._worktree_add`) ------------------
 #
 # The two stderr shapes below are quoted verbatim from the 2026-08-06 sweep
 # recorded on `nightshift-worktree-paths-not-defensive-on-windows`.
@@ -506,31 +506,31 @@ class _Result:
 
 
 def test_worktree_add_passes_through_a_clean_result(tmp_path, monkeypatch):
-    monkeypatch.setattr(runner, "_git", lambda root, *a: _Result(0))
+    monkeypatch.setattr(git, "run", lambda root, *a: _Result(0))
 
-    result = runner._worktree_add(tmp_path, "--detach", str(tmp_path), "main")
+    result = worktree._worktree_add(tmp_path, "--detach", str(tmp_path), "main")
 
     assert result.returncode == 0
 
 
 def test_worktree_add_passes_through_an_unrelated_failure(tmp_path, monkeypatch):
-    monkeypatch.setattr(runner, "_git",
+    monkeypatch.setattr(git, "run",
                         lambda root, *a: _Result(128, stderr="fatal: not a git repository"))
 
-    result = runner._worktree_add(tmp_path, "--detach", str(tmp_path), "main")
+    result = worktree._worktree_add(tmp_path, "--detach", str(tmp_path), "main")
 
     assert result.returncode == 128
     assert "not a git repository" in result.stderr
 
 
 def test_worktree_add_raises_on_filename_too_long(tmp_path, monkeypatch):
-    monkeypatch.setattr(runner, "_git", lambda root, *a: _Result(
+    monkeypatch.setattr(git, "run", lambda root, *a: _Result(
         128, stderr="fatal: unable to create file 'a/very/long/path.py': Filename too long"))
     monkeypatch.setattr(doctor, "worst_worktree_name", lambda root: (10, "_review-x"))
     monkeypatch.setattr(doctor, "worst_relative", lambda root: (20, "some/path.py"))
 
-    with pytest.raises(runner.WorktreePathTooLong) as excinfo:
-        runner._worktree_add(tmp_path, "--detach", str(tmp_path), "main")
+    with pytest.raises(worktree.WorktreePathTooLong) as excinfo:
+        worktree._worktree_add(tmp_path, "--detach", str(tmp_path), "main")
 
     message = str(excinfo.value)
     assert "MAX_PATH" in message
@@ -538,12 +538,12 @@ def test_worktree_add_raises_on_filename_too_long(tmp_path, monkeypatch):
 
 
 def test_worktree_add_raises_on_git_dir_too_big(tmp_path, monkeypatch):
-    monkeypatch.setattr(runner, "_git",
+    monkeypatch.setattr(git, "run",
                         lambda root, *a: _Result(128, stderr="fatal: '$GIT_DIR' too big"))
     monkeypatch.setattr(doctor, "worst_worktree_name", lambda root: (10, "_review-x"))
     monkeypatch.setattr(doctor, "worst_relative", lambda root: (20, "some/path.py"))
 
-    with pytest.raises(runner.WorktreePathTooLong) as excinfo:
-        runner._worktree_add(tmp_path, "--detach", str(tmp_path), "main")
+    with pytest.raises(worktree.WorktreePathTooLong) as excinfo:
+        worktree._worktree_add(tmp_path, "--detach", str(tmp_path), "main")
 
     assert "MAX_PATH" in str(excinfo.value)

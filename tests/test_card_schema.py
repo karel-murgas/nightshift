@@ -157,7 +157,7 @@ def test_checker_charter_missing_the_contract_is_caught(tmp_path):
     """A charter built for a different job (here standing in for `code-reviewer`,
     which answers ok/needs_fix/needs_decision on the separate diff-review stage)
     that never declares `checker_contract: producer-loop` must not be nameable
-    as `checker:` — `runner.run_checker` would still send it the fixed
+    as `checker:` — `review.run_checker` would still send it the fixed
     pass/revise/reject prompt regardless of what its own charter promises."""
     root = _board(tmp_path, "tasks", _GOOD.format(id="probe", lane="tasks").replace(
         "recipe: none", "recipe: none\nchecker: diff-reviewer"

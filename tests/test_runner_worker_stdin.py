@@ -20,7 +20,7 @@ import time
 
 import pytest
 
-from nightshift import runner
+from nightshift import worker
 
 # ~80 KB: comfortably over the 64 KB the card asks for, over the 32,767-character
 # Windows cap that caused the crash, and far past any pipe buffer — so the write
@@ -52,7 +52,7 @@ def test_an_80_kb_prompt_round_trips_through_a_real_child(tmp_path):
     silently CRLF-ify every line on Windows, and a prompt the model receives is not
     the prompt written to `prompt-N.md`.
     """
-    proc = runner._run_worker([sys.executable, "-c", _ECHO], tmp_path, 120,
+    proc = worker._run_worker([sys.executable, "-c", _ECHO], tmp_path, 120,
                               prompt=BIG_PROMPT)
 
     assert proc.returncode == 0, proc.stderr
@@ -80,7 +80,7 @@ def test_stdin_is_closed_even_when_there_is_no_prompt(tmp_path):
     non-interactive worker should see EOF, and a caller that passes no prompt (every
     existing direct call in the suites) must not hang waiting for one."""
     stub = "import sys; sys.stdout.write(repr(sys.stdin.read()))"
-    proc = runner._run_worker([sys.executable, "-c", stub], tmp_path, 30)
+    proc = worker._run_worker([sys.executable, "-c", stub], tmp_path, 30)
 
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "''"
@@ -93,7 +93,7 @@ def test_a_child_that_never_reads_stdin_still_returns_promptly(tmp_path):
     code either way."""
     stub = "import sys; sys.stdout.write('done')"
     started = time.monotonic()
-    proc = runner._run_worker([sys.executable, "-c", stub], tmp_path, 60,
+    proc = worker._run_worker([sys.executable, "-c", stub], tmp_path, 60,
                               prompt=BIG_PROMPT)
     elapsed = time.monotonic() - started
 
@@ -112,7 +112,7 @@ def test_the_timeout_still_fires_when_the_child_ignores_a_huge_prompt(tmp_path):
             "time.sleep(60)\n")
     started = time.monotonic()
     with pytest.raises(subprocess.TimeoutExpired) as caught:
-        runner._run_worker([sys.executable, "-c", stub], tmp_path, 3, prompt=BIG_PROMPT)
+        worker._run_worker([sys.executable, "-c", stub], tmp_path, 3, prompt=BIG_PROMPT)
     elapsed = time.monotonic() - started
 
     assert "working" in (caught.value.output or "")
@@ -124,7 +124,7 @@ def test_the_tee_still_receives_the_stream_with_a_prompt_attached(tmp_path):
     is on the same side of the pipe as the change. Asserted together with a prompt so
     a regression in one is not hidden by the other."""
     stream = tmp_path / "stream.jsonl"
-    proc = runner._run_worker([sys.executable, "-c", _ECHO], tmp_path, 60,
+    proc = worker._run_worker([sys.executable, "-c", _ECHO], tmp_path, 60,
                               stream, prompt=_LINE * 20)
 
     assert proc.returncode == 0, proc.stderr

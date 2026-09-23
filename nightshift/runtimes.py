@@ -291,7 +291,7 @@ def host_block(root: Path) -> dict:
     the override rules change. The import is deferred because `runner` imports
     this module.
     """
-    from nightshift.runner import host_setting
+    from nightshift.hostconfig import host_setting
 
     found = host_setting(root, HOST_KEY, None)
     return found if isinstance(found, dict) else {}
@@ -537,7 +537,7 @@ def binary() -> str | None:
     Windows.** npm installs `opencode.CMD`, and `subprocess` does not apply
     PATHEXT — `subprocess.run(["opencode", ...])` raises `FileNotFoundError`
     (WinError 2) on a box where `opencode` works perfectly from any shell.
-    Measured here on 2026-09-19, and it is the same reason `runner.claude_binary`
+    Measured here on 2026-09-19, and it is the same reason `startup.claude_binary`
     exists rather than every call site spelling out `claude`.
 
     The consequence of getting it wrong is the one this module is built to avoid

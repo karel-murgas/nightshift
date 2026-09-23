@@ -68,12 +68,13 @@ from nightshift import board
 from nightshift import limits
 from nightshift import run_record
 from nightshift import runner
+from nightshift import dispatch, git, hostconfig, outcome, review, settle, startup, verify, worker, worktree
 
 import _fixtures
 
 
 def fake_rebase_and_merge(ok: bool = True, why: str = "merged", seen: list | None = None):
-    """A `runner.rebase_and_merge` stand-in that lands like the real one: on success it
+    """A `review.rebase_and_merge` stand-in that lands like the real one: on success it
     runs the plan's `before_move` and moves the card, as `landing.land` would.
     `seen` records `(branch, base, remote)` per call."""
     def fake(r, card, branch, base, test_timeout=600, remote="", plan=None):
@@ -152,7 +153,7 @@ def _build_repo(tmp_path: Path) -> None:
     # out of `.ai/branches.py` in 07_portability.md §8 step 4, and the step's own
     # checklist names this trap: a hardcoded default moved behind a manifest field
     # changes behaviour for every caller that supplies no config, and a synthetic
-    # fixture is exactly such a caller. Without this, `runner.preflight` raises
+    # fixture is exactly such a caller. Without this, `startup.startup_checks` raises
     # ManifestError instead of judging the base branch.
     _write_manifest(tmp_path)
     (tmp_path / "seed.txt").write_text("seed\n", encoding="utf-8")
@@ -217,8 +218,8 @@ def _ignore_runs(root: Path) -> None:
 
 
 def _select(root: Path, capabilities: set[str] | None = None,
-            bad: dict | None = None) -> dict[str, runner.Candidate]:
-    return {c.card.id: c for c in runner.select(root, capabilities or set(), bad or {})}
+            bad: dict | None = None) -> dict[str, dispatch.Candidate]:
+    return {c.card.id: c for c in dispatch.select(root, capabilities or set(), bad or {})}
 
 
 @pytest.fixture(autouse=True)
@@ -228,7 +229,7 @@ def _no_xdist_in_fixtures(monkeypatch):
     (it turned this file's runtime from ~3 to ~5 min), so blank the parallel flags
     for fixtures. `test_run_tests_passes_the_parallel_and_junit_flags` restores
     them to prove production still parallelises."""
-    monkeypatch.setattr(runner, "_PYTEST_PARALLEL", (), raising=False)
+    monkeypatch.setattr(verify, "_PYTEST_PARALLEL", (), raising=False)
     _fixtures.serial_child_pytest(monkeypatch)
 
 
@@ -276,7 +277,7 @@ def _grow(path: Path, size: int) -> Path:
 
 def _hosts(root: Path, mapping: dict) -> None:
     (root / ".ai").mkdir(exist_ok=True)
-    (root / runner.HOSTS_FILE).write_text(json.dumps(mapping), encoding="utf-8")
+    (root / hostconfig.HOSTS_FILE).write_text(json.dumps(mapping), encoding="utf-8")
 
 
 # --- the whole cycle, end to end --------------------------------------------
@@ -288,7 +289,7 @@ def _hosts(root: Path, mapping: dict) -> None:
 # eight seconds, rather than at 7 AM after a night that produced nothing.
 
 def _gate_stub(monkeypatch, tmp_path: Path, body: str = "import sys; sys.exit(0)\n") -> Path:
-    """Point `runner.GATE_ARGV` at a scripted stand-in for the gate suite.
+    """Point `verify.GATE_ARGV` at a scripted stand-in for the gate suite.
 
     The fixture repo used to stub the harness by *writing* `.ai/gates/run.py`, and
     that is precisely why the suite could not see step 3 break production: the
@@ -306,7 +307,7 @@ def _gate_stub(monkeypatch, tmp_path: Path, body: str = "import sys; sys.exit(0)
     """
     stub = tmp_path.parent / f"{tmp_path.name}-gate-stub.py"
     stub.write_text(body, encoding="utf-8")
-    monkeypatch.setattr(runner, "GATE_ARGV", [sys.executable, str(stub)])
+    monkeypatch.setattr(verify, "GATE_ARGV", [sys.executable, str(stub)])
     return stub
 
 
@@ -321,12 +322,12 @@ def _gates_pass_by_default(monkeypatch, tmp_path):
 def _worktree_repo(tmp_path: Path) -> Path:
     """A repo with a `development_team` branch, so `dispatch` can cut a real
     worktree and run its real acceptance step. The gate harness is stubbed by
-    `_gates_pass_by_default` substituting `runner.GATE_ARGV` — deliberately NOT
+    `_gates_pass_by_default` substituting `verify.GATE_ARGV` — deliberately NOT
     by writing `.ai/gates/run.py` here, which is what previously hid the gate
     runner's move behind a file only the fixture created.
 
     **The repo goes in a subdirectory of `tmp_path`, and that is load-bearing.**
-    `runner.worktree_root` is `root.parent / f".{project}-worktrees"` — outside the
+    `worktree.worktree_root` is `root.parent / f".{project}-worktrees"` — outside the
     repo on purpose, so `doc_scan`, `card_schema` and the digest do not walk it. Put
     the repo *at* `tmp_path` and that resolves to `tmp_path.parent`, which pytest
     shares between every test in the session (serially) or on the worker (under
@@ -394,14 +395,14 @@ def _fake_worker(monkeypatch, *, verdict: dict | None = None, commit: bool = Tru
         return subprocess.CompletedProcess(
             argv, returncode, json.dumps({"total_cost_usd": cost}), stderr)
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
     return seen
 
 
 def _stub_repair(monkeypatch, *, fixed: bool, note: str = "stubbed",
                  cost: float = 0.0, wall=None) -> list:
-    """Stand in for `runner.repair_drift` (drift-should-not-end-the-night).
+    """Stand in for `dispatch.repair_drift` (drift-should-not-end-the-night).
 
     Drift tests are about *classification and routing* — is this the card's fault,
     where does the card end up — and the repair is a whole agent dispatch in the
@@ -416,7 +417,7 @@ def _stub_repair(monkeypatch, *, fixed: bool, note: str = "stubbed",
                       "effort": effort})
         return fixed, cost, note, wall
 
-    monkeypatch.setattr(runner, "repair_drift", fake)
+    monkeypatch.setattr(dispatch, "repair_drift", fake)
     return calls
 
 
@@ -448,7 +449,7 @@ def _loaded_board(tmp_path: Path, *card_ids: str) -> Path:
     return root
 
 
-def _night(monkeypatch, root: Path, outcomes: list[runner.Dispatch]) -> list[str]:
+def _night(monkeypatch, root: Path, outcomes: list[outcome.Dispatch]) -> list[str]:
     """Run one night with a scripted sequence of dispatch outcomes. Returns the
     card ids dispatched, in order — the last one repeating means a wall sent the
     loop back to the same card, which is the property most of these check."""
@@ -458,17 +459,17 @@ def _night(monkeypatch, root: Path, outcomes: list[runner.Dispatch]) -> list[str
     def fake_dispatch(root_, card, base, model, card_budget, test_timeout,
                       *, allow_local=True, worker="", effort=""):
         calls.append(card.id)
-        return script.pop(0) if script else runner.Dispatch("review", "ok")
+        return script.pop(0) if script else outcome.Dispatch("review", "ok")
 
-    monkeypatch.setattr(runner, "dispatch", fake_dispatch)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(dispatch, "dispatch", fake_dispatch)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
     monkeypatch.setattr(runner, "_sleep_until", lambda when: True)
-    monkeypatch.setattr(runner, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
+    monkeypatch.setattr(settle, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
     return calls
 
 
-def _wall(scope: str = limits.SESSION) -> runner.Dispatch:
-    return runner.Dispatch("limited", "usage limit reached", 0.0, 1,
+def _wall(scope: str = limits.SESSION) -> outcome.Dispatch:
+    return outcome.Dispatch("limited", "usage limit reached", 0.0, 1,
                            limits.Wall(scope, None, "usage limit reached"))
 
 
@@ -554,8 +555,8 @@ def _fake_loop(monkeypatch, verdicts: list[str], *, notes: str = "too dark"):
                 encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
     return seen
 
 
@@ -632,8 +633,8 @@ def _walls_dirty(monkeypatch, *, session_id: str = "sess-1", content: str = "dra
         return subprocess.CompletedProcess(
             argv, 1, json.dumps({"total_cost_usd": 0.5, "session_id": session_id}),
             "Claude AI usage limit reached")
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
 
 def _finishing_worker(monkeypatch, *, record: list | None = None,
@@ -658,8 +659,8 @@ def _finishing_worker(monkeypatch, *, record: list | None = None,
                            encoding="utf-8")
         return subprocess.CompletedProcess(
             argv, 0, json.dumps({"total_cost_usd": 0.2, "session_id": session_id}), "")
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
 
 def _seed_wip_branch(root: Path, tmp_path: Path, card_id: str, content: str) -> None:
@@ -673,8 +674,8 @@ def _seed_wip_branch(root: Path, tmp_path: Path, card_id: str, content: str) -> 
     subprocess.run(["git", "add", "-A"], cwd=seed, check=True)
     subprocess.run(["git", "commit", "-qm", f"wip: {card_id} interrupted"], cwd=seed, check=True)
     subprocess.run(["git", "worktree", "remove", "--force", str(seed)], cwd=root, check=True)
-    runner.write_handover(root, card_id,
-                          runner.Handover(session_id="", diff_hash="stale", no_progress=0))
+    worktree.write_handover(root, card_id,
+                          worktree.Handover(session_id="", diff_hash="stale", no_progress=0))
 # --- the review stage (automate-review-step) --------------------------------
 #
 # A new, distinct always-on stage that runs after gates+tests pass: the runner
@@ -724,7 +725,7 @@ def _stub_reviewer(monkeypatch, verdict: dict, cost: float = 0.2,
         spawned.append(branch)
         return verdict, cost, wall
 
-    monkeypatch.setattr(runner, "review_branch", fake)
+    monkeypatch.setattr(review, "review_branch", fake)
     return spawned
 
 
@@ -782,17 +783,17 @@ def _fake_loop_walling(monkeypatch, verdicts: list[str], *, wall_at: int = 1,
             argv, 1 if walled else 0, json.dumps({"total_cost_usd": 0.1}),
             "Claude AI usage limit reached" if walled else "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
     return seen
 
 
 # --- the night still treats an honoured wall as a wall ------------------------
 
-def _landed_wall(scope: str = limits.SESSION) -> runner.Dispatch:
+def _landed_wall(scope: str = limits.SESSION) -> outcome.Dispatch:
     """A card that *landed* — gates and tests passed, the verdict was honoured —
     on a dispatch that nonetheless met the wall."""
-    return runner.Dispatch("review", "ok", 0.0, 1,
+    return outcome.Dispatch("review", "ok", 0.0, 1,
                            limits.Wall(scope, None, "usage limit reached"))
 
 
@@ -862,7 +863,7 @@ def _split_repo(tmp_path: Path, *card_ids: str,
     subprocess.run(["git", "commit", "-qm", "board + config on development_team"],
                    cwd=root, check=True)
     subprocess.run(["git", "checkout", "-q", "-b", work_branch], cwd=root, check=True)
-    return root, runner.integration_checkout_path(root)
+    return root, worktree.integration_checkout_path(root)
 
 
 # --- rebase-then-merge (decision #2) ----------------------------------------
@@ -894,7 +895,7 @@ def _commit_on_base(root: Path, tmp_path: Path, name: str, body: str) -> None:
 # the behaviour that mattered.
 
 def _remote_has(bare: Path, branch: str) -> bool:
-    return runner._git(bare, "rev-parse", "--verify", f"refs/heads/{branch}").returncode == 0
+    return git.run(bare, "rev-parse", "--verify", f"refs/heads/{branch}").returncode == 0
 
 
 def _advance_on_remote(bare: Path, tmp_path: Path, branch: str, name: str, body: str) -> str:
@@ -908,7 +909,7 @@ def _advance_on_remote(bare: Path, tmp_path: Path, branch: str, name: str, body:
     subprocess.run(["git", "commit", "-qm", f"{branch}: {name} (elsewhere)"],
                    cwd=clone, check=True)
     subprocess.run(["git", "push", "-q", "origin", branch], cwd=clone, check=True)
-    return runner._git(bare, "rev-parse", f"refs/heads/{branch}").stdout.strip()
+    return git.run(bare, "rev-parse", f"refs/heads/{branch}").stdout.strip()
 
 
 # --- publish: pushing so a cloud run is pullable anywhere -------------------
@@ -935,7 +936,7 @@ def _bare_origin(root: Path, tmp_path: Path, name: str = "origin.git") -> Path:
 
 
 def _remote_tip(bare: Path, ref: str) -> str:
-    return runner._git(bare, "rev-parse", ref).stdout.strip()
+    return git.run(bare, "rev-parse", ref).stdout.strip()
 
 
 # --------------------------------------------------------------------------
@@ -972,7 +973,7 @@ def _last_commit_subject(root: Path) -> str:
 
 def _fake_review_run(monkeypatch, root: Path, card_id: str) -> None:
     """One card, dispatched by name and landed as a real `reviewed` outcome —
-    genuinely moved to `testing/` via `runner.settle`, not the `_night` helper's
+    genuinely moved to `testing/` via `settle.settle`, not the `_night` helper's
     no-op settle stub (which never moves a card, and would make an "is this card
     still individually named in the report" assertion meaningless). `dispatch`
     returns `reviewed` directly rather than `review`, so `run()`'s own
@@ -981,11 +982,11 @@ def _fake_review_run(monkeypatch, root: Path, card_id: str) -> None:
     `rebase_and_merge` is stubbed to succeed, same as
     `test_settle_reviewed_merges_and_lands_in_testing`.
     """
-    monkeypatch.setattr(runner, "dispatch",
+    monkeypatch.setattr(dispatch, "dispatch",
                         lambda root_, card, base, model, card_budget, test_timeout:
-                        runner.Dispatch("reviewed", "ok"))
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-    monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge())
+                        outcome.Dispatch("reviewed", "ok"))
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(review, "rebase_and_merge", fake_rebase_and_merge())
 
 
 # --------------------------------------------------------------------------
@@ -1017,12 +1018,12 @@ def _crashing_night(monkeypatch, root: Path, boom: BaseException,
         card.write({"attempts": str(card.attempts + 1), "started": "now"})
         if card.id == on_card:
             raise boom
-        return runner.Dispatch("review", "ok")
+        return outcome.Dispatch("review", "ok")
 
-    monkeypatch.setattr(runner, "dispatch", fake_dispatch)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(dispatch, "dispatch", fake_dispatch)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
     if not real_settle:
-        monkeypatch.setattr(runner, "settle",
+        monkeypatch.setattr(settle, "settle",
                             lambda r, cid, result: f"{cid}: {result.outcome}")
     return calls
 

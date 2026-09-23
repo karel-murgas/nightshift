@@ -31,7 +31,8 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import board, drain, limits, runner, usage
+from nightshift import board, drain, limits, usage
+from nightshift import hostconfig, outcome, review, startup, verify, worker
 
 import _fixtures
 
@@ -163,18 +164,18 @@ def _no_meter(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _gates_pass(monkeypatch):
-    monkeypatch.setattr(runner, "GATE_ARGV", ["python", "-c", "pass"])
+    monkeypatch.setattr(verify, "GATE_ARGV", ["python", "-c", "pass"])
 
 
 @pytest.fixture(autouse=True)
 def _serial_pytest(monkeypatch):
-    monkeypatch.setattr(runner, "_PYTEST_PARALLEL", ())
+    monkeypatch.setattr(verify, "_PYTEST_PARALLEL", ())
     _fixtures.serial_child_pytest(monkeypatch)
 
 
 @pytest.fixture(autouse=True)
 def _leave_the_real_config_alone(monkeypatch):
-    monkeypatch.setattr(runner, "ensure_workspace_trusted", lambda root: None)
+    monkeypatch.setattr(startup, "ensure_workspace_trusted", lambda root: None)
 
 
 class _Reviewer:
@@ -200,8 +201,8 @@ class _Reviewer:
         self.reviewed: list[str] = []
 
     def install(self, monkeypatch):
-        monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-        monkeypatch.setattr(runner, "_run_worker", self)
+        monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+        monkeypatch.setattr(worker, "_run_worker", self)
         return self
 
     def __call__(self, argv, cwd, timeout, stream_path=None, env=None, prompt=""):
@@ -462,17 +463,17 @@ def test_a_wall_part_way_through_stops_the_pass_and_names_what_it_did_not_reach(
         _branch_with_a_commit(root, card_id)
     reviewer = _Reviewer().install(monkeypatch)
 
-    real = runner.review_stage
+    real = review.review_stage
 
     def walled(root_, card, result, base, card_budget, timeout):
         out = real(root_, card, result, base, card_budget, timeout)
         if card.id != "first":
             return out
-        return runner.Dispatch(out.outcome, out.detail, out.cost_usd, out.rounds,
+        return outcome.Dispatch(out.outcome, out.detail, out.cost_usd, out.rounds,
                                limits.Wall(limits.WEEKLY, None, "weekly limit reached"),
                                how_to_test=out.how_to_test)
 
-    monkeypatch.setattr(runner, "review_stage", walled)
+    monkeypatch.setattr(review, "review_stage", walled)
 
     result = drain.drain(root, BASE)
 
@@ -491,23 +492,23 @@ def test_the_kill_switch_stops_the_pass_before_the_next_card(tmp_path, monkeypat
         _branch_with_a_commit(root, card_id)
     reviewer = _Reviewer().install(monkeypatch)
 
-    real = runner.review_stage
+    real = review.review_stage
 
     def then_stop(root_, card, *args):
         out = real(root_, card, *args)
-        (root / runner.STOP_FILE).parent.mkdir(parents=True, exist_ok=True)
-        (root / runner.STOP_FILE).write_text("stop\n", encoding="utf-8")
+        (root / hostconfig.STOP_FILE).parent.mkdir(parents=True, exist_ok=True)
+        (root / hostconfig.STOP_FILE).write_text("stop\n", encoding="utf-8")
         return out
 
-    monkeypatch.setattr(runner, "review_stage", then_stop)
+    monkeypatch.setattr(review, "review_stage", then_stop)
 
     result = drain.drain(root, BASE)
 
     assert reviewer.reviewed == ["first"]
     assert result.outcomes[-1].state == drain.NOT_REACHED
-    # Single-use, like `runner._stop_requested()`: left on disk, it would stop
+    # Single-use, like `hostconfig._stop_requested()`: left on disk, it would stop
     # the very next `drain` call too, with nothing telling you why.
-    assert not (root / runner.STOP_FILE).exists()
+    assert not (root / hostconfig.STOP_FILE).exists()
 
 
 # ------------------------------------------------------------------ selection
@@ -611,7 +612,7 @@ def test_the_command_reports_each_card_and_releases_the_lock(tmp_path, monkeypat
 
     assert code == 0, printed
     assert "a-card" in printed
-    assert not (root / runner.LOCK_FILE).exists(), (
+    assert not (root / hostconfig.LOCK_FILE).exists(), (
         "the lock outlived the pass — the next night would refuse to start")
 
 
@@ -628,7 +629,7 @@ def test_the_command_refuses_while_a_runner_holds_the_lock(tmp_path, monkeypatch
     root = _repo(tmp_path, ("a-card", "review"))
     _branch_with_a_commit(root, "a-card")
     reviewer = _Reviewer().install(monkeypatch)
-    monkeypatch.setattr(runner, "acquire_lock", lambda r: False)
+    monkeypatch.setattr(hostconfig, "acquire_lock", lambda r: False)
 
     assert drain.main(["--root", str(root), "--base", BASE]) == 1
     assert reviewer.reviewed == []

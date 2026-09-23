@@ -15,9 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 
-from nightshift import boardcmd, discover, init, manifest as _manifest, stale_sweep
+from nightshift import boardcmd, discover, init, stale_sweep
 from nightshift.gates import import_layering, memory_freshness, orientation_budget
 
 import _fixtures

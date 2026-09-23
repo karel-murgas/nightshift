@@ -53,12 +53,13 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import board, manifest, suite, textio, tiers, usage
+from nightshift import board, git, manifest, suite, textio, tiers, usage
 from nightshift.manifest import AI_DIR
-# The one place the CLI is executed lives in `runner`; see the alias's comment there
+# The one place the CLI is executed lives in `worker`; see the alias's comment there
 # on why this imports it rather than growing a second copy of the deadlock fix.
-from nightshift.runner import (cannot_edit, claude_binary, ensure_workspace_trusted,
-                               host_setting, repo_root, run_cli)
+from nightshift.hostconfig import cannot_edit, host_setting, repo_root
+from nightshift.startup import claude_binary, ensure_workspace_trusted
+from nightshift.worker import run_cli
 
 #: Written at the repo root, next to the digest, because that is the Obsidian vault
 #: root — a report the maintainer has to go looking for is a report they do not read.
@@ -267,7 +268,7 @@ def _cli_result(completed) -> tuple[str, str]:
 def denials(completed) -> list[str]:
     """Which tool calls the CLI refused, out of its own envelope.
 
-    `runner.read_telemetry` has read this field for months and reports it as *"the
+    `telemetry.read_telemetry` has read this field for months and reports it as *"the
     worker was refused a tool it asked for"*; this module ignored it, so an agent
     that could not write the file it was told to write reported nothing at all and
     the run said only that nothing happened. It is the difference between "the
@@ -464,7 +465,7 @@ def classify(found: list[Note], root: Path, *, model: str = "",
 #: * `worker: none` / `recipe: none` — nothing will dispatch it, and naming an agent
 #:   would put its name on a person's work.
 #: * `unattended: false` — the field governs exactly one decision, "may the runner
-#:   start this", and for work routed to a person the answer is no. `runner.select`
+#:   start this", and for work routed to a person the answer is no. `dispatch.select`
 #:   and `chores.select` both already refuse on it, so this is the card declaring
 #:   itself to machinery that is already listening.
 #: * `kind: inline` — what tells this card apart from one a worker would take, in a
@@ -1303,14 +1304,6 @@ def recorded(root: Path, found: list[Note]) -> list[Decision]:
 # --------------------------------------------------------------------------
 
 
-def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
-    """git, captured. `encoding=` is not optional on Windows — these three lines
-    are `runner._git`'s, copied rather than imported: reaching into another
-    module's privates to save three lines is the worse of the two smells."""
-    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace")
-
-
 #: The explicit zero `publish` hands the preflight's corrections check.
 #:
 #: That check exists to make a *lesson* mandatory when a branch taught one, and to
@@ -1355,7 +1348,7 @@ def unpushed(root: Path) -> list[str]:
     classifies as `other` and `other` selects no tests; here it would refuse a
     perfectly good push.)
     """
-    out = _git(root, "diff", "--name-only", "-z", "@{u}..HEAD")
+    out = git.run(root, "diff", "--name-only", "-z", "@{u}..HEAD")
     if out.returncode != 0:
         return []
     return [path for path in out.stdout.split("\0") if path]
@@ -1393,21 +1386,21 @@ def publish(root: Path) -> bool:
     for a human — and a pass that has already routed the lane must not report
     failure over the last hop.
     """
-    branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    branch = git.run(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     if not branch or branch == "HEAD":
         print("  publish: detached HEAD - nothing to push from")
         return False
-    if _git(root, "rev-parse", "--abbrev-ref", "@{u}").returncode != 0:
+    if git.run(root, "rev-parse", "--abbrev-ref", "@{u}").returncode != 0:
         print(f"  publish: `{branch}` tracks no remote branch - the commits stay here")
         return False
-    ahead = _git(root, "rev-list", "--count", "@{u}..HEAD").stdout.strip()
+    ahead = git.run(root, "rev-list", "--count", "@{u}..HEAD").stdout.strip()
     if ahead in ("", "0"):
         return False                       # level with the remote: nothing worth a line
     if stray := not_board(root, unpushed(root)):
         print(f"  ! publish: not pushing - `{branch}` also carries `{stray}`, which is "
               f"not board content. Preflight it and push it yourself.")
         return False
-    remote = _git(root, "config", "--get", f"branch.{branch}.remote").stdout.strip()
+    remote = git.run(root, "config", "--get", f"branch.{branch}.remote").stdout.strip()
     print(f"  publishing {ahead} board commit(s) to {remote}/{branch} - preflight first")
     # Uncaptured on purpose: the preflight's own report is the record, and it lands
     # in this run's log, which is what the panel is already showing.
@@ -1416,7 +1409,7 @@ def publish(root: Path) -> bool:
     if check.returncode != 0:
         print("  ! publish: the preflight refused, above - not pushing")
         return False
-    pushed = _git(root, "push", remote, branch)
+    pushed = git.run(root, "push", remote, branch)
     if pushed.returncode != 0:
         said = (pushed.stderr or pushed.stdout or "").strip().splitlines()
         print(f"  ! publish: `{branch}` was not pushed to {remote} - "

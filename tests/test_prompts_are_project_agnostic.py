@@ -42,6 +42,8 @@ from pathlib import Path
 
 import pytest
 
+from nightshift import dispatch, review, stale
+
 PACKAGE = Path(__file__).resolve().parent.parent / "nightshift"
 
 # The origin project and its maintainer. Deliberately literal: the point is that
@@ -116,14 +118,17 @@ def test_no_runtime_string_cites_a_document_that_does_not_ship():
 # The tests above cover the package. These pin the four strings the defect was
 # actually found in, so a regression names the prompt rather than a line number.
 
-PROMPTS = ("_PROMPT", "_CHECKER_PROMPT", "_REVIEW_PROMPT", "_STALE_PROMPT")
+PROMPTS = {
+    "_PROMPT": dispatch,
+    "_CHECKER_PROMPT": review,
+    "_REVIEW_PROMPT": review,
+    "_STALE_PROMPT": stale,
+}
 
 
 @pytest.mark.parametrize("name", PROMPTS)
 def test_a_dispatched_prompt_is_project_agnostic(name):
-    from nightshift import runner
-
-    prompt = getattr(runner, name)
+    prompt = getattr(PROMPTS[name], name)
     assert not ORIGIN.search(prompt), f"{name} names the origin project"
     assert not DESIGN_NOTE.search(prompt), f"{name} cites a design note that does not ship"
 
@@ -140,27 +145,25 @@ def test_the_review_prompt_does_not_hand_over_a_game_s_gate_list(tmp_path):
     the two things to pin are that the template still bakes in no project's
     gates, and that the reviewer learns the list either way.
     """
-    from nightshift import runner
 
     for gate in ("parity", "help-catalog", "asset hygiene"):
-        assert gate not in runner._REVIEW_PROMPT
+        assert gate not in review._REVIEW_PROMPT
     # Delivered at format time from the project's own report, never hardcoded.
-    assert "{gates}" in runner._REVIEW_PROMPT
-    assert "{gates}" in runner._BATCH_REVIEW_PROMPT
+    assert "{gates}" in review._REVIEW_PROMPT
+    assert "{gates}" in review._BATCH_REVIEW_PROMPT
     # And when there is no report to hand over, the old discovery instruction is
     # still what the reviewer gets — the degradation must not be "assume".
-    assert "nightshift.gates.run" in runner._gates_block(tmp_path)
+    assert "nightshift.gates.run" in review._gates_block(tmp_path)
     (tmp_path / "gates.txt").write_text("7 gates, 0 violations", encoding="utf-8")
-    assert "7 gates, 0 violations" in runner._gates_block(tmp_path)
+    assert "7 gates, 0 violations" in review._gates_block(tmp_path)
 
 
 def test_the_worker_prompt_still_states_the_rules_it_stopped_citing():
     """Removing a §-citation must not remove the rule with it — the whole reason
     the citations were replaceable is that the rule can be said in one clause."""
-    from nightshift import runner
 
     # the tier rule, formerly "from 00_architecture.md §16"
-    assert "running above it is a defect" in runner._PROMPT
+    assert "running above it is a defect" in dispatch._PROMPT
     # parking, formerly "a success state (00_architecture.md §13)"
-    assert "success state" in runner._PROMPT
-    assert "what each would imply" in runner._PROMPT
+    assert "success state" in dispatch._PROMPT
+    assert "what each would imply" in dispatch._PROMPT

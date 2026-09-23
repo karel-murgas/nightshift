@@ -1,16 +1,16 @@
 """Tests for `nightshift/merge_check.py` — real coverage for the one runner
 consumer that had none.
 
-The bug that motivated this file (2026-07-31): runner._run_tests changed from a
+The bug that motivated this file (2026-07-31): verify._run_tests changed from a
 2-tuple to a 3-tuple return; the identical stale unpack in merge_check.py survived
 two green test runs because nothing imported that module. This file makes that
 invisible.
 
 **The seam to runner is always real.** Every test that reaches check_branch lets
-merge_check actually call runner._run_tests and runner._run_gates (except the
+merge_check actually call verify._run_tests and verify._run_gates (except the
 TimeoutExpired path, which tests merge_check's exception handler, not the runner).
-The gate runner is substituted via runner.GATE_ARGV (same technique as
-test_runner_observability.py's _fake_gates); runner._run_tests is never
+The gate runner is substituted via verify.GATE_ARGV (same technique as
+test_runner_observability.py's _fake_gates); verify._run_tests is never
 monkeypatched for the CLEAN path. A mock there would have agreed with the broken
 3-tuple unpack, which is the whole point.
 
@@ -31,12 +31,12 @@ import pytest
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from nightshift import runner  # noqa: E402
 
 import _fixtures  # noqa: E402
 from _runner_helpers import _card, _repo  # noqa: E402
 import nightshift.merge_check as merge_check  # noqa: E402
 from nightshift.merge_check import check_branch, report, _conflicted_paths  # noqa: E402
+from nightshift import verify, worktree
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +67,7 @@ def _status_values() -> frozenset[str]:
 @pytest.fixture(autouse=True)
 def _no_xdist_in_fixtures(monkeypatch):
     """Blank xdist flags so fixture-spawned pytest children don't spin up workers."""
-    monkeypatch.setattr(runner, "_PYTEST_PARALLEL", (), raising=False)
+    monkeypatch.setattr(verify, "_PYTEST_PARALLEL", (), raising=False)
     _fixtures.serial_child_pytest(monkeypatch)
 
 
@@ -123,16 +123,16 @@ def _make_branch(root: Path, branch: str, body_file: str, body_text: str,
 
 def _stub_gates(monkeypatch, tmp_path: Path,
                 body: str = "import sys; sys.exit(0)\n") -> None:
-    """Point runner.GATE_ARGV at a scripted stand-in — same seam as _fake_gates
+    """Point verify.GATE_ARGV at a scripted stand-in — same seam as _fake_gates
     in test_board_runner_observability.py."""
     stub = tmp_path / "gate_stub.py"
     stub.write_text(body, encoding="utf-8")
-    monkeypatch.setattr(runner, "GATE_ARGV", [sys.executable, str(stub)])
+    monkeypatch.setattr(verify, "GATE_ARGV", [sys.executable, str(stub)])
 
 
 def _worktree_path(root: Path, card_id: str) -> Path:
     """Where check_branch puts — and drop_worktree removes — the card's tree."""
-    return runner.worktree_root(root) / "_merge-check" / card_id
+    return worktree.worktree_root(root) / "_merge-check" / card_id
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +174,7 @@ def test_a_conflict_in_a_file_named_like_prose_is_reported_whole():
 def test_clean_with_tests_executes_real_run_tests(tmp_path):
     """The three-value unpack in merge_check runs for real.
 
-    runner._run_tests is NOT monkeypatched here. If merge_check had a stale
+    verify._run_tests is NOT monkeypatched here. If merge_check had a stale
     2-tuple unpack, this test would fail with a ValueError — exactly the defect
     that was invisible before this file existed. Gates are stubbed (via GATE_ARGV),
     but the runner seam itself is always live.
@@ -333,7 +333,7 @@ def test_tests_failed(tmp_path):
 def test_timeout_is_caught_and_maps_to_tests_failed(tmp_path, monkeypatch):
     """subprocess.TimeoutExpired during _run_tests → TESTS_FAILED with 'timed out'.
 
-    runner._run_tests is monkeypatched here because we are testing merge_check's
+    verify._run_tests is monkeypatched here because we are testing merge_check's
     exception handler, not the runner's own timeout behavior. The CLEAN test above
     is where the real seam matters; timing out the actual pytest child would make
     the fixture fragile without adding information.
@@ -344,7 +344,7 @@ def test_timeout_is_caught_and_maps_to_tests_failed(tmp_path, monkeypatch):
     def _fake_run_tests(cwd, log, timeout, junit, pytest_args):
         raise subprocess.TimeoutExpired(["pytest"], timeout)
 
-    monkeypatch.setattr(runner, "_run_tests", _fake_run_tests)
+    monkeypatch.setattr(verify, "_run_tests", _fake_run_tests)
 
     result = check_branch(root, "timeout-card", "ai/timeout-card", "development_team",
                           test_timeout=5)
@@ -379,7 +379,7 @@ def test_worktree_is_removed_on_every_exit_path(tmp_path, monkeypatch):
         ("tests-fail-card", tmp_path),
         ("timeout-card", tmp_path),
     ]:
-        wt = runner.worktree_root(tmp_path) / "_merge-check" / card_id
+        wt = worktree.worktree_root(tmp_path) / "_merge-check" / card_id
         assert not wt.exists(), (
             f"worktree for '{card_id}' still exists at {wt} — "
             "the finally block failed to clean up"

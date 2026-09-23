@@ -5,7 +5,7 @@ own standing rule depends on:
 
 **The server owns no logic.** Every write/dispatch verb is a call to
 `run_command`/`spawn_background`, which shell out to `python -m nightshift.<module>
-<args>` — never a direct import of `boardcmd`, `runner.dispatch`/`settle`,
+<args>` — never a direct import of `boardcmd`, `dispatch.dispatch`/`settle`,
 `chores.execute`, `ingest.classify`/`scribe` or `drain.drain`. Checked
 mechanically (`test_panel_never_imports_a_write_or_dispatch_verb_directly`) so this
 does not quietly rot the way `test_boardcmd.py`'s own precedent warns it can.
@@ -145,7 +145,7 @@ def _card(root: Path, lane: str, card_id: str, *, unattended: str = "true",
 def _harvest_audio(root: Path, card: str, attempt: int, *, sound: str = "", generated: str = "",
                    takes: list[dict] | None = None, manifest: bool = True,
                    subdir: str = "audio_final") -> Path:
-    """Stand in for what `runner.harvest` leaves an audio card: a directory of
+    """Stand in for what `worktree.harvest` leaves an audio card: a directory of
     takes under `.ai/runs/<card>/attempt-N/artefacts/.tmp/<subdir>/`, with
     (unless `manifest=False`) a `candidates.json` describing them the way
     `audio-asset/SKILL.md` §5 does — each dict in `takes` is both a file to
@@ -199,16 +199,18 @@ def test_panel_never_imports_a_write_or_dispatch_verb_directly():
 
 
 def test_panel_only_imports_read_helpers_from_runner():
-    """`runner.py` owns `dispatch`/`settle`/`merge_branch` and a great deal more —
-    the panel may read its status file and its queue-selection logic, and nothing
-    that mutates a card or a branch."""
+    """The runner's split modules own `dispatch`/`settle`/`merge_branch` and a
+    great deal more — the panel may read status and queue-selection helpers off
+    `hostconfig`/`startup`/`dispatch`/`review`/`telemetry`, and nothing that
+    mutates a card or a branch."""
     source = Path(panel.__file__).read_text(encoding="utf-8")
-    assert "from nightshift.runner import" in source
+    assert any(f"from nightshift.{mod} import" in source
+              for mod in ("hostconfig", "startup", "dispatch", "review", "telemetry"))
     forbidden_names = ("dispatch", "settle", "merge_branch", "rebase_and_merge",
                       "run_producer", "prepare_worktree")
     for name in forbidden_names:
         assert f" {name}," not in source and f" {name}\n" not in source and \
-              f"import {name}" not in source, f"runner.{name} must not be imported"
+              f"import {name}" not in source, f"{name} must not be imported"
 
 
 # ------------------------------------------------------------- account state
@@ -2819,7 +2821,7 @@ def _chore(root: Path, card_id: str) -> Path:
 
 
 def test_a_chore_is_not_filed_under_work_that_needs_you_at_the_keyboard(server):
-    """`runner.select` calls this "not a refusal — a routing fact": the chore
+    """`dispatch.select` calls this "not a refusal — a routing fact": the chore
     batch runs it, unattended. Filing it beside `unattended: false` said the
     opposite, under a chip that cut the explanation off mid-sentence."""
     base, root = server
@@ -4155,7 +4157,7 @@ def test_the_tier_tick_is_not_carried_across_a_swap(server):
 # --------------------------------------------------------- audio candidates
 #
 # `audio-audition-review-in-command-center`: the Run page's listen-and-pick
-# surface over `.ai/runs/*/attempt-*/artefacts/` — `runner.harvest`'s own
+# surface over `.ai/runs/*/attempt-*/artefacts/` — `worktree.harvest`'s own
 # layout, read here rather than reimplemented, and `audio-asset/SKILL.md` §5's
 # `candidates.json` shape (`id`, `seconds`, `seed`, `generator`, `post_flags`,
 # `ok`, `problems`).
@@ -4529,7 +4531,7 @@ def test_the_decide_page_shows_that_cards_own_audio_takes(server):
 #
 # `artefact-cards-owe-a-pick`: the visual twin of the audio surface above.
 # A card that generated N candidates and installed none is parked in
-# `needs-decision/` by `runner.unadopted_artefacts` + `_park_for_pick`, and its
+# `needs-decision/` by `worktree.unadopted_artefacts` + `_park_for_pick`, and its
 # `## Question` points here by name — so the properties that matter are not
 # "does it render" but that a pick *answers the card*, that the checker's
 # verdict is read off the highest round rather than any file called
@@ -4552,10 +4554,10 @@ def _png(width: int, height: int) -> bytes:
 def _harvest_images(root: Path, card: str, attempt: int, *, shots: list[str] | None = None,
                     subdir: str = ".tmp", size: tuple[int, int] = (32, 32),
                     verdict: str = "", best: str = "", notes: str = "") -> Path:
-    """Stand in for what `runner.harvest` leaves an art card: PNGs under
+    """Stand in for what `worktree.harvest` leaves an art card: PNGs under
     `.ai/runs/<card>/attempt-N/artefacts/<subdir>/` — the real
     `stun-grenade-visuals` layout — plus, when `verdict` is given, the
-    `review-<attempt>.json` `runner.run_checker` writes one directory up."""
+    `review-<attempt>.json` `review.run_checker` writes one directory up."""
     out_dir = root / panel.RUNS / card / f"attempt-{attempt}"
     directory = out_dir / "artefacts" / subdir
     directory.mkdir(parents=True, exist_ok=True)
@@ -4874,7 +4876,7 @@ def test_picking_a_bogus_image_path_is_refused(server):
 
 def test_picking_an_image_answers_the_parked_card_it_belongs_to(server):
     """The click that closes the loop: one POST records the pick *and* writes the
-    answer onto the card `runner._park_for_pick` filed in `needs-decision/`. The
+    answer onto the card `settle._park_for_pick` filed in `needs-decision/`. The
     card is deliberately left there — `decide.write_answer`'s park-over-promote —
     so the existing "To tasks" click still releases the installing pass."""
     base, root = server

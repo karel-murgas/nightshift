@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from nightshift import discover
+from nightshift import hostconfig, worktree
 
 import _fixtures
 
@@ -185,13 +186,12 @@ def test_the_proposed_checkout_dir_is_the_one_the_runner_would_use(tmp_path):
     runner would have created `.project_tigress-integration`, and `doctor`
     reported drift against whichever of the two a manifest held. An underscore
     is the smallest name on which the two spellings part."""
-    from nightshift import runner
 
     root = tmp_path / "my_app"
     root.mkdir()
     proposed = {p.key: p.value for p in discover.worker_config(root)}
-    assert proposed["worker.integration_checkout_dir"] == runner.integration_checkout_dir(root)
-    assert runner.worktree_root(root).name == ".my_app-worktrees"
+    assert proposed["worker.integration_checkout_dir"] == hostconfig.integration_checkout_dir(root)
+    assert worktree.worktree_root(root).name == ".my_app-worktrees"
 
 
 def test_harvest_dirs_is_absent_rather_than_invented(repo):

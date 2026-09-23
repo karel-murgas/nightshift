@@ -666,7 +666,7 @@ def promote_to_tasks(root: Path, card_id: str, *, today: dt.date | None = None) 
     chose while looking at more information than the parker had.
 
     **A promoted card gets a fresh attempt budget** (`retry_from`, read by
-    `runner.attempt_limit`), the same as a play-test rejection. `chores.py` charges a
+    `dispatch.attempt_limit`), the same as a play-test rejection. `chores.py` charges a
     chore's one attempt the moment it bounces to `needs-decision/`, and `settle` parks
     a full card that ran out of attempts, so without the reset a promoted card sat in
     `tasks/` looking dispatchable and was not — `docs-production` on 2026-08-26, which

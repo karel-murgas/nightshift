@@ -74,7 +74,14 @@ from pathlib import Path
 
 from nightshift import (board, gitmerge, landing, manifest, run_record, runner,
                         suite, textio, tiers, usage)
-from nightshift.runner import repo_root
+from nightshift import (dispatch, git, hostconfig, review, settle,
+                        telemetry, verify, worktree)
+# Aliased: this module's own `Outcome` (a batch item's outcome) is a parameter
+# name throughout this file, and it would shadow a bare `outcome` import in
+# every function that takes one -- `outcome.Dispatch`, the two places this
+# module actually needs the framework type, reads fine off an alias instead.
+from nightshift import outcome as _outcome
+from nightshift.hostconfig import repo_root
 
 #: Written at the repo root next to the digest, because that is the vault root. The
 #: name comes from `board`, which owns the set — see `GENERATED_VIEWS` on why a view
@@ -89,14 +96,14 @@ DEFAULT_BATCH = 8
 #: There is deliberately **no effort budget here** — no turn cap, no wall cap of this
 #: module's own. `cost_note` records what an item cost and nothing weighs it. The
 #: runaway that a cap was meant to stop is bounded where it can still be stopped: the
-#: wall-clock timeout on the worker's own process, inside `runner._run_worker`. See
+#: wall-clock timeout on the worker's own process, inside `worker._run_worker`. See
 #: `cost_note` for the two measurements that removed the budget that used to sit here.
 
 #: A chore gets one attempt. A failed one-prompter is worth a human's eye, not a second
 #: dispatch, and it keeps the arithmetic honest: 8 chores x 3 attempts is a night.
 #: Defined in `runner` beside the full-card limit, because the dispatcher's queue
 #: selection and its retirement rule both read it and must not disagree.
-MAX_ATTEMPTS = runner.CHORE_MAX_ATTEMPTS
+MAX_ATTEMPTS = hostconfig.CHORE_MAX_ATTEMPTS
 
 KIND = board.KIND_CHORE
 
@@ -139,7 +146,7 @@ class Outcome:
     detail: str = ""
     turns: int = 0
     wall_s: float = 0.0
-    #: What this item's own attempt cost — read off `runner.read_telemetry`
+    #: What this item's own attempt cost — read off `telemetry.read_telemetry`
     #: alongside `turns`/`wall_s`, which already carried it and discarded it
     #: (`token-economy.md` phase 0.1's "chore cost is not recorded" finding: the
     #: panel showed `$0` for a chore batch because this field did not exist to
@@ -151,7 +158,7 @@ class Outcome:
     #: The worker's scenario, carried from its verdict to the card when the batch
     #: lands. Only the worker that built the thing knows which door it is behind.
     how_to_test: str = ""
-    #: `runner.unadopted_artefacts` for this chore's attempt: candidates harvested,
+    #: `worktree.unadopted_artefacts` for this chore's attempt: candidates harvested,
     #: none installed. Non-zero means it lands in `needs-decision/` owing a pick,
     #: whatever its `verify:` says — see `_plan`.
     unadopted: int = 0
@@ -230,7 +237,7 @@ def eligible(card: board.Card, *, capabilities: frozenset[str] | set[str]) -> st
     Kept separate from `select` so the reason can be reported per card. A chore that is
     silently absent from a batch is indistinguishable from one that was never written.
 
-    `capabilities` is this machine's, from `runner.host_capabilities()` — required
+    `capabilities` is this machine's, from `hostconfig.host_capabilities()` — required
     rather than defaulted, because the check it feeds is one this function did not have
     until 2026-08-18 and a default of "assume none" or "assume all" would both be wrong
     silently. Two callers now ask this question (the batch itself, and the panel
@@ -244,7 +251,7 @@ def eligible(card: board.Card, *, capabilities: frozenset[str] | set[str]) -> st
         return "tier: lead - a chore has nothing to decide"
     if card.fields.get("unattended", "true").strip().lower() != "true":
         return "unattended: false - the batch runs without a human present"
-    # The same precondition `runner.select` enforces for a dispatched card, and its
+    # The same precondition `dispatch.select` enforces for a dispatched card, and its
     # absence here was a real hole rather than a tidiness point: `requires:` is what
     # keeps an art or audio card off the laptop that has no ComfyUI stack, and a chore
     # was exempt from it for no reason anybody chose. `ad-sound-for-recharge` is
@@ -262,7 +269,7 @@ def eligible(card: board.Card, *, capabilities: frozenset[str] | set[str]) -> st
         attempts = 0
     # `attempt_limit`, not `MAX_ATTEMPTS`: a play-test rejection resets the budget
     # (`retry_from`), and the runner and this batch must agree on what is spent.
-    if attempts >= runner.attempt_limit(card):
+    if attempts >= dispatch.attempt_limit(card):
         return (f"already attempted {attempts}x - a chore gets {MAX_ATTEMPTS}; "
                 f"read it rather than re-running it")
     return ""
@@ -273,7 +280,7 @@ def select(root: Path, *, limit: int = DEFAULT_BATCH,
     """The chores that form the next batch, and every one that was left out with why."""
     chosen: list[board.Card] = []
     skipped: list[Skipped] = []
-    capabilities = runner.host_capabilities(root)
+    capabilities = hostconfig.host_capabilities(root)
     for card in board.cards(root, lane):
         if card.kind != KIND:
             continue                      # not a chore at all: not "skipped", just other work
@@ -480,18 +487,18 @@ def _merge_prefix(work: Path, tree: Path, base: str,
     Rebuilding from `base` each time rather than un-merging is what makes the bisect
     below simple: every probe is one deterministic replay of a prefix.
     """
-    runner._git(tree, "reset", "--hard", base)
+    git.run(tree, "reset", "--hard", base)
     merged: list[str] = []
     refused: list[tuple[str, str]] = []
     for card_id in order:
         ref = f"ai/{card_id}"
-        if runner._git(work, "rev-parse", "--verify", ref).returncode != 0:
+        if git.run(work, "rev-parse", "--verify", ref).returncode != 0:
             refused.append((card_id, f"`{ref}` no longer exists"))
             continue
-        applied = runner._git(tree, "merge", *gitmerge.STRATEGY_ARGS, "--no-ff",
+        applied = git.run(tree, "merge", *gitmerge.STRATEGY_ARGS, "--no-ff",
                               "-m", f"chore {card_id}", ref)
         if applied.returncode != 0:
-            runner._git(tree, "merge", "--abort")
+            git.run(tree, "merge", "--abort")
             refused.append((card_id, gitmerge.failure_detail(applied)))
             continue
         merged.append(card_id)
@@ -507,13 +514,13 @@ def _verify_tree(work: Path, tree: Path, out_dir: Path, tag: str,
     nothing checking the combination. Judged by the JUnit report, like every other
     pytest this package runs.
     """
-    status, why = runner._run_gates(work, tree, out_dir / f"{tag}-gates.txt")
-    if status != runner.GATE_PASS:
+    status, why = verify._run_gates(work, tree, out_dir / f"{tag}-gates.txt")
+    if status != verify.GATE_PASS:
         return False, why, 0
     junit = out_dir / f"{tag}-junit.xml"
     whole = suite.Selection(suite.ALL, "the merged batch - everything, once")
     try:
-        ok, why, _ = runner._run_tests(
+        ok, why, _ = verify._run_tests(
             tree, out_dir / f"{tag}-pytest.txt", test_timeout, junit,
             whole.pytest_args(tree / suite.tests_rel(work)))
     except subprocess.TimeoutExpired:
@@ -597,10 +604,10 @@ def _plan(work: Path, base: str, card: board.Card, outcome: Outcome,
             else landing.finished_lane(work, card, f"ai/{card.id}", base))
 
     def before_move(landed: board.Card) -> None:
-        landed.write({"started": None, "finished": runner._now()})
+        landed.write({"started": None, "finished": hostconfig._now()})
         landed.write_section("Summary", outcome.detail or "landed as part of a chore batch")
         if outcome.owes_a_pick:
-            runner._write_pick_question(landed, runner.Dispatch(
+            settle._write_pick_question(landed, _outcome.Dispatch(
                 "pick", outcome.detail, unadopted=outcome.unadopted))
         elif landed.verify == "play":
             landed.write_section("How to test", outcome.how_to_test or
@@ -648,7 +655,7 @@ def _hand_over(work: Path, card: board.Card, branch: str, why: str) -> str:
     fixed for the per-card path (Karel, reported after a chore batch failed and
     left two survivors sitting in Under Review with no action button at all).
     """
-    card.write({"started": None, "finished": runner._now()})
+    card.write({"started": None, "finished": hostconfig._now()})
     card.write_section("Summary", why)
     board.move(work, card, "review", review_owed=(
         "a survivor's own diff on its `ai/<id>` is green and was never reviewed on its "
@@ -658,7 +665,7 @@ def _hand_over(work: Path, card: board.Card, branch: str, why: str) -> str:
 
 def _route_flagged(work: Path, card: board.Card, kind: str, detail: str) -> tuple[str, str]:
     """One survivor the batch reviewer named on its own — routed on that verdict
-    directly, the same way `runner._settle_impl` routes a single-card `needs_fix`/
+    directly, the same way `settle._settle_impl` routes a single-card `needs_fix`/
     `needs_decision`, without spending a second review call to get there: the batch
     review already produced this item's own verdict, in the one pass.
 
@@ -666,7 +673,7 @@ def _route_flagged(work: Path, card: board.Card, kind: str, detail: str) -> tupl
     digest calls a retried card `needs_fix` and an escalated one `needs_decision`
     rather than folding both into one label.
 
-    A chore gets exactly one dispatch attempt (`runner.CHORE_MAX_ATTEMPTS`), and it
+    A chore gets exactly one dispatch attempt (`hostconfig.CHORE_MAX_ATTEMPTS`), and it
     is already spent by the time a survivor reaches here — so unlike the per-card
     runner loop, `needs_fix`'s `card.attempts < attempt_limit(card)` branch is dead
     in practice today (attempts is 1, the limit is 1) and everything lands in
@@ -674,13 +681,13 @@ def _route_flagged(work: Path, card: board.Card, kind: str, detail: str) -> tupl
     hardcoded "always needs-decision", so raising `CHORE_MAX_ATTEMPTS` in the future
     does not silently strand a card here again.
     """
-    card.write({"started": None, "finished": runner._now()})
-    if kind == "needs_fix" and card.attempts < runner.attempt_limit(card):
-        card.write_section("Review Finding", runner._review_finding_section(card.id, detail))
+    card.write({"started": None, "finished": hostconfig._now()})
+    if kind == "needs_fix" and card.attempts < dispatch.attempt_limit(card):
+        card.write_section("Review Finding", settle._review_finding_section(card.id, detail))
         card.write({"last_outcome": "needs_fix"})
         branch = card.fields.get("branch") or f"ai/{card.id}"
-        if runner._branch_exists(work, branch):
-            runner.write_handover(work, card.id, runner.Handover(review_fix=True))
+        if worktree._branch_exists(work, branch):
+            worktree.write_handover(work, card.id, worktree.Handover(review_fix=True))
         board.move(work, card, "tasks")
         return (f"{card.id}: -> tasks/ (batch review flagged a fixable defect, will retry)",
                 "needs_fix")
@@ -708,13 +715,13 @@ def _workspace(root: Path, base: str) -> tuple[Path, str]:
     checkout is on the integration branch the batch works in place, otherwise it
     uses the runner's dedicated checkout and leaves the working copy alone.
     """
-    if runner.current_branch(root) == base:
+    if hostconfig.current_branch(root) == base:
         return root, ""
     try:
-        work = runner.ensure_integration_checkout(root, base)
+        work = worktree.ensure_integration_checkout(root, base)
     except RuntimeError as exc:
         return root, str(exc)
-    if dirty := runner.dirty_outside_board(work):
+    if dirty := hostconfig.dirty_outside_board(work):
         shown = ", ".join(dirty[:4]) + (f" (+{len(dirty) - 4} more)" if len(dirty) > 4 else "")
         return root, (f"the dedicated `{base}` checkout is dirty outside the board: "
                       f"{shown}. It is runner-owned; commit or discard those changes "
@@ -724,7 +731,7 @@ def _workspace(root: Path, base: str) -> tuple[Path, str]:
     # promoted card left behind in the launch checkout would make this batch report
     # "nothing to dispatch" about a chore that is plainly sitting in `tasks/` on his
     # screen. That is the failure `stranded_board_edits` was written for.
-    if refusal := runner.stranded_board_refusal(root, work, base):
+    if refusal := worktree.stranded_board_refusal(root, work, base):
         return root, refusal
     return work, ""
 
@@ -854,8 +861,8 @@ class BatchLanding(runner.Landing):
             return ""
         return "the usage window closed"
 
-    def settle(self, ctx: runner.RunContext, candidate: runner.Candidate,
-               result: runner.Dispatch, model: str) -> str:
+    def settle(self, ctx: runner.RunContext, candidate: dispatch.Candidate,
+               result: _outcome.Dispatch, model: str) -> str:
         """Judge one chore on the gates plus the tests it could reach, and either
         settle it now or hold it as a survivor.
 
@@ -879,25 +886,25 @@ class BatchLanding(runner.Landing):
 
         def settled(state: str, detail: str) -> str:
             out.state, out.detail = state, detail
-            line = runner.settle(work, card.id, result)
+            line = settle.settle(work, card.id, result)
             _record_outcomes(ctx.record, self.batch, self.cards, self.model)
             return line
 
         if result.outcome in ("limited", "blocked", "interrupted"):
             return settled("blocked", result.detail)
 
-        out_dir = runner.run_dir(work, card, card.attempts)
-        telemetry = runner.read_telemetry(out_dir)
-        out.turns = int(telemetry.get("turns", 0))
-        out.wall_s = float(telemetry.get("wall_s", 0.0))
-        out.cost_usd = float(telemetry.get("cost_usd", 0.0))
+        out_dir = telemetry.run_dir(work, card, card.attempts)
+        reading = telemetry.read_telemetry(out_dir)
+        out.turns = int(reading.get("turns", 0))
+        out.wall_s = float(reading.get("wall_s", 0.0))
+        out.cost_usd = float(reading.get("cost_usd", 0.0))
         # The per-stage breakdown behind that one total (worker + its checker, if the
         # card names one) — `token-economy.md` phase 0.1's fix for the batch panel
         # showing `$0`: the number was already on disk, just never copied anywhere
         # that summed to a dollar figure. The whole map, straight off the `Dispatch`
         # that produced these stages, not `{"worker": ...}` reconstructed here, which
         # was true only while the worker was the one stage that got an `--effort`.
-        runner.record_usage(ctx.record, out_dir, card_id=card.id, model=model,
+        telemetry.record_usage(ctx.record, out_dir, card_id=card.id, model=model,
                             efforts=result.efforts)
 
         if result.outcome == "parked":
@@ -1010,7 +1017,7 @@ def queue(ctx: runner.RunContext, args: argparse.Namespace, *,
         print(f"dispatching {len(chosen)} chore(s) at tier {CHORE_TIER} ({model})")
     return runner.Queue(
         name="chores",
-        cards=[runner.Candidate(card, True, f"kind: chore, tier: {CHORE_TIER}")
+        cards=[dispatch.Candidate(card, True, f"kind: chore, tier: {CHORE_TIER}")
                for card in chosen],
         landing=landing,
         tier=CHORE_TIER,
@@ -1051,7 +1058,7 @@ def execute(root: Path, *, limit: int = DEFAULT_BATCH, allow_paid: bool = False,
     """
     now = now or dt.datetime.now()
     try:
-        base = runner.default_base(root)
+        base = hostconfig.default_base(root)
     except manifest.ManifestError as exc:
         # A repo that was never set up, or one whose config names no integration
         # branch. Caught rather than allowed to propagate because this is a CLI and
@@ -1085,15 +1092,15 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
                     model: str) -> int:
     """Phases 2 and 3: merge the survivors, verify once, review once, land once."""
     branch = batch_branch(now)
-    out_dir = work / runner.RUNS / "_chores" / f"{now:%Y%m%d-%H%M}"
+    out_dir = work / hostconfig.RUNS / "_chores" / f"{now:%Y%m%d-%H%M}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    remote = str(runner.host_setting(work, "publish_remote", "")).strip()
+    remote = str(hostconfig.host_setting(work, "publish_remote", "")).strip()
 
-    runner._git(work, "branch", "-f", branch, base)
-    tree = runner.worktree_root(work) / f"_batch-{now:%Y%m%d-%H%M}"
-    if tree.exists() or runner._worktree_registered(work, tree):
-        runner._git(work, "worktree", "remove", "--force", str(tree))
-    runner._git(work, "worktree", "prune")
+    git.run(work, "branch", "-f", branch, base)
+    tree = worktree.worktree_root(work) / f"_batch-{now:%Y%m%d-%H%M}"
+    if tree.exists() or worktree._worktree_registered(work, tree):
+        git.run(work, "worktree", "remove", "--force", str(tree))
+    git.run(work, "worktree", "prune")
     tree.parent.mkdir(parents=True, exist_ok=True)
 
     landed = False
@@ -1112,7 +1119,7 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
     reviewed_but_unmerged = False
     landed_lines: list[str] = []
     try:
-        made = runner._worktree_add(work, str(tree), branch)
+        made = worktree._worktree_add(work, str(tree), branch)
         if made.returncode != 0:
             why = (f"could not cut a worktree for `{branch}`: "
                    f"{(made.stderr or made.stdout or '').strip()[:150]}")
@@ -1214,8 +1221,8 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
                                 order = clean
                                 reviewed_but_unmerged = True
     finally:
-        runner._git(work, "worktree", "remove", "--force", str(tree))
-        runner._git(work, "worktree", "prune")
+        git.run(work, "worktree", "remove", "--force", str(tree))
+        git.run(work, "worktree", "prune")
 
     suite_line = f"{total} test(s), green" if landed else (why or "not run")
     record.note(f"batch branch {branch} - suite: {suite_line}")
@@ -1223,7 +1230,7 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
         print(f"phase 3: {branch} merged into {base}")
         for line in landed_lines:
             print("  " + line)
-        runner._git(work, "branch", "-d", branch)
+        git.run(work, "branch", "-d", branch)
     else:
         record.stop(why)
         print(f"the batch did not land - {why}")
@@ -1261,7 +1268,7 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
 
     textio.write_text_lf(work / OUT, report(batch, now, branch=branch, suite=suite_line))
     board.commit_board(work, f"chores: batch {branch}", extra_paths=(str(OUT),))
-    runner.publish(work, remote, base)
+    worktree.publish(work, remote, base)
     print(f"  wrote {OUT}")
     return 0 if landed else 4
 
@@ -1286,7 +1293,7 @@ def _drop(work: Path, batch: Batch, cards: dict[str, board.Card], card_id: str,
             break
     card = cards.get(card_id)
     if card is not None:
-        print("  " + runner.settle(work, card_id, runner.Dispatch("failed", detail)))
+        print("  " + settle.settle(work, card_id, _outcome.Dispatch("failed", detail)))
 
 
 @dataclass
@@ -1317,7 +1324,7 @@ def _review(work: Path, base: str, branch: str, out_dir: Path,
     holding the combined diff can see an interaction between two items that a
     per-item review structurally cannot.
 
-    **But one call, not one verdict.** `runner._BATCH_REVIEW_PROMPT` asks for a
+    **But one call, not one verdict.** `review._BATCH_REVIEW_PROMPT` asks for a
     verdict *per numbered item* in that one call, so a `needs_fix` about one chore
     routes only that chore — the rest were reviewed too, in the same pass, and an
     `ok` from that pass is exactly as authoritative as an `ok` from a solo review
@@ -1339,16 +1346,16 @@ def _review(work: Path, base: str, branch: str, out_dir: Path,
     # per-card path) — without this, status.json is left on whatever phase 1's last
     # chore dispatch set it to (`pytest`), so the panel's rail keeps showing "tests"
     # for the whole of phase 3.
-    runner._status(work, phase="review", card=branch, model=model, since=runner._now())
-    verdict, _cost, wall = runner.review_branch(
+    hostconfig._status(work, phase="review", card=branch, model=model, since=hostconfig._now())
+    verdict, _cost, wall = review.review_branch(
         work, f"batch-{branch.replace('/', '-')}", out_dir, model, base, branch,
         card_budget, BATCH_TEST_TIMEOUT_S, criteria=criteria, intent=intent,
         effort=tiers.effort(work, "lead"),
-        template=runner._BATCH_REVIEW_PROMPT)
+        template=review._BATCH_REVIEW_PROMPT)
     # One reviewer call over every item at once, so it is recorded against the
     # batch rather than any one card — the same "$0" gap `run_one` had, for the
     # one stage that never had a per-card `out_dir` to begin with.
-    runner.record_usage(record, out_dir, card_id=f"batch:{branch}", model=model,
+    telemetry.record_usage(record, out_dir, card_id=f"batch:{branch}", model=model,
                         efforts={"reviewer": tiers.effort(work, "lead")})
     items = verdict.get("items") if isinstance(verdict, dict) else None
     if not isinstance(items, list) or not items:
@@ -1398,7 +1405,7 @@ def _plan_root(root: Path, base: str) -> Path:
     through `_workspace`, so the two could describe different boards with nothing in
     either output saying so: a plan listing a chore off the launch checkout, and a
     batch minutes later reporting "nothing to dispatch" — the 2026-08-28 confusion
-    that `runner.stranded_board_edits` documents, arriving by a second route.
+    that `worktree.stranded_board_edits` documents, arriving by a second route.
 
     It does **not** cut a worktree the way `_workspace` does, and does not refuse on a
     dirty one. A plan writes nothing but its own view and dispatches nothing; the
@@ -1407,11 +1414,11 @@ def _plan_root(root: Path, base: str) -> Path:
     checkout when one already exists, and otherwise `root` with the caveat said out
     loud rather than left to be inferred from a batch that behaves differently later.
     """
-    if runner.current_branch(root) == base:
+    if hostconfig.current_branch(root) == base:
         return root
-    existing = runner.integration_checkout_path(root)
-    if runner._worktree_registered(root, existing):
-        if stranded := runner.stranded_board_edits(root, base):
+    existing = worktree.integration_checkout_path(root)
+    if worktree._worktree_registered(root, existing):
+        if stranded := worktree.stranded_board_edits(root, base):
             shown = ", ".join(stranded[:6]) + (
                 f" (+{len(stranded) - 6} more)" if len(stranded) > 6 else "")
             print(f"  note - the board below is {existing}'s, not this checkout's, and "
@@ -1419,7 +1426,7 @@ def _plan_root(root: Path, base: str) -> Path:
                   f"A real batch will refuse until they are landed on `{base}`.")
         return existing
     print(f"  note - no dedicated `{base}` checkout exists yet, so this reads the board "
-          f"from the launch checkout on `{runner.current_branch(root)}`, which may lag "
+          f"from the launch checkout on `{hostconfig.current_branch(root)}`, which may lag "
           f"`{base}`")
     return root
 
@@ -1473,7 +1480,7 @@ def main(argv: list[str] | None = None) -> int:
     # where that has to be an error, and a read-only view of the board is exactly
     # what you want working while a repo is still being set up.
     try:
-        base = runner.default_base(root)
+        base = hostconfig.default_base(root)
     except manifest.ManifestError:
         base = ""
     work = _plan_root(root, base) if base else root

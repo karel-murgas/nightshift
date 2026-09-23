@@ -20,6 +20,7 @@ import pytest
 from nightshift import board
 from nightshift import limits
 from nightshift import runner
+from nightshift import dispatch, git, hostconfig, outcome, review, settle, startup, telemetry, verify, worker, worktree
 
 from _runner_helpers import (  # noqa: F401  (fixtures register by name)
     _JSON_AWARE_GATE,
@@ -75,7 +76,7 @@ def test_two_fixture_repos_never_share_a_worktree_root(tmp_path):
     """
     a = _worktree_repo(tmp_path / "one")
     b = _worktree_repo(tmp_path / "two")
-    assert runner.worktree_root(a) != runner.worktree_root(b)
+    assert worktree.worktree_root(a) != worktree.worktree_root(b)
 
 
 def test_a_worktree_left_behind_does_not_reach_the_next_repo(tmp_path, monkeypatch):
@@ -90,15 +91,15 @@ def test_a_worktree_left_behind_does_not_reach_the_next_repo(tmp_path, monkeypat
     leaker = _worktree_repo(tmp_path / "leaker")
     _charter(leaker, "code-thread")
     _card(leaker, "tasks", "probe")
-    runner.prepare_worktree(leaker, board.find(leaker, "probe"), "development_team")
-    assert (runner.worktree_root(leaker) / "probe").exists(), "the leak is the premise"
+    worktree.prepare_worktree(leaker, board.find(leaker, "probe"), "development_team")
+    assert (worktree.worktree_root(leaker) / "probe").exists(), "the leak is the premise"
 
     victim = _worktree_repo(tmp_path / "victim")
     _charter(victim, "code-thread")
     _card(victim, "tasks", "probe")
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "implemented"})
 
-    result = runner.dispatch(victim, board.find(victim, "probe"), "development_team",
+    result = dispatch.dispatch(victim, board.find(victim, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "review", result.detail
 
@@ -109,12 +110,12 @@ def test_a_successful_dispatch_lands_the_card_in_review(tmp_path, monkeypatch):
     _card(root, "tasks", "probe")
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "implemented"})
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "review"
     assert result.cost_usd == pytest.approx(0.11)
 
-    runner.settle(root, "probe", result)
+    settle.settle(root, "probe", result)
     card = board.find(root, "probe")
     assert card.lane == "review"
     assert card.fields["branch"] == "ai/probe"
@@ -137,7 +138,7 @@ def test_a_usage_limit_is_not_the_cards_fault(tmp_path, monkeypatch):
     _fake_worker(monkeypatch, commit=False, returncode=1,
                  stderr="Claude AI usage limit reached")
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 0.0, 120)
     assert result.outcome == "limited"
     assert result.wall is not None and result.wall.scope == limits.SESSION
@@ -154,9 +155,9 @@ def test_a_limited_card_gets_its_attempt_back_and_stays_in_tasks(tmp_path, monke
     _fake_worker(monkeypatch, commit=False, returncode=1,
                  stderr="Claude AI usage limit reached")
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 0.0, 120)
-    runner.settle(root, "probe", result)
+    settle.settle(root, "probe", result)
 
     card = board.find(root, "probe")
     assert card.lane == "tasks"
@@ -182,9 +183,9 @@ def test_unrepairable_drift_files_the_card_as_blocked_not_back_in_tasks(
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
     _stub_repair(monkeypatch, fixed=False, note="could not clear it")
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
-    runner.settle(root, "probe", result)
+    settle.settle(root, "probe", result)
 
     card = board.find(root, "probe")
     assert card.lane == board.BLOCKED_LANE
@@ -203,9 +204,9 @@ def test_a_second_attempt_stopped_by_a_wall_rewinds_to_the_first(tmp_path, monke
     _fake_worker(monkeypatch, commit=False, returncode=1,
                  stderr="Claude AI usage limit reached")
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 0.0, 120)
-    runner.settle(root, "probe", result)
+    settle.settle(root, "probe", result)
     assert board.find(root, "probe").attempts == 1
 
 
@@ -217,10 +218,10 @@ def test_an_ordinary_non_zero_exit_is_still_the_cards_fault(tmp_path, monkeypatc
     _card(root, "tasks", "probe")
     _fake_worker(monkeypatch, commit=False, returncode=1, stderr="Traceback: ImportError")
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 0.0, 120)
     assert result.outcome == "failed"
-    runner.settle(root, "probe", result)
+    settle.settle(root, "probe", result)
     assert board.find(root, "probe").attempts == 1
 
 
@@ -232,8 +233,8 @@ def test_no_dollar_cap_is_passed_to_the_cli_by_default(tmp_path, monkeypatch):
     _card(root, "tasks", "probe")
     seen = _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
 
-    runner.dispatch(root, board.find(root, "probe"), "development_team",
-                    "sonnet", runner.DEFAULT_CARD_BUDGET_USD, 120)
+    dispatch.dispatch(root, board.find(root, "probe"), "development_team",
+                    "sonnet", hostconfig.DEFAULT_CARD_BUDGET_USD, 120)
     assert "--max-budget-usd" not in seen["argv"]
 
 
@@ -243,7 +244,7 @@ def test_a_dollar_cap_is_still_passed_when_one_is_asked_for(tmp_path, monkeypatc
     _card(root, "tasks", "probe")
     seen = _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
 
-    runner.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 5.0, 120)
+    dispatch.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 5.0, 120)
     assert seen["argv"][seen["argv"].index("--max-budget-usd") + 1] == "5.0"
 
 
@@ -261,7 +262,7 @@ def test_two_sessions_sleeps_through_the_reset_and_retries_the_same_card(tmp_pat
     attempted, so the next window starts with it rather than skipping it."""
     root = _loaded_board(tmp_path, "a", "b")
 
-    calls = _night(monkeypatch, root, [_wall(), runner.Dispatch("review", "ok"), _wall()])
+    calls = _night(monkeypatch, root, [_wall(), outcome.Dispatch("review", "ok"), _wall()])
     runner.run(root, runner._parser(root).parse_args(
         ["--base", "development_team", "--sessions", "2"]))
     assert calls == ["a", "a", "b"]  # a walled, a retried after the reset, then b walled
@@ -280,10 +281,10 @@ def test_the_retried_card_is_reloaded_so_the_rewind_is_not_undone(tmp_path, monk
         seen.append(card.attempts)
         # What the real dispatch does before the worker starts.
         card.write({"attempts": str(card.attempts + 1), "started": "now"})
-        return _wall() if len(seen) == 1 else runner.Dispatch("review", "ok")
+        return _wall() if len(seen) == 1 else outcome.Dispatch("review", "ok")
 
-    monkeypatch.setattr(runner, "dispatch", fake_dispatch)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(dispatch, "dispatch", fake_dispatch)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
     monkeypatch.setattr(runner, "_sleep_until", lambda when: True)
     runner.run(root, runner._parser(root).parse_args(
         ["--base", "development_team", "--sessions", "2"]))
@@ -302,13 +303,13 @@ def test_a_card_moved_off_the_board_while_we_slept_is_left_alone(tmp_path, monke
         if len(calls) == 1:
             board.move(root, board.find(root, "a"), "needs-decision")
             return _wall()
-        return runner.Dispatch("review", "ok")
+        return outcome.Dispatch("review", "ok")
 
     calls: list[str] = []
-    monkeypatch.setattr(runner, "dispatch", fake_dispatch)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(dispatch, "dispatch", fake_dispatch)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
     monkeypatch.setattr(runner, "_sleep_until", lambda when: True)
-    monkeypatch.setattr(runner, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
+    monkeypatch.setattr(settle, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
     runner.run(root, runner._parser(root).parse_args(
         ["--base", "development_team", "--sessions", "2"]))
 
@@ -331,8 +332,8 @@ def test_a_needs_fix_is_retried_in_the_same_run(tmp_path, monkeypatch):
     root = _loaded_board(tmp_path, "a", "b")
 
     calls = _night(monkeypatch, root, [
-        runner.Dispatch("needs_fix", "name commit Y instead"),
-        runner.Dispatch("review", "ok"),
+        outcome.Dispatch("needs_fix", "name commit Y instead"),
+        outcome.Dispatch("review", "ok"),
     ])
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
@@ -349,16 +350,16 @@ def test_a_needs_fix_that_escalates_ends_the_cards_turn(tmp_path, monkeypatch):
     def fake_dispatch(root_, card, base, model, card_budget, test_timeout,
                       *, allow_local=True, worker="", effort=""):
         calls.append(card.id)
-        return runner.Dispatch("needs_fix", "still wrong")
+        return outcome.Dispatch("needs_fix", "still wrong")
 
     def fake_settle(r, cid, result):
         # What the real settle does once `attempts >= attempt_limit`.
         board.move(root, board.find(root, cid), "needs-decision")
         return f"{cid}: → needs-decision/"
 
-    monkeypatch.setattr(runner, "dispatch", fake_dispatch)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-    monkeypatch.setattr(runner, "settle", fake_settle)
+    monkeypatch.setattr(dispatch, "dispatch", fake_dispatch)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(settle, "settle", fake_settle)
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     assert calls == ["a", "b"]
@@ -374,12 +375,12 @@ def test_a_card_cannot_spin_on_review_fixes_forever(tmp_path, monkeypatch):
     """
     root = _loaded_board(tmp_path, "a", "b")
 
-    calls = _night(monkeypatch, root, [runner.Dispatch("needs_fix", "still wrong")] * 8)
+    calls = _night(monkeypatch, root, [outcome.Dispatch("needs_fix", "still wrong")] * 8)
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     # Each card spins its own limit and no more, and the counter resets when the
     # loop moves on rather than carrying `a`'s rounds over to `b`.
-    assert calls == ["a"] * runner.MAX_ATTEMPTS + ["b"] * runner.MAX_ATTEMPTS
+    assert calls == ["a"] * hostconfig.MAX_ATTEMPTS + ["b"] * hostconfig.MAX_ATTEMPTS
 
 
 def test_a_wall_on_a_needs_fix_closes_the_window_before_any_retry(tmp_path, monkeypatch):
@@ -390,7 +391,7 @@ def test_a_wall_on_a_needs_fix_closes_the_window_before_any_retry(tmp_path, monk
     root = _loaded_board(tmp_path, "a", "b")
 
     calls = _night(monkeypatch, root, [
-        runner.Dispatch("needs_fix", "name commit Y instead", 0.0, 1,
+        outcome.Dispatch("needs_fix", "name commit Y instead", 0.0, 1,
                         limits.Wall(limits.SESSION, None, "session limit")),
     ])
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
@@ -410,12 +411,12 @@ def test_a_needs_fix_does_not_count_toward_the_consecutive_failure_breaker(tmp_p
                       *, allow_local=True, worker="", effort=""):
         calls.append(card.id)
         # One fix each, then the card lands.
-        return (runner.Dispatch("needs_fix", "tidy this")
-                if calls.count(card.id) == 1 else runner.Dispatch("review", "ok"))
+        return (outcome.Dispatch("needs_fix", "tidy this")
+                if calls.count(card.id) == 1 else outcome.Dispatch("review", "ok"))
 
-    monkeypatch.setattr(runner, "dispatch", fake_dispatch)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-    monkeypatch.setattr(runner, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
+    monkeypatch.setattr(dispatch, "dispatch", fake_dispatch)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(settle, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     assert calls == ["a", "a", "b", "b", "c", "c"]
@@ -463,18 +464,18 @@ def test_the_night_drains_the_reviews_it_left_owed(tmp_path, monkeypatch):
     root = _loaded_board(tmp_path, "a")
     seen = _drain_calls(monkeypatch)
 
-    _night(monkeypatch, root, [runner.Dispatch("review", "ok")])
+    _night(monkeypatch, root, [outcome.Dispatch("review", "ok")])
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     assert len(seen) == 1
-    assert seen[0]["limit"] == runner.DRAIN_CAP
+    assert seen[0]["limit"] == hostconfig.DRAIN_CAP
 
 
 def test_no_drain_turns_the_end_of_night_pass_off(tmp_path, monkeypatch):
     root = _loaded_board(tmp_path, "a")
     seen = _drain_calls(monkeypatch)
 
-    _night(monkeypatch, root, [runner.Dispatch("review", "ok")])
+    _night(monkeypatch, root, [outcome.Dispatch("review", "ok")])
     runner.run(root, runner._parser(root).parse_args(
         ["--base", "development_team", "--no-drain"]))
 
@@ -496,7 +497,7 @@ def test_a_night_that_ran_out_of_window_does_not_start_a_drain(tmp_path, monkeyp
     monkeypatch.setattr(runner, "_deadline",
                         lambda until, max_minutes: dt.datetime.now() - dt.timedelta(minutes=1))
 
-    _night(monkeypatch, root, [runner.Dispatch("review", "ok")])
+    _night(monkeypatch, root, [outcome.Dispatch("review", "ok")])
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     assert seen == []
@@ -509,8 +510,8 @@ def test_the_kill_switch_stops_the_drain_from_starting(tmp_path, monkeypatch):
     root = _loaded_board(tmp_path, "a")
     seen = _drain_calls(monkeypatch)
 
-    _night(monkeypatch, root, [runner.Dispatch("review", "ok")])
-    monkeypatch.setattr(runner, "_stop_requested", lambda: True)
+    _night(monkeypatch, root, [outcome.Dispatch("review", "ok")])
+    monkeypatch.setattr(hostconfig, "_stop_requested", lambda: True)
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     assert seen == []
@@ -522,7 +523,7 @@ def test_the_drain_is_skipped_when_nothing_is_owed(tmp_path, monkeypatch):
     root = _loaded_board(tmp_path, "a")
     seen = _drain_calls(monkeypatch, owed=())
 
-    _night(monkeypatch, root, [runner.Dispatch("review", "ok")])
+    _night(monkeypatch, root, [outcome.Dispatch("review", "ok")])
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     assert seen == []
@@ -565,12 +566,12 @@ def test_the_baseline_run_is_never_asked_about_a_file_that_is_not_on_base(
         return real_run(argv, *a, **kw)
 
     monkeypatch.setattr(subprocess, "run", spy)
-    why = runner._already_failing_on_base(root, "development_team", junit, "probe", 120)
+    why = verify._already_failing_on_base(root, "development_team", junit, "probe", 120)
 
     assert why == ""
     assert spawned == []
     # And no worktree was cut to find that out.
-    assert not (runner.worktree_root(root) / "_baseline-probe").exists()
+    assert not (worktree.worktree_root(root) / "_baseline-probe").exists()
 
 
 # --- one test failing for two cards is the baseline, not the cards -----------
@@ -604,11 +605,11 @@ def test_one_test_failing_for_two_cards_stops_the_night_and_blames_neither(
         calls.append(card.id)
         _junit_naming(root, card.id, card.attempts + 1, shared)
         card.write({"attempts": str(card.attempts + 1)})
-        return runner.Dispatch("failed", "pytest: 1 failure(s)")
+        return outcome.Dispatch("failed", "pytest: 1 failure(s)")
 
-    monkeypatch.setattr(runner, "dispatch", fake_dispatch)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-    monkeypatch.setattr(runner, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
+    monkeypatch.setattr(dispatch, "dispatch", fake_dispatch)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(settle, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     # Stopped at the second card, not the third — and `c` never ran.
@@ -630,11 +631,11 @@ def test_two_cards_failing_on_different_tests_is_just_two_failures(tmp_path, mon
         _junit_naming(root, card.id, card.attempts + 1,
                       f"tests/test_{card.id}.py::test_its_own")
         card.write({"attempts": str(card.attempts + 1)})
-        return runner.Dispatch("failed", "pytest: 1 failure(s)")
+        return outcome.Dispatch("failed", "pytest: 1 failure(s)")
 
-    monkeypatch.setattr(runner, "dispatch", fake_dispatch)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-    monkeypatch.setattr(runner, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
+    monkeypatch.setattr(dispatch, "dispatch", fake_dispatch)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(settle, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     assert calls == ["a", "b"]
@@ -654,12 +655,12 @@ def test_the_same_card_failing_twice_is_not_cross_card_drift(tmp_path, monkeypat
         calls.append(card.id)
         _junit_naming(root, card.id, card.attempts + 1, shared)
         card.write({"attempts": str(card.attempts + 1)})
-        return (runner.Dispatch("needs_fix", "tidy this") if len(calls) == 1
-                else runner.Dispatch("failed", "pytest: 1 failure(s)"))
+        return (outcome.Dispatch("needs_fix", "tidy this") if len(calls) == 1
+                else outcome.Dispatch("failed", "pytest: 1 failure(s)"))
 
-    monkeypatch.setattr(runner, "dispatch", fake_dispatch)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-    monkeypatch.setattr(runner, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
+    monkeypatch.setattr(dispatch, "dispatch", fake_dispatch)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(settle, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     assert calls == ["a", "a"]
@@ -694,7 +695,7 @@ def test_endless_transient_limits_are_capped_rather_than_retried_until_morning(t
 
     calls = _night(monkeypatch, root, [_wall(limits.TRANSIENT)] * 20)
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
-    assert len(calls) == runner.TRANSIENT_RETRIES + 1
+    assert len(calls) == hostconfig.TRANSIENT_RETRIES + 1
 
 
 def test_three_failures_in_a_row_end_the_night(tmp_path, monkeypatch):
@@ -703,7 +704,7 @@ def test_three_failures_in_a_row_end_the_night(tmp_path, monkeypatch):
     walks the whole queue spending an attempt on each."""
     root = _loaded_board(tmp_path, "a", "b", "c", "d", "e")
 
-    calls = _night(monkeypatch, root, [runner.Dispatch("failed", "worker exited 1")] * 5)
+    calls = _night(monkeypatch, root, [outcome.Dispatch("failed", "worker exited 1")] * 5)
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
     assert calls == ["a", "b", "c"]
 
@@ -713,10 +714,10 @@ def test_a_success_between_failures_resets_the_streak(tmp_path, monkeypatch):
     root = _loaded_board(tmp_path, "a", "b", "c", "d")
 
     calls = _night(monkeypatch, root, [
-        runner.Dispatch("failed", "x"),
-        runner.Dispatch("failed", "x"),
-        runner.Dispatch("review", "ok"),
-        runner.Dispatch("failed", "x"),
+        outcome.Dispatch("failed", "x"),
+        outcome.Dispatch("failed", "x"),
+        outcome.Dispatch("review", "ok"),
+        outcome.Dispatch("failed", "x"),
     ])
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
     assert calls == ["a", "b", "c", "d"]
@@ -727,7 +728,7 @@ def test_the_default_night_has_no_dollar_stopping_condition(tmp_path, monkeypatc
     end the night at some API-equivalent figure nobody is spending."""
     root = _loaded_board(tmp_path, "a", "b", "c")
 
-    calls = _night(monkeypatch, root, [runner.Dispatch("review", "ok", cost_usd=99.0)] * 3)
+    calls = _night(monkeypatch, root, [outcome.Dispatch("review", "ok", cost_usd=99.0)] * 3)
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
     assert calls == ["a", "b", "c"]
 
@@ -740,11 +741,11 @@ def test_the_branch_survives_the_dispatch_but_the_worktree_does_not(tmp_path, mo
     _card(root, "tasks", "probe")
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
 
-    runner.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 5.0, 120)
+    dispatch.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 5.0, 120)
     branches = subprocess.run(["git", "branch", "--list", "ai/probe"], cwd=root,
                               capture_output=True, text=True).stdout
     assert "ai/probe" in branches
-    assert not (runner.worktree_root(root) / "probe").exists()
+    assert not (worktree.worktree_root(root) / "probe").exists()
 
 
 def test_a_failed_attempts_branch_is_a_rescue_ref_after_the_next_dispatch(tmp_path, monkeypatch):
@@ -754,15 +755,15 @@ def test_a_failed_attempts_branch_is_a_rescue_ref_after_the_next_dispatch(tmp_pa
     _fake_worker(monkeypatch, commit=True, returncode=1)
 
     card = board.find(root, "probe")
-    result = runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+    result = dispatch.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
     assert result.outcome == "failed"
-    runner.settle(root, "probe", result)
+    settle.settle(root, "probe", result)
     first_sha = _rev(root, "ai/probe")
 
     _fake_worker(monkeypatch, commit=True, returncode=0,
                  verdict={"outcome": "done", "summary": "x"})
     card = board.find(root, "probe")
-    runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+    dispatch.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
 
     assert _rev(root, "ai/probe@failed-1") == first_sha, \
         "the first attempt's commits must survive under a rescue name"
@@ -782,8 +783,8 @@ def test_a_second_failed_attempt_becomes_failed_2_not_a_collision(tmp_path, monk
         _fake_worker(monkeypatch, commit=True, returncode=1)
         card = board.find(root, "probe")
         card.write({"finished": None})
-        result = runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
-        runner.settle(root, "probe", result)
+        result = dispatch.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+        settle.settle(root, "probe", result)
 
     # Third dispatch's cold start renames the second attempt's branch — the
     # first attempt's rescue ref must still be there under its own name.
@@ -791,7 +792,7 @@ def test_a_second_failed_attempt_becomes_failed_2_not_a_collision(tmp_path, monk
                  verdict={"outcome": "done", "summary": "x"})
     card = board.find(root, "probe")
     card.write({"finished": None})
-    runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+    dispatch.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
 
     listed = subprocess.run(["git", "branch", "--list", "ai/probe@failed-*"], cwd=root,
                             capture_output=True, text=True).stdout
@@ -804,11 +805,11 @@ def test_rescue_branches_are_reaped_when_a_card_retires_to_failed(tmp_path, monk
     _card(root, "tasks", "probe")
     _fake_worker(monkeypatch, commit=True, returncode=1)
 
-    for _ in range(runner.MAX_ATTEMPTS):
+    for _ in range(hostconfig.MAX_ATTEMPTS):
         card = board.find(root, "probe")
         card.write({"finished": None})
-        result = runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
-        runner.settle(root, "probe", result)
+        result = dispatch.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+        settle.settle(root, "probe", result)
 
     assert board.find(root, "probe").lane == "failed"
     listed = subprocess.run(["git", "branch", "--list", "ai/probe@failed-*"], cwd=root,
@@ -824,18 +825,18 @@ def test_rescue_branches_are_reaped_when_a_done_card_is_swept_at_startup(tmp_pat
     _card(root, "tasks", "probe")
     _fake_worker(monkeypatch, commit=True, returncode=1)
     card = board.find(root, "probe")
-    result = runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
-    runner.settle(root, "probe", result)  # attempt 1 failed, ai/probe holds its commit
+    result = dispatch.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+    settle.settle(root, "probe", result)  # attempt 1 failed, ai/probe holds its commit
 
     _fake_worker(monkeypatch, commit=True, returncode=0,
                  verdict={"outcome": "done", "summary": "x"})
     card = board.find(root, "probe")
     card.write({"finished": None})
-    runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+    dispatch.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
     # ai/probe@failed-1 now exists; Karel hand-moves the card straight to done/.
     board.move(root, board.find(root, "probe"), "done")
 
-    pruned = runner.sweep_terminal_cards(root)
+    pruned = worktree.sweep_terminal_cards(root)
     assert "probe" in pruned or True  # pruned only reflects run-dir removal; branch check below
     listed = subprocess.run(["git", "branch", "--list", "ai/probe@failed-*"], cwd=root,
                             capture_output=True, text=True).stdout
@@ -853,18 +854,18 @@ def test_rescue_branches_are_reaped_when_a_testing_card_is_swept_at_startup(
     _card(root, "tasks", "probe")
     _fake_worker(monkeypatch, commit=True, returncode=1)
     card = board.find(root, "probe")
-    result = runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
-    runner.settle(root, "probe", result)  # attempt 1 failed, ai/probe holds its commit
+    result = dispatch.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+    settle.settle(root, "probe", result)  # attempt 1 failed, ai/probe holds its commit
 
     _fake_worker(monkeypatch, commit=True, returncode=0,
                  verdict={"outcome": "done", "summary": "x"})
     card = board.find(root, "probe")
     card.write({"finished": None})
-    runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+    dispatch.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
     # ai/probe@failed-1 now exists; hand-moved to testing/ rather than through settle().
     board.move(root, board.find(root, "probe"), "testing")
 
-    runner.sweep_terminal_cards(root)
+    worktree.sweep_terminal_cards(root)
     listed = subprocess.run(["git", "branch", "--list", "ai/probe@failed-*"], cwd=root,
                             capture_output=True, text=True).stdout
     assert listed.strip() == ""
@@ -880,11 +881,11 @@ def test_a_card_forced_past_max_attempts_by_name_still_caps_rescue_branches(
     _charter(root, "code-thread")
     _card(root, "tasks", "probe")
 
-    for _ in range(runner.MAX_ATTEMPTS + 2):
+    for _ in range(hostconfig.MAX_ATTEMPTS + 2):
         _fake_worker(monkeypatch, commit=True, returncode=1)
         card = board.find(root, "probe")
         card.write({"finished": None})
-        result = runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+        result = dispatch.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
         # Give the attempt back by hand instead of retiring, so the card stays
         # in tasks/ across every one of these forced re-dispatches.
         #
@@ -900,10 +901,10 @@ def test_a_card_forced_past_max_attempts_by_name_still_caps_rescue_branches(
         board.find(root, "probe").write({"attempts": None, "started": None,
                                          "finished": None, "last_outcome": "failed"})
 
-    runner.cap_rescue_branches_in_flight(root)
+    worktree.cap_rescue_branches_in_flight(root)
     listed = subprocess.run(["git", "branch", "--list", "ai/probe@failed-*"], cwd=root,
                             capture_output=True, text=True).stdout.split()
-    assert len(listed) <= runner.MAX_ATTEMPTS
+    assert len(listed) <= hostconfig.MAX_ATTEMPTS
 
 
 def test_publish_pushes_a_rescue_branch_and_the_reap_deletes_both_copies(tmp_path,
@@ -918,23 +919,23 @@ def test_publish_pushes_a_rescue_branch_and_the_reap_deletes_both_copies(tmp_pat
     _host_publishes_to_origin(root)
 
     _fake_worker(monkeypatch, commit=True, returncode=1)
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
-    runner.settle(root, "probe", result)
+    settle.settle(root, "probe", result)
     _fake_worker(monkeypatch, commit=True, returncode=0,
                  verdict={"outcome": "done", "summary": "x"})
     card = board.find(root, "probe")
     card.write({"finished": None})
-    runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+    dispatch.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
 
-    runner.publish(root, "origin", "development_team")
+    worktree.publish(root, "origin", "development_team")
     assert _remote_has(bare, "ai/probe@failed-1"), \
         "a rescue ref is an `ai/` branch and publish must push it like any other"
 
-    runner.prune_rescue_branches(root, "probe")
+    worktree.prune_rescue_branches(root, "probe")
     assert not _remote_has(bare, "ai/probe@failed-1"), \
         "reaping the local ref must not leave the pushed copy orphaned on the remote"
-    assert runner._git(root, "rev-parse", "--verify", "ai/probe@failed-1").returncode != 0
+    assert git.run(root, "rev-parse", "--verify", "ai/probe@failed-1").returncode != 0
 
 
 def test_a_reap_touches_no_remote_without_a_publish_remote(tmp_path):
@@ -943,12 +944,12 @@ def test_a_reap_touches_no_remote_without_a_publish_remote(tmp_path):
     root = _worktree_repo(tmp_path)
     bare = _bare_origin(root, tmp_path)
     _branch_with_file(root, tmp_path, "ai/probe@failed-1", "rescued.py", "x = 1\n")
-    runner.publish(root, "origin", "development_team")
+    worktree.publish(root, "origin", "development_team")
     assert _remote_has(bare, "ai/probe@failed-1")
 
-    runner.prune_rescue_branches(root, "probe")
+    worktree.prune_rescue_branches(root, "probe")
     assert _remote_has(bare, "ai/probe@failed-1")
-    assert runner._git(root, "rev-parse", "--verify", "ai/probe@failed-1").returncode != 0
+    assert git.run(root, "rev-parse", "--verify", "ai/probe@failed-1").returncode != 0
 
 
 def test_a_reap_refuses_a_remote_rescue_ref_carrying_commits_this_checkout_lacks(tmp_path):
@@ -960,14 +961,14 @@ def test_a_reap_refuses_a_remote_rescue_ref_carrying_commits_this_checkout_lacks
     bare = _bare_origin(root, tmp_path)
     _host_publishes_to_origin(root)
     _branch_with_file(root, tmp_path, "ai/probe@failed-1", "rescued.py", "x = 1\n")
-    runner.publish(root, "origin", "development_team")
+    worktree.publish(root, "origin", "development_team")
     elsewhere = _advance_on_remote(bare, tmp_path, "ai/probe@failed-1",
                                   "more.py", "y = 2\n")
 
-    runner.prune_rescue_branches(root, "probe")
+    worktree.prune_rescue_branches(root, "probe")
     assert _remote_tip(bare, "ai/probe@failed-1") == elsewhere, \
         "commits this checkout never had must survive the reap"
-    assert runner._git(root, "rev-parse", "--verify", "ai/probe@failed-1").returncode != 0
+    assert git.run(root, "rev-parse", "--verify", "ai/probe@failed-1").returncode != 0
 
 
 def test_attempts_is_committed_before_the_worker_starts(tmp_path, monkeypatch):
@@ -990,9 +991,9 @@ def test_attempts_is_committed_before_the_worker_starts(tmp_path, monkeypatch):
             capture_output=True, text=True).stdout.strip() == ""
         return subprocess.CompletedProcess(argv, 1, "{}", "died")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-    runner.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 5.0, 120)
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+    dispatch.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 5.0, 120)
 
     assert seen == {"attempts": 1, "started": True, "committed": True}
 
@@ -1007,7 +1008,7 @@ def test_a_worker_that_produces_nothing_is_a_failure(tmp_path, monkeypatch):
     _card(root, "tasks", "probe")
     _fake_worker(monkeypatch, commit=False, verdict={"outcome": "done", "summary": "x"})
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "failed"
     assert "neither a commit nor an artefact" in result.detail
@@ -1020,10 +1021,10 @@ def test_a_parked_verdict_reaches_needs_decision(tmp_path, monkeypatch):
     _fake_worker(monkeypatch, commit=False,
                  verdict={"outcome": "parked", "summary": "HP or heat?"})
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "parked"
-    runner.settle(root, "probe", result)
+    settle.settle(root, "probe", result)
     assert board.find(root, "probe").lane == "needs-decision"
 
 
@@ -1035,7 +1036,7 @@ def test_parking_beats_the_no_commit_rule(tmp_path, monkeypatch):
     _charter(root, "code-thread")
     _card(root, "tasks", "probe")
     _fake_worker(monkeypatch, commit=False, verdict={"outcome": "parked", "summary": "q"})
-    assert runner.dispatch(root, board.find(root, "probe"), "development_team",
+    assert dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                            "sonnet", 5.0, 120).outcome == "parked"
 
 
@@ -1055,7 +1056,7 @@ def test_red_gates_fail_the_card_even_with_a_done_verdict(tmp_path, monkeypatch)
     subprocess.run(["git", "commit", "-qm", "red gate"], cwd=root, check=True)
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "all good honest"})
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "failed"
     assert "gates" in result.detail
@@ -1078,7 +1079,7 @@ def test_a_violation_entirely_outside_this_attempts_diff_is_blocked_not_failed(
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
     tried = _stub_repair(monkeypatch, fixed=False, note="could not clear it")
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "blocked"
     assert result.repo_drift is True
@@ -1130,9 +1131,9 @@ def test_a_repairable_drift_is_repaired_and_the_card_carries_on(tmp_path, monkey
         flag.write_text("fixed", encoding="utf-8")
         return True, 0.4, f"repaired on {branch} (abc1234)", None
 
-    monkeypatch.setattr(runner, "repair_drift", repaired)
+    monkeypatch.setattr(dispatch, "repair_drift", repaired)
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "review", result.detail
     assert result.repo_drift is False
@@ -1157,7 +1158,7 @@ def test_a_walled_repair_gives_the_attempt_back_rather_than_blaming_the_drift(
     _stub_repair(monkeypatch, fixed=False, note="hit a usage wall",
                  wall=limits.Wall(limits.SESSION, None, "usage limit reached"))
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "limited"
     assert result.repo_drift is False, (
@@ -1169,9 +1170,9 @@ def test_a_repair_that_walls_but_leaves_green_gates_is_honoured(tmp_path, monkey
     """`verdict_survives_a_wall`'s newest stage. The repair's terminal artefact is
     not a file it wrote but the gate suite's own answer, so a repair that made the
     tree green and *then* walled on its wrap-up call has demonstrably finished."""
-    assert runner.verdict_survives_a_wall(runner.REPAIR_STAGE, {"gates_clean": True})
-    assert not runner.verdict_survives_a_wall(runner.REPAIR_STAGE, {"gates_clean": False})
-    assert not runner.verdict_survives_a_wall(runner.REPAIR_STAGE, {})
+    assert telemetry.verdict_survives_a_wall(telemetry.REPAIR_STAGE, {"gates_clean": True})
+    assert not telemetry.verdict_survives_a_wall(telemetry.REPAIR_STAGE, {"gates_clean": False})
+    assert not telemetry.verdict_survives_a_wall(telemetry.REPAIR_STAGE, {})
 
 
 def test_a_violation_inside_this_attempts_diff_still_fails_the_card(tmp_path, monkeypatch):
@@ -1185,7 +1186,7 @@ def test_a_violation_inside_this_attempts_diff_still_fails_the_card(tmp_path, mo
                _JSON_AWARE_GATE.format(file="worked.txt", rule="nope"))
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "failed"
     assert "gates" in result.detail
@@ -1202,7 +1203,7 @@ def test_a_pathless_violation_from_an_unknown_gate_falls_through_to_failed(
     _gate_stub(monkeypatch, tmp_path, _JSON_AWARE_GATE.format(file="", rule="mystery"))
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "failed"
     assert result.repo_drift is False
@@ -1222,7 +1223,7 @@ def test_a_gate_stub_that_does_not_understand_json_never_classifies_as_drift(
                "print('Board/other.md:1 — nope'); raise SystemExit(1)\n")
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "failed"
     assert result.repo_drift is False
@@ -1241,8 +1242,8 @@ def _worker_breaking_a_test(monkeypatch, verdict: dict):
         path.write_text(json.dumps(verdict), encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
 
 def test_a_failing_test_suite_fails_the_card(tmp_path, monkeypatch):
@@ -1252,7 +1253,7 @@ def test_a_failing_test_suite_fails_the_card(tmp_path, monkeypatch):
     _card(root, "tasks", "probe")
     _worker_breaking_a_test(monkeypatch, {"outcome": "done", "summary": "x"})
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "failed"
     assert result.repo_drift is False
@@ -1281,7 +1282,7 @@ def test_a_test_already_red_on_base_is_not_the_cards_fault(tmp_path, monkeypatch
     subprocess.run(["git", "commit", "-aqm", "red on base"], cwd=root, check=True)
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "blocked"
     assert result.repo_drift is True
@@ -1309,10 +1310,10 @@ def test_a_test_the_card_itself_added_gets_no_baseline_excuse(tmp_path, monkeypa
                         encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "failed"
     assert result.repo_drift is False
@@ -1326,7 +1327,7 @@ def test_a_worker_with_no_verdict_falls_through_to_the_gates(tmp_path, monkeypat
     _charter(root, "code-thread")
     _card(root, "tasks", "probe")
     _fake_worker(monkeypatch, verdict=None)
-    assert runner.dispatch(root, board.find(root, "probe"), "development_team",
+    assert dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                            "sonnet", 5.0, 120).outcome == "review"
 
 
@@ -1339,11 +1340,11 @@ def test_three_failures_retire_the_card_to_failed(tmp_path, monkeypatch):
 
     for expected_lane in ("tasks", "tasks", "failed"):
         card = board.find(root, "probe")
-        result = runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
-        runner.settle(root, "probe", result)
+        result = dispatch.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+        settle.settle(root, "probe", result)
         assert board.find(root, "probe").lane == expected_lane
 
-    assert board.find(root, "probe").attempts == runner.MAX_ATTEMPTS
+    assert board.find(root, "probe").attempts == hostconfig.MAX_ATTEMPTS
 
 
 def test_the_dispatch_argv_carries_the_resolved_model_and_the_charter(tmp_path, monkeypatch):
@@ -1354,12 +1355,12 @@ def test_the_dispatch_argv_carries_the_resolved_model_and_the_charter(tmp_path, 
     _card(root, "tasks", "probe")
     seen = _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
 
-    runner.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 3.0, 120)
+    dispatch.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 3.0, 120)
     argv = seen["argv"]
     assert argv[argv.index("--model") + 1] == "sonnet"
     assert argv[argv.index("--agent") + 1] == "code-thread"
     assert argv[argv.index("--max-budget-usd") + 1] == "3.0"
-    assert seen["cwd"] == runner.worktree_root(root) / "probe"
+    assert seen["cwd"] == worktree.worktree_root(root) / "probe"
 
 
 def test_run_output_is_written_beside_the_run_not_onto_the_card(tmp_path, monkeypatch):
@@ -1370,7 +1371,7 @@ def test_run_output_is_written_beside_the_run_not_onto_the_card(tmp_path, monkey
     _card(root, "tasks", "probe")
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
 
-    runner.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 5.0, 120)
+    dispatch.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 5.0, 120)
     out = root / ".ai" / "runs" / "probe" / "attempt-1"
     assert (out / "prompt-1.md").is_file()      # per round, so round 2 does not clobber round 1
     assert (out / "worker-1.json").is_file()
@@ -1384,7 +1385,7 @@ def test_a_pass_on_the_first_round_ends_the_loop(tmp_path, monkeypatch):
     _art_card(root)
     seen = _fake_loop(monkeypatch, ["pass"])
 
-    result = runner.dispatch(root, board.find(root, "icon"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "icon"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "review"
     assert result.rounds == 1
@@ -1398,7 +1399,7 @@ def test_a_revise_verdict_runs_another_round_with_the_notes(tmp_path, monkeypatc
     _art_card(root)
     seen = _fake_loop(monkeypatch, ["revise", "pass"], notes="blades merge below 24px")
 
-    result = runner.dispatch(root, board.find(root, "icon"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "icon"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "review"
     assert result.rounds == 2
@@ -1414,10 +1415,10 @@ def test_the_round_limit_is_enforced_by_the_runner_not_by_the_charter(tmp_path, 
     _art_card(root)
     seen = _fake_loop(monkeypatch, ["revise"] * 10)
 
-    result = runner.dispatch(root, board.find(root, "icon"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "icon"), "development_team",
                              "sonnet", 5.0, 120)
-    assert result.rounds == runner.MAX_ROUNDS
-    assert seen["calls"].count("art") == runner.MAX_ROUNDS
+    assert result.rounds == hostconfig.MAX_ROUNDS
+    assert seen["calls"].count("art") == hostconfig.MAX_ROUNDS
 
 
 def test_exhausting_the_rounds_parks_rather_than_fails(tmp_path, monkeypatch):
@@ -1427,13 +1428,13 @@ def test_exhausting_the_rounds_parks_rather_than_fails(tmp_path, monkeypatch):
     _art_card(root)
     _fake_loop(monkeypatch, ["reject"] * 5, notes="silhouette unreadable at 20px")
 
-    result = runner.dispatch(root, board.find(root, "icon"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "icon"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "parked"
     assert "silhouette unreadable at 20px" in result.detail
     assert "cand.png" in result.detail
 
-    runner.settle(root, "icon", result)
+    settle.settle(root, "icon", result)
     card = board.find(root, "icon")
     assert card.lane == "needs-decision"
     assert "## Question" in card.text
@@ -1448,7 +1449,7 @@ def test_the_checker_is_never_shown_the_producers_prompt(tmp_path, monkeypatch):
     root = _worktree_repo(tmp_path)
     _art_card(root)
     seen = _fake_loop(monkeypatch, ["pass"])
-    runner.dispatch(root, board.find(root, "icon"), "development_team", "sonnet", 5.0, 120)
+    dispatch.dispatch(root, board.find(root, "icon"), "development_team", "sonnet", 5.0, 120)
 
     checker_prompt = seen["checker_prompts"][0]
     producer_prompt = seen["producer_prompts"][0]
@@ -1481,9 +1482,9 @@ def test_the_checker_is_dispatched_with_an_explicit_model(tmp_path, monkeypatch)
             (tmp / "c.png").write_bytes(b"\x89PNG")
         return subprocess.CompletedProcess(argv, 0, "{}", "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-    runner.dispatch(root, board.find(root, "icon"), "development_team", "sonnet", 5.0, 120)
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+    dispatch.dispatch(root, board.find(root, "icon"), "development_team", "sonnet", 5.0, 120)
 
     checker_argv = next(a for a in calls if a[a.index("--agent") + 1] == "art-reviewer")
     assert "--model" in checker_argv
@@ -1508,10 +1509,10 @@ def test_a_producer_that_parks_stops_the_loop_immediately(tmp_path, monkeypatch)
                           encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, "{}", "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
-    result = runner.dispatch(root, board.find(root, "icon"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "icon"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "parked"
     assert "which corp's logo?" in result.detail
@@ -1526,7 +1527,7 @@ def test_a_card_with_no_checker_runs_exactly_one_round(tmp_path, monkeypatch):
     _card(root, "tasks", "probe")
     seen = _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "review"
     assert result.rounds == 1
@@ -1538,7 +1539,7 @@ def test_every_round_costs_are_summed(tmp_path, monkeypatch):
     root = _worktree_repo(tmp_path)
     _art_card(root)
     _fake_loop(monkeypatch, ["revise", "pass"])
-    result = runner.dispatch(root, board.find(root, "icon"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "icon"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.cost_usd == pytest.approx(0.4)
 
@@ -1774,10 +1775,10 @@ def test_an_audio_card_drives_the_same_loop_with_no_runner_change(tmp_path, monk
                 {"verdict": "pass", "best": "hit.wav", "notes": ""}), encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
-    result = runner.dispatch(root, board.find(root, "sfx"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "sfx"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "review"
     assert result.rounds == 1
@@ -1794,22 +1795,22 @@ def test_a_walled_worker_with_dirty_work_keeps_its_worktree_and_records_the_sess
     _card(root, "tasks", "keepwt")
     _walls_dirty(monkeypatch, session_id="sess-keep")
 
-    result = runner.dispatch(root, board.find(root, "keepwt"),
+    result = dispatch.dispatch(root, board.find(root, "keepwt"),
                              "development_team", "sonnet", 0.0, 120)
     assert result.outcome == "limited"
     assert result.kept and result.progressed and not result.stuck
-    assert (runner.worktree_root(root) / "keepwt").exists()   # kept, not dropped
-    handover = runner.read_handover(root, "keepwt")
+    assert (worktree.worktree_root(root) / "keepwt").exists()   # kept, not dropped
+    handover = worktree.read_handover(root, "keepwt")
     assert handover.session_id == "sess-keep"
     assert handover.diff_hash and handover.no_progress == 0
 
-    runner.settle(root, "keepwt", result)
+    settle.settle(root, "keepwt", result)
     card = board.find(root, "keepwt")
     assert card.lane == "tasks"
     assert card.attempts == 0                                 # attempt given back
     assert card.fields.get("branch") == "ai/keepwt"           # branch kept (it is state)
-    assert (runner.worktree_root(root) / "keepwt").exists()   # still there to re-enter
-    assert runner.read_handover(root, "keepwt").session_id == "sess-keep"
+    assert (worktree.worktree_root(root) / "keepwt").exists()   # still there to re-enter
+    assert worktree.read_handover(root, "keepwt").session_id == "sess-keep"
 
 
 def test_a_wall_at_the_first_call_with_no_changes_drops_everything_as_before(
@@ -1823,13 +1824,13 @@ def test_a_wall_at_the_first_call_with_no_changes_drops_everything_as_before(
     _fake_worker(monkeypatch, commit=False, returncode=1,
                  stderr="Claude AI usage limit reached")
 
-    result = runner.dispatch(root, board.find(root, "empty"),
+    result = dispatch.dispatch(root, board.find(root, "empty"),
                              "development_team", "sonnet", 0.0, 120)
     assert result.outcome == "limited" and not result.kept
-    assert not (runner.worktree_root(root) / "empty").exists()      # dropped
-    assert runner.read_handover(root, "empty").session_id == ""     # nothing preserved
+    assert not (worktree.worktree_root(root) / "empty").exists()      # dropped
+    assert worktree.read_handover(root, "empty").session_id == ""     # nothing preserved
 
-    runner.settle(root, "empty", result)
+    settle.settle(root, "empty", result)
     card = board.find(root, "empty")
     assert card.lane == "tasks"
     assert card.attempts == 0
@@ -1844,13 +1845,13 @@ def test_the_next_dispatch_of_an_interrupted_card_resumes_its_session(tmp_path, 
     _charter(root, "code-thread")
     _card(root, "tasks", "resumecard")
     _walls_dirty(monkeypatch, session_id="sess-resume")
-    runner.settle(root, "resumecard",
-                  runner.dispatch(root, board.find(root, "resumecard"),
+    settle.settle(root, "resumecard",
+                  dispatch.dispatch(root, board.find(root, "resumecard"),
                                   "development_team", "sonnet", 0.0, 120))
 
     seen: list = []
     _finishing_worker(monkeypatch, record=seen)
-    result = runner.dispatch(root, board.find(root, "resumecard"),
+    result = dispatch.dispatch(root, board.find(root, "resumecard"),
                              "development_team", "sonnet", 0.0, 120)
     assert result.outcome == "review"
     argv = seen[0]["argv"]
@@ -1870,14 +1871,14 @@ def test_a_failing_resume_falls_through_to_a_fresh_session_in_the_same_worktree(
     _charter(root, "code-thread")
     _card(root, "tasks", "fallbackcard")
     _walls_dirty(monkeypatch, session_id="sess-dead")
-    runner.settle(root, "fallbackcard",
-                  runner.dispatch(root, board.find(root, "fallbackcard"),
+    settle.settle(root, "fallbackcard",
+                  dispatch.dispatch(root, board.find(root, "fallbackcard"),
                                   "development_team", "sonnet", 0.0, 120))
 
     seen: list = []
     _finishing_worker(monkeypatch, record=seen, resume_returncode=1,
                       resume_stderr="No conversation found with session ID sess-dead")
-    result = runner.dispatch(root, board.find(root, "fallbackcard"),
+    result = dispatch.dispatch(root, board.find(root, "fallbackcard"),
                              "development_team", "sonnet", 0.0, 120)
     assert result.outcome == "review"
     assert len(seen) == 2                          # resume, then the fresh fallback
@@ -1893,16 +1894,16 @@ def test_commit_wip_banks_dirty_work_and_is_a_noop_when_clean(tmp_path):
     is already clean, so it is safe to call defensively."""
     root = _worktree_repo(tmp_path)
     _card(root, "tasks", "wipcard")
-    tree, branch, mode = runner.prepare_worktree(
+    tree, branch, mode = worktree.prepare_worktree(
         root, board.find(root, "wipcard"), "development_team")
-    assert mode == runner.FRESH
-    assert runner.commit_wip(root, tree, "wipcard") is False        # clean → no-op
+    assert mode == worktree.FRESH
+    assert worktree.commit_wip(root, tree, "wipcard") is False        # clean → no-op
     (tree / "draft.txt").write_text("half done", encoding="utf-8")
-    assert runner.commit_wip(root, tree, "wipcard") is True
+    assert worktree.commit_wip(root, tree, "wipcard") is True
     log = subprocess.run(["git", "log", "--oneline"], cwd=tree,
                          capture_output=True, text=True).stdout
     assert "wip: wipcard interrupted" in log
-    assert runner.commit_wip(root, tree, "wipcard") is False        # nothing left
+    assert worktree.commit_wip(root, tree, "wipcard") is False        # nothing left
 
 
 def test_a_lost_worktree_is_rebuilt_from_its_wip_commit(tmp_path):
@@ -1913,9 +1914,9 @@ def test_a_lost_worktree_is_rebuilt_from_its_wip_commit(tmp_path):
     _card(root, "tasks", "wtrebuild")
     _seed_wip_branch(root, tmp_path, "wtrebuild", "interrupted work")
 
-    tree, branch, mode = runner.prepare_worktree(
+    tree, branch, mode = worktree.prepare_worktree(
         root, board.find(root, "wtrebuild"), "development_team")
-    assert mode == runner.FROM_WIP
+    assert mode == worktree.FROM_WIP
     assert (tree / "wip.txt").read_text(encoding="utf-8") == "interrupted work"
 
 
@@ -1934,10 +1935,10 @@ def test_prepare_worktree_normalizes_line_endings_on_a_fresh_checkout(tmp_path, 
     monkeypatch.setattr(normalize_worktree, "normalize",
                         lambda repo, **kw: calls.append(repo) or 0)
 
-    tree, _, mode = runner.prepare_worktree(
+    tree, _, mode = worktree.prepare_worktree(
         root, board.find(root, "crlfcard"), "development_team")
 
-    assert mode == runner.FRESH
+    assert mode == worktree.FRESH
     assert calls == [tree]
 
 
@@ -1953,10 +1954,10 @@ def test_prepare_worktree_normalizes_line_endings_from_wip_too(tmp_path, monkeyp
     monkeypatch.setattr(normalize_worktree, "normalize",
                         lambda repo, **kw: calls.append(repo) or 0)
 
-    tree, _, mode = runner.prepare_worktree(
+    tree, _, mode = worktree.prepare_worktree(
         root, board.find(root, "crlfwip"), "development_team")
 
-    assert mode == runner.FROM_WIP
+    assert mode == worktree.FROM_WIP
     assert calls == [tree]
 
 
@@ -1973,10 +1974,10 @@ def test_prepare_worktree_survives_normalize_worktree_raising(tmp_path, monkeypa
 
     monkeypatch.setattr(normalize_worktree, "normalize", _boom)
 
-    tree, _, mode = runner.prepare_worktree(
+    tree, _, mode = worktree.prepare_worktree(
         root, board.find(root, "crlfboom"), "development_team")
 
-    assert mode == runner.FRESH
+    assert mode == worktree.FRESH
     assert tree.is_dir()
 
 
@@ -1992,7 +1993,7 @@ def test_a_dispatch_from_a_wip_commit_hands_over_a_progress_note_and_does_not_re
 
     seen: list = []
     _finishing_worker(monkeypatch, record=seen)
-    result = runner.dispatch(root, board.find(root, "wtnote"),
+    result = dispatch.dispatch(root, board.find(root, "wtnote"),
                              "development_team", "sonnet", 0.0, 120)
     assert result.outcome == "review"
     assert "--resume" not in seen[0]["argv"]
@@ -2011,24 +2012,24 @@ def test_a_resume_that_moves_nothing_spends_the_attempt_then_files_the_card(
     _walls_dirty(monkeypatch, session_id="s", content="frozen")   # same bytes every time
 
     # wall 1 — first interruption: given back, worktree kept.
-    runner.settle(root, "stuckcard",
-                  runner.dispatch(root, board.find(root, "stuckcard"),
+    settle.settle(root, "stuckcard",
+                  dispatch.dispatch(root, board.find(root, "stuckcard"),
                                   "development_team", "sonnet", 0.0, 120))
     assert board.find(root, "stuckcard").attempts == 0
 
     # wall 2 — no movement: the attempt is SPENT (not rewound), card stays in tasks/.
-    r2 = runner.dispatch(root, board.find(root, "stuckcard"),
+    r2 = dispatch.dispatch(root, board.find(root, "stuckcard"),
                          "development_team", "sonnet", 0.0, 120)
     assert r2.kept and not r2.progressed and not r2.stuck
-    runner.settle(root, "stuckcard", r2)
+    settle.settle(root, "stuckcard", r2)
     card = board.find(root, "stuckcard")
     assert card.lane == "tasks" and card.attempts == 1
 
     # wall 3 — still no movement: the breaker trips and the card leaves the head.
-    r3 = runner.dispatch(root, board.find(root, "stuckcard"),
+    r3 = dispatch.dispatch(root, board.find(root, "stuckcard"),
                          "development_team", "sonnet", 0.0, 120)
     assert r3.stuck
-    runner.settle(root, "stuckcard", r3)
+    settle.settle(root, "stuckcard", r3)
     assert board.find(root, "stuckcard").lane == "failed"
 
 
@@ -2042,18 +2043,18 @@ def test_a_kept_worktree_is_not_pruned_by_this_runner(tmp_path, monkeypatch):
     _card(root, "tasks", "kept")
     _card(root, "tasks", "sibling")
     _walls_dirty(monkeypatch, session_id="s")
-    runner.settle(root, "kept",
-                  runner.dispatch(root, board.find(root, "kept"),
+    settle.settle(root, "kept",
+                  dispatch.dispatch(root, board.find(root, "kept"),
                                   "development_team", "sonnet", 0.0, 120))
-    assert (runner.worktree_root(root) / "kept").exists()
+    assert (worktree.worktree_root(root) / "kept").exists()
 
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
-    runner.settle(root, "sibling",
-                  runner.dispatch(root, board.find(root, "sibling"),
+    settle.settle(root, "sibling",
+                  dispatch.dispatch(root, board.find(root, "sibling"),
                                   "development_team", "sonnet", 0.0, 120))
-    assert (runner.worktree_root(root) / "kept").exists()            # untouched — no cap here
-    assert not (runner.worktree_root(root) / "sibling").exists()     # resolved, dropped as normal
-    assert runner.read_handover(root, "kept").session_id == "s"      # still resumable
+    assert (worktree.worktree_root(root) / "kept").exists()            # untouched — no cap here
+    assert not (worktree.worktree_root(root) / "sibling").exists()     # resolved, dropped as normal
+    assert worktree.read_handover(root, "kept").session_id == "s"      # still resumable
 
 
 def test_the_worktree_hash_ignores_where_the_worktree_lives_but_not_its_content(tmp_path):
@@ -2062,15 +2063,15 @@ def test_the_worktree_hash_ignores_where_the_worktree_lives_but_not_its_content(
     output is untracked before it commits)."""
     root = _worktree_repo(tmp_path)
     _card(root, "tasks", "hashcard")
-    tree, _, _ = runner.prepare_worktree(root, board.find(root, "hashcard"), "development_team")
-    base = runner._worktree_state_hash(tree)
+    tree, _, _ = worktree.prepare_worktree(root, board.find(root, "hashcard"), "development_team")
+    base = worktree._worktree_state_hash(tree)
     (tree / "a.txt").write_text("one", encoding="utf-8")
-    after_add = runner._worktree_state_hash(tree)
+    after_add = worktree._worktree_state_hash(tree)
     assert after_add != base                                  # untracked content is seen
     (tree / "a.txt").write_text("two", encoding="utf-8")
-    assert runner._worktree_state_hash(tree) != after_add     # a changed byte moves it
+    assert worktree._worktree_state_hash(tree) != after_add     # a changed byte moves it
     (tree / "a.txt").write_text("one", encoding="utf-8")
-    assert runner._worktree_state_hash(tree) == after_add     # deterministic, no drift
+    assert worktree._worktree_state_hash(tree) == after_add     # deterministic, no drift
 
 
 # --------------------------------------------------------------------------
@@ -2104,8 +2105,8 @@ def test_a_card_retired_via_max_attempts_keeps_its_run_dir_for_resume(tmp_path, 
     for expected_lane in ("tasks", "tasks", "failed"):
         card = board.find(root, "probe")
         card.write({"finished": None})
-        result = runner.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
-        runner.settle(root, "probe", result)
+        result = dispatch.dispatch(root, card, "development_team", "sonnet", 5.0, 120)
+        settle.settle(root, "probe", result)
         assert board.find(root, "probe").lane == expected_lane
 
     assert (root / ".ai" / "runs" / "probe").exists()
@@ -2121,17 +2122,17 @@ def test_a_card_filed_as_stuck_is_pruned_eagerly_in_the_same_settle(tmp_path, mo
     _card(root, "tasks", "stuckcard")
     _walls_dirty(monkeypatch, session_id="s", content="frozen")
 
-    runner.settle(root, "stuckcard", runner.dispatch(
+    settle.settle(root, "stuckcard", dispatch.dispatch(
         root, board.find(root, "stuckcard"), "development_team", "sonnet", 0.0, 120))
-    r2 = runner.dispatch(root, board.find(root, "stuckcard"),
+    r2 = dispatch.dispatch(root, board.find(root, "stuckcard"),
                          "development_team", "sonnet", 0.0, 120)
-    runner.settle(root, "stuckcard", r2)
+    settle.settle(root, "stuckcard", r2)
     assert (root / ".ai" / "runs" / "stuckcard").exists()   # still in tasks/ — not pruned yet
 
-    r3 = runner.dispatch(root, board.find(root, "stuckcard"),
+    r3 = dispatch.dispatch(root, board.find(root, "stuckcard"),
                          "development_team", "sonnet", 0.0, 120)
     assert r3.stuck
-    runner.settle(root, "stuckcard", r3)
+    settle.settle(root, "stuckcard", r3)
     assert board.find(root, "stuckcard").lane == "failed"
     assert not (root / ".ai" / "runs" / "stuckcard").exists()
     assert "## Telemetry" in board.find(root, "stuckcard").text
@@ -2148,7 +2149,7 @@ def test_a_hand_moved_done_card_is_pruned_by_the_next_runner_startup(tmp_path, m
     run_dir = root / ".ai" / "runs" / "shipped" / "attempt-1"
     run_dir.mkdir(parents=True)
     (run_dir / "worker-1.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
@@ -2164,13 +2165,13 @@ def test_the_sweep_also_drops_an_orphaned_worktree_left_on_a_terminal_card(tmp_p
     root = _loaded_board(tmp_path)
     _card(root, "failed", "orphan")
     subprocess.run(["git", "worktree", "add", "-b", "ai/orphan",
-                    str(runner.worktree_root(root) / "orphan"), "development_team"],
+                    str(worktree.worktree_root(root) / "orphan"), "development_team"],
                    cwd=root, check=True)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
-    assert not (runner.worktree_root(root) / "orphan").exists()
+    assert not (worktree.worktree_root(root) / "orphan").exists()
     kept = subprocess.run(["git", "branch", "--list", "ai/orphan"], cwd=root,
                           capture_output=True, text=True).stdout
     assert "ai/orphan" in kept   # only the checkout is dropped, the branch survives
@@ -2185,7 +2186,7 @@ def test_a_card_in_tasks_with_attempts_keeps_its_run_dirs_through_the_sweep(tmp_
     run_dir.mkdir(parents=True)
     (run_dir / "worker-1.json").write_text("{}", encoding="utf-8")
 
-    swept = runner.sweep_terminal_cards(root)
+    swept = worktree.sweep_terminal_cards(root)
 
     assert swept == []
     assert run_dir.is_dir()
@@ -2202,7 +2203,7 @@ def test_a_testing_card_keeps_its_run_dir_through_the_sweep(tmp_path):
     run_dir.mkdir(parents=True)
     (run_dir / "worker-1.json").write_text('{"session_id": "s"}', encoding="utf-8")
 
-    swept = runner.sweep_terminal_cards(root)
+    swept = worktree.sweep_terminal_cards(root)
 
     assert swept == []
     assert run_dir.is_dir()
@@ -2220,7 +2221,7 @@ def test_a_failed_card_keeps_its_run_dir_through_the_sweep(tmp_path):
     run_dir.mkdir(parents=True)
     (run_dir / "worker-1.json").write_text('{"session_id": "s"}', encoding="utf-8")
 
-    swept = runner.sweep_terminal_cards(root)
+    swept = worktree.sweep_terminal_cards(root)
 
     assert swept == []
     assert run_dir.is_dir()
@@ -2234,7 +2235,7 @@ def test_cap_run_dir_keeps_only_the_last_n_attempts(tmp_path):
     for n in (1, 2, 3, 4, 5):
         (root / ".ai" / "runs" / "capcard" / f"attempt-{n}").mkdir(parents=True)
 
-    runner.cap_run_dir(root, "capcard", keep=3)
+    worktree.cap_run_dir(root, "capcard", keep=3)
 
     remaining = sorted(p.name for p in (root / ".ai" / "runs" / "capcard").iterdir())
     assert remaining == ["attempt-3", "attempt-4", "attempt-5"]
@@ -2246,7 +2247,7 @@ def test_cap_run_dirs_in_flight_only_touches_tasks_lane_cards(tmp_path):
     for n in (1, 2, 3, 4):
         (root / ".ai" / "runs" / "inflight" / f"attempt-{n}").mkdir(parents=True)
 
-    runner.cap_run_dirs_in_flight(root, keep=3)
+    worktree.cap_run_dirs_in_flight(root, keep=3)
 
     remaining = sorted(p.name for p in (root / ".ai" / "runs" / "inflight").iterdir())
     assert remaining == ["attempt-2", "attempt-3", "attempt-4"]
@@ -2257,8 +2258,8 @@ def test_prune_run_dir_and_prune_worktree_are_no_ops_when_absent(tmp_path):
     error — a sweep over every terminal card must not care which of them ever
     actually had a run dir or a surviving worktree."""
     root = _repo(tmp_path)
-    runner.prune_run_dir(root, "never-existed")               # must not raise
-    runner.prune_worktree_if_present(root, "never-existed")   # neither must this
+    worktree.prune_run_dir(root, "never-existed")               # must not raise
+    worktree.prune_worktree_if_present(root, "never-existed")   # neither must this
 
 
 def test_status_json_log_and_lock_survive_pruning_the_running_cards_own_dir(tmp_path):
@@ -2275,7 +2276,7 @@ def test_status_json_log_and_lock_survive_pruning_the_running_cards_own_dir(tmp_
     (runs / "running-now" / "attempt-1").mkdir(parents=True)
     (runs / "running-now" / "attempt-1" / "worker-1.json").write_text("{}", encoding="utf-8")
 
-    runner.prune_run_dir(root, "running-now")
+    worktree.prune_run_dir(root, "running-now")
 
     assert (runs / "status.json").is_file()
     assert (runs / ".lock").is_file()
@@ -2297,7 +2298,7 @@ def test_prune_old_run_logs_keeps_the_last_n_days(tmp_path):
     (runs / f"{drop_date}.log").write_text("drop\n", encoding="utf-8")
     (runs / "not-a-date.log").write_text("ignored\n", encoding="utf-8")
 
-    runner.prune_old_run_logs(root, days=14)
+    worktree.prune_old_run_logs(root, days=14)
 
     assert (runs / f"{keep_date}.log").is_file()
     assert not (runs / f"{drop_date}.log").exists()
@@ -2310,12 +2311,12 @@ def test_run_calls_all_four_housekeeping_steps_at_startup(tmp_path, monkeypatch)
     single function's own unit test would catch it."""
     root = _loaded_board(tmp_path)
     _ignore_runs(root)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
     calls: list[str] = []
-    monkeypatch.setattr(runner, "sweep_terminal_cards", lambda r: calls.append("sweep") or [])
-    monkeypatch.setattr(runner, "cap_run_dirs_in_flight", lambda r: calls.append("cap"))
-    monkeypatch.setattr(runner, "prune_old_run_logs", lambda r: calls.append("logs"))
-    monkeypatch.setattr(runner, "enforce_worktree_ceiling", lambda r: calls.append("ceiling") or [])
+    monkeypatch.setattr(worktree, "sweep_terminal_cards", lambda r: calls.append("sweep") or [])
+    monkeypatch.setattr(worktree, "cap_run_dirs_in_flight", lambda r: calls.append("cap"))
+    monkeypatch.setattr(worktree, "prune_old_run_logs", lambda r: calls.append("logs"))
+    monkeypatch.setattr(worktree, "enforce_worktree_ceiling", lambda r: calls.append("ceiling") or [])
 
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
@@ -2328,10 +2329,10 @@ def test_the_housekeeping_steps_do_not_run_on_a_dry_run(tmp_path, monkeypatch):
     root = _loaded_board(tmp_path)
     _ignore_runs(root)
     calls: list[str] = []
-    monkeypatch.setattr(runner, "sweep_terminal_cards", lambda r: calls.append("sweep") or [])
-    monkeypatch.setattr(runner, "cap_run_dirs_in_flight", lambda r: calls.append("cap"))
-    monkeypatch.setattr(runner, "prune_old_run_logs", lambda r: calls.append("logs"))
-    monkeypatch.setattr(runner, "enforce_worktree_ceiling", lambda r: calls.append("ceiling") or [])
+    monkeypatch.setattr(worktree, "sweep_terminal_cards", lambda r: calls.append("sweep") or [])
+    monkeypatch.setattr(worktree, "cap_run_dirs_in_flight", lambda r: calls.append("cap"))
+    monkeypatch.setattr(worktree, "prune_old_run_logs", lambda r: calls.append("logs"))
+    monkeypatch.setattr(worktree, "enforce_worktree_ceiling", lambda r: calls.append("ceiling") or [])
 
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team", "--dry-run"]))
 
@@ -2343,13 +2344,13 @@ def test_demote_is_silent_when_there_is_nothing_to_bank(tmp_path, monkeypatch):
     stay silent through it rather than logging a phantom failure."""
     root = _worktree_repo(tmp_path)
     _card(root, "tasks", "cleanwt")
-    tree, _, mode = runner.prepare_worktree(root, board.find(root, "cleanwt"),
+    tree, _, mode = worktree.prepare_worktree(root, board.find(root, "cleanwt"),
                                             "development_team")
-    assert mode == runner.FRESH
+    assert mode == worktree.FRESH
     logged: list[str] = []
-    monkeypatch.setattr(runner, "_log", lambda message: logged.append(message))
+    monkeypatch.setattr(hostconfig, "_log", lambda message: logged.append(message))
 
-    runner.demote_worktree_to_wip(root, tree, "cleanwt")
+    worktree.demote_worktree_to_wip(root, tree, "cleanwt")
 
     assert logged == []
     assert not tree.exists()
@@ -2362,15 +2363,15 @@ def test_demote_logs_but_still_drops_when_the_wip_commit_genuinely_fails(tmp_pat
     to be enforced either way."""
     root = _worktree_repo(tmp_path)
     _card(root, "tasks", "failwt")
-    tree, _, mode = runner.prepare_worktree(root, board.find(root, "failwt"),
+    tree, _, mode = worktree.prepare_worktree(root, board.find(root, "failwt"),
                                             "development_team")
-    assert mode == runner.FRESH
+    assert mode == worktree.FRESH
     (tree / "draft.txt").write_text("uncommitted", encoding="utf-8")
     logged: list[str] = []
-    monkeypatch.setattr(runner, "_log", lambda message: logged.append(message))
-    monkeypatch.setattr(runner, "commit_wip", lambda root_, tree_, card_id: False)
+    monkeypatch.setattr(hostconfig, "_log", lambda message: logged.append(message))
+    monkeypatch.setattr(worktree, "commit_wip", lambda root_, tree_, card_id: False)
 
-    runner.demote_worktree_to_wip(root, tree, "failwt")
+    worktree.demote_worktree_to_wip(root, tree, "failwt")
 
     assert logged and "WIP commit failed" in logged[0]
     assert not tree.exists()
@@ -2384,20 +2385,20 @@ def test_demote_calls_the_real_commit_wip_primitive_not_a_lookalike(tmp_path, mo
     that merely behaves like it."""
     root = _worktree_repo(tmp_path)
     _card(root, "tasks", "callcard")
-    tree, _, mode = runner.prepare_worktree(root, board.find(root, "callcard"),
+    tree, _, mode = worktree.prepare_worktree(root, board.find(root, "callcard"),
                                             "development_team")
-    assert mode == runner.FRESH
+    assert mode == worktree.FRESH
     (tree / "draft.txt").write_text("data", encoding="utf-8")
-    real_commit_wip = runner.commit_wip
+    real_commit_wip = worktree.commit_wip
     calls: list[tuple] = []
 
     def spy(root_, tree_, card_id):
         calls.append((root_, tree_, card_id))
         return real_commit_wip(root_, tree_, card_id)
 
-    monkeypatch.setattr(runner, "commit_wip", spy)
+    monkeypatch.setattr(worktree, "commit_wip", spy)
 
-    runner.demote_worktree_to_wip(root, tree, "callcard")
+    worktree.demote_worktree_to_wip(root, tree, "callcard")
 
     assert calls == [(root, tree, "callcard")]
     log = subprocess.run(["git", "log", "--oneline", "ai/callcard"], cwd=root,
@@ -2417,22 +2418,22 @@ def test_the_kept_worktree_ceiling_demotes_the_oldest_first(tmp_path, monkeypatc
     for cid in ids:
         _card(root, "tasks", cid)
         _walls_dirty(monkeypatch, session_id="s")
-        runner.settle(root, cid, runner.dispatch(
+        settle.settle(root, cid, dispatch.dispatch(
             root, board.find(root, cid), "development_team", "sonnet", 0.0, 120))
         assert board.find(root, cid).lane == "tasks"   # kept — warm, not resolved
 
     for index, cid in enumerate(ids):
         stamp = 1_700_000_000 + index * 1_000   # strictly increasing; wt-a is oldest
-        tree = runner.worktree_root(root) / cid
+        tree = worktree.worktree_root(root) / cid
         os.utime(tree, (stamp, stamp))
 
-    demoted = runner.enforce_worktree_ceiling(root, ceiling=2)
+    demoted = worktree.enforce_worktree_ceiling(root, ceiling=2)
 
     assert demoted == ["wt-a", "wt-b"]
-    assert not (runner.worktree_root(root) / "wt-a").exists()
-    assert not (runner.worktree_root(root) / "wt-b").exists()
-    assert (runner.worktree_root(root) / "wt-c").exists()
-    assert (runner.worktree_root(root) / "wt-d").exists()
+    assert not (worktree.worktree_root(root) / "wt-a").exists()
+    assert not (worktree.worktree_root(root) / "wt-b").exists()
+    assert (worktree.worktree_root(root) / "wt-c").exists()
+    assert (worktree.worktree_root(root) / "wt-d").exists()
     log = subprocess.run(["git", "log", "--oneline", "ai/wt-a"], cwd=root,
                          capture_output=True, text=True).stdout
     assert "wip: wt-a interrupted" in log   # the demoted card's work is banked, not lost
@@ -2443,13 +2444,13 @@ def test_enforce_worktree_ceiling_is_a_noop_when_at_or_under_it(tmp_path, monkey
     _charter(root, "code-thread")
     _card(root, "tasks", "onlyone")
     _walls_dirty(monkeypatch, session_id="s")
-    runner.settle(root, "onlyone", runner.dispatch(
+    settle.settle(root, "onlyone", dispatch.dispatch(
         root, board.find(root, "onlyone"), "development_team", "sonnet", 0.0, 120))
 
-    demoted = runner.enforce_worktree_ceiling(root, ceiling=runner.WORKTREE_KEEP_CEILING)
+    demoted = worktree.enforce_worktree_ceiling(root, ceiling=hostconfig.WORKTREE_KEEP_CEILING)
 
     assert demoted == []
-    assert (runner.worktree_root(root) / "onlyone").exists()
+    assert (worktree.worktree_root(root) / "onlyone").exists()
 
 
 def test_a_walled_attempt_that_left_commits_but_no_handover_is_resumed_from_its_branch(tmp_path):
@@ -2472,12 +2473,12 @@ def test_a_walled_attempt_that_left_commits_but_no_handover_is_resumed_from_its_
     root = _worktree_repo(tmp_path)
     _card(root, "tasks", "orphan")
     _seed_orphaned_branch(root, tmp_path, "orphan", "the finished feature")
-    assert not runner.read_handover(root, "orphan").session_id
+    assert not worktree.read_handover(root, "orphan").session_id
 
-    tree, branch, mode = runner.prepare_worktree(
+    tree, branch, mode = worktree.prepare_worktree(
         root, board.find(root, "orphan"), "development_team")
 
-    assert mode == runner.FROM_BRANCH
+    assert mode == worktree.FROM_BRANCH
     assert branch == "ai/orphan"
     # The commits are there to continue from, not renamed away to a rescue ref.
     assert (tree / "feature.txt").read_text(encoding="utf-8") == "the finished feature"
@@ -2494,10 +2495,10 @@ def test_an_empty_branch_still_cold_starts(tmp_path):
     _card(root, "tasks", "emptybr")
     subprocess.run(["git", "branch", "ai/emptybr", "development_team"], cwd=root, check=True)
 
-    _, _, mode = runner.prepare_worktree(
+    _, _, mode = worktree.prepare_worktree(
         root, board.find(root, "emptybr"), "development_team")
 
-    assert mode == runner.FRESH
+    assert mode == worktree.FRESH
 
 
 def test_the_from_branch_note_does_not_tell_the_worker_to_undo_a_real_commit(tmp_path):
@@ -2505,7 +2506,7 @@ def test_the_from_branch_note_does_not_tell_the_worker_to_undo_a_real_commit(tmp
     matters: it says the branch tip is a `wip:` placeholder to be replaced with
     `git reset --soft HEAD~1`. FROM_BRANCH's commits are ordinary and finished, so
     a worker following that advice would soft-reset real work it never wrote."""
-    note = runner._FROM_BRANCH_NOTE.format(base="test")
+    note = dispatch._FROM_BRANCH_NOTE.format(base="test")
     assert "reset --soft" not in note
     assert "HEAD~1" not in note
     # It may *mention* `wip:` — it does, to say this is not one — but it must say so
@@ -2532,10 +2533,10 @@ def test_a_failed_attempts_branch_is_rescued_not_resumed(tmp_path):
     _seed_orphaned_branch(root, tmp_path, "brokecard", "half-broken work")
     board.find(root, "brokecard").write({"last_outcome": "failed"})
 
-    _, _, mode = runner.prepare_worktree(
+    _, _, mode = worktree.prepare_worktree(
         root, board.find(root, "brokecard"), "development_team")
 
-    assert mode == runner.FRESH
+    assert mode == worktree.FRESH
     rescues = subprocess.run(["git", "branch", "--list", "ai/brokecard@failed-*"],
                              cwd=root, capture_output=True, text=True).stdout.split()
     assert rescues, "a failed attempt's branch must still be preserved as a rescue ref"
@@ -2589,7 +2590,7 @@ def test_a_violation_outside_the_diff_that_base_is_clean_of_fails_the_card(
     _gate_stub(monkeypatch, tmp_path, _TREE_SENSITIVE_GATE)
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
 
     assert result.outcome == "failed"
@@ -2605,14 +2606,14 @@ def test_gates_failing_on_base_names_what_reproduced(tmp_path, monkeypatch):
     _gate_stub(monkeypatch, tmp_path,
                _JSON_AWARE_GATE.format(file="Board/other.md", rule="stale"))
 
-    why = runner._gates_failing_on_base(
+    why = verify._gates_failing_on_base(
         root, "development_team",
         [{"file": "Board/other.md", "line": 1, "rule": "stale"}], "probe")
 
     assert "Board/other.md" in why
     assert "development_team" in why
     # And the baseline checkout is cleaned up behind it, the same as the pytest half.
-    assert not (runner.worktree_root(root) / "_gatebase-probe").exists()
+    assert not (worktree.worktree_root(root) / "_gatebase-probe").exists()
 
 
 def test_gates_failing_on_base_matches_the_rule_not_just_the_path(tmp_path, monkeypatch):
@@ -2623,7 +2624,7 @@ def test_gates_failing_on_base_matches_the_rule_not_just_the_path(tmp_path, monk
     _gate_stub(monkeypatch, tmp_path,
                _JSON_AWARE_GATE.format(file="Board/other.md", rule="a-newer-rule"))
 
-    why = runner._gates_failing_on_base(
+    why = verify._gates_failing_on_base(
         root, "development_team",
         [{"file": "Board/other.md", "line": 1, "rule": "the-branchs-old-rule"}], "probe")
 
@@ -2639,7 +2640,7 @@ def test_gates_failing_on_base_blames_nobody_when_it_cannot_answer(tmp_path, mon
     _gate_stub(monkeypatch, tmp_path,
                "print('Board/other.md:1 - stale'); raise SystemExit(1)\n")
 
-    why = runner._gates_failing_on_base(
+    why = verify._gates_failing_on_base(
         root, "development_team",
         [{"file": "Board/other.md", "line": 1, "rule": "stale"}], "probe")
 
@@ -2661,16 +2662,16 @@ def test_a_resumed_branch_is_replayed_onto_base_before_it_is_judged(tmp_path):
     # base moves on afterwards, exactly as it does while a card waits in `tasks/`.
     _commit_on_base(root, tmp_path, "moved_on.txt", "a sibling card landed")
 
-    tree, branch, mode = runner.prepare_worktree(
+    tree, branch, mode = worktree.prepare_worktree(
         root, board.find(root, "orphan"), "development_team")
 
-    assert mode == runner.FROM_BRANCH
+    assert mode == worktree.FROM_BRANCH
     assert branch == "ai/orphan"
     # Its own commits survived the replay...
     assert (tree / "feature.txt").read_text(encoding="utf-8") == "the finished feature"
     # ...and it is no longer behind, so the gates see what `development_team` sees.
     assert (tree / "moved_on.txt").exists(), "the branch was judged against a stale tree"
-    assert runner._commits_behind(root, branch, "development_team") == 0
+    assert worktree._commits_behind(root, branch, "development_team") == 0
 
 
 def test_a_resumed_branch_that_will_not_replay_cold_starts_and_keeps_its_commits(
@@ -2689,15 +2690,15 @@ def test_a_resumed_branch_that_will_not_replay_cold_starts_and_keeps_its_commits
     # The same path, a different answer: nothing can replay this without a judgment.
     _commit_on_base(root, tmp_path, "feature.txt", "base's answer")
 
-    _tree, _branch, mode = runner.prepare_worktree(
+    _tree, _branch, mode = worktree.prepare_worktree(
         root, board.find(root, "clash"), "development_team")
 
-    assert mode == runner.FRESH
+    assert mode == worktree.FRESH
     rescues = subprocess.run(["git", "branch", "--list", "ai/clash@failed-*"],
                              cwd=root, capture_output=True, text=True).stdout.split()
     assert rescues, "the branch's commits must be preserved, not discarded"
     # And no rebase was left paused in the worktree the fall-through discarded.
-    assert not runner._rebase_in_progress(runner.worktree_root(root) / "clash")
+    assert not review._rebase_in_progress(worktree.worktree_root(root) / "clash")
 
 
 def test_a_replayed_review_fix_branch_keeps_its_review_anchor(tmp_path):
@@ -2715,25 +2716,25 @@ def test_a_replayed_review_fix_branch_keeps_its_review_anchor(tmp_path):
     root = _worktree_repo(tmp_path)
     _card(root, "tasks", "anchor")
     _branch_with_file(root, tmp_path, "ai/anchor", "feature.py", "x = 1\n")
-    reviewed = runner._git(root, "rev-parse", "ai/anchor").stdout.strip()
-    runner.write_handover(root, "anchor", runner.Handover(
+    reviewed = git.run(root, "rev-parse", "ai/anchor").stdout.strip()
+    worktree.write_handover(root, "anchor", worktree.Handover(
         review_fix=True, reviewed_sha=reviewed, review_finding="name commit Y instead"))
     # A sibling card merges into base while this one waits to be re-dispatched —
     # which is why the branch is behind, and why the replay fires at all.
     _commit_on_base(root, tmp_path, "sibling.txt", "a sibling card landed")
 
-    tree, branch, mode = runner.prepare_worktree(
+    tree, branch, mode = worktree.prepare_worktree(
         root, board.find(root, "anchor"), "development_team")
 
-    assert mode == runner.FROM_REVIEW
-    assert runner._commits_behind(root, branch, "development_team") == 0
-    after = runner.read_handover(root, "anchor")
+    assert mode == worktree.FROM_REVIEW
+    assert worktree._commits_behind(root, branch, "development_team") == 0
+    after = worktree.read_handover(root, "anchor")
     assert after.reviewed_sha != reviewed, "the pre-rebase sha cannot survive a rebase"
-    assert runner._is_ancestor(root, after.reviewed_sha, branch), \
+    assert worktree._is_ancestor(root, after.reviewed_sha, branch), \
         "the anchor must be reachable from the branch, or review_stage discards it"
     # The anchor is the replayed tip, so the incremental diff is empty until the
     # worker commits the fix — which is exactly right: nothing new to review yet.
-    assert after.reviewed_sha == runner._git(tree, "rev-parse", "HEAD").stdout.strip()
+    assert after.reviewed_sha == git.run(tree, "rev-parse", "HEAD").stdout.strip()
     # And the fields that are not about the replay came through untouched.
     assert after.review_fix is True
     assert after.review_finding == "name commit Y instead"
@@ -2746,15 +2747,15 @@ def test_a_review_fix_branch_that_is_level_with_base_keeps_its_anchor_unchanged(
     root = _worktree_repo(tmp_path)
     _card(root, "tasks", "level")
     _branch_with_file(root, tmp_path, "ai/level", "feature.py", "x = 1\n")
-    reviewed = runner._git(root, "rev-parse", "ai/level").stdout.strip()
-    runner.write_handover(root, "level", runner.Handover(
+    reviewed = git.run(root, "rev-parse", "ai/level").stdout.strip()
+    worktree.write_handover(root, "level", worktree.Handover(
         review_fix=True, reviewed_sha=reviewed, review_finding="f"))
 
-    tree, branch, mode = runner.prepare_worktree(
+    tree, branch, mode = worktree.prepare_worktree(
         root, board.find(root, "level"), "development_team")
 
-    assert mode == runner.FROM_REVIEW
-    assert runner.read_handover(root, "level").reviewed_sha == reviewed
+    assert mode == worktree.FROM_REVIEW
+    assert worktree.read_handover(root, "level").reviewed_sha == reviewed
 
 
 def test_a_replayed_wip_branch_does_not_move_its_review_anchor(tmp_path):
@@ -2768,18 +2769,18 @@ def test_a_replayed_wip_branch_does_not_move_its_review_anchor(tmp_path):
     root = _worktree_repo(tmp_path)
     _card(root, "tasks", "wipanchor")
     _seed_wip_branch(root, tmp_path, "wipanchor", "half-applied fix")
-    reviewed = runner._git(root, "rev-parse", "ai/wipanchor~1").stdout.strip()
-    prior = runner.read_handover(root, "wipanchor")
-    runner.write_handover(root, "wipanchor", runner.Handover(
+    reviewed = git.run(root, "rev-parse", "ai/wipanchor~1").stdout.strip()
+    prior = worktree.read_handover(root, "wipanchor")
+    worktree.write_handover(root, "wipanchor", worktree.Handover(
         session_id=prior.session_id, diff_hash=prior.diff_hash,
         review_fix=True, reviewed_sha=reviewed, review_finding="f"))
     _commit_on_base(root, tmp_path, "sibling.txt", "a sibling card landed")
 
-    tree, branch, mode = runner.prepare_worktree(
+    tree, branch, mode = worktree.prepare_worktree(
         root, board.find(root, "wipanchor"), "development_team")
 
-    assert mode == runner.FROM_WIP
-    assert runner.read_handover(root, "wipanchor").reviewed_sha == reviewed
+    assert mode == worktree.FROM_WIP
+    assert worktree.read_handover(root, "wipanchor").reviewed_sha == reviewed
 
 
 def test_a_walled_fix_attempt_keeps_its_review_anchor(tmp_path):
@@ -2796,23 +2797,23 @@ def test_a_walled_fix_attempt_keeps_its_review_anchor(tmp_path):
     root = _worktree_repo(tmp_path)
     _card(root, "tasks", "walled")
     _branch_with_file(root, tmp_path, "ai/walled", "feature.py", "x = 1\n")
-    reviewed = runner._git(root, "rev-parse", "ai/walled").stdout.strip()
-    runner.write_handover(root, "walled", runner.Handover(
+    reviewed = git.run(root, "rev-parse", "ai/walled").stdout.strip()
+    worktree.write_handover(root, "walled", worktree.Handover(
         session_id="s-1", diff_hash="prior-hash",
         review_fix=True, reviewed_sha=reviewed, review_finding="name commit Y instead"))
 
-    tree, branch, mode = runner.prepare_worktree(
+    tree, branch, mode = worktree.prepare_worktree(
         root, board.find(root, "walled"), "development_team")
     (tree / "half-done.txt").write_text("the fix, partly applied", encoding="utf-8")
 
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    result = runner._limit_reached(
+    result = dispatch._limit_reached(
         root, board.find(root, "walled"), tree, branch, out_dir, 1,
         limits.Wall(limits.SESSION, None, "session limit"), 0.5, "walled mid-fix")
 
     assert result.outcome == "limited"
-    after = runner.read_handover(root, "walled")
+    after = worktree.read_handover(root, "walled")
     assert after.review_fix is True
     assert after.reviewed_sha == reviewed
     assert after.review_finding == "name commit Y instead"
@@ -2860,7 +2861,7 @@ def test_the_dispatch_prompt_quotes_the_answer_the_maintainer_gave(tmp_path, mon
     _answered_card(root)
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
 
-    runner.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 3.0, 120)
+    dispatch.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 3.0, 120)
     prompt = (root / ".ai" / "runs" / "probe" / "attempt-1" / "prompt-1.md").read_text(
         encoding="utf-8")
     assert "the maintainer answered this card" in prompt
@@ -2880,7 +2881,7 @@ def test_the_answer_is_told_to_the_worker_after_the_park_on_a_decision_rule(
     _answered_card(root, kind="chore", worker="chore-thread")
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
 
-    runner.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 3.0, 120)
+    dispatch.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 3.0, 120)
     prompt = (root / ".ai" / "runs" / "probe" / "attempt-1" / "prompt-1.md").read_text(
         encoding="utf-8")
     assert prompt.index("the change needs a design decision") < \
@@ -2894,7 +2895,7 @@ def test_a_card_nobody_answered_gets_no_such_block(tmp_path, monkeypatch):
     _card(root, "tasks", "probe")
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
 
-    runner.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 3.0, 120)
+    dispatch.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 3.0, 120)
     prompt = (root / ".ai" / "runs" / "probe" / "attempt-1" / "prompt-1.md").read_text(
         encoding="utf-8")
     assert "the maintainer answered this card" not in prompt
@@ -2908,7 +2909,7 @@ def test_a_project_with_no_attributor_is_not_told_it_has_an_answer(tmp_path, mon
     _answered_card(root)                            # no `_attributed(root)`
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
 
-    runner.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 3.0, 120)
+    dispatch.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 3.0, 120)
     prompt = (root / ".ai" / "runs" / "probe" / "attempt-1" / "prompt-1.md").read_text(
         encoding="utf-8")
     assert "the maintainer answered this card" not in prompt
