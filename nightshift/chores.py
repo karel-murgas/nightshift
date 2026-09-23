@@ -647,6 +647,9 @@ def _hand_over(work: Path, card: board.Card, branch: str, why: str) -> str:
     """
     card.write({"started": None, "finished": runner._now()})
     card.write_section("Summary", why)
+    # gate-ok(review_lane_producer): a survivor's own diff on `ai/{card_id}` is
+    # green and has never been reviewed at all — obtainable the ordinary way, by
+    # the next review pass; only the batch verdict, not this card's, failed to land.
     board.move(work, card, "review")
     return f"{card.id}: -> review/ (the batch did not land)"
 
