@@ -61,12 +61,18 @@ def evaluate(payload: dict) -> str | None:
     return _DENY
 
 
+def check(payload: dict) -> str | None:
+    """The deny reason for one PreToolUse payload, or None — run by `main` and by
+    the `nightshift.hooks.pre` dispatcher."""
+    return evaluate(payload)
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
         return 0  # never block on a payload we cannot parse
-    reason = evaluate(payload if isinstance(payload, dict) else {})
+    reason = check(payload if isinstance(payload, dict) else {})
     if reason:
         json.dump(
             {

@@ -65,11 +65,13 @@ from pathlib import Path
 from types import CodeType
 
 from nightshift import board          # the card model
+from nightshift import boardhealth    # cards stuck between two lanes
 from nightshift import branches       # branch roles
 from nightshift import conflictmarkers  # what a hand-resolved conflict must not leave
 from nightshift import decide         # reopening a re-parked card's decision state
 from nightshift import gitmerge       # merge strategy + failure reporting, one home
 from nightshift import gitpaths       # git's path lists, read NUL-separated
+from nightshift import landing        # merge -> fold -> branch cleanup -> lane move, one path
 from nightshift import limits
 from nightshift import reviewdiff     # what the diff reviewer is shown, and how
 from nightshift import manifest as _manifest
@@ -400,6 +402,10 @@ def _log(message: str) -> None:
         # the thing that ends a night — losing the tee is survivable, and
         # raising here would take down a run that is otherwise fine.
         pass
+
+
+# Late-bound, so a test that monkeypatches `runner._log` also captures landing's lines.
+landing.set_log(lambda message: _log(message))
 
 
 def _stop_requested() -> bool:
@@ -1540,15 +1546,15 @@ def _drop_rescue_branch(root: Path, name: str) -> None:
     *only* place a preserved attempt survives the container, which is the whole
     point of preserving it (failed-attempt-work-is-deleted-not-resumed).
 
-    Remote before local, because `_delete_remote_branch`'s guard is an ancestry
+    Remote before local, because `landing.delete_remote_branch`'s guard is an ancestry
     test against the local tip and there is nothing left to test against after
     `git branch -D`. The remote is resolved here rather than threaded through
     the callers because two of them (`sweep_terminal_cards`,
     `cap_rescue_branches_in_flight`) reap across cards at startup, before the
     run loop has resolved a remote of its own.
     """
-    _delete_remote_branch(root, str(host_setting(root, "publish_remote", "")).strip(),
-                          name, action="reaped")
+    landing.delete_remote_branch(root, str(host_setting(root, "publish_remote", "")).strip(),
+                                 name, action="reaped")
     _git(root, "branch", "-D", name)
 
 
@@ -5575,43 +5581,6 @@ def _dispatch_attempt(root: Path, card: board.Card, base: str, model: str,
 # `settle`; this function only produces the outcome that drives them.
 
 
-def merge_branch(root: Path, branch: str, base: str,
-                 label: str | None = None) -> tuple[bool, str]:
-    """Merge `branch` (a branch name or a bare SHA) into `base`, for a reviewed-ok card.
-
-    The last mechanical step of §11's pipeline: the branch is the deliverable and
-    this advances the integration branch to include it. A merge that does not
-    apply cleanly is **aborted and reported**, never left half-applied and never
-    silently dropped — so `settle` can route it to a human instead of pretending
-    it merged. No LLM (§12): every line is a git exit code.
-
-    `root` must be checked out on `base`. In the new topology that is the runner's
-    dedicated integration checkout; in the in-place fallback it is Karel's main
-    checkout, which the runner is started on. Refusing on a mismatch is cheaper
-    than merging into the wrong branch at 3 AM. `label` names the ref in the merge
-    commit message when `branch` is a rebased SHA rather than a readable name.
-    """
-    name = label or branch
-    head = current_branch(root)
-    if head != base:
-        return False, f"the checkout is on `{head}`, not the integration branch `{base}`"
-    if _git(root, "rev-parse", "--verify", branch).returncode != 0:
-        return False, f"`{name}` no longer exists"
-    merged = _git(root, "merge", *gitmerge.STRATEGY_ARGS, "--no-ff", "-m",
-                  f"merge {name}: reviewed ok by the runner", branch)
-    if merged.returncode == 0:
-        return True, "merged"
-    aborted = _git(root, "merge", "--abort")  # leave no half-applied merge behind
-    if aborted.returncode != 0:
-        # Expected, and not itself a problem, when the merge was refused *before* it
-        # started — git has no merge to abort then. Says so, because "may need
-        # attention" reads as a wedged checkout and sent one 2026-08-01 investigation
-        # looking for damage that was never there.
-        _log(f"  ! merge --abort of {name} found no merge in progress — git refused the "
-             f"merge before starting it; the checkout is untouched")
-    return False, gitmerge.failure_detail(merged)
-
-
 def _unmerged_paths(tree: Path) -> list[str]:
     """Paths git marks as unmerged (a rebase/merge conflict), for the review note."""
     return gitpaths.changed(tree, "--diff-filter=U")
@@ -6073,82 +6042,11 @@ def _rebase_in_progress(tree: Path) -> bool:
     )
 
 
-def _delete_remote_branch(root: Path, remote: str, branch: str, *,
-                          action: str = "merged") -> None:
-    """Delete `branch` on `remote` once its work has landed, so a published card
-    branch does not outlive the local one (Karel, 2026-08-09: *"Delete on merge,
-    both local and remote."*).
-
-    Must be called **while `branch` still exists locally** — the guard below is
-    an ancestry test against that very ref, and after `git branch -D` there is
-    nothing left to test against.
-
-    `action` is what the caller just did to the branch, and it appears in the two
-    failure logs: `merged` for `rebase_and_merge`, `reaped` for a rescue ref
-    dropped by `_drop_rescue_branch`. Only the wording differs — the shared-remote
-    reasoning below is the same either way, because the danger is a property of
-    the remote, not of why this checkout is finished with the branch.
-
-    **The guard is against the local branch, not against `base`.** Ancestry
-    against `base` — the check `publish()`'s dormant-branch case would suggest —
-    is exactly backwards here: what lands on `base` is the *rebased copy*, so
-    `branch`'s own tip is never an ancestor of `base` after a successful merge
-    (the same fact that forces the local delete to use `-D`, not `-d`). A guard
-    phrased that way would refuse every delete, and a gate that never fires is
-    worse than none. The warrant for deleting is not ancestry at all: it is that
-    this checkout just rebased these commits, re-ran gates and the test slice on
-    the replayed result, and merged it.
-
-    What the local delete does not have to worry about, and this does, is that a
-    remote is **shared**. `remote`'s copy of `branch` may carry commits this
-    checkout has never seen — pushed by another machine or a cloud run since the
-    last fetch — which were no part of what was just rebased and merged, and
-    which a delete would destroy with no copy anywhere. That is the same class
-    of loss `publish()` documents (verified against a real bare remote,
-    `menu-unlock-indicators`, 2026-07-28). So: fetch the branch, and delete it
-    only when the remote's tip **is an ancestor of the local tip** — everything
-    the remote had is contained in what just merged. When it is not, refuse and
-    log loudly, leaving it for a human, exactly `publish()`'s posture on a
-    diverged branch.
-
-    A no-op when `remote` is empty (the schema default: a host that never opted
-    into pushing must not start deleting on a remote) or when `remote` is not
-    configured in this checkout. A remote that simply has no such branch is the
-    ordinary case — most cards merge without ever having been published — not a
-    failure, and is not logged as one. Every real failure is logged and
-    swallowed: a delete problem is an observability gap, not a reason to end the
-    night.
-    """
-    if not remote:
-        return
-    if _git(root, "remote", "get-url", remote).returncode != 0:
-        return
-
-    fetched = _git(root, "fetch", remote, branch)
-    if fetched.returncode != 0:
-        # The remote has no such branch: this card was merged without ever being
-        # published. Nothing to delete, and nothing to report.
-        return
-    remote_tip = _git(root, "rev-parse", "FETCH_HEAD").stdout.strip()
-    if not remote_tip or not _is_ancestor(root, remote_tip, branch):
-        _log(f"  ! {action} {branch} but did NOT delete it on {remote} — the remote "
-             f"carries commits this checkout does not have (pushed from elsewhere "
-             f"since the last fetch); deleting would destroy them. Reconcile "
-             f"`{remote}/{branch}` by hand.")
-        return
-
-    deleted = _git(root, "push", remote, "--delete", branch)
-    if deleted.returncode != 0:
-        detail = (deleted.stderr or deleted.stdout or "").strip().splitlines()
-        _log(f"  ! {action} {branch} but could not delete it on {remote} — "
-             f"{detail[-1][:150] if detail else 'see git output'}")
-
-
 def _reconcile_dirty_bookkeeping(root: Path) -> tuple[bool, str]:
     """Fold `root`'s own uncommitted changes into a commit before anything merges
     into it — but only when every one of them is board or memory bookkeeping.
 
-    **Why this exists** (aim-crit-display-desync, 2026-08-29). `merge_branch` and
+    **Why this exists** (aim-crit-display-desync, 2026-08-29). `landing.land`'s merge and
     `_merge_with_resolver`'s final `--ff-only` both update `root`'s working tree
     directly, and git refuses either outright — `"error: Your local changes to
     the following files would be overwritten by merge"` — the instant a path it
@@ -6202,7 +6100,8 @@ def _reconcile_dirty_bookkeeping(root: Path) -> tuple[bool, str]:
 
 def _bookkeeping_merge_fallback(root: Path, card: board.Card, branch: str, base: str,
                                 out_dir: Path, *, why: str, test_timeout: int,
-                                remote: str) -> tuple[bool, str]:
+                                remote: str,
+                                plan: landing.Plan | None = None) -> tuple[bool, str]:
     """If `base`'s own divergence since the merge-base is provably confined to
     board/memory bookkeeping, retry landing `branch` as a plain merge
     (`_merge_with_resolver`) instead of giving up on it.
@@ -6211,7 +6110,7 @@ def _bookkeeping_merge_fallback(root: Path, card: board.Card, branch: str, base:
     needing to weigh in: a rebase conflict the resolver declined (the original
     `stun-animation` case, 2026-08-27), a rebase that refused before producing any
     conflict markers at all (git's "local changes would be overwritten"), and
-    `merge_branch`'s own failure landing an already-reverified rebase result
+    `landing.land`'s own failure landing an already-reverified rebase result
     (both aim-crit-display-desync, 2026-08-29). All three are the same
     underlying situation surfacing through a different git error: `base` moved in
     bookkeeping only, so nothing about the card's actual work disagrees with it.
@@ -6233,14 +6132,15 @@ def _bookkeeping_merge_fallback(root: Path, card: board.Card, branch: str, base:
          f"plain merge")
     landed, why2 = _merge_with_resolver(
         root, card, branch, base, out_dir, rebase_reason=why,
-        test_timeout=test_timeout, remote=remote)
+        test_timeout=test_timeout, remote=remote, plan=plan)
     if landed:
         _log(f"    landed as a plain merge — {why2}")
     return landed, why2
 
 
 def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
-                     test_timeout: int = 600, remote: str = "") -> tuple[bool, str]:
+                     test_timeout: int = 600, remote: str = "",
+                     plan: landing.Plan | None = None) -> tuple[bool, str]:
     """Rebase a reviewed-ok card's branch onto the current integration tip,
     re-verify gates + the affected test slice, then merge (runner-hardening #3).
 
@@ -6279,7 +6179,7 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
     (aim-crit-display-desync, 2026-08-29): a rebase that refuses before
     producing any conflict markers at all — git's "your local changes... would
     be overwritten," textually indistinguishable from a genuinely broken
-    checkout — and `merge_branch`'s own failure landing a rebase that had
+    checkout — and `landing.land`'s own failure landing a rebase that had
     already replayed and re-verified clean. Both were previously dead ends with
     no retry whatsoever, even when `base` had moved in bookkeeping only.
     `_reconcile_dirty_bookkeeping` additionally folds a stray uncommitted
@@ -6311,7 +6211,7 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
     both halves of a card branch's remote lifetime take the remote the same way.
     The `""` default is the schema default and means "no remote deletion", so
     every caller that has not opted into publishing keeps today's behaviour
-    exactly. `_delete_remote_branch` carries the guard and the reasoning; note
+    exactly. `landing.delete_remote_branch` carries the guard and the reasoning; note
     only that it must run **before** the local `-D`, because that guard is an
     ancestry test against the local branch's own tip.
 
@@ -6319,6 +6219,9 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
     resolver could not settle, or gates/tests failing on the replayed result —
     returns `(False, reason)` with `base` unmoved, and `settle` routes the card to
     `blocked/` with the reason. Never a guess (decision #3).
+
+    `plan` (`landing.Plan`) is the lane the card moves to once it has landed, as part
+    of the same `landing.land` call; `None` leaves the card where it is.
     """
     if _git(root, "rev-parse", "--verify", branch).returncode != 0:
         return False, f"`{branch}` no longer exists"
@@ -6358,7 +6261,7 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
                 _git(tree, "rebase", "--abort")
                 landed, why2 = _bookkeeping_merge_fallback(
                     root, card, branch, base, out_dir, why=why,
-                    test_timeout=test_timeout, remote=remote)
+                    test_timeout=test_timeout, remote=remote, plan=plan)
                 if landed:
                     return True, why2
                 detail = f"; retried as a plain merge and {why2}" if why2 else ""
@@ -6371,7 +6274,7 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
             if not resolved:
                 landed, why2 = _bookkeeping_merge_fallback(
                     root, card, branch, base, out_dir, why=detail,
-                    test_timeout=test_timeout, remote=remote)
+                    test_timeout=test_timeout, remote=remote, plan=plan)
                 if landed:
                     return True, why2
                 if why2:
@@ -6402,46 +6305,27 @@ def rebase_and_merge(root: Path, card: board.Card, branch: str, base: str,
         if not ok:
             return False, f"after rebasing onto {base}, {why}"
 
-        # Merge the verified rebased commits. The throwaway worktree still holds
-        # HEAD at `rebased_sha`, which keeps it referenced across the merge; the
-        # `finally` drops the worktree only after.
-        merged, why = merge_branch(root, rebased_sha, base, label=branch)
+        # Land the verified rebased commits — merge, fold, branch cleanup and the
+        # lane move are one call (`landing.land`). The throwaway worktree still holds
+        # HEAD at `rebased_sha`, keeping it referenced; the `finally` drops it after.
+        # `-D`: what lands is the rebased copy, so the branch's own tip is never an
+        # ancestor of `base`.
+        merged, why = landing.land(root, card, branch=branch, base=base, plan=plan,
+                                   remote=remote, ref=rebased_sha, label=branch,
+                                   force_delete=True)
         if not merged:
-            # aim-crit-display-desync (2026-08-29): the rebase replayed cleanly
-            # and re-verified green (gates + the affected tests, above) — the
-            # failure is `merge_branch`'s own, landing the result onto `root`.
-            # Unlike the two conflict shapes above, this one had no fallback at
-            # all: `merge_branch` just aborts and reports, and this returned
-            # straight to a human even when `base` had only moved in board/
-            # memory bookkeeping since the fork — the same narrow-scope case
-            # `_bookkeeping_merge_fallback` already exists for.
+            # The replay re-verified green; the failure is landing it onto `root`.
+            # Same narrow-scope retry as the conflict shapes above
+            # (aim-crit-display-desync, 2026-08-29).
             landed, why2 = _bookkeeping_merge_fallback(
                 root, card, branch, base, out_dir, why=why,
-                test_timeout=test_timeout, remote=remote)
+                test_timeout=test_timeout, remote=remote, plan=plan)
             if landed:
                 return True, why2
             if why2:
                 why = f"{why}; retried as a plain merge and {why2}"
             return False, (f"rebasing {branch} onto {base} replayed and verified "
                            f"cleanly, but landing it failed: {why}")
-        # The card's memory record goes into the shared logs *here*, on `base`,
-        # one card at a time — which is the whole point of the fragment
-        # (`nightshift.memoryfold`). Every card wants to prepend to the same
-        # list, so doing it on the branch made two same-night cards conflict by
-        # construction; doing it after the merge serialises the insertion.
-        _fold_memory(root, card, base)
-        # The remote copy goes first, while `branch` still resolves: its
-        # guard is an ancestry test against this ref, which `-D` would take
-        # away. A refusal or a failure there is logged and swallowed, so the
-        # local delete below happens either way.
-        _delete_remote_branch(root, remote, branch)
-        # The dispatch worktree that had `branch` checked out is already gone
-        # by this point (dropped at the end of `dispatch`, well before review
-        # and settle run), so the ref is never checked out anywhere here.
-        deleted = _git(root, "branch", "-D", branch)
-        if deleted.returncode != 0:
-            _log(f"  ! merged {branch} but could not delete it — "
-                 f"{(deleted.stderr or deleted.stdout or '').strip()[:150]}")
         return merged, why
     finally:
         _git(root, "worktree", "remove", "--force", str(tree))
@@ -6486,7 +6370,8 @@ def _bookkeeping_divergence(root: Path, base: str, merge_base: str) -> list[str]
 
 def _merge_with_resolver(root: Path, card: board.Card, branch: str, base: str,
                          out_dir: Path, *, rebase_reason: str = "",
-                         test_timeout: int = 600, remote: str = "") -> tuple[bool, str]:
+                         test_timeout: int = 600, remote: str = "",
+                         plan: landing.Plan | None = None) -> tuple[bool, str]:
     """The narrow-scope escalation `rebase_and_merge` reaches for — via
     `_bookkeeping_merge_fallback` — whenever a rebase-based landing of `branch`
     onto `base` did not settle (a conflict the resolver declined, a rebase that
@@ -6594,16 +6479,13 @@ def _merge_with_resolver(root: Path, card: board.Card, branch: str, base: str,
         if not ok:
             return False, f"after merging into {base}, {why}"
 
-        landed = _git(root, "merge", "--ff-only", merged_sha)
-        if landed.returncode != 0:
+        # `ff_only`: the merge commit above already has `base`'s tip as its first
+        # parent. `-d` is safe afterwards — a real merge makes `branch` an ancestor.
+        landed, why = landing.land(root, card, branch=branch, base=base, plan=plan,
+                                   remote=remote, ref=merged_sha, ff_only=True)
+        if not landed:
             return False, (f"verified the merge but could not fast-forward {base} onto "
-                           f"it: {(landed.stderr or landed.stdout or '').strip()[:150]}")
-        _fold_memory(root, card, base)
-        _delete_remote_branch(root, remote, branch)
-        deleted = _git(root, "branch", "-d", branch)
-        if deleted.returncode != 0:
-            _log(f"  ! merged {branch} but could not delete it — "
-                 f"{(deleted.stderr or deleted.stdout or '').strip()[:150]}")
+                           f"it: {why}")
         return True, ("resolved as a plain merge — a rebase-based landing did not "
                       "settle on bookkeeping-only paths")
     finally:
@@ -6640,55 +6522,6 @@ branch merges, one card at a time — which is the point: every card appends at 
 anchor in them, so editing them on your branch conflicts with any sibling card that \
 finishes tonight. Editing them directly is refused by a hook.
 """
-
-
-def _fold_memory(root: Path, card: board.Card, base: str) -> None:
-    """Fold this card's memory fragment into the shared logs and commit it.
-
-    Runs on `base` immediately after the card's work merged, which is the only
-    moment both halves are true: the work is landed, and no other card is mid-merge.
-
-    **Every failure is logged and swallowed.** The card's work is already on `base`
-    at this point; raising here would abort a merge that has happened, and returning
-    `False` would route a landed card to `blocked/`. A fragment that will not fold
-    stays on disk and `python -m nightshift.memoryfold` picks it up later — the
-    lossy direction is losing the card's record, and the fragment surviving is what
-    prevents that.
-    """
-    if not memoryfold.targets(root):
-        return
-    fragment = memoryfold.fragment_path(root, card.id)
-    if not fragment.is_file():
-        return
-    # `merge_branch` already refused unless the checkout was on `base`, and it has
-    # just succeeded — so this holds. Checked anyway because the failure it would
-    # otherwise produce is a commit on the wrong branch, which is the one outcome
-    # this file's guards exist to make impossible rather than unlikely.
-    head = current_branch(root)
-    if head != base:
-        _log(f"  ! merged {card.id} but did not fold its memory record — the checkout "
-             f"is on `{head}`, not `{base}`; run `python -m nightshift.memoryfold`")
-        return
-    try:
-        report = memoryfold.fold(root, card_id=card.id)
-    except OSError as exc:
-        _log(f"  ! merged {card.id} but its memory fragment would not fold — {exc}")
-        return
-    for line in report:
-        _log(f"    {line}")
-    if any("LEFT IN PLACE" in line for line in report):
-        return
-    paths = [str(root / target.path) for target in memoryfold.targets(root)]
-    added = _git(root, "add", "--", str(fragment), *paths)
-    if added.returncode != 0:
-        _log(f"  ! folded {card.id}'s memory record but could not stage it — "
-             f"{(added.stderr or added.stdout or '').strip()[:150]}")
-        return
-    committed = _git(root, "commit", "-m", f"memory: fold {card.id}'s record",
-                     "--", str(fragment), *paths)
-    if committed.returncode != 0:
-        _log(f"  ! folded {card.id}'s memory record but could not commit it — "
-             f"{(committed.stderr or committed.stdout or '').strip()[:150]}")
 
 
 def branch_has_commits(root: Path, base: str, branch: str) -> bool:
@@ -7116,6 +6949,22 @@ def _park_for_pick(root: Path, card: board.Card, result: Dispatch,
     answer form and the morning digest both offer the options rather than only
     quoting the prose around them.
     """
+    _write_pick_question(card, result)
+    board.move(root, card, "needs-decision")
+    return _pick_message(card, result, merged_from=merged_from, integration=integration)
+
+
+def _pick_message(card: board.Card, result: Dispatch, *, merged_from: str = "",
+                  integration: str = "") -> str:
+    landed = (f", rebased {merged_from} onto {integration} and merged"
+              if merged_from else ", nothing to merge")
+    return (f"{card.id}: → needs-decision/ ({result.unadopted} candidate(s) produced, none "
+            f"installed{landed})")
+
+
+def _write_pick_question(card: board.Card, result: Dispatch) -> None:
+    """The pick question `_park_for_pick` files — without the move, for a card
+    `landing.land` moves once its diff has merged."""
     attempt = card.attempts
     count = result.unadopted
     card.write_section(
@@ -7136,11 +6985,6 @@ def _park_for_pick(root: Path, card: board.Card, result: Dispatch,
     # Same reopening as the `parked` and `needs_decision` paths — see `decide.reopen`.
     card.text = decide.reopen(card.text)
     textio.write_text_lf(card.path, card.text)
-    board.move(root, card, "needs-decision")
-    landed = (f", rebased {merged_from} onto {integration} and merged"
-              if merged_from else ", nothing to merge")
-    return (f"{card.id}: → needs-decision/ ({count} candidate(s) produced, none "
-            f"installed{landed})")
 
 
 def settle(root: Path, card_id: str, result: Dispatch) -> str:
@@ -7292,11 +7136,10 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
         # reaches testing/ carries a brief "what happened" a human can read without
         # opening `.ai/runs/` or the verbose `## Thread` prose (menu-summary-on-card).
         card.write_section("Summary", result.detail)
-        # gate-ok(review_lane_producer): reached only via `review_stage`'s own
-        # `Dispatch("review", ...)`, which already asserted owed-and-obtainable —
-        # window still open, a diff exists, and either no verdict landed yet or the
-        # card is the artefact-only case whose reviewer is Karel.
-        board.move(root, card, "review")
+        board.move(root, card, "review", review_owed=(
+            "reached only via `review_stage`'s own `Dispatch(\"review\")`, which "
+            "asserted a review is owed and obtainable: the window is open, a diff "
+            "exists, and no verdict landed yet (or the reviewer is the maintainer)"))
         return f"{card_id}: → review/ ({result.detail})"
 
     if result.outcome == "parked":
@@ -7503,22 +7346,31 @@ def _settle_impl(root: Path, card_id: str, result: Dispatch) -> str:
             # An artefact-only attempt: its entire output is the candidates, so
             # there is no diff to land and nothing for the merge machinery to do.
             return _park_for_pick(root, card, result)
-        merged, why = rebase_and_merge(root, card, branch, integration, remote=remote)
+        if result.outcome == "pick":
+            plan = landing.Plan("needs-decision",
+                                lambda landed: _write_pick_question(landed, result))
+        else:
+            lane = landing.finished_lane(root, card, branch, integration)
+
+            def _how_to_test(landed: board.Card) -> None:
+                # Written before the move, so the card carries its scenario into the
+                # lane rather than arriving there bare.
+                if landed.verify == "play":
+                    landed.write_section("How to test", result.how_to_test or
+                                         "The worker recorded no scenario — that is "
+                                         "itself a defect on a `verify: play` card; the "
+                                         f"diff is on `{branch}`.")
+                elif lane == "testing" and result.how_to_test:
+                    landed.write_section("How to test", result.how_to_test)
+
+            plan = landing.Plan(lane, _how_to_test)
+        merged, why = rebase_and_merge(root, card, branch, integration, remote=remote,
+                                       plan=plan)
         if merged:
             if result.outcome == "pick":
-                return _park_for_pick(root, card, result, merged_from=branch,
-                                      integration=integration)
-            # Written before the move, so the card carries its scenario into the
-            # lane rather than arriving there bare — the same ordering, and for the
-            # same reason, as `## Summary` on the `review` branch above.
-            if card.verify == "play":
-                card.write_section("How to test", result.how_to_test or
-                                   "The worker recorded no scenario — that is itself a "
-                                   "defect on a `verify: play` card; the diff is on "
-                                   f"`{branch}`.")
-            lane = board.finished_lane(card)
-            board.move(root, card, lane)
-            return (f"{card_id}: → {lane}/ (reviewed ok, rebased {branch} onto "
+                return _pick_message(card, result, merged_from=branch,
+                                     integration=integration)
+            return (f"{card_id}: → {plan.lane}/ (reviewed ok, rebased {branch} onto "
                     f"{integration} and merged)")
         # Reviewed ok but the branch will not rebase-and-merge, and `_resolve_conflict`
         # could not settle it either — it conflicts with what has landed on the
@@ -7941,6 +7793,10 @@ def _startup_housekeeping(ctrl: Path, work: Path) -> None:
     if demoted := enforce_worktree_ceiling(work):
         _log(f"kept-worktree ceiling ({WORKTREE_KEEP_CEILING}) exceeded — "
              f"demoted to git-WIP-only: {', '.join(demoted)}")
+    # Cards stuck between two lanes by a hand-made merge or an unread verdict — logged,
+    # never acted on: the fix is a person's (`nightshift.boardhealth`).
+    for finding in boardhealth.check(work):
+        _log(f"board health — {finding}")
 
 
 @contextlib.contextmanager

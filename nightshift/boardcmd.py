@@ -51,6 +51,7 @@ No LLM anywhere in here (`00_architecture.md` §12) — it is a file mover.
     python -m nightshift.boardcmd edit <path-under-the-board> --body-file -
     python -m nightshift.boardcmd delete <note.md>
     python -m nightshift.boardcmd delete <note.md> --lane ideas
+    python -m nightshift.boardcmd land <card-id> [--lane testing|done] [--no-branch]
 
 The sixth verb the panel needs — reviewing a card sitting in `review/` — is not
 here. It is a dispatch rather than a board write, and it belongs to
@@ -392,6 +393,84 @@ def close_note(root: Path, name: str) -> str:
 _NOTE_LANES = (INBOX, board.PRIVATE_LANE)
 
 
+#: Lanes `land` moves a card out of: an inline card still in `tasks/`, and a card in
+#: `review/` or `blocked/` whose merge a person finished by hand.
+LAND_FROM = ("tasks", "review", "blocked")
+#: Lanes a card has already landed in. `land` merges a follow-up fix for one of these
+#: and leaves the card where it is.
+LANDED = ("testing", "done")
+
+
+def land(root: Path, card_id: str, *, lane: str = "", no_branch: bool = False) -> str:
+    """Verb — close out a card worked by hand, through `landing.land`: merge its
+    branch into the integration branch, fold its memory fragment, delete the branch
+    (locally and on the publish remote), move the card, commit.
+
+    Refused unless the checkout is on the integration branch and the branch tip
+    carries a preflight receipt (the merge guard hook cannot see this merge, so the
+    verb asks the receipt itself). A branch already merged by hand only gets the
+    rest. `--no-branch` is for work that landed in another repository. A card in
+    `testing/` or `done/` takes a follow-up fix and stays in its lane.
+    """
+    from nightshift import branches, landing, preflight, runner
+    from nightshift.manifest import ManifestError
+
+    card = _find(root, card_id)
+    if card.lane not in LAND_FROM + LANDED:
+        raise BoardCommandError(
+            f"{card_id} is in {card.lane}/ — `land` takes a card from "
+            f"{', '.join(f'{name}/' for name in LAND_FROM + LANDED)}")
+    if lane and lane not in ("testing", "done"):
+        raise BoardCommandError(f"--lane must be testing or done, not {lane!r}")
+    try:
+        base = branches.integration(root)
+    except ManifestError as exc:
+        raise BoardCommandError(f"no integration branch declared: {exc}") from exc
+    head = _git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if head != base:
+        raise BoardCommandError(
+            f"the checkout is on `{head}`; land from the integration branch `{base}`")
+
+    branch = branches.work_branch(card.id, card.fields.get("branch", ""))
+    exists = _git(root, "rev-parse", "--verify", f"refs/heads/{branch}").returncode == 0
+    if card.lane in LANDED and not exists:
+        raise BoardCommandError(f"{card_id} already landed and `{branch}` does not exist "
+                                f"— there is no fix to merge")
+    if not exists and not no_branch:
+        raise BoardCommandError(
+            f"no local branch `{branch}` — if the work landed in another repository, "
+            f"pass --no-branch")
+    if card.lane in LANDED:
+        target = card.lane
+    elif exists:
+        hit = landing.player_visible_hit(root, branch, base)
+        target = lane or landing.finished_lane(root, card, branch, base)
+        if target == "done" and hit:
+            raise BoardCommandError(
+                f"`{branch}` touches `{hit}`, a declared player-visible path — it goes to "
+                f"testing/ until the maintainer has seen it")
+    else:
+        branch, target = "", lane or board.finished_lane(card)
+
+    already = bool(branch) and _git(root, "merge-base", "--is-ancestor",
+                                    branch, base).returncode == 0
+    if branch and not already:
+        sha = _git(root, "rev-parse", branch).stdout.strip()
+        if not preflight.is_validated(root, sha):
+            raise BoardCommandError(
+                f"preflight has not validated `{branch}` ({sha[:8]}) — run "
+                f"`python -m nightshift.preflight` on it first")
+    remote = str(runner.host_setting(root, "publish_remote", "")).strip()
+    from_lane = card.lane
+    plan = None if card.lane in LANDED else landing.Plan(target)
+    landed, why = landing.land(
+        root, card, branch=branch, base=base, plan=plan, remote=remote,
+        message=f"Merge {branch}: {card.title}", already_merged=already or not branch)
+    if not landed:
+        raise BoardCommandError(why)
+    return f"{card_id}: {from_lane}/ → {target}/ ({why})"
+
+
 def create_note(root: Path, name: str, body: str, lane: str = INBOX) -> str:
     """Verb 4 — write a new bare note into `inbox/` (or, by request, `ideas/`).
 
@@ -558,6 +637,13 @@ def _parser() -> argparse.ArgumentParser:
     deleted.add_argument("--lane", choices=_NOTE_LANES, default=INBOX,
                          help=f"which lane to delete from (default {INBOX})")
 
+    landed = subs.add_parser("land", help="close out a card worked by hand: merge, fold, "
+                                         "delete its branch, move it, commit")
+    landed.add_argument("card_id")
+    landed.add_argument("--lane", default="", help="testing or done (default: from verify:)")
+    landed.add_argument("--no-branch", action="store_true",
+                        help="the work landed in another repository; only move the card")
+
     for sub in (note, edit):
         body = sub.add_mutually_exclusive_group(required=True)
         body.add_argument("--body", help="the body text itself")
@@ -592,6 +678,8 @@ def main(argv: list[str] | None = None) -> int:
             print(edit_body(root, args.path, _body(args)))
         elif args.verb == "delete":
             print(delete_note(root, args.name, lane=args.lane))
+        elif args.verb == "land":
+            print(land(root, args.card_id, lane=args.lane, no_branch=args.no_branch))
     except BoardCommandError as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 1

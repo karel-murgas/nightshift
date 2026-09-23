@@ -72,7 +72,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import (board, gitmerge, manifest, run_record, runner,
+from nightshift import (board, gitmerge, landing, manifest, run_record, runner,
                         suite, textio, tiers, usage)
 from nightshift.runner import repo_root
 
@@ -153,7 +153,7 @@ class Outcome:
     how_to_test: str = ""
     #: `runner.unadopted_artefacts` for this chore's attempt: candidates harvested,
     #: none installed. Non-zero means it lands in `needs-decision/` owing a pick,
-    #: whatever its `verify:` says — see `_land`.
+    #: whatever its `verify:` says — see `_plan`.
     unadopted: int = 0
 
     @property
@@ -583,49 +583,52 @@ def _review_context(cards: dict[str, board.Card], order: list[str]) -> tuple[str
     return "\n".join(criteria), "\n".join(intent)
 
 
-def _land(work: Path, card: board.Card, outcome: Outcome, branch: str,
-          remote: str) -> str:
-    """Move one landed chore to its final lane and reap its branch.
+def _plan(work: Path, base: str, card: board.Card, outcome: Outcome,
+          branch: str) -> landing.Plan:
+    """Where one chore goes once the batch lands, and what is written onto it first.
 
-    Where it goes is the card's own `verify:` declaration, exactly as `settle` reads
-    it for a full card: `play` has a surface to exercise and lands in `testing/`
-    carrying the batch checklist's row; `review` has none — a gate, an encoding fix,
-    inner wiring — so the gates and the suite were its acceptance and it goes
-    straight to `done/`. That is what keeps the checklist short enough to be read.
-
-    **Except a chore that owes a pick**, which goes to `needs-decision/` through the
-    same `runner._park_for_pick` a full card's `settle` uses. Without this, `verify:`
-    was the only thing read here, and `runner.unadopted_artefacts` — computed by the
-    very `dispatch` this chore ran through — was dropped on the floor: on
-    2026-09-11 `sound-for-taser` generated four takes, installed none, and landed
-    in `testing/` asking Karel to play a synth stopgap. He picked a take in the
-    Command Center; nothing was ever parked to receive that pick, so nothing ran
-    to install it.
+    The lane is `landing.finished_lane` — the card's own `verify:`, exactly as `settle`
+    reads it for a full card — **except a chore that owes a pick**, which goes to
+    `needs-decision/` carrying the same question a full card's `settle` files
+    (`sound-for-taser`, 2026-09-11: four takes generated, none installed, and the card
+    landed in `testing/` with nothing parked to receive the pick).
     """
-    card.write({"started": None, "finished": runner._now()})
-    card.write_section("Summary", outcome.detail or "landed as part of a chore batch")
-    if outcome.owes_a_pick:
-        runner._park_for_pick(work, card, runner.Dispatch(
-            "pick", outcome.detail, unadopted=outcome.unadopted))
-        lane = "needs-decision"
-    else:
-        if card.verify == "play":
-            card.write_section("How to test", outcome.how_to_test or
-                               "The worker recorded no scenario - that is itself a defect "
-                               f"on a `verify: play` card; the diff is on `{branch}`.")
-        lane = "testing" if card.verify == "play" else "done"
-        board.move(work, card, lane)
+    lane = ("needs-decision" if outcome.owes_a_pick
+            else landing.finished_lane(work, card, f"ai/{card.id}", base))
 
-    ref = f"ai/{card.id}"
-    runner._delete_remote_branch(work, remote, ref)
-    # `-d`, not `-D`: the safe form refuses a branch that is not actually merged,
-    # which is exactly the check wanted here. Nothing was rebased, so the branch's
-    # own tip really is an ancestor of the integration branch once the batch landed.
-    dropped = runner._git(work, "branch", "-d", ref)
-    if dropped.returncode != 0:
-        print(f"  ! landed {card.id} but could not delete {ref} - "
-              f"{(dropped.stderr or dropped.stdout or '').strip()[:120]}")
-    return f"{card.id}: -> {lane}/"
+    def before_move(landed: board.Card) -> None:
+        landed.write({"started": None, "finished": runner._now()})
+        landed.write_section("Summary", outcome.detail or "landed as part of a chore batch")
+        if outcome.owes_a_pick:
+            runner._write_pick_question(landed, runner.Dispatch(
+                "pick", outcome.detail, unadopted=outcome.unadopted))
+        elif landed.verify == "play":
+            landed.write_section("How to test", outcome.how_to_test or
+                                 "The worker recorded no scenario - that is itself a "
+                                 "defect on a `verify: play` card; the diff is on "
+                                 f"`{branch}`.")
+        elif lane == "testing" and outcome.how_to_test:
+            landed.write_section("How to test", outcome.how_to_test)
+
+    return landing.Plan(lane, before_move)
+
+
+def _land_batch(work: Path, base: str, branch: str, batch: Batch,
+                cards: dict[str, board.Card], order: list[str],
+                remote: str) -> tuple[bool, str, list[str]]:
+    """Land the batch branch and finish every chore on it through `landing.land_batch`
+    — merge, fold each card's fragment, delete each `ai/<id>`, move each card.
+    Returns `(landed, detail, one line per card)`."""
+    plans = []
+    lines = []
+    for card_id in order:
+        outcome = next(o for o in batch.outcomes if o.card_id == card_id)
+        plan = _plan(work, base, cards[card_id], outcome, branch)
+        plans.append((cards[card_id], f"ai/{card_id}", plan))
+        lines.append(f"{card_id}: -> {plan.lane}/")
+    landed, why = landing.land_batch(work, branch, base, plans, remote=remote,
+                                     label=branch)
+    return landed, why, lines
 
 
 def _hand_over(work: Path, card: board.Card, branch: str, why: str) -> str:
@@ -647,10 +650,9 @@ def _hand_over(work: Path, card: board.Card, branch: str, why: str) -> str:
     """
     card.write({"started": None, "finished": runner._now()})
     card.write_section("Summary", why)
-    # gate-ok(review_lane_producer): a survivor's own diff on `ai/{card_id}` is
-    # green and has never been reviewed at all — obtainable the ordinary way, by
-    # the next review pass; only the batch verdict, not this card's, failed to land.
-    board.move(work, card, "review")
+    board.move(work, card, "review", review_owed=(
+        "a survivor's own diff on its `ai/<id>` is green and was never reviewed on its "
+        "own — obtainable by the next review pass; only the batch failed to land"))
     return f"{card.id}: -> review/ (the batch did not land)"
 
 
@@ -1108,6 +1110,7 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
     #: unreviewed-fallback `_hand_over` message below for cards that *were* reviewed
     #: `ok`, so that message does not wrongly say otherwise.
     reviewed_but_unmerged = False
+    landed_lines: list[str] = []
     try:
         made = runner._worktree_add(work, str(tree), branch)
         if made.returncode != 0:
@@ -1172,7 +1175,8 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
                     why = review.why
                 elif not review.flagged:
                     # Every item cleared - land the whole batch, unchanged from before.
-                    landed, why = runner.merge_branch(work, branch, base, label=branch)
+                    landed, why, landed_lines = _land_batch(
+                        work, base, branch, batch, cards, order, remote)
                 else:
                     # A split verdict: route the flagged item(s) on their own verdict —
                     # no second review call, the batch review already produced it — and
@@ -1199,8 +1203,8 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
                             ok2, why2, total2 = _verify_tree(
                                 work, tree, out_dir, "batch-clean", batch_test_timeout)
                             if ok2:
-                                landed, why = runner.merge_branch(
-                                    work, branch, base, label=branch)
+                                landed, why, landed_lines = _land_batch(
+                                    work, base, branch, batch, cards, clean, remote)
                                 total = total2
                                 order = clean
                             else:
@@ -1217,9 +1221,8 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
     record.note(f"batch branch {branch} - suite: {suite_line}")
     if landed:
         print(f"phase 3: {branch} merged into {base}")
-        for card_id in order:
-            outcome = next(o for o in batch.outcomes if o.card_id == card_id)
-            print("  " + _land(work, cards[card_id], outcome, branch, remote))
+        for line in landed_lines:
+            print("  " + line)
         runner._git(work, "branch", "-d", branch)
     else:
         record.stop(why)
@@ -1247,7 +1250,7 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
                     f"still exists too, if the failure is worth reading first.")
             print("  " + _hand_over(work, cards[card_id], branch, detail))
 
-    # After `_land`, so a chore that reached `testing/`/`done/` records `reviewed`
+    # After `_land_batch`, so a chore that reached `testing/`/`done/` records `reviewed`
     # rather than the `review` it carried while the batch review was still ahead of it.
     _record_outcomes(record, batch, cards, model,
                      landed_ids=frozenset(order) if landed else frozenset(),

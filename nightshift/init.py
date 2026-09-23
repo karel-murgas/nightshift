@@ -356,6 +356,17 @@ def manifest_text(tables: dict[str, dict]) -> str:
 # --- settings.json -----------------------------------------------------------
 
 
+_HOOK_MODULE = re.compile(r"-m\s+(nightshift(?:\.[A-Za-z0-9_]+)+)")
+
+
+def _hook_key(matcher: object, hook: dict) -> tuple:
+    """What makes two hook entries the same hook: matcher, `if`, and the nightshift
+    module a command runs (else the whole command)."""
+    command = str(hook.get("command", ""))
+    found = _HOOK_MODULE.search(command)
+    return matcher, found.group(1) if found else command, hook.get("if")
+
+
 def merge_hooks(existing: dict, fragment: dict) -> tuple[dict, int]:
     """Add the hook entries a project's `settings.json` lacks. Returns (merged, added).
 
@@ -363,6 +374,8 @@ def merge_hooks(existing: dict, fragment: dict) -> tuple[dict, int]:
     `additionalDirectories`, which are the project's and must survive. Matching is
     on the hook *command*: the same command under the same matcher is already wired,
     whatever its timeout or status message says — those are a project's to tune.
+    A `python -m nightshift.<module>` command matches on the module, so a project
+    may pass its own arguments (`nightshift.hooks.post .ai/recipes/hint.py`).
     """
     merged = json.loads(json.dumps(existing))  # deep copy; these are small
     hooks = merged.setdefault("hooks", {})
@@ -370,14 +383,14 @@ def merge_hooks(existing: dict, fragment: dict) -> tuple[dict, int]:
     for event, groups in fragment.get("hooks", {}).items():
         current = hooks.setdefault(event, [])
         wired = {
-            (group.get("matcher"), hook.get("command"), hook.get("if"))
+            _hook_key(group.get("matcher"), hook)
             for group in current if isinstance(group, dict)
             for hook in group.get("hooks", []) if isinstance(hook, dict)
         }
         for group in groups:
             wanted = [
                 hook for hook in group.get("hooks", [])
-                if (group.get("matcher"), hook.get("command"), hook.get("if")) not in wired
+                if _hook_key(group.get("matcher"), hook) not in wired
             ]
             if wanted:
                 current.append({**group, "hooks": wanted})

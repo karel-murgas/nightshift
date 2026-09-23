@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from nightshift import board
+from nightshift import landing
 from nightshift import limits
 from nightshift import reviewdiff
 from nightshift import run_record
@@ -31,6 +32,7 @@ from nightshift.hooks import worktree_fence
 
 import _runner_helpers
 from _runner_helpers import (  # noqa: F401  (fixtures register by name)
+    fake_rebase_and_merge,
     _RUNNER_SOURCE,
     _advance_on_remote,
     _art_card,
@@ -741,9 +743,7 @@ def test_settle_reviewed_merges_and_lands_in_testing(tmp_path, monkeypatch):
     card = _reviewed_branch(root, tmp_path)
     card.write({"started": "2026-07-24T03:00:00"})
     calls: list = []
-    monkeypatch.setattr(runner, "rebase_and_merge",
-                        lambda r, card, branch, base, test_timeout=600, remote="":
-                        (calls.append((branch, base, remote)) or (True, "merged")))
+    monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge(seen=calls))
 
     note = runner.settle(root, "probe", runner.Dispatch("reviewed", "clean"))
     settled = board.find(root, "probe")
@@ -770,9 +770,7 @@ def test_settle_reaps_rescue_branches_the_moment_a_card_succeeds_into_testing(
     card.write({"started": "2026-07-24T03:00:00"})
     subprocess.run(["git", "branch", "ai/probe@failed-1", "development_team"],
                    cwd=root, check=True)
-    monkeypatch.setattr(runner, "rebase_and_merge",
-                        lambda r, card, branch, base, test_timeout=600, remote="":
-                        (True, "merged"))
+    monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge())
 
     runner.settle(root, "probe", runner.Dispatch("reviewed", "clean"))
 
@@ -794,12 +792,10 @@ def test_settle_threads_the_publish_remote_to_the_merge(tmp_path, monkeypatch):
     (root / runner.HOST_FILE).write_bytes(
         json.dumps({"publish_remote": "origin"}).encode("utf-8"))
     seen: list = []
-    monkeypatch.setattr(runner, "rebase_and_merge",
-                        lambda r, card, branch, base, test_timeout=600, remote="":
-                        (seen.append(remote) or (True, "merged")))
+    monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge(seen=seen))
 
     runner.settle(root, "probe", runner.Dispatch("reviewed", "clean"))
-    assert seen == ["origin"]
+    assert [remote for _, _, remote in seen] == ["origin"]
 
 
 def test_settle_reviewed_but_unmergeable_goes_to_blocked_not_testing(tmp_path, monkeypatch):
@@ -813,9 +809,7 @@ def test_settle_reviewed_but_unmergeable_goes_to_blocked_not_testing(tmp_path, m
     root = _worktree_repo(tmp_path)
     card = _reviewed_branch(root, tmp_path)
     card.write({"started": "2026-07-24T03:00:00"})
-    monkeypatch.setattr(runner, "rebase_and_merge",
-                        lambda r, card, branch, base, test_timeout=600, remote="":
-                        (False, "conflict in board.py"))
+    monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge(ok=False, why="conflict in board.py"))
 
     note = runner.settle(root, "probe", runner.Dispatch("reviewed", "clean"))
     settled = board.find(root, "probe")
@@ -1009,9 +1003,7 @@ def test_only_a_verify_review_card_reaches_done_from_this_stage(tmp_path, monkey
     sixteen cards waiting there had no surface Karel could exercise. It is reachable
     now, but only for a card that *declares* `verify: review`, and only on a clean
     merge. Drive every routing the stage can produce and pin where each one lands."""
-    monkeypatch.setattr(runner, "rebase_and_merge",
-                        lambda r, card, branch, base, test_timeout=600, remote="":
-                        (True, "merged"))
+    monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge())
     cases = {
         "needs_decision": ("needs-decision", "play", runner.Dispatch("needs_decision", "q?")),
         "reviewed-play": ("testing", "play", runner.Dispatch("reviewed", "ok")),
@@ -1034,9 +1026,7 @@ def test_only_a_verify_review_card_reaches_done_from_this_stage(tmp_path, monkey
         sub.mkdir()
         root = _worktree_repo(sub)
         _reviewed_branch(root, sub, verify=verify)
-        monkeypatch.setattr(runner, "rebase_and_merge",
-                            lambda r, card, branch, base, test_timeout=600, remote="":
-                            (False, "conflict"))
+        monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge(ok=False, why="conflict"))
         runner.settle(root, "probe", runner.Dispatch("reviewed", "ok"))
         assert board.find(root, "probe").lane == board.BLOCKED_LANE, verify
 
@@ -1044,9 +1034,7 @@ def test_only_a_verify_review_card_reaches_done_from_this_stage(tmp_path, monkey
 def test_a_play_card_lands_carrying_the_workers_scenario(tmp_path, monkeypatch):
     """The other half of the split: a card that does reach Karel's desk arrives
     with a `## How to test` written by the worker that built it, not bare."""
-    monkeypatch.setattr(runner, "rebase_and_merge",
-                        lambda r, card, branch, base, test_timeout=600, remote="":
-                        (True, "merged"))
+    monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge())
     root = _worktree_repo(tmp_path)
     _reviewed_branch(root, tmp_path, verify="play")
     runner.settle(root, "probe", runner.Dispatch(
@@ -1066,22 +1054,20 @@ def test_a_night_lands_a_reviewed_ok_card_in_testing(tmp_path, monkeypatch):
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "done"})
     monkeypatch.setattr(runner, "review_branch",
                         lambda *a, **k: ({"verdict": "ok", "notes": "clean"}, 0.1, None))
-    monkeypatch.setattr(runner, "rebase_and_merge",
-                        lambda r, card, branch, base, test_timeout=600, remote="":
-                        (True, "merged"))
+    monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge())
 
     runner.run(root, runner._parser(root).parse_args(
         ["--base", "development_team", "--max-cards", "1"]))
     assert board.find(root, "feat").lane == "testing"
 
 
-def test_merge_branch_refuses_when_the_checkout_is_on_the_wrong_branch(tmp_path):
-    """`merge_branch` never merges into whatever branch happens to be checked out.
+def test_the_landing_merge_refuses_when_the_checkout_is_on_the_wrong_branch(tmp_path):
+    """`landing._merge` never merges into whatever branch happens to be checked out.
     The main checkout must be on the integration branch — the runner is started
     there — and a mismatch is refused with a reason rather than merging blindly.
     (No live merge: the guard returns before any git merge is attempted.)"""
     root = _worktree_repo(tmp_path)          # HEAD is on development_team
-    ok, why = runner.merge_branch(root, "ai/probe", "some-other-branch")
+    ok, why = landing._merge(root, "ai/probe", "some-other-branch")
     assert not ok
     assert "not the integration branch" in why
 

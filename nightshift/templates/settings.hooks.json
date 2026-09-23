@@ -11,9 +11,13 @@
     "enforces that, and `nightshift.hooks.project_script` is the cwd-independent",
     "way to reach a script that must stay project-side.",
     "",
-    "The PostToolUse gate run (`nightshift.hooks.gates_on_edit`) always exits 0 on",
-    "purpose: a violation must show in the transcript, not block the edit that would",
-    "fix it. It prints only what is news since the previous edit, never the gate list.",
+    "The PostToolUse dispatcher (`nightshift.hooks.post`) runs the gates and always",
+    "exits 0 on purpose: a violation must show in the transcript, not block the edit",
+    "that would fix it. It prints only what is news since the previous edit. A project",
+    "names its own after-edit scripts as arguments: `nightshift.hooks.post <script>`.",
+    "",
+    "`nightshift.hooks.pre` runs every PreToolUse fence in one process (its `RULES`);",
+    "one spawn per tool call instead of one per fence.",
     "",
     "`nightshift.hooks.commit_pathspec` reads what that run last recorded and refuses",
     "a commit while it is red, in addition to its pathspec check -- so the gap between",
@@ -23,13 +27,13 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Agent",
+        "matcher": "Agent|Write|Edit|NotebookEdit|Bash|Read|Grep|Glob",
         "hooks": [
           {
             "type": "command",
-            "command": "python -m nightshift.hooks.tier_guard",
-            "timeout": 10,
-            "statusMessage": "Checking the card-execution tier..."
+            "command": "python -m nightshift.hooks.pre",
+            "timeout": 15,
+            "statusMessage": "Checking the fences (nightshift.hooks.pre)..."
           }
         ]
       },
@@ -58,61 +62,6 @@
             "statusMessage": "Checking the pre-merge preflight receipt..."
           }
         ]
-      },
-      {
-        "matcher": "Write|Edit|Bash|NotebookEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python -m nightshift.hooks.worktree_fence",
-            "timeout": 10,
-            "statusMessage": "Checking the worktree fence (a dispatched worker writes only in its worktree)..."
-          }
-        ]
-      },
-      {
-        "matcher": "Write|Edit|NotebookEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python -m nightshift.hooks.board_branch_fence",
-            "timeout": 10,
-            "statusMessage": "Checking the board branch fence (Board/ is written from the integration branch)..."
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python -m nightshift.hooks.commit_pathspec",
-            "timeout": 15,
-            "statusMessage": "Checking that git commit names what it commits..."
-          }
-        ]
-      },
-      {
-        "matcher": "Read|Grep|Glob|Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python -m nightshift.hooks.ideas_fence",
-            "timeout": 10,
-            "statusMessage": "Checking the private-lane fence..."
-          }
-        ]
-      },
-      {
-        "matcher": "Read|Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python -m nightshift.hooks.tool_economy",
-            "timeout": 10,
-            "statusMessage": "Checking tool economy (no whole reads of big files; a worker runs the slice, not the suite)..."
-          }
-        ]
       }
     ],
     "PostToolUse": [
@@ -121,9 +70,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python -m nightshift.hooks.gates_on_edit",
+            "command": "python -m nightshift.hooks.post",
             "timeout": 30,
-            "statusMessage": "Running gates (nightshift.hooks.gates_on_edit)..."
+            "statusMessage": "Running gates (nightshift.hooks.post)..."
           }
         ]
       },

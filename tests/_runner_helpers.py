@@ -72,6 +72,21 @@ from nightshift import runner
 import _fixtures
 
 
+def fake_rebase_and_merge(ok: bool = True, why: str = "merged", seen: list | None = None):
+    """A `runner.rebase_and_merge` stand-in that lands like the real one: on success it
+    runs the plan's `before_move` and moves the card, as `landing.land` would.
+    `seen` records `(branch, base, remote)` per call."""
+    def fake(r, card, branch, base, test_timeout=600, remote="", plan=None):
+        if seen is not None:
+            seen.append((branch, base, remote))
+        if ok and plan is not None:
+            if plan.before_move is not None:
+                plan.before_move(card)
+            board.move(r, card, plan.lane)
+        return ok, why
+    return fake
+
+
 
 # The runner's own source, for the AST guards below. Read off the installed
 # module rather than `.ai/runner.py`: 07_portability.md §8 step 4 moved it into
@@ -971,9 +986,7 @@ def _fake_review_run(monkeypatch, root: Path, card_id: str) -> None:
                         lambda root_, card, base, model, card_budget, test_timeout:
                         runner.Dispatch("reviewed", "ok"))
     monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-    monkeypatch.setattr(runner, "rebase_and_merge",
-                        lambda r, card, branch, base, test_timeout=600, remote="":
-                        (True, "merged"))
+    monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge())
 
 
 # --------------------------------------------------------------------------

@@ -69,7 +69,6 @@ import argparse
 import difflib
 import importlib.util
 import json
-import re
 import sys
 import tomllib
 from dataclasses import dataclass, field
@@ -348,7 +347,7 @@ def survey(root: Path) -> Survey:
 
 
 #: `python -m nightshift.some.module` inside a hook command.
-_HOOK_MODULE = re.compile(r"-m\s+(nightshift(?:\.[A-Za-z0-9_]+)+)")
+_HOOK_MODULE = init._HOOK_MODULE
 
 
 def dead_hook(hook: object) -> bool:
@@ -376,6 +375,11 @@ def dead_hook(hook: object) -> bool:
     match = _HOOK_MODULE.search(str(hook.get("command", "")))
     if not match:
         return False
+    # A fence folded into a dispatcher still imports, but wiring it on its own as
+    # well would run it twice per tool call.
+    from nightshift.hooks import post, pre
+    if match.group(1) in pre.SUPERSEDED | post.SUPERSEDED:
+        return True
     try:
         return importlib.util.find_spec(match.group(1)) is None
     except (ImportError, ValueError):

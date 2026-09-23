@@ -29,7 +29,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from nightshift import board, gitmerge, runner
+from nightshift import board, gitmerge, landing, runner
 
 import _fixtures  # noqa: E402
 import _runner_helpers  # noqa: E402
@@ -237,7 +237,7 @@ def test_rebase_and_merge_leaves_development_team_untouched_when_the_merge_also_
 
 # --------------------------------------------------------------------------
 # aim-crit-display-desync (2026-08-29): the rebase itself can replay and
-# re-verify clean, yet the final `merge_branch` step onto `development_team`
+# re-verify clean, yet the final the landing merge step onto `development_team`
 # still fails — and until now that failure had no fallback at all, unlike the
 # two conflict shapes above. `_bookkeeping_merge_fallback` closes that gap.
 # --------------------------------------------------------------------------
@@ -246,19 +246,23 @@ def test_rebase_and_merge_escalates_when_merge_branch_itself_fails(
         tmp_path, monkeypatch):
     """The exact shape that hit aim-crit-display-desync: the rebase replays and
     re-verifies cleanly (no conflict at all), but landing it onto
-    `development_team` (`merge_branch`) fails on its own — git's "local changes
-    would be overwritten" is one real cause, but any `merge_branch` failure
+    `development_team` (the landing merge) fails on its own — git's "local changes
+    would be overwritten" is one real cause, but any the landing merge failure
     belongs to this class. Since `development_team` has only moved in board
     bookkeeping since the fork, the plain-merge fallback gets a shot and lands
-    the card even though `merge_branch` itself never recovers."""
+    the card even though the landing merge itself never recovers."""
     root = _worktree_repo(tmp_path)
     _branch_with_file(root, tmp_path, "ai/probe", "feature.py", "x = 1\n")
     (root / "Board" / "blocked").mkdir(parents=True, exist_ok=True)
     _commit_on_base(root, tmp_path, "Board/blocked/probe.md", "board bookkeeping only\n")
 
-    monkeypatch.setattr(runner, "merge_branch",
-                        lambda *a, **k: (False, "your local changes to the following "
-                                        "files would be overwritten by merge"))
+    real_merge = landing._merge
+    # Only the rebase path's `--no-ff` landing fails; the plain-merge fallback lands
+    # through `ff_only`, which is left alone.
+    monkeypatch.setattr(landing, "_merge",
+                        lambda *a, **k: real_merge(*a, **k) if k.get("ff_only") else
+                        (False, "your local changes to the following "
+                                "files would be overwritten by merge"))
 
     card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
     merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
@@ -271,7 +275,7 @@ def test_rebase_and_merge_escalates_when_merge_branch_itself_fails(
 
 def test_rebase_and_merge_does_not_escalate_merge_branch_failure_on_production_divergence(
         tmp_path, monkeypatch):
-    """The narrow-scope guard applies here too: `merge_branch` failing is not a
+    """The narrow-scope guard applies here too: the landing merge failing is not a
     blank cheque to retry as a plain merge when `development_team` has moved in
     real production code, not just bookkeeping."""
     root = _worktree_repo(tmp_path)
@@ -279,7 +283,7 @@ def test_rebase_and_merge_does_not_escalate_merge_branch_failure_on_production_d
     _commit_on_base(root, tmp_path, "shared.py", "value = 'B'\n")
     base_before = runner._git(root, "rev-parse", "development_team").stdout.strip()
 
-    monkeypatch.setattr(runner, "merge_branch",
+    monkeypatch.setattr(landing, "_merge",
                         lambda *a, **k: (False, "some merge_branch failure"))
     escalated = []
     monkeypatch.setattr(runner, "_merge_with_resolver",

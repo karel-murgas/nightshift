@@ -73,9 +73,10 @@ from __future__ import annotations
 import json
 import os
 import re
-import shlex
 import sys
 from pathlib import Path
+
+from nightshift.hooks import shellwords
 
 NAME = "tool_economy"
 
@@ -91,11 +92,6 @@ BIG_FILE_BYTES = 60_000
 #: Rendered by the Read tool rather than dumped as text, so size says nothing
 #: about context cost.
 _RENDERED = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".pdf", ".ipynb"})
-
-#: Splits a command line into the segments that are separate invocations, so
-#: `cd foo && pytest` is judged on the `pytest`, and a pipeline's downstream
-#: `head` is judged separately from its upstream producer.
-_SEGMENT = re.compile(r"\s*(?:\|\||&&|[;|])\s*")
 
 #: A pytest invocation naming no path at all, or naming only the tests root, is
 #: the whole suite. `pytest tests/test_one.py` names a file and is exempt: a
@@ -119,10 +115,14 @@ _PATHISH = re.compile(r"[/\\]|\.\w{1,4}$")
 
 #: The two module invocations the Approach names as "no fence covers": long
 #: enough to make a foreground session look hung, and not already denied to a
-#: worker the way the whole suite is. Matched by the `-m` argument itself, not
-#: a substring search, so a string that merely mentions one of these names in
-#: passing (a commit message, a grep pattern) cannot trip it.
+#: worker the way the whole suite is. Matched on the interpreter's own `-m`
+#: argument, so a grep pattern or a commit message naming one cannot trip it
+#: (`slow-command-guard-matched-a-grep-pattern`).
 _SLOW_MODULES = frozenset({"nightshift.preflight", "nightshift.runner"})
+
+_PYTHONS = frozenset({"python", "python3", "py", "pythonw"})
+#: Interpreter options that take a value, so the value is not read as a script.
+_PYTHON_VALUED = frozenset({"-X", "-W", "-Q"})
 
 
 def _repo_root() -> Path | None:
@@ -159,24 +159,40 @@ def _armed() -> bool:
     return bool(os.environ.get(_env_name(), "").strip())
 
 
-def _words(segment: str) -> list[str]:
-    try:
-        return shlex.split(segment, posix=False)
-    except ValueError:
-        return segment.split()
+def _run_module(cmd: shellwords.Command) -> tuple[str, tuple[str, ...]]:
+    """`(module, its arguments)` when `cmd` is `python -m <module> ...`, else
+    `("", ())`. A script named before any `-m` owns the rest of the line."""
+    if cmd.program not in _PYTHONS:
+        return "", ()
+    words = cmd.words
+    skip = False
+    for at in range(1, len(words)):
+        word = words[at]
+        if skip:
+            skip = False
+        elif word == "-m":
+            return (words[at + 1], words[at + 2:]) if at + 1 < len(words) else ("", ())
+        elif word in _PYTHON_VALUED:
+            skip = True
+        elif not word.startswith("-"):
+            return "", ()
+    return "", ()
 
 
-def _is_full_suite_pytest(words: list[str]) -> bool:
-    """`pytest` / `python -m pytest` over everything, parallel or not."""
-    joined = " ".join(words)
-    if not re.search(r"(?:^|[/\\\s])(?:pytest|py\.test)(?:$|\s)", joined):
-        return False
+def _is_full_suite_pytest(cmd: shellwords.Command) -> bool:
+    """`pytest` / `python -m pytest` over everything, parallel or not — judged on the
+    command's own executable, never on a word elsewhere in the line."""
+    if cmd.program in ("pytest", "py.test"):
+        args = cmd.words[1:]
+    else:
+        module, args = _run_module(cmd)
+        if module != "pytest":
+            return False
     # Any positional argument that is a path other than the tests root means the
     # run was narrowed — the behaviour we want, not the one we are pricing.
     # `-k`/`-m` selections and `-n <workers>` are flags and fall out below.
     skip_next = False
-    for w in words:
-        bare = w.strip("\"'")
+    for bare in args:
         if skip_next:
             skip_next = False
             continue
@@ -185,8 +201,6 @@ def _is_full_suite_pytest(words: list[str]) -> bool:
             skip_next = bare in ("-k", "-m", "-p", "-o", "-n", "--dist", "--deselect",
                                  "--ignore")
             continue
-        if "pytest" in bare or bare in ("python", "python3", "py"):
-            continue
         if _TESTS_ROOT.match(bare):
             continue
         if _PATHISH.search(bare) or "::" in bare:
@@ -194,13 +208,10 @@ def _is_full_suite_pytest(words: list[str]) -> bool:
     return True
 
 
-def _is_known_slow_module(words: list[str]) -> bool:
-    """`python -m nightshift.preflight` / `python -m nightshift.runner`, however
-    the interpreter is spelled (`python`, `python3`, `py`) or quoted."""
-    for i, word in enumerate(words[:-1]):
-        if word.strip("\"'") == "-m" and words[i + 1].strip("\"'") in _SLOW_MODULES:
-            return True
-    return False
+def _is_known_slow_module(cmd: shellwords.Command) -> bool:
+    """`python -m nightshift.preflight` / `python -m nightshift.runner`, however the
+    interpreter is spelled (`python`, `python3`, `py`)."""
+    return _run_module(cmd)[0] in _SLOW_MODULES
 
 
 def _slow_verdict(command: str, run_in_background: bool) -> str | None:
@@ -213,11 +224,8 @@ def _slow_verdict(command: str, run_in_background: bool) -> str | None:
     """
     if run_in_background:
         return None
-    for seg in _SEGMENT.split(command):
-        words = _words(seg)
-        if not words:
-            continue
-        if _is_full_suite_pytest(words) or _is_known_slow_module(words):
+    for cmd in shellwords.commands(command) or ():
+        if _is_full_suite_pytest(cmd) or _is_known_slow_module(cmd):
             return (
                 "This command can run for minutes with no output in between, which "
                 "makes a foreground call indistinguishable from a hung session. Set "
@@ -227,39 +235,29 @@ def _slow_verdict(command: str, run_in_background: bool) -> str | None:
     return None
 
 
-def _file_reader(words: list[str], piped_into: bool) -> str | None:
-    """The reader command's name, when this segment reads a file off disk.
+def _file_reader(cmd: shellwords.Command) -> str | None:
+    """The reader command's name, when this command reads a file off disk.
 
-    `piped_into` is the exemption that makes this safe to deny on: a segment
-    downstream of a pipe is consuming the previous command's output, and
-    `... | head -20` is the ordinary, correct way to keep a chatty command's
-    result small. Only a reader with a file operand of its own is a Read in
-    disguise.
+    A command reading a pipe is exempt: `... | head -20` is the ordinary, correct
+    way to keep a chatty command's result small. Only a reader with a file operand
+    of its own is a Read in disguise.
     """
-    if piped_into or not words:
-        return None
-    cmd = Path(words[0].strip("\"'")).name.lower()
-    if cmd.endswith(".exe"):
-        cmd = cmd[:-4]
-    if cmd not in _TOOL_FOR:
+    name = cmd.program
+    if cmd.piped or name not in _TOOL_FOR:
         return None
     # The first bare operand of `grep`/`rg` is the *pattern*, not a path, so it
     # is skipped before looking for a file — otherwise `grep foo.bar x` would
     # trip on its own pattern.
-    operands = [w.strip("\"'") for w in words[1:] if not w.startswith("-")]
-    if cmd in ("grep", "rg") and operands:
+    operands = [w for w in cmd.words[1:] if not w.startswith("-")]
+    if name in ("grep", "rg") and operands:
         operands = operands[1:]
-    return cmd if any(_PATHISH.search(o) for o in operands) else None
+    return name if any(_PATHISH.search(o) for o in operands) else None
 
 
 def _verdict(command: str) -> str | None:
     """The reason to deny a dispatched worker's Bash command, or None to allow."""
-    segments = _SEGMENT.split(command)
-    for i, seg in enumerate(segments):
-        words = _words(seg)
-        if not words:
-            continue
-        if _is_full_suite_pytest(words):
+    for cmd in shellwords.commands(command) or ():
+        if _is_full_suite_pytest(cmd):
             return (  # gate-ok(source_reference_liveness): `tests/test_x.py` below is a placeholder in advice shown to a worker, not a reference to any file in this repo.
                 "Do not run the whole suite. `python -m nightshift.suite slice` runs "
                 "exactly the test slice the runner will judge your branch on, in "
@@ -268,7 +266,7 @@ def _verdict(command: str) -> str | None:
                 "run decides nothing. While iterating, run only the files you touched: "
                 "`pytest tests/test_x.py`."  # gate-ok(source_reference_liveness): a placeholder filename inside advice shown to a worker, not a reference to any file in this repo.
             )
-        reader = _file_reader(words, piped_into=i > 0)
+        reader = _file_reader(cmd)
         if reader:
             tool = _TOOL_FOR[reader]
             return (
@@ -304,13 +302,9 @@ def _read_verdict(tool_input: dict) -> str | None:
     )
 
 
-def main() -> int:
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
-        return 0  # fail open
-    if not isinstance(payload, dict):
-        return 0
+def check(payload: dict) -> str | None:
+    """The deny reason for one PreToolUse payload, or None — run by `main` and by
+    the `nightshift.hooks.pre` dispatcher. Fails open on anything unexpected."""
     tool = payload.get("tool_name")
     tool_input = payload.get("tool_input") or {}
     try:
@@ -331,12 +325,23 @@ def main() -> int:
         else:
             reason = None
     except Exception:
+        return None
+    return f"[{NAME}] {reason}" if reason else None
+
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
         return 0  # fail open
+    if not isinstance(payload, dict):
+        return 0
+    reason = check(payload)
     if reason:
         json.dump({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": f"[{NAME}] {reason}",
+            "permissionDecisionReason": reason,
         }}, sys.stdout)
     return 0
 

@@ -180,7 +180,8 @@ class Board:
     decision_attributor: str = ""
 
     #: Path prefixes (relative to the repo root) this project considers a
-    #: *player-visible surface* — read by `gates.player_visible_skipped_testing`.
+    #: *player-visible surface* — read by `landing.finished_lane`, which lands a card
+    #: touching one in `testing/` rather than `done/`.
     #: `inline-route-assumed-karel-was-the-author` (`.ai/corrections.log`,
     #: 2026-08-29): `verify: review` routes a card straight to `done/`, skipping
     #: the one lane where Karel actually looks at what shipped, and three
@@ -189,7 +190,7 @@ class Board:
     #: vocabulary is not this package's to invent (07_portability.md D5, the same
     #: reasoning `[layering].forbid` and `[dead_code].paths` already follow).
     #:
-    #: **Empty disables the gate**, not "nothing is player-visible" — a project
+    #: **Empty disables the check**, not "nothing is player-visible" — a project
     #: that has not declared this gets no opinion, same as an unset
     #: `decision_attributor`.
     player_visible_paths: tuple[str, ...] = ()

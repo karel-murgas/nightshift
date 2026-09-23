@@ -104,6 +104,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from nightshift.hooks import shellwords
 from nightshift.manifest import AI_DIR, MANIFEST_NAME
 
 # Every character `shlex(punctuation_chars=True)` lexes as an operator rather than
@@ -467,48 +468,9 @@ def _strip_assignments(argv: list[str]) -> list[str]:
     return argv[n:]
 
 
-_HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
-
-# A here-string: `cat <<<word`. Its content is data, like a here-document's, and it is
-# removed for the same reason — but the reason it is removed *here* rather than left to
-# the lexer is sharper. `<<<` lexes as an operator that `_split` does not know, and the
-# command that follows it on the next line then escapes `_hides_a_guarded_op` entirely:
-# `cat <<<word` then `git -C other push` was ALLOWED. A guard that fails closed on prose
-# it cannot lex, and open on a real push behind an unusual redirect, has its caution
-# pointed the wrong way.
-_HERESTRING = re.compile(r"<<<\s*(?:'[^']*'|\"[^\"]*\"|\S+)")
-
-
-def _strip_heredocs(command: str) -> str:
-    """`command` with every here-document *body* removed, delimiters and all.
-
-    A heredoc body is data the shell hands to a program's stdin; it is never parsed as
-    command text. Reading it as if it were produces exactly one behaviour, and it is bad
-    in both directions: a commit message that merely mentions `git push` makes the whole
-    command look guarded, and an apostrophe anywhere in that prose ("the session's repo")
-    then makes it unlexable — so the guard fails closed on a `git commit` that pushes
-    nothing.
-
-    Found the day the guard was rewritten, by it denying the commit of its own rewrite,
-    and then denying the script written to investigate that. Both messages described the
-    push incident the fix was about, in prose, with apostrophes in it.
-
-    `<<<` is a here-string, not a here-document: the `[A-Za-z_]` after the optional quote
-    declines to match it, and its content is a single word on the same line anyway.
-    """
-    out: list[str] = []
-    lines = _HERESTRING.sub(" ", command).splitlines(keepends=True)
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        out.append(line)
-        i += 1
-        for match in _HEREDOC.finditer(line):
-            tag = match.group(2)
-            while i < len(lines) and lines[i].strip() != tag:
-                i += 1
-            i += 1                      # and the closing delimiter line itself
-    return "".join(out)
+# Heredoc bodies are data, not commands: a commit message mentioning `git push` must
+# not read as a push, and its apostrophes must not make the command unlexable.
+_strip_heredocs = shellwords.strip_heredocs
 
 
 def _evaluate(command: str, cwd: Path | None, depth: int) -> dict | None:

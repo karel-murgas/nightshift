@@ -101,9 +101,9 @@ def _settle(tmp_path, monkeypatch, result: runner.Dispatch, *, commits: bool = T
                    capture_output=True)
     calls: dict = {"merged": 0}
 
-    def fake_merge(*a, **k):
+    def fake_merge(r, card, branch, base, test_timeout=600, remote="", plan=None):
         calls["merged"] += 1
-        return True, ""
+        return helpers.fake_rebase_and_merge(why="")(r, card, branch, base, plan=plan)
 
     monkeypatch.setattr(runner, "rebase_and_merge", fake_merge)
     monkeypatch.setattr(runner, "branch_has_commits", lambda *a, **k: commits)

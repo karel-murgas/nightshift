@@ -194,34 +194,21 @@ run — the on-save hook after your next `Write`/`Edit`, or `preflight` if none 
 
 Occasionally {{maintainer}} authorises a card to be done **inline**, in this session, rather
 than through the runner — cross-repo work the runner cannot cut a worktree for, most often.
-When that happens this skill owns the close-out the runner would otherwise have done, and
-**the lane move is the part that gets forgotten**: writing `## Telemetry` into the card feels
-like finishing it, and it is not. The lane *is* the state. A card whose work shipped and
-whose file never left `tasks/` is a board that lies — it will be re-dispatched, or re-read as
-outstanding by whoever looks next.
+The close-out is one command, the same landing the runner and the chore batch use:
 
-So an inline card is not finished until all five are true:
+1. Write `## Telemetry` onto the card — what was done, where it landed, what was verified
+   by running. It is a board edit, so on the integration branch.
+2. Run `python -m nightshift.preflight` on the card's branch, so its tip carries a receipt.
+3. From the integration branch: `python -m nightshift.boardcmd land <id>`.
 
-1. `## Telemetry` records what was done, where it landed, and what was verified by running.
-2. The work is **committed** — and, if it landed in another repo, pushed there — because
-   `done/` claims that.
-3. `state:` is set to the landing lane and `reconcile --apply` has moved the file.
-4. The gates are green *after* the move, not before.
-5. **The card's branch is deleted once merged — local and remote.** `git branch -d ai/<id>`
-   (the safe form: it refuses anything not actually merged, which is exactly the check you
-   want), and `git push origin --delete ai/<id>` if it ever reached the remote.
-
-Point 5 is the one this flow uniquely gets wrong. The runner deletes the branch inside
-`rebase_and_merge` the instant the rebased result lands — but an inline card never goes
-through `rebase_and_merge`, so nothing deletes anything and the branch simply stays. They are
-not harmless once `publish_remote` is set: `publish()` pushes every live `ai/<id>` branch, so
-a leftover local branch becomes a leftover *remote* branch on the next run.
-
-**"Merged" is the bar, not "the card is in `done/`".** Nothing about a lane move touches
-branches. Note the asymmetry with the runner: a branch the runner merged is **not** an
-ancestor of the integration branch (what landed is the rebased copy), so `git branch --merged`
-cannot see it — but a branch you merged inline with `--ff-only` *is*, which is why the safe
-`-d` works here and the runner has to use `-D`.
+`land` merges `ai/<id>`, folds its memory fragment, deletes the branch locally and on the
+publish remote, moves the card to its lane and commits — or refuses and touches nothing (no
+receipt, the wrong branch checked out, a merge that does not apply). The lane follows
+`verify:`, except that a diff touching a declared player-visible path always goes to
+`testing/`, and `--lane done` is refused for it. `--lane testing|done` overrides otherwise;
+`--no-branch` is for work that landed in another repository, so only the card moves. A
+branch already merged by hand is finished without a receipt, and
+`python -m nightshift.boardhealth` lists any card left merged but unmoved.
 
 Which lane: `done/` when it shipped and {{maintainer}} has already seen the result;
 `testing/` when it shipped and still needs them at the keyboard. Do not use `done/` to mean
