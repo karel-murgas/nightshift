@@ -15,7 +15,6 @@ legitimately edits a doc, and a gate that fails on legitimate edits gets muted.
 """
 from __future__ import annotations
 
-from pathlib import Path
 
 from nightshift.gates import deletion_sweep
 from nightshift.gates import doc_reference_liveness

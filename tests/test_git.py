@@ -1,4 +1,4 @@
-"""`nightshift.gitpaths` — git's path lists, read the one unambiguous way.
+"""`nightshift.git` — git's path lists, read the one unambiguous way.
 
 Driven by **real repositories with real awkward filenames**, never by fixture
 strings of what git is assumed to print. That assumption is the defect this module
@@ -18,7 +18,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from nightshift import gitpaths
+from nightshift import git
 
 import _fixtures
 
@@ -62,7 +62,7 @@ def test_git_still_quotes_and_splits_these_names_which_is_the_whole_point(tmp_pa
 
 def test_both_names_survive_a_listing_whole(tmp_path):
     root = _repo(tmp_path)
-    assert sorted(gitpaths.tracked(root)) == sorted([DASHED, SPACED])
+    assert sorted(git.tracked(root)) == sorted([DASHED, SPACED])
 
 
 def test_both_names_survive_a_diff_whole(tmp_path):
@@ -71,7 +71,7 @@ def test_both_names_survive_a_diff_whole(tmp_path):
     (root / DASHED).write_text("edited\n", encoding="utf-8")
     _git(root, "commit", "-qam", "edit both")
 
-    assert sorted(gitpaths.changed(root, "HEAD~1..HEAD")) == sorted([DASHED, SPACED])
+    assert sorted(git.changed(root, "HEAD~1..HEAD")) == sorted([DASHED, SPACED])
 
 
 def test_the_first_commit_reports_the_files_it_added(tmp_path):
@@ -79,21 +79,21 @@ def test_the_first_commit_reports_the_files_it_added(tmp_path):
     without `--root` this would answer "no paths" for the one commit where every
     path in it is new."""
     root = _repo(tmp_path)
-    assert sorted(gitpaths.committed(root)) == sorted([DASHED, SPACED])
+    assert sorted(git.committed(root)) == sorted([DASHED, SPACED])
 
 
 def test_a_working_tree_change_is_a_code_and_a_path(tmp_path):
     root = _repo(tmp_path)
     (root / SPACED).write_text("edited\n", encoding="utf-8")
 
-    assert gitpaths.status(root) == [(" M", SPACED)]
-    assert gitpaths.dirty(root) is True
+    assert git.status(root) == [(" M", SPACED)]
+    assert git.dirty(root) is True
 
 
 def test_a_clean_tree_says_nothing(tmp_path):
     root = _repo(tmp_path)
-    assert gitpaths.status(root) == []
-    assert gitpaths.dirty(root) is False
+    assert git.status(root) == []
+    assert git.dirty(root) is False
 
 
 def test_a_rename_is_one_change_at_the_path_that_now_exists(tmp_path):
@@ -104,7 +104,7 @@ def test_a_rename_is_one_change_at_the_path_that_now_exists(tmp_path):
     root = _repo(tmp_path)
     _git(root, "mv", SPACED, "Board/inbox/Renamed note.md")
 
-    assert gitpaths.status(root) == [("R ", "Board/inbox/Renamed note.md")]
+    assert git.status(root) == [("R ", "Board/inbox/Renamed note.md")]
 
 
 def test_name_status_orders_a_rename_the_other_way_round(tmp_path):
@@ -115,7 +115,7 @@ def test_name_status_orders_a_rename_the_other_way_round(tmp_path):
     _git(root, "mv", SPACED, "Board/inbox/Renamed note.md")
     _git(root, "commit", "-qm", "rename")
 
-    assert gitpaths.name_status(root, "HEAD~1..HEAD") == [
+    assert git.name_status(root, "HEAD~1..HEAD") == [
         ("R100", "Board/inbox/Renamed note.md")]
 
 
@@ -124,7 +124,7 @@ def test_name_status_reports_a_deletion_at_its_own_path(tmp_path):
     _git(root, "rm", "-q", DASHED)
     _git(root, "commit", "-qm", "delete")
 
-    assert gitpaths.name_status(root, "HEAD~1..HEAD") == [("D", DASHED)]
+    assert git.name_status(root, "HEAD~1..HEAD") == [("D", DASHED)]
 
 
 def test_a_question_git_cannot_answer_is_an_empty_list_not_a_crash(tmp_path):
@@ -133,11 +133,11 @@ def test_a_question_git_cannot_answer_is_an_empty_list_not_a_crash(tmp_path):
     matters, "cannot tell" against "nothing changed", is resolved by the caller at
     the merge-base rather than here."""
     root = _repo(tmp_path)
-    assert gitpaths.changed(root, "no-such-ref..HEAD") == []
-    assert gitpaths.name_status(root, "no-such-ref..HEAD") == []
+    assert git.changed(root, "no-such-ref..HEAD") == []
+    assert git.name_status(root, "no-such-ref..HEAD") == []
 
 
 def test_the_empty_blob_is_no_paths_rather_than_one_empty_one(tmp_path):
-    assert gitpaths.split("") == []
-    assert gitpaths.split("\0") == []
-    assert gitpaths.split("one\0two\0") == ["one", "two"]
+    assert git.split("") == []
+    assert git.split("\0") == []
+    assert git.split("one\0two\0") == ["one", "two"]

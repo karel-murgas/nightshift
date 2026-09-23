@@ -61,11 +61,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import subprocess
 import sys
 from pathlib import Path
 
-from nightshift import board, run_record, textio
+from nightshift import board, git, hostconfig, run_record, textio
 from nightshift.manifest import find_root
 
 #: Where a promoted note lands. The inbox is the only lane that takes an
@@ -91,11 +90,6 @@ class BoardCommandError(RuntimeError):
     """
 
 
-def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=root, check=False, capture_output=True,
-                          text=True, encoding="utf-8", errors="replace")
-
-
 def _bare_name(name: str) -> str:
     """`name` as a single markdown filename, or a refusal.
 
@@ -119,7 +113,7 @@ def _move_file(root: Path, source: Path, target: Path) -> None:
     not track yet, which is the ordinary state of a note nobody has committed.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
-    moved = _git(root, "mv", str(source), str(target))
+    moved = git.run(root, "mv", str(source), str(target))
     if moved.returncode != 0:
         source.rename(target)
 
@@ -189,7 +183,7 @@ def mark_rejected(root: Path, card_id: str, note: str) -> str:
     sees: a card only reaches `testing/` after gates, tests and an LLM review all
     passed, so whatever is wrong here is something none of them could catch —
     which is exactly why `verify: play` cards exist. That is not a decision either,
-    the same reasoning `drain.py` and `runner.settle` give for a reviewer's
+    the same reasoning `drain.py` and `settle.settle` give for a reviewer's
     `needs_fix`: a concrete "this is wrong, here is how" is work for the next
     attempt, not a question for `needs-decision/`.
 
@@ -205,7 +199,7 @@ def mark_rejected(root: Path, card_id: str, note: str) -> str:
     lands on top of it, not instead of it.
 
     **The card keeps its kind and gets a fresh attempt budget** (`retry_from`, read
-    by `runner.attempt_limit`). A rejected chore has already spent its one attempt,
+    by `dispatch.attempt_limit`). A rejected chore has already spent its one attempt,
     and without the reset `chores.eligible()` refused it and the panel filed it
     under "Do now" — work a person must do by hand — when the fix was usually a
     one-liner the batch could take. Karel, 2026-09-16.
@@ -415,7 +409,7 @@ def land(root: Path, card_id: str, *, lane: str = "", no_branch: bool = False) -
     rest. `--no-branch` is for work that landed in another repository. A card in
     `testing/` or `done/` takes a follow-up fix and stays in its lane.
     """
-    from nightshift import branches, landing, preflight, runner
+    from nightshift import branches, landing, preflight
     from nightshift.manifest import ManifestError
 
     card = _find(root, card_id)
@@ -429,13 +423,13 @@ def land(root: Path, card_id: str, *, lane: str = "", no_branch: bool = False) -
         base = branches.integration(root)
     except ManifestError as exc:
         raise BoardCommandError(f"no integration branch declared: {exc}") from exc
-    head = _git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    head = git.run(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     if head != base:
         raise BoardCommandError(
             f"the checkout is on `{head}`; land from the integration branch `{base}`")
 
     branch = branches.work_branch(card.id, card.fields.get("branch", ""))
-    exists = _git(root, "rev-parse", "--verify", f"refs/heads/{branch}").returncode == 0
+    exists = git.run(root, "rev-parse", "--verify", f"refs/heads/{branch}").returncode == 0
     if card.lane in LANDED and not exists:
         raise BoardCommandError(f"{card_id} already landed and `{branch}` does not exist "
                                 f"— there is no fix to merge")
@@ -455,15 +449,15 @@ def land(root: Path, card_id: str, *, lane: str = "", no_branch: bool = False) -
     else:
         branch, target = "", lane or board.finished_lane(card)
 
-    already = bool(branch) and _git(root, "merge-base", "--is-ancestor",
+    already = bool(branch) and git.run(root, "merge-base", "--is-ancestor",
                                     branch, base).returncode == 0
     if branch and not already:
-        sha = _git(root, "rev-parse", branch).stdout.strip()
+        sha = git.run(root, "rev-parse", branch).stdout.strip()
         if not preflight.is_validated(root, sha):
             raise BoardCommandError(
                 f"preflight has not validated `{branch}` ({sha[:8]}) — run "
                 f"`python -m nightshift.preflight` on it first")
-    remote = str(runner.host_setting(root, "publish_remote", "")).strip()
+    remote = str(hostconfig.host_setting(root, "publish_remote", "")).strip()
     from_lane = card.lane
     plan = None if card.lane in LANDED else landing.Plan(target)
     landed, why = landing.land(
@@ -525,7 +519,7 @@ def delete_note(root: Path, name: str, lane: str = INBOX) -> str:
     target = board.board_dir(root) / lane / filename
     if not target.is_file():
         raise BoardCommandError(f"no note called {filename!r} in {lane}/")
-    removed = _git(root, "rm", "-f", "--", str(target))
+    removed = git.run(root, "rm", "-f", "--", str(target))
     if removed.returncode != 0:
         target.unlink()
     board.commit_board(root, f"board: deleted {lane}/{filename}")

@@ -79,7 +79,7 @@ KEEP = 30
 # ambiguity already and nothing distinguishes them there either. The board-lane
 # section of the digest (not this file) is what actually shows a card now sitting
 # in needs-decision/, regardless of how the dispatch that put it there was logged.
-# `pick` is a decision even though the diff landed (`runner.unadopted_artefacts`):
+# `pick` is a decision even though the diff landed (`worktree.unadopted_artefacts`):
 # the attempt produced candidates and installed none, so the card is in
 # needs-decision/ waiting to be told which one. Reporting it as landed would put
 # it in the digest’s "these are done" list, which is the misreport the outcome was
@@ -126,7 +126,7 @@ class Record:
     """One run's record, flushed to disk after every event.
 
     A full overwrite per event rather than an append log, for the same reason
-    `runner._status` overwrites `status.json`: the file is tiny, the caller
+    `hostconfig._status` overwrites `status.json`: the file is tiny, the caller
     already holds the whole truth in memory, and a torn write costs one run's
     record rather than corrupting a stream. Every write is wrapped — a record
     that cannot be saved must never be the thing that ends a night. It is an
@@ -196,7 +196,7 @@ class Record:
         that survived a run: everything else the CLI reports about a call —
         turns, wall/API time, the four token counters, which model actually did
         the work — was downloaded, parsed once for its dollar figure, and
-        discarded (`token-economy.md` §1). `runner.usage_breakdown()` is the
+        discarded (`token-economy.md` §1). `telemetry.usage_breakdown()` is the
         reader that recovers the rest from what the stage already wrote to
         `.ai/runs/`; this is where it lands so a report can compare stages and
         cards without re-parsing a transcript.
@@ -256,7 +256,7 @@ class Record:
         self.save()
 
     def oversized(self, entries: list[tuple[str, int, int]]) -> None:
-        """Cards that were **dispatched** while over `runner.CARD_COMFORT_BYTES`,
+        """Cards that were **dispatched** while over `dispatch.CARD_COMFORT_BYTES`,
         as `(card_id, bytes, threshold)`.
 
         A field of its own, and the separation is the whole reason this exists.

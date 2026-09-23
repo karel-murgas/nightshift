@@ -37,10 +37,9 @@ specified.
 """
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
-from nightshift import branches, gitpaths
+from nightshift import branches, git
 from nightshift.gates.base import Violation
 from nightshift.manifest import ManifestError
 from nightshift.manifest import load as load_manifest
@@ -49,29 +48,18 @@ NAME = "memory_freshness"
 DESCRIPTION = "a diff touching a declared source area must also touch its memory doc"
 
 
-def _git_output(repo_root: Path, args: list[str]) -> str:
-    # `encoding=` is required — see the note in `deletion_sweep._git`. Without it
-    # Windows decodes git's output as cp1252 and any non-mappable byte in a tracked
-    # file makes `.stdout` `None` rather than raising.
-    result = subprocess.run(
-        ["git", *args], cwd=repo_root, capture_output=True, text=True, check=False,
-        encoding="utf-8", errors="replace",
-    )
-    return result.stdout or ""
-
-
 def _status_paths(repo_root: Path) -> list[tuple[str, str]]:
     """`(porcelain code, path)` for every working-tree change, renames resolved."""
-    return gitpaths.status(repo_root)
+    return git.status(repo_root)
 
 
 def changed_files(repo_root: Path) -> set[str]:
     """Everything this diff touches: working tree ∪ committed-since-merge-base."""
     files = {path for _, path in _status_paths(repo_root)}
     for base in branches.merge_base_candidates(repo_root):
-        merge_base = _git_output(repo_root, ["merge-base", "HEAD", base]).strip()
+        merge_base = (git.run(repo_root, "merge-base", "HEAD", base).stdout or "").strip()
         if merge_base:
-            files.update(gitpaths.changed(repo_root, f"{merge_base}..HEAD"))
+            files.update(git.changed(repo_root, f"{merge_base}..HEAD"))
             break
     return files
 

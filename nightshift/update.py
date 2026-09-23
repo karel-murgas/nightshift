@@ -60,7 +60,7 @@ rewrites files in your repo is the wrong default.
 rather than guessed at; there are two installs in the world that predate it and they are
 being updated by hand.
 
-No LLM in this module except `--merge`, which dispatches one through `runner._run_worker`
+No LLM in this module except `--merge`, which dispatches one through `worker._run_worker`
 exactly as `fix` does — the one place the Claude CLI is executed.
 """
 from __future__ import annotations
@@ -74,7 +74,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import init, runner, textio, tiers, uninstall
+from nightshift import init, textio, tiers, uninstall
+from nightshift import hostconfig, startup, telemetry, worker
 from nightshift.manifest import AI_DIR, MANIFEST_NAME, ManifestError, find_root
 
 for _stream in (sys.stdout, sys.stderr):
@@ -601,7 +602,7 @@ def merge(found: Survey, finding: Finding, *, permission_mode: str,
           timeout: int = MERGE_TIMEOUT_S) -> tuple[int, str]:
     """Hand both versions to an agent. Returns (exit code, its final message).
 
-    Dispatched through `runner._run_worker` — documented as the one place the Claude CLI
+    Dispatched through `worker._run_worker` — documented as the one place the Claude CLI
     is executed, and a second call site would make that claim false along with the test
     asserting it. The prompt goes in on **stdin**, never argv (`prompt_not_in_argv`).
 
@@ -623,7 +624,7 @@ def merge(found: Survey, finding: Finding, *, permission_mode: str,
     """
     if finding.staged is None:
         raise UpdateError(f"{finding.rel} has no template to merge.")
-    binary = runner.claude_binary()
+    binary = startup.claude_binary()
     if binary is None:
         raise UpdateError(
             "the `claude` CLI was not found (checked $CLAUDE_BIN, PATH and "
@@ -632,15 +633,15 @@ def merge(found: Survey, finding: Finding, *, permission_mode: str,
     # `plan` cannot edit either, and this check said `== "default"` from the day it
     # was written until 2026-08-17 — not because `plan` was judged acceptable but
     # because "cannot edit" and `"default"` were the same string while the category
-    # had one member (`runner.MODES_WITHOUT_EDIT`).
-    if permission_mode in runner.MODES_WITHOUT_EDIT:
+    # had one member (`hostconfig.MODES_WITHOUT_EDIT`).
+    if permission_mode in hostconfig.MODES_WITHOUT_EDIT:
         raise UpdateError(
             f"permission_mode is `{permission_mode}`, which cannot edit files — the agent "
             f"could read both versions and write neither. Pass `--permission-mode "
             f"acceptEdits` for this merge, or set it in {AI_DIR}/hosts.json.")
 
     before = _on_disk(found.root / finding.rel)
-    out_dir = found.root / runner.RUNS / "merge"
+    out_dir = found.root / hostconfig.RUNS / "merge"
     out_dir.mkdir(parents=True, exist_ok=True)
     scratch = found.root / (finding.rel + ".nightshift-new")
     scratch.parent.mkdir(parents=True, exist_ok=True)
@@ -650,10 +651,10 @@ def merge(found: Survey, finding: Finding, *, permission_mode: str,
                                new=scratch.relative_to(found.root).as_posix())
     textio.write_text_lf(out_dir / "prompt.md", text)
     argv = [binary, "-p", "--model", _model(found.root),
-            *runner._STREAM_ARGV, "--permission-mode", permission_mode]
-    done = runner._run_worker(argv, found.root, timeout, out_dir / "stream.jsonl",
+            *worker._STREAM_ARGV, "--permission-mode", permission_mode]
+    done = worker._run_worker(argv, found.root, timeout, out_dir / "stream.jsonl",
                              prompt=text)
-    result = runner._terminal_result(done.stdout or "")
+    result = telemetry._terminal_result(done.stdout or "")
     scratch.unlink(missing_ok=True)
     final = str(result.get("result") or "").strip()
     if done.returncode != 0:
@@ -813,7 +814,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.merge:
             mode = args.permission_mode or str(
-                runner.host_setting(root, "permission_mode", "default"))
+                hostconfig.host_setting(root, "permission_mode", "default"))
             code, final = merge(found, find(found, args.merge), permission_mode=mode)
             print(final or "  (the agent said nothing)")
             return code

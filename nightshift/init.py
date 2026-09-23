@@ -33,13 +33,14 @@ import json
 import os
 import re
 import socket
-import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from nightshift import discover
+from nightshift import git
+from nightshift import hostconfig
 from nightshift import textio
 from nightshift import tiers
 from nightshift.gates import line_endings
@@ -252,20 +253,6 @@ def render(text: str, values: dict[str, str]) -> str:
     return text
 
 
-def _git_out(root: Path, *args: str) -> str:
-    """git stdout, stripped — or `""` if git could not answer.
-
-    Never raises: `init` runs in repos that are half set up, and a discovery step
-    that dies on a missing git is a step nobody can run where it is most needed.
-    """
-    try:
-        done = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
-                              text=True, encoding="utf-8", errors="replace")
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return done.stdout.strip() if done.returncode == 0 else ""
-
-
 def _maintainer(root: Path, project: dict) -> str:
     """The name the charters address the operator by, most specific source first.
 
@@ -288,16 +275,15 @@ def _maintainer(root: Path, project: dict) -> str:
     lazy rather than top-level because `init` is the bootstrap module and `runner`
     pulls in a third of the package.
     """
-    from nightshift import runner
 
-    per_machine = runner.host_setting(root, "maintainer", "")
+    per_machine = hostconfig.host_setting(root, "maintainer", "")
     return (str(per_machine or "").strip()
             or str(project.get("maintainer") or "").strip()
             or _git_user(root))
 
 
 def _git_user(root: Path) -> str:
-    return _git_out(root, "config", "user.name") or "the maintainer"
+    return git.text(root, "config", "user.name") or "the maintainer"
 
 
 # --- the manifest ------------------------------------------------------------

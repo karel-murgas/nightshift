@@ -100,10 +100,10 @@ from __future__ import annotations
 import json
 import re
 import shlex
-import subprocess
 import sys
 from pathlib import Path
 
+from nightshift import git
 from nightshift.hooks import shellwords
 from nightshift.manifest import AI_DIR, MANIFEST_NAME
 
@@ -123,13 +123,6 @@ _MAX_DEPTH = 3
 # a false positive: that lexes fine, and its `git push` is one quoted word.
 _LOOKS_GUARDED = re.compile(
     r"\bgit\b.*?\b(?:push|merge)\b|\bgh\b.*?\bpr\b.*?\bcreate\b", re.DOTALL)
-
-
-def _git(repo_root: Path, *args: str) -> str:
-    out = subprocess.run(["git", *args], cwd=repo_root,
-                         capture_output=True, text=True, timeout=10,
-                         encoding="utf-8", errors="replace")
-    return (out.stdout or "").strip() if out.returncode == 0 else ""
 
 
 def _allow() -> dict:
@@ -321,12 +314,7 @@ def _toplevel(directory: Path) -> Path | None:
     directory is not in a git work tree. Not a walk up looking for `.ai/`: a
     checkout nested inside another project would find the enclosing project's
     manifest, which is the same wrong-repo answer this module is fixing."""
-    out = subprocess.run(["git", "-C", str(directory), "rev-parse", "--show-toplevel"],
-                         capture_output=True, text=True, timeout=10,
-                         encoding="utf-8", errors="replace")
-    if out.returncode != 0:
-        return None
-    line = (out.stdout or "").strip()
+    line = git.text_or_empty(directory, "rev-parse", "--show-toplevel", timeout=10)
     return Path(line).resolve() if line else None
 
 
@@ -362,11 +350,11 @@ def _sha(root: Path, sub: str, tail: list[str]) -> str | None:
     if sub == "push":
         if _is_delete(tail):
             return None   # removing a ref publishes nothing — see `_is_delete`
-        return _git(root, "rev-parse", "HEAD") or None
+        return git.text_or_empty(root, "rev-parse", "HEAD") or None
     ref = next((a for a in tail if not a.startswith("-")), None)
     if ref is None:
         return None   # `git merge --continue` / `--abort` — not a publish
-    return _git(root, "rev-parse", ref) or None
+    return git.text_or_empty(root, "rev-parse", ref) or None
 
 
 def _check(argv: list[str], cwd: Path | None) -> dict | None:

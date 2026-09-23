@@ -22,7 +22,7 @@ it was dispatched") gets wrong the moment two branches land the same night.
 
 **Read-only with respect to the real repository.** Every check happens in a
 detached worktree outside the repo (same reasoning as
-`runner.worktree_root` — a worktree inside `Board/`'s tree would be walked by
+`worktree.worktree_root` — a worktree inside `Board/`'s tree would be walked by
 `doc_scan`/`card_schema` and every card would appear twice); it is torn down
 whether the merge succeeds or fails, and nothing is ever pushed, committed to
 `{base}`, or left checked out. Running this can be done at any time, on a dirty
@@ -54,7 +54,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from nightshift import board, branches, gitmerge, gitpaths, runner, suite
+from nightshift import board, branches, git, gitmerge, suite
+from nightshift import hostconfig, verify, worktree
 from nightshift.manifest import find_root
 
 # Every possible outcome of one branch's check. Deliberately more than
@@ -62,7 +63,7 @@ from nightshift.manifest import find_root
 # running this before spending a human's attention on it.
 CLEAN = "clean"                  # merges with no conflict, gates green, tests green (or skipped)
 CONFLICT = "conflict"            # the merge itself does not apply cleanly
-GATE_CRASH = "gate_crash"        # the gate harness fell over — see runner.GATE_CRASH
+GATE_CRASH = "gate_crash"        # the gate harness fell over — see verify.GATE_CRASH
 GATE_VIOLATION = "gate_violation"
 TESTS_FAILED = "tests_failed"
 NO_BRANCH = "no_branch"          # the card carries no `branch:` field to check
@@ -86,35 +87,28 @@ class MergeCheck:
         return self.status == CLEAN
 
 
-def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
-    # `encoding=` is required under `.ai/` — see `subprocess_encoding` and the
-    # note in `.ai/gates/deletion_sweep.py._git` for the night this was learned.
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace")
-
-
 def _check_root(root: Path) -> Path:
     """Where this script's own throwaway worktrees live — a sibling of the
     runner's dispatch worktrees, never inside them, so a card actively being
     dispatched and the same card being merge-checked cannot collide."""
-    path = runner.worktree_root(root) / "_merge-check"
+    path = worktree.worktree_root(root) / "_merge-check"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def _run_dir(root: Path, card_id: str) -> Path:
-    path = root / runner.RUNS / "_merge-check" / card_id
+    path = root / hostconfig.RUNS / "_merge-check" / card_id
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def _conflicted_paths(entries: list[tuple[str, str]]) -> list[str]:
-    """Paths `gitpaths.status` marks as unmerged. `UU`/`AA`/`DD` are the two-sided
+    """Paths `git.status` marks as unmerged. `UU`/`AA`/`DD` are the two-sided
     conflict codes; `AU`/`UA`/`DU`/`UD` are the one-sided ones (added or deleted on
     only one side) — all of them need a human, so all are listed.
 
     Takes the parsed entries rather than the raw text: a path with a space in it
-    read out of `--porcelain` by hand is the defect `gitpaths` exists for, and a
+    read out of `--porcelain` by hand is the defect `git` exists for, and a
     conflict report that names half a filename is a report nobody can act on."""
     unmerged = {"UU", "AA", "DD", "AU", "UA", "DU", "UD"}
     return [path for code, path in entries if code in unmerged]
@@ -127,29 +121,29 @@ def check_branch(root: Path, card_id: str, branch: str, base: str,
     Every exit path removes the worktree it made, success or failure alike —
     this is a question, not a step, and must leave no trace either way.
     """
-    if _git(root, "rev-parse", "--verify", branch).returncode != 0:
+    if git.run(root, "rev-parse", "--verify", branch).returncode != 0:
         return MergeCheck(card_id, branch, BRANCH_MISSING,
                           f"`branch: {branch}` is on the card but the ref no longer exists")
 
     tree = _check_root(root) / card_id
     if tree.exists():
-        _git(root, "worktree", "remove", "--force", str(tree))
+        git.run(root, "worktree", "remove", "--force", str(tree))
     tree.parent.mkdir(parents=True, exist_ok=True)
     try:
-        made = runner._worktree_add(root, "--detach", str(tree), base)
-    except runner.WorktreePathTooLong as exc:
+        made = worktree._worktree_add(root, "--detach", str(tree), base)
+    except worktree.WorktreePathTooLong as exc:
         return MergeCheck(card_id, branch, CHECKOUT_FAILED, str(exc))
     if made.returncode != 0:
         return MergeCheck(card_id, branch, CHECKOUT_FAILED,
                           (made.stderr or made.stdout or "").strip()[:200])
 
     try:
-        merged = _git(tree, "merge", *gitmerge.STRATEGY_ARGS, "--no-commit", "--no-ff",
+        merged = git.run(tree, "merge", *gitmerge.STRATEGY_ARGS, "--no-commit", "--no-ff",
                       branch)
         if merged.returncode != 0:
-            conflicts = _conflicted_paths(gitpaths.status(tree))
+            conflicts = _conflicted_paths(git.status(tree))
             why = gitmerge.failure_detail(merged)
-            _git(tree, "merge", "--abort")
+            git.run(tree, "merge", "--abort")
             # Both halves: which paths, and what git said. A merge can fail with *no*
             # unmerged paths — refused before it started — and reporting only the
             # (then empty) conflict list is how a real cause goes unrecorded.
@@ -158,10 +152,10 @@ def check_branch(root: Path, card_id: str, branch: str, base: str,
                               f" — {why}")
 
         out_dir = _run_dir(root, card_id)
-        gate_status, gate_why = runner._run_gates(root, tree, out_dir / "gates.txt")
-        if gate_status == runner.GATE_CRASH:
+        gate_status, gate_why = verify._run_gates(root, tree, out_dir / "gates.txt")
+        if gate_status == verify.GATE_CRASH:
             return MergeCheck(card_id, branch, GATE_CRASH, gate_why)
-        if gate_status != runner.GATE_PASS:
+        if gate_status != verify.GATE_PASS:
             return MergeCheck(card_id, branch, GATE_VIOLATION, gate_why)
 
         if skip_tests:
@@ -172,7 +166,7 @@ def check_branch(root: Path, card_id: str, branch: str, base: str,
         # the same selection the runner uses (runner-test-selection). Computed from
         # the branch's own file changes since it forked, not the merged tree, so a
         # game-only card skips the ~500 system tests it cannot touch.
-        changed = set(gitpaths.changed(root, f"{base}...{branch}"))
+        changed = set(git.changed(root, f"{base}...{branch}"))
         # Classified against `tree` (the merged result pytest will run), not `root`
         # — a changed test file's slice depends on what it imports.
         selection = suite.select(changed, tree)
@@ -182,7 +176,7 @@ def check_branch(root: Path, card_id: str, branch: str, base: str,
             # card that has to survive being read on another machine. `why` names the
             # first failing test (`suite.check_junit`), and the full log is in
             # `out_dir` on this box, where they are standing.
-            ok, why, _ = runner._run_tests(tree, out_dir / "pytest.txt", test_timeout,
+            ok, why, _ = verify._run_tests(tree, out_dir / "pytest.txt", test_timeout,
                                            out_dir / "junit.xml",
                                            selection.pytest_args(tree / suite.tests_rel(root)))
         except subprocess.TimeoutExpired:
@@ -195,7 +189,7 @@ def check_branch(root: Path, card_id: str, branch: str, base: str,
         # Every path through this function leaves the worktree behind unless
         # this runs — including the two `return`s above it, which is why it is
         # a `finally` rather than repeated at each exit.
-        runner.drop_worktree(root, tree)
+        worktree.drop_worktree(root, tree)
 
 
 def report(root: Path, lanes: tuple[str, ...] = _LANES, base: str | None = None,
@@ -203,7 +197,7 @@ def report(root: Path, lanes: tuple[str, ...] = _LANES, base: str | None = None,
           only: str | None = None) -> list[MergeCheck]:
     """Every card with a `branch:` in the given lanes, checked. `only` narrows
     to one card id, searched across the given lanes rather than just one — the
-    same "a name is a specific request" reasoning `runner.resolve_named` uses."""
+    same "a name is a specific request" reasoning `dispatch.resolve_named` uses."""
     base = base or branches.integration(root)
     results: list[MergeCheck] = []
     for lane in lanes:

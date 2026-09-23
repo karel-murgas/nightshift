@@ -42,6 +42,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from nightshift import git
+
 
 def _find_repo_root() -> Path:
     from nightshift.manifest import find_root
@@ -65,10 +67,7 @@ def _check_tracked(repo: Path, rel: str) -> bool:
     """True if the path is tracked by git (defence-in-depth; check() already
     filters to tracked files, but an explicit verification before any delete
     is the safe habit)."""
-    result = subprocess.run(
-        ["git", "-C", str(repo), "ls-files", "--error-unmatch", rel],
-        capture_output=True, encoding="utf-8",
-    )
+    result = git.run(repo, "ls-files", "--error-unmatch", rel)
     return result.returncode == 0
 
 
@@ -156,11 +155,8 @@ def normalize(repo: Path, *, dry_run: bool = False) -> int:
         # `--stdin` rather than argv: a pre-attributes checkout can have hundreds
         # of targets (304 on the host that motivated this card) and Windows caps a
         # command line at ~32k characters.
-        result = subprocess.run(
-            ["git", "-C", str(repo), "checkout-index", "-f", "--stdin", "-z"],
-            input="".join(f"{rel}\0" for rel in safe),
-            capture_output=True, encoding="utf-8",
-        )
+        result = git.run(repo, "checkout-index", "-f", "--stdin", "-z",
+                         input="".join(f"{rel}\0" for rel in safe))
         if result.returncode != 0:
             print(
                 f"normalize_worktree: ERROR: git checkout-index failed:\n"
@@ -172,10 +168,7 @@ def normalize(repo: Path, *, dry_run: bool = False) -> int:
         # Also scoped: a bare `git add -u` stages every modified tracked file, so
         # it would sweep the skipped files' real edits into the index — not data
         # loss, but not this script's business either.
-        result = subprocess.run(
-            ["git", "-C", str(repo), "add", "-u", "--", *safe],
-            capture_output=True, encoding="utf-8",
-        )
+        result = git.run(repo, "add", "-u", "--", *safe)
         if result.returncode != 0:
             print(
                 f"normalize_worktree: ERROR: git add -u failed:\n{result.stderr}",

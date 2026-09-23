@@ -36,7 +36,7 @@ stops. A check that repaired the tree would be a check nobody reads the output o
 
 **Reuse over re-implementation.** Each check is a call to the predicate that
 already owns the question — `gates.line_endings.check`, the project's
-`runner.claude_binary`, `preflight.integration_base`. A
+`startup.claude_binary`, `preflight.integration_base`. A
 second implementation of "is `claude` installed" would be a second thing to keep
 true.
 """
@@ -46,13 +46,13 @@ import importlib.metadata as metadata
 import json
 import os
 import socket
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 import nightshift
-from nightshift import freshness, gitpaths, runner
+from nightshift import freshness, git
+from nightshift import hostconfig, startup, worktree
 from nightshift.gates import line_endings
 from nightshift.manifest import AI_DIR, ManifestError
 from nightshift.preflight import Check
@@ -75,18 +75,6 @@ _MAX_PATH = 259
 # that eats headroom without anyone noticing.
 _WARN_BELOW = 30
 GREEN, WARN, FAIL = "green", "warn", "fail"
-
-
-def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess | None:
-    """`None` when git cannot answer at all — no binary, or `cwd` is gone. The
-    callers here must survive that: a doctor that raises is worse than no doctor,
-    because it takes the whole preflight down with a traceback about itself."""
-    try:
-        # `encoding=` is required — see the note in `.ai/gates/deletion_sweep.py`.
-        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace")
-    except (OSError, subprocess.SubprocessError):
-        return None
 
 
 def lf_worktree(root: Path) -> Check:
@@ -130,7 +118,7 @@ def claude_on_path(root: Path) -> Check:
     if not _dispatches(root):
         return Check("claude-bin", True, "no board here — nothing dispatches, so the "
                                          "worker CLI is not needed", skipped=True)
-    found = runner.claude_binary()
+    found = startup.claude_binary()
     if found:
         return Check("claude-bin", True, found)
     return Check("claude-bin", False,
@@ -149,7 +137,7 @@ def hosts_entry(root: Path) -> Check:
     (`_TODO-desktop-hostname`: "until it was renamed, art cards never dispatched
     anywhere"), which is why an absent entry is a failure here and not an FYI.
 
-    Key presence, not `runner.host_config`: that resolver answers "what may this
+    Key presence, not `hostconfig.host_config`: that resolver answers "what may this
     box do", and returns `{}` both for an unlisted host and for a host whose entry
     is empty. Only the first is a problem, so the question has to be asked of the
     file. The paths still come from the runner, so there is one home for them.
@@ -158,11 +146,11 @@ def hosts_entry(root: Path) -> Check:
         return Check("hosts-json", True, "no board here — nothing dispatches, so no "
                                          "per-machine dispatch config is needed", skipped=True)
     hostname = socket.gethostname()
-    if (root / runner.HOST_FILE).is_file():
+    if (root / hostconfig.HOST_FILE).is_file():
         return Check("hosts-json", True,
                      f"{_HOST_OVERRIDE} overrides hosts.json on this box")
 
-    path = root / runner.HOSTS_FILE
+    path = root / hostconfig.HOSTS_FILE
     if not path.is_file():
         return Check("hosts-json", False,
                      f"{_HOSTS} does not exist — the runner has no per-machine config "
@@ -213,7 +201,7 @@ def worst_relative(root: Path) -> tuple[int, str]:
     Returns `(length, path)` so a report can name what is binding, not just
     how long it is.
     """
-    tracked = gitpaths.tracked(root)
+    tracked = git.tracked(root)
     if not tracked:
         return 0, "(no tracked files)"
 
@@ -318,7 +306,7 @@ def worktree_headroom(root: Path) -> Check:
         return Check("worktree-headroom", True,
                      "no board here — nothing cuts a worktree", skipped=True)
 
-    wt_root = runner.worktree_root(root)
+    wt_root = worktree.worktree_root(root)
     wt_root_len = len(str(wt_root))
     name_len, name = worst_worktree_name(root)
     rel_len, rel = worst_relative(root)
@@ -399,13 +387,13 @@ def framework_version(root: Path, checkout: Path | None = None) -> Check:
         # into site-packages, where the git lookup below simply finds nothing.
         checkout = Path(nightshift.__file__).resolve().parent.parent
 
-    head = _git(checkout, "rev-parse", "HEAD")
+    head = git.run_safe(checkout, "rev-parse", "HEAD")
     if head is None or head.returncode != 0:
         return Check("nightshift", True,
                      f"v{nightshift.__version__} at {checkout} — not a git checkout, "
                      f"so no commit to report (installed non-editable?)")
     sha = head.stdout.strip()[:8]
-    dirty = gitpaths.status(checkout)
+    dirty = git.status(checkout)
     state = f"{len(dirty)} uncommitted change(s)" if dirty else "clean"
     return Check("nightshift", True, f"{sha} ({state}) at {checkout}")
 
@@ -456,7 +444,7 @@ def paired_branches(root: Path, checkout: Path | None = None) -> Check:
         return Check("paired-branches", True,
                      f"framework at {state.checkout} is not a git checkout — no branch "
                      f"to pair with", skipped=True)
-    here = runner.current_branch(root)
+    here = hostconfig.current_branch(root)
     if not here:
         return Check("paired-branches", True, "this repo reports no branch (detached?)",
                      skipped=True)
@@ -547,7 +535,7 @@ def drift(root: Path) -> list[Drift]:
     # `_git` here returns the CompletedProcess even on a non-zero exit (`None` means
     # git could not run at all), so the verdict is the return code, not the object.
     integration = written.branches.integration
-    verify = _git(root, "rev-parse", "--verify", f"refs/heads/{integration}") if integration else None
+    verify = git.run_safe(root, "rev-parse", "--verify", f"refs/heads/{integration}") if integration else None
     if integration and verify is not None and verify.returncode != 0:
         out.append(Drift("branches.integration", integration, None,
                          "no such branch — nothing can dispatch until this is a branch "

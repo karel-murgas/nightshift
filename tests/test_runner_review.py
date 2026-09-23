@@ -27,8 +27,8 @@ from nightshift import limits
 from nightshift import reviewdiff
 from nightshift import run_record
 from nightshift import runner
-from nightshift import stale_sweep
 from nightshift.hooks import worktree_fence
+from nightshift import dispatch, git, hostconfig, outcome, review, settle, stale, startup, telemetry, verify, worker, worktree
 
 import _runner_helpers
 from _runner_helpers import (  # noqa: F401  (fixtures register by name)
@@ -75,7 +75,7 @@ def test_an_ok_verdict_becomes_a_reviewed_outcome(tmp_path, monkeypatch):
     card = _reviewed_branch(root, tmp_path)
     _stub_reviewer(monkeypatch, {"verdict": "ok", "notes": "clean"}, cost=0.2)
 
-    result = runner.review_stage(root, card, runner.Dispatch("review", "2 commits", 0.5),
+    result = review.review_stage(root, card, outcome.Dispatch("review", "2 commits", 0.5),
                                  "development_team", 0.0, 120)
     assert result.outcome == "reviewed"
     assert result.cost_usd == pytest.approx(0.7)   # dispatch 0.5 + reviewer 0.2, once
@@ -88,7 +88,7 @@ def test_a_needs_decision_verdict_carries_the_reviewers_question(tmp_path, monke
     _stub_reviewer(monkeypatch, {"verdict": "needs_decision",
                                  "question": "worker chose HP; the card allows HP or heat"})
 
-    result = runner.review_stage(root, card, runner.Dispatch("review", "x", 0.1),
+    result = review.review_stage(root, card, outcome.Dispatch("review", "x", 0.1),
                                  "development_team", 0.0, 120)
     assert result.outcome == "needs_decision"
     assert "HP or heat" in result.detail
@@ -104,7 +104,7 @@ def test_a_needs_fix_verdict_carries_the_reviewers_finding(tmp_path, monkeypatch
     _stub_reviewer(monkeypatch, {"verdict": "needs_fix",
                                  "finding": "credits commit a0bc0c2, not this card"})
 
-    result = runner.review_stage(root, card, runner.Dispatch("review", "x", 0.1),
+    result = review.review_stage(root, card, outcome.Dispatch("review", "x", 0.1),
                                  "development_team", 0.0, 120)
     assert result.outcome == "needs_fix"
     assert "a0bc0c2" in result.detail
@@ -120,7 +120,7 @@ def test_a_review_fix_continuation_reviews_only_since_the_prior_verdict(tmp_path
     _tier_binding(root)
     card = _reviewed_branch(root, tmp_path)
     reviewed_sha = _rev(root, "ai/probe")
-    runner.write_handover(root, "probe", runner.Handover(
+    worktree.write_handover(root, "probe", worktree.Handover(
         review_fix=True, reviewed_sha=reviewed_sha, review_finding="name commit Y instead"))
     # The fix: one more commit on top of the point the handover names.
     seed = tmp_path / "seed-fix"
@@ -139,9 +139,9 @@ def test_a_review_fix_continuation_reviews_only_since_the_prior_verdict(tmp_path
         seen["prior_finding"] = prior_finding
         return {"verdict": "ok", "notes": "fixed"}, 0.1, None
 
-    monkeypatch.setattr(runner, "review_branch", fake)
+    monkeypatch.setattr(review, "review_branch", fake)
 
-    result = runner.review_stage(root, card, runner.Dispatch("review", "x", 0.1),
+    result = review.review_stage(root, card, outcome.Dispatch("review", "x", 0.1),
                                  "development_team", 0.0, 120)
 
     assert result.outcome == "reviewed"
@@ -166,8 +166,8 @@ def test_a_first_review_passes_no_since_or_prior_finding(tmp_path, monkeypatch):
         seen["prior_finding"] = prior_finding
         return {"verdict": "ok"}, 0.1, None
 
-    monkeypatch.setattr(runner, "review_branch", fake)
-    runner.review_stage(root, card, runner.Dispatch("review", "x", 0.1),
+    monkeypatch.setattr(review, "review_branch", fake)
+    review.review_stage(root, card, outcome.Dispatch("review", "x", 0.1),
                         "development_team", 0.0, 120)
 
     assert seen == {"since": "", "prior_finding": ""}
@@ -186,7 +186,7 @@ def test_a_reviewed_sha_no_longer_reachable_falls_back_to_a_full_review(tmp_path
     root = _worktree_repo(tmp_path)
     _tier_binding(root)
     card = _reviewed_branch(root, tmp_path)
-    runner.write_handover(root, "probe", runner.Handover(
+    worktree.write_handover(root, "probe", worktree.Handover(
         review_fix=True, reviewed_sha="0" * 40, review_finding="stale finding"))
 
     seen: dict = {}
@@ -198,8 +198,8 @@ def test_a_reviewed_sha_no_longer_reachable_falls_back_to_a_full_review(tmp_path
         seen["prior_finding"] = prior_finding
         return {"verdict": "ok"}, 0.1, None
 
-    monkeypatch.setattr(runner, "review_branch", fake)
-    runner.review_stage(root, card, runner.Dispatch("review", "x", 0.1),
+    monkeypatch.setattr(review, "review_branch", fake)
+    review.review_stage(root, card, outcome.Dispatch("review", "x", 0.1),
                         "development_team", 0.0, 120)
 
     assert seen == {"since": "", "prior_finding": "stale finding"}
@@ -227,12 +227,12 @@ def test_a_full_diff_fix_round_is_told_it_is_one_without_the_incremental_claim(
         Path(verdict_line).write_text(json.dumps({"verdict": "ok"}), encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    runner.review_branch(root, "probe", out_dir, "opus", "development_team", branch,
+    review.review_branch(root, "probe", out_dir, "opus", "development_team", branch,
                          0.0, 60, criteria="x", intent="y",
                          since="", prior_finding="the finding to re-check")
 
@@ -271,12 +271,12 @@ def test_review_branch_diffs_only_since_the_prior_review_when_given(tmp_path, mo
         Path(verdict_line).write_text(json.dumps({"verdict": "ok"}), encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    runner.review_branch(root, "probe", out_dir, "opus", "development_team", branch,
+    review.review_branch(root, "probe", out_dir, "opus", "development_team", branch,
                          0.0, 60, criteria="x", intent="y",
                          since=reviewed_sha, prior_finding="fix the thing")
 
@@ -305,12 +305,12 @@ def test_review_branch_defaults_to_the_full_diff_without_since(tmp_path, monkeyp
         Path(verdict_line).write_text(json.dumps({"verdict": "ok"}), encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    runner.review_branch(root, "probe", out_dir, "opus", "development_team", branch,
+    review.review_branch(root, "probe", out_dir, "opus", "development_team", branch,
                          0.0, 60, criteria="x", intent="y")
 
     diff_text = (out_dir / "review-diff.patch").read_text(encoding="utf-8")
@@ -330,7 +330,7 @@ def test_the_review_stage_skips_an_artefact_only_card(tmp_path, monkeypatch):
     card = _reviewed_branch(root, tmp_path, "icon", worker="art", commit=False)
     spawned = _stub_reviewer(monkeypatch, {"verdict": "ok"})
 
-    result = runner.review_stage(root, card, runner.Dispatch("review", "art done", 0.3),
+    result = review.review_stage(root, card, outcome.Dispatch("review", "art done", 0.3),
                                  "development_team", 0.0, 120)
     assert result.outcome == "review"             # unchanged
     assert result.cost_usd == pytest.approx(0.3)  # reviewer never ran, no added cost
@@ -346,7 +346,7 @@ def test_the_review_stage_falls_back_to_review_on_a_wall(tmp_path, monkeypatch):
     _stub_reviewer(monkeypatch, {}, cost=0.3,
                    wall=limits.Wall(limits.SESSION, None, "usage limit reached"))
 
-    result = runner.review_stage(root, card, runner.Dispatch("review", "x", 0.1),
+    result = review.review_stage(root, card, outcome.Dispatch("review", "x", 0.1),
                                  "development_team", 0.0, 120)
     assert result.outcome == "review"
     assert result.cost_usd == pytest.approx(0.4)   # cost still carried forward
@@ -371,7 +371,7 @@ def test_an_unusable_verdict_is_unreviewable_not_a_review_still_owed(tmp_path, m
     card = _reviewed_branch(root, tmp_path)
     _stub_reviewer(monkeypatch, {}, cost=0.0)
 
-    result = runner.review_stage(root, card, runner.Dispatch("review", "x", 0.0),
+    result = review.review_stage(root, card, outcome.Dispatch("review", "x", 0.0),
                                  "development_team", 0.0, 120)
     assert result.outcome == "unreviewable"
 
@@ -387,7 +387,7 @@ def test_a_wall_mid_review_still_leaves_the_review_owed(tmp_path, monkeypatch):
     _stub_reviewer(monkeypatch, {}, cost=0.0,
                    wall=limits.Wall(limits.SESSION, None, "session limit"))
 
-    result = runner.review_stage(root, card, runner.Dispatch("review", "x", 0.0),
+    result = review.review_stage(root, card, outcome.Dispatch("review", "x", 0.0),
                                  "development_team", 0.0, 120)
     assert result.outcome == "review"
     assert result.wall is not None
@@ -403,7 +403,7 @@ def test_settle_files_an_unreviewable_card_to_blocked_with_the_command(tmp_path)
     card = _reviewed_branch(root, tmp_path)
     card.write({"started": "2026-07-24T03:00:00"})
 
-    message = runner.settle(root, "probe", runner.Dispatch(
+    message = settle.settle(root, "probe", outcome.Dispatch(
         "unreviewable", "the reviewer produced no usable verdict"))
 
     settled = board.find(root, "probe")
@@ -428,12 +428,12 @@ def test_a_checker_that_walls_after_writing_pass_has_its_verdict_honoured(
     _art_card(root)
     _fake_loop_walling(monkeypatch, ["pass"])
 
-    result = runner.dispatch(root, board.find(root, "icon"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "icon"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "review"          # NOT "limited"
     assert result.wall is not None and result.wall.scope == limits.SESSION
 
-    runner.settle(root, "icon", result)
+    settle.settle(root, "icon", result)
     card = board.find(root, "icon")
     assert card.lane == "review"
     assert card.attempts == 1                  # spent, not given back
@@ -448,11 +448,11 @@ def test_a_checker_that_walls_having_written_nothing_still_gives_the_attempt_bac
     _art_card(root)
     _fake_loop_walling(monkeypatch, ["pass"], write_verdict=False)
 
-    result = runner.dispatch(root, board.find(root, "icon"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "icon"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "limited"
 
-    runner.settle(root, "icon", result)
+    settle.settle(root, "icon", result)
     card = board.find(root, "icon")
     assert card.lane == "tasks"
     assert card.attempts == 0
@@ -469,13 +469,13 @@ def test_a_checker_that_walls_on_revise_with_rounds_left_is_still_limited(
     root = _worktree_repo(tmp_path)
     _art_card(root)
     _fake_loop_walling(monkeypatch, ["revise"])
-    assert runner.MAX_ROUNDS > 1, "this test is only meaningful with rounds to spare"
+    assert hostconfig.MAX_ROUNDS > 1, "this test is only meaningful with rounds to spare"
 
-    result = runner.dispatch(root, board.find(root, "icon"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "icon"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "limited"          # never "parked"
 
-    runner.settle(root, "icon", result)
+    settle.settle(root, "icon", result)
     card = board.find(root, "icon")
     assert card.lane == "tasks" and card.attempts == 0
 
@@ -488,14 +488,14 @@ def test_a_checker_that_walls_on_revise_in_the_last_round_is_honoured_as_a_park(
     have had if the wrap-up call had returned cleanly."""
     root = _worktree_repo(tmp_path)
     _art_card(root)
-    _fake_loop_walling(monkeypatch, ["revise"] * runner.MAX_ROUNDS,
-                       wall_at=runner.MAX_ROUNDS)
+    _fake_loop_walling(monkeypatch, ["revise"] * hostconfig.MAX_ROUNDS,
+                       wall_at=hostconfig.MAX_ROUNDS)
 
-    result = runner.dispatch(root, board.find(root, "icon"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "icon"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "parked"
     assert result.wall is not None
-    assert f"did not pass this in {runner.MAX_ROUNDS} round(s)" in result.detail
+    assert f"did not pass this in {hostconfig.MAX_ROUNDS} round(s)" in result.detail
 
 
 def test_a_producer_that_walls_after_parking_keeps_its_question(tmp_path, monkeypatch):
@@ -510,13 +510,13 @@ def test_a_producer_that_walls_after_parking_keeps_its_question(tmp_path, monkey
                  verdict={"outcome": "parked",
                           "summary": "HP or heat? the card allows either"})
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "parked"
     assert result.wall is not None
     assert "HP or heat" in result.detail
 
-    runner.settle(root, "probe", result)
+    settle.settle(root, "probe", result)
     card = board.find(root, "probe")
     assert card.lane == "needs-decision"
     assert "HP or heat" in card.text
@@ -534,11 +534,11 @@ def test_a_producer_that_walls_on_any_other_verdict_is_unchanged(tmp_path, monke
                  stderr="Claude AI usage limit reached",
                  verdict={"outcome": "done", "summary": "implemented"})
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "limited"
 
-    runner.settle(root, "probe", result)
+    settle.settle(root, "probe", result)
     assert board.find(root, "probe").attempts == 0
 
 
@@ -552,7 +552,7 @@ def test_a_reviewer_that_walls_after_writing_ok_still_routes_on_it(tmp_path, mon
     _stub_reviewer(monkeypatch, {"verdict": "ok", "notes": "clean"}, cost=0.2,
                    wall=limits.Wall(limits.SESSION, None, "usage limit reached"))
 
-    result = runner.review_stage(root, card, runner.Dispatch("review", "x", 0.5),
+    result = review.review_stage(root, card, outcome.Dispatch("review", "x", 0.5),
                                  "development_team", 0.0, 120)
     assert result.outcome == "reviewed"
     assert result.wall is not None
@@ -567,7 +567,7 @@ def test_a_reviewer_that_walls_after_needs_decision_still_carries_the_question(
     _stub_reviewer(monkeypatch, {"verdict": "needs_decision", "question": "which cap?"},
                    wall=limits.Wall(limits.SESSION, None, "usage limit reached"))
 
-    result = runner.review_stage(root, card, runner.Dispatch("review", "x", 0.1),
+    result = review.review_stage(root, card, outcome.Dispatch("review", "x", 0.1),
                                  "development_team", 0.0, 120)
     assert result.outcome == "needs_decision"
     assert "which cap?" in result.detail
@@ -582,7 +582,7 @@ def test_a_reviewer_that_walls_after_needs_fix_still_carries_the_finding(
     _stub_reviewer(monkeypatch, {"verdict": "needs_fix", "finding": "wrong constant name"},
                    wall=limits.Wall(limits.SESSION, None, "usage limit reached"))
 
-    result = runner.review_stage(root, card, runner.Dispatch("review", "x", 0.1),
+    result = review.review_stage(root, card, outcome.Dispatch("review", "x", 0.1),
                                  "development_team", 0.0, 120)
     assert result.outcome == "needs_fix"
     assert "wrong constant name" in result.detail
@@ -600,8 +600,8 @@ def test_the_review_stage_does_not_spawn_the_reviewer_into_a_closed_window(
     spawned = _stub_reviewer(monkeypatch, {"verdict": "ok"})
 
     wall = limits.Wall(limits.SESSION, None, "usage limit reached")
-    result = runner.review_stage(
-        root, card, runner.Dispatch("review", "x", 0.4, 1, wall),
+    result = review.review_stage(
+        root, card, outcome.Dispatch("review", "x", 0.4, 1, wall),
         "development_team", 0.0, 120)
     assert spawned == []                          # never called
     assert result.outcome == "review"
@@ -660,7 +660,7 @@ def test_the_run_log_tells_an_honoured_wall_apart_from_an_empty_one(tmp_path, mo
     _night(monkeypatch, root, [_landed_wall()])
     monkeypatch.setattr(runner, "_sleep_until", lambda when: True)
     lines: list[str] = []
-    monkeypatch.setattr(runner, "_log", lambda msg: lines.append(str(msg)))
+    monkeypatch.setattr(hostconfig, "_log", lambda msg: lines.append(str(msg)))
 
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
@@ -678,13 +678,13 @@ def test_a_give_back_outcome_carrying_a_wall_is_never_called_a_landing(
     only, so it names every give-back outcome as excluded rather than `limited`
     alone."""
     root = _loaded_board(tmp_path, "a")
-    blocked = runner.Dispatch("blocked", "the gate harness crashed", 0.0, 1,
+    blocked = outcome.Dispatch("blocked", "the gate harness crashed", 0.0, 1,
                               limits.Wall(limits.SESSION, None, "usage limit reached"))
     _night(monkeypatch, root, [blocked])
-    monkeypatch.setattr(runner, "settle",
+    monkeypatch.setattr(settle, "settle",
                         lambda r, cid, res: f"{cid}: not attempted, attempt given back")
     lines: list[str] = []
-    monkeypatch.setattr(runner, "_log", lambda msg: lines.append(str(msg)))
+    monkeypatch.setattr(hostconfig, "_log", lambda msg: lines.append(str(msg)))
 
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
@@ -712,14 +712,14 @@ def test_the_reviewer_is_never_shown_the_workers_prompt(tmp_path, monkeypatch):
         target.write_text(json.dumps({"verdict": "ok", "notes": ""}), encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-    runner.review_stage(root, card, runner.Dispatch("review", "x", 0.0),
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+    review.review_stage(root, card, outcome.Dispatch("review", "x", 0.0),
                         "development_team", 0.0, 120)
 
     argv = seen["argv"]
     prompt = seen["prompt"]
-    assert argv[argv.index("--agent") + 1] == runner.REVIEWER_AGENT
+    assert argv[argv.index("--agent") + 1] == hostconfig.REVIEWER_AGENT
     # a line unique to the worker's dispatch prompt, never present in the review one
     assert "Commit your work on this branch" not in prompt
     assert "Do not move the card" not in prompt
@@ -743,16 +743,16 @@ def test_settle_reviewed_merges_and_lands_in_testing(tmp_path, monkeypatch):
     card = _reviewed_branch(root, tmp_path)
     card.write({"started": "2026-07-24T03:00:00"})
     calls: list = []
-    monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge(seen=calls))
+    monkeypatch.setattr(review, "rebase_and_merge", fake_rebase_and_merge(seen=calls))
 
-    note = runner.settle(root, "probe", runner.Dispatch("reviewed", "clean"))
+    note = settle.settle(root, "probe", outcome.Dispatch("reviewed", "clean"))
     settled = board.find(root, "probe")
     assert settled.lane == "testing"
     assert not settled.fields.get("started")
     # Rebased onto + merged into the integration branch, and told which remote to
     # delete the branch on — `""` here, since this fixture's host declares no
     # `publish_remote` (see `test_settle_threads_the_publish_remote_to_the_merge`).
-    assert calls == [("ai/probe", runner.default_base(root), "")]
+    assert calls == [("ai/probe", hostconfig.default_base(root), "")]
     assert "testing/" in note
 
 
@@ -769,9 +769,9 @@ def test_settle_reaps_rescue_branches_the_moment_a_card_succeeds_into_testing(
     card.write({"started": "2026-07-24T03:00:00"})
     subprocess.run(["git", "branch", "ai/probe@failed-1", "development_team"],
                    cwd=root, check=True)
-    monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge())
+    monkeypatch.setattr(review, "rebase_and_merge", fake_rebase_and_merge())
 
-    runner.settle(root, "probe", runner.Dispatch("reviewed", "clean"))
+    settle.settle(root, "probe", outcome.Dispatch("reviewed", "clean"))
 
     assert board.find(root, "probe").lane == "testing"
     listed = subprocess.run(["git", "branch", "--list", "ai/probe@failed-*"], cwd=root,
@@ -788,12 +788,12 @@ def test_settle_threads_the_publish_remote_to_the_merge(tmp_path, monkeypatch):
     root = _worktree_repo(tmp_path)
     _reviewed_branch(root, tmp_path)
     (root / ".ai").mkdir(exist_ok=True)
-    (root / runner.HOST_FILE).write_bytes(
+    (root / hostconfig.HOST_FILE).write_bytes(
         json.dumps({"publish_remote": "origin"}).encode("utf-8"))
     seen: list = []
-    monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge(seen=seen))
+    monkeypatch.setattr(review, "rebase_and_merge", fake_rebase_and_merge(seen=seen))
 
-    runner.settle(root, "probe", runner.Dispatch("reviewed", "clean"))
+    settle.settle(root, "probe", outcome.Dispatch("reviewed", "clean"))
     assert [remote for _, _, remote in seen] == ["origin"]
 
 
@@ -808,9 +808,9 @@ def test_settle_reviewed_but_unmergeable_goes_to_blocked_not_testing(tmp_path, m
     root = _worktree_repo(tmp_path)
     card = _reviewed_branch(root, tmp_path)
     card.write({"started": "2026-07-24T03:00:00"})
-    monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge(ok=False, why="conflict in board.py"))
+    monkeypatch.setattr(review, "rebase_and_merge", fake_rebase_and_merge(ok=False, why="conflict in board.py"))
 
-    note = runner.settle(root, "probe", runner.Dispatch("reviewed", "clean"))
+    note = settle.settle(root, "probe", outcome.Dispatch("reviewed", "clean"))
     settled = board.find(root, "probe")
     assert settled.lane == board.BLOCKED_LANE
     assert "could not be rebased" in settled.text
@@ -827,7 +827,7 @@ def test_settle_needs_decision_files_a_schema_valid_question(tmp_path):
     card = _reviewed_branch(root, tmp_path)
     card.write({"started": "2026-07-24T03:00:00"})
 
-    runner.settle(root, "probe", runner.Dispatch(
+    settle.settle(root, "probe", outcome.Dispatch(
         "needs_decision", "worker chose HP; the card allows HP or heat — "
         "HP means A, heat means B. Which did you intend?"))
     settled = board.find(root, "probe")
@@ -849,7 +849,7 @@ def test_settle_needs_fix_sends_the_card_back_to_tasks_with_a_review_finding(tmp
     card = _reviewed_branch(root, tmp_path)  # attempts=1, well under MAX_ATTEMPTS
     card.write({"started": "2026-07-24T03:00:00"})
 
-    message = runner.settle(root, "probe", runner.Dispatch(
+    message = settle.settle(root, "probe", outcome.Dispatch(
         "needs_fix", "this claims commit X did the fix; git log shows commit Y did it "
         "on 2026-08-07 — name Y instead"))
     settled = board.find(root, "probe")
@@ -875,9 +875,9 @@ def test_settle_needs_fix_hands_the_branch_to_the_next_attempt(tmp_path):
     card.write({"started": "2026-07-24T03:00:00"})
     tip = _rev(root, "ai/probe")
 
-    runner.settle(root, "probe", runner.Dispatch("needs_fix", "name commit Y instead"))
+    settle.settle(root, "probe", outcome.Dispatch("needs_fix", "name commit Y instead"))
 
-    handover = runner.read_handover(root, "probe")
+    handover = worktree.read_handover(root, "probe")
     assert handover.review_fix is True
     # The branch is still where the work is — not renamed out of the way.
     assert _rev(root, "ai/probe") == tip
@@ -898,10 +898,10 @@ def test_settle_needs_fix_does_not_promise_a_branch_that_is_not_there(tmp_path):
     card.write({"started": "2026-07-24T03:00:00"})
     subprocess.run(["git", "branch", "-D", "ai/probe"], cwd=root, check=True)
 
-    runner.settle(root, "probe", runner.Dispatch("needs_fix", "nothing to fix, oddly"))
+    settle.settle(root, "probe", outcome.Dispatch("needs_fix", "nothing to fix, oddly"))
 
     assert board.find(root, "probe").lane == "tasks"
-    assert runner.read_handover(root, "probe").review_fix is False
+    assert worktree.read_handover(root, "probe").review_fix is False
 
 
 def test_a_review_fix_retry_continues_from_the_reviewed_branch(tmp_path):
@@ -918,21 +918,21 @@ def test_a_review_fix_retry_continues_from_the_reviewed_branch(tmp_path):
     root = _worktree_repo(tmp_path)
     card = _reviewed_branch(root, tmp_path)
     tip = _rev(root, "ai/probe")
-    runner.write_handover(root, "probe", runner.Handover(review_fix=True))
+    worktree.write_handover(root, "probe", worktree.Handover(review_fix=True))
 
-    tree, branch, mode = runner.prepare_worktree(root, card, "development_team")
+    tree, branch, mode = worktree.prepare_worktree(root, card, "development_team")
     try:
-        assert mode == runner.FROM_REVIEW
+        assert mode == worktree.FROM_REVIEW
         assert branch == "ai/probe"
         # The reviewed commit is checked out, so the finding has something to
         # apply to — the property the old code's own prose claimed and broke.
         assert _rev(tree, "HEAD") == tip
         assert (tree / "feature.py").is_file()
         # And the branch was not renamed out from under it.
-        assert runner._branch_exists(root, "ai/probe")
-        assert runner._rescue_branches(root, "probe") == []
+        assert worktree._branch_exists(root, "ai/probe")
+        assert worktree._rescue_branches(root, "probe") == []
     finally:
-        runner.drop_worktree(root, tree)
+        worktree.drop_worktree(root, tree)
 
 
 def test_an_interrupted_attempt_still_outranks_a_review_fix(tmp_path):
@@ -942,14 +942,14 @@ def test_an_interrupted_attempt_still_outranks_a_review_fix(tmp_path):
     is the one that is lost if it is not chosen, so it wins."""
     root = _worktree_repo(tmp_path)
     card = _reviewed_branch(root, tmp_path)
-    runner.write_handover(root, "probe", runner.Handover(
+    worktree.write_handover(root, "probe", worktree.Handover(
         session_id="sess-1", review_fix=True))
 
-    tree, _, mode = runner.prepare_worktree(root, card, "development_team")
+    tree, _, mode = worktree.prepare_worktree(root, card, "development_team")
     try:
-        assert mode == runner.FROM_WIP
+        assert mode == worktree.FROM_WIP
     finally:
-        runner.drop_worktree(root, tree)
+        worktree.drop_worktree(root, tree)
 
 
 def test_the_review_fix_worker_is_told_not_to_reimplement_the_card(tmp_path, monkeypatch):
@@ -960,11 +960,11 @@ def test_the_review_fix_worker_is_told_not_to_reimplement_the_card(tmp_path, mon
     root = _worktree_repo(tmp_path)
     card = _reviewed_branch(root, tmp_path)
     card.write_section("Review Finding", "change `Row 79.` to `Row 80.`")
-    runner.write_handover(root, "probe", runner.Handover(review_fix=True))
+    worktree.write_handover(root, "probe", worktree.Handover(review_fix=True))
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "fixed"})
     _stub_reviewer(monkeypatch, {"verdict": "ok", "notes": "good"})
 
-    runner.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 0.0, 60)
+    dispatch.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 0.0, 60)
 
     archived = sorted((root / ".ai" / "runs" / "probe").glob("attempt-*/prompt-1.md"))
     prompt = archived[-1].read_text(encoding="utf-8")
@@ -983,9 +983,9 @@ def test_settle_needs_fix_escalates_to_needs_decision_past_the_attempt_limit(tmp
 
     root = _worktree_repo(tmp_path)
     card = _reviewed_branch(root, tmp_path)
-    card.write({"started": "2026-07-24T03:00:00", "attempts": str(runner.MAX_ATTEMPTS)})
+    card.write({"started": "2026-07-24T03:00:00", "attempts": str(hostconfig.MAX_ATTEMPTS)})
 
-    message = runner.settle(root, "probe", runner.Dispatch("needs_fix", "still wrong"))
+    message = settle.settle(root, "probe", outcome.Dispatch("needs_fix", "still wrong"))
     settled = board.find(root, "probe")
     assert settled.lane == "needs-decision"
     assert "## Question" in settled.text
@@ -1001,18 +1001,18 @@ def test_only_a_verify_review_card_reaches_done_from_this_stage(tmp_path, monkey
     sixteen cards waiting there had no surface Karel could exercise. It is reachable
     now, but only for a card that *declares* `verify: review`, and only on a clean
     merge. Drive every routing the stage can produce and pin where each one lands."""
-    monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge())
+    monkeypatch.setattr(review, "rebase_and_merge", fake_rebase_and_merge())
     cases = {
-        "needs_decision": ("needs-decision", "play", runner.Dispatch("needs_decision", "q?")),
-        "reviewed-play": ("testing", "play", runner.Dispatch("reviewed", "ok")),
-        "reviewed-review": ("done", "review", runner.Dispatch("reviewed", "ok")),
+        "needs_decision": ("needs-decision", "play", outcome.Dispatch("needs_decision", "q?")),
+        "reviewed-play": ("testing", "play", outcome.Dispatch("reviewed", "ok")),
+        "reviewed-review": ("done", "review", outcome.Dispatch("reviewed", "ok")),
     }
     for i, (label, (expected_lane, verify, result)) in enumerate(cases.items()):
         sub = tmp_path / f"case{i}"
         sub.mkdir()
         root = _worktree_repo(sub)
         _reviewed_branch(root, sub, verify=verify)
-        runner.settle(root, "probe", result)
+        settle.settle(root, "probe", result)
         assert board.find(root, "probe").lane == expected_lane, label
 
     # A card that cannot merge goes to blocked/ from either value: "a human must
@@ -1024,18 +1024,18 @@ def test_only_a_verify_review_card_reaches_done_from_this_stage(tmp_path, monkey
         sub.mkdir()
         root = _worktree_repo(sub)
         _reviewed_branch(root, sub, verify=verify)
-        monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge(ok=False, why="conflict"))
-        runner.settle(root, "probe", runner.Dispatch("reviewed", "ok"))
+        monkeypatch.setattr(review, "rebase_and_merge", fake_rebase_and_merge(ok=False, why="conflict"))
+        settle.settle(root, "probe", outcome.Dispatch("reviewed", "ok"))
         assert board.find(root, "probe").lane == board.BLOCKED_LANE, verify
 
 
 def test_a_play_card_lands_carrying_the_workers_scenario(tmp_path, monkeypatch):
     """The other half of the split: a card that does reach Karel's desk arrives
     with a `## How to test` written by the worker that built it, not bare."""
-    monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge())
+    monkeypatch.setattr(review, "rebase_and_merge", fake_rebase_and_merge())
     root = _worktree_repo(tmp_path)
     _reviewed_branch(root, tmp_path, verify="play")
-    runner.settle(root, "probe", runner.Dispatch(
+    settle.settle(root, "probe", outcome.Dispatch(
         "reviewed", "ok", how_to_test="Start a run, open the hotbar, expect two slots."))
     landed = board.find(root, "probe")
     assert "## How to test" in landed.text
@@ -1050,9 +1050,9 @@ def test_a_night_lands_a_reviewed_ok_card_in_testing(tmp_path, monkeypatch):
     merge)."""
     root = _loaded_board(tmp_path, "feat")
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "done"})
-    monkeypatch.setattr(runner, "review_branch",
+    monkeypatch.setattr(review, "review_branch",
                         lambda *a, **k: ({"verdict": "ok", "notes": "clean"}, 0.1, None))
-    monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge())
+    monkeypatch.setattr(review, "rebase_and_merge", fake_rebase_and_merge())
 
     runner.run(root, runner._parser(root).parse_args(
         ["--base", "development_team", "--max-cards", "1"]))
@@ -1091,7 +1091,7 @@ class TestTerminalResult:
         is one line, so the last line is the only line and this must agree
         with a plain `json.loads` exactly."""
         stdout = json.dumps({"total_cost_usd": 0.5, "session_id": "s1"})
-        assert runner._terminal_result(stdout) == {"total_cost_usd": 0.5, "session_id": "s1"}
+        assert telemetry._terminal_result(stdout) == {"total_cost_usd": 0.5, "session_id": "s1"}
 
     def test_a_multi_event_stream_reads_the_last_line_not_the_first(self):
         stdout = "\n".join([
@@ -1100,18 +1100,18 @@ class TestTerminalResult:
             json.dumps({"type": "result", "total_cost_usd": 1.23,
                        "terminal_reason": "completed"}),
         ])
-        assert runner._terminal_result(stdout) == {
+        assert telemetry._terminal_result(stdout) == {
             "type": "result", "total_cost_usd": 1.23, "terminal_reason": "completed"}
 
     def test_trailing_blank_lines_do_not_hide_the_result(self):
         stdout = json.dumps({"type": "result", "total_cost_usd": 2.0}) + "\n\n\n"
-        assert runner._terminal_result(stdout)["total_cost_usd"] == 2.0
+        assert telemetry._terminal_result(stdout)["total_cost_usd"] == 2.0
 
     def test_unparseable_stdout_is_an_empty_dict_not_an_exception(self):
-        assert runner._terminal_result("not json at all\nstill not json") == {}
+        assert telemetry._terminal_result("not json at all\nstill not json") == {}
 
     def test_empty_stdout_is_an_empty_dict(self):
-        assert runner._terminal_result("") == {}
+        assert telemetry._terminal_result("") == {}
 
 
 def test_producer_argv_asks_for_stream_json_and_verbose(tmp_path, monkeypatch):
@@ -1125,7 +1125,7 @@ def test_producer_argv_asks_for_stream_json_and_verbose(tmp_path, monkeypatch):
     _card(root, "tasks", "probe")
     seen = _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "ok"})
 
-    runner.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 5.0, 120)
+    dispatch.dispatch(root, board.find(root, "probe"), "development_team", "sonnet", 5.0, 120)
 
     argv = seen["argv"]
     assert argv.count("--output-format") == 1
@@ -1157,10 +1157,10 @@ def test_the_producer_and_checker_argvs_both_use_stream_json_and_verbose(tmp_pat
                               encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
-    result = runner.dispatch(root, board.find(root, "icon"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "icon"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "review"
     assert len(argvs) == 2   # producer, then checker
@@ -1181,12 +1181,12 @@ def test_stale_check_argv_uses_stream_json_and_verbose(tmp_path, monkeypatch):
         seen["stream_path"] = stream_path
         return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.02}), "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    runner.run_stale_check(tmp_path, "docs/x.md", out_dir, "sonnet", 0.0, 60)
+    stale.run_stale_check(tmp_path, "docs/x.md", out_dir, "sonnet", 0.0, 60)
 
     argv = seen["argv"]
     assert argv.count("--output-format") == 1
@@ -1231,26 +1231,26 @@ def test_read_telemetry_survives_a_stream_json_worker(tmp_path, monkeypatch):
             json.dumps({"outcome": "done", "summary": "implemented"}), encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, jsonl_stdout, "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "review"
     assert result.cost_usd == pytest.approx(0.42)
 
-    out_dir = runner.run_dir(root, board.find(root, "probe"), 1)
+    out_dir = telemetry.run_dir(root, board.find(root, "probe"), 1)
     worker_json = json.loads((out_dir / "worker-1.json").read_text(encoding="utf-8"))
     assert worker_json["type"] == "result"
     assert worker_json["total_cost_usd"] == 0.42     # the result event, not the assistant line
 
-    tel = runner.read_telemetry(out_dir)
+    tel = telemetry.read_telemetry(out_dir)
     assert tel["cost_usd"] == pytest.approx(0.42)
     assert tel["turns"] == 4
     assert tel["ended"] == "completed"
     assert "claude-sonnet-5" in tel["models"]
 
-    runner.settle(root, "probe", result)
+    settle.settle(root, "probe", result)
     card_text = (root / "Board" / "review" / "probe.md").read_text(encoding="utf-8")
     assert "## Telemetry" in card_text and "0.42" in card_text
 
@@ -1270,7 +1270,7 @@ def test_stream_jsonl_grows_while_the_worker_is_still_running(tmp_path):
     outcome: dict = {}
 
     def _run():
-        outcome["proc"] = runner._run_worker(
+        outcome["proc"] = worker._run_worker(
             [sys.executable, "-c", stub], tmp_path, 10, stream_path)
 
     thread = threading.Thread(target=_run)
@@ -1306,7 +1306,7 @@ def test_a_worker_that_exceeds_its_timeout_is_still_killed(tmp_path):
         "    time.sleep(1)\n"
     )
     with pytest.raises(subprocess.TimeoutExpired):
-        runner._run_worker([sys.executable, "-c", stub, str(pidfile)], tmp_path, 2)
+        worker._run_worker([sys.executable, "-c", stub, str(pidfile)], tmp_path, 2)
 
     deadline = time.time() + 5
     pid = None
@@ -1316,7 +1316,7 @@ def test_a_worker_that_exceeds_its_timeout_is_still_killed(tmp_path):
             break
         time.sleep(0.05)
     assert pid is not None, "the stub never reported its own pid"
-    assert not runner._pid_alive(pid), "the timed-out worker was not actually killed"
+    assert not hostconfig._pid_alive(pid), "the timed-out worker was not actually killed"
 
 
 def test_run_worker_closes_the_stream_handle_when_popen_itself_fails(tmp_path):
@@ -1327,7 +1327,7 @@ def test_run_worker_closes_the_stream_handle_when_popen_itself_fails(tmp_path):
     stream_path = tmp_path / "stream.jsonl"
     missing = tmp_path / "does-not-exist-binary"
     with pytest.raises(OSError):
-        runner._run_worker([str(missing)], tmp_path, 5, stream_path)
+        worker._run_worker([str(missing)], tmp_path, 5, stream_path)
     stream_path.unlink()
 
 
@@ -1350,7 +1350,7 @@ def test_run_worker_returns_promptly_when_a_grandchild_holds_stdout_open(tmp_pat
         "os.close(fd)\n"
     )
     start = time.time()
-    proc = runner._run_worker([sys.executable, "-c", stub], tmp_path, 20)
+    proc = worker._run_worker([sys.executable, "-c", stub], tmp_path, 20)
     elapsed = time.time() - start
     assert elapsed < 15, f"_run_worker took {elapsed:.1f}s — the drain-thread join is not bounded"
     assert proc.returncode == 0
@@ -1361,7 +1361,7 @@ def test_ensure_trusted_writes_the_flag_for_an_untrusted_workspace(tmp_path, mon
     key = str(tmp_path.resolve()).replace("\\", "/")
     config.write_text(json.dumps({"projects": {key: {"hasTrustDialogAccepted": False}}}),
                       encoding="utf-8")
-    runner.ensure_workspace_trusted(tmp_path)
+    startup.ensure_workspace_trusted(tmp_path)
     data = json.loads(config.read_text(encoding="utf-8"))
     assert data["projects"][key]["hasTrustDialogAccepted"] is True
 
@@ -1369,7 +1369,7 @@ def test_ensure_trusted_writes_the_flag_for_an_untrusted_workspace(tmp_path, mon
 def test_ensure_trusted_creates_the_project_entry_when_absent(tmp_path, monkeypatch):
     config = _home(monkeypatch, tmp_path)
     config.write_text(json.dumps({"projects": {}}), encoding="utf-8")
-    runner.ensure_workspace_trusted(tmp_path)
+    startup.ensure_workspace_trusted(tmp_path)
     data = json.loads(config.read_text(encoding="utf-8"))
     key = str(tmp_path.resolve()).replace("\\", "/")
     assert data["projects"][key]["hasTrustDialogAccepted"] is True
@@ -1383,7 +1383,7 @@ def test_ensure_trusted_matches_an_existing_key_case_insensitively(tmp_path, mon
     weird = str(tmp_path.resolve()).replace("\\", "/").swapcase()
     config.write_text(json.dumps({"projects": {weird: {"hasTrustDialogAccepted": False}}}),
                       encoding="utf-8")
-    runner.ensure_workspace_trusted(tmp_path)
+    startup.ensure_workspace_trusted(tmp_path)
     data = json.loads(config.read_text(encoding="utf-8"))
     assert data["projects"][weird]["hasTrustDialogAccepted"] is True
     assert len(data["projects"]) == 1, "created a duplicate instead of updating in place"
@@ -1395,19 +1395,19 @@ def test_ensure_trusted_is_a_noop_when_already_trusted(tmp_path, monkeypatch):
     config.write_text(json.dumps({"projects": {key: {"hasTrustDialogAccepted": True}}}),
                       encoding="utf-8")
     before = config.stat().st_mtime_ns
-    runner.ensure_workspace_trusted(tmp_path)
+    startup.ensure_workspace_trusted(tmp_path)
     assert config.stat().st_mtime_ns == before, "rewrote the file with nothing to change"
 
 
 def test_ensure_trusted_swallows_a_missing_config(tmp_path, monkeypatch):
     _home(monkeypatch, tmp_path)  # no .claude.json written
-    runner.ensure_workspace_trusted(tmp_path)  # must not raise
+    startup.ensure_workspace_trusted(tmp_path)  # must not raise
 
 
 def test_ensure_trusted_swallows_unreadable_json(tmp_path, monkeypatch):
     config = _home(monkeypatch, tmp_path)
     config.write_text("{ not json", encoding="utf-8")
-    runner.ensure_workspace_trusted(tmp_path)  # must not raise
+    startup.ensure_workspace_trusted(tmp_path)  # must not raise
     assert config.read_text(encoding="utf-8") == "{ not json", "clobbered a file it could not parse"
 
 
@@ -1475,8 +1475,8 @@ def test_worker_env_declares_exactly_the_three_writable_roots(tmp_path):
     writes."""
     _write_manifest(tmp_path)
     tree, out_dir = tmp_path / "wt", tmp_path / "runs" / "c" / "attempt-1"
-    env = runner._worker_env(tmp_path, tree, out_dir)
-    declared = env[runner.fence_env(tmp_path)].split(os.pathsep)
+    env = worker._worker_env(tmp_path, tree, out_dir)
+    declared = env[hostconfig.fence_env(tmp_path)].split(os.pathsep)
     expected = {str(p.resolve()) for p in (tree, out_dir, tmp_path / "Board")}
     assert set(declared) == expected
     assert "PATH" in env or "Path" in env, "must inherit the parent environment, not replace it"
@@ -1486,8 +1486,8 @@ def test_a_project_declaring_no_fence_env_leaves_the_fence_off(tmp_path):
     """`[worker].fence_env` is optional, and its absence must be a plain
     inherited environment rather than a `KeyError` or a variable named `""`.
     The fence then never arms, which is the safe direction the hook documents."""
-    assert runner.fence_env(tmp_path) == ""
-    env = runner._worker_env(tmp_path, tmp_path / "wt", tmp_path / "out")
+    assert hostconfig.fence_env(tmp_path) == ""
+    env = worker._worker_env(tmp_path, tmp_path / "wt", tmp_path / "out")
     assert "" not in env
     assert "PATH" in env or "Path" in env
 
@@ -1496,27 +1496,27 @@ def test_backstop_resets_a_stray_commit_off_the_integration_branch(tmp_path):
     """A worker commit that lands on `base` from the wrong checkout is undone; the
     branch returns to the tip the runner left, no matter the card's fate."""
     root = _repo(tmp_path)
-    base = runner.current_branch(root)
-    tip = runner._git(root, "rev-parse", base).stdout.strip()
+    base = hostconfig.current_branch(root)
+    tip = git.run(root, "rev-parse", base).stdout.strip()
 
     # Simulate the defect: a commit lands on `base` in the main checkout.
     (root / "stray.py").write_text("print('wrong checkout')\n", encoding="utf-8")
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "stray: committed to base by mistake"],
                    cwd=root, check=True)
-    assert runner._git(root, "rev-parse", base).stdout.strip() != tip
+    assert git.run(root, "rev-parse", base).stdout.strip() != tip
 
-    assert runner.assert_integration_unmoved(root, base, tip) is True
-    assert runner._git(root, "rev-parse", base).stdout.strip() == tip
+    assert worktree.assert_integration_unmoved(root, base, tip) is True
+    assert git.run(root, "rev-parse", base).stdout.strip() == tip
     assert not (root / "stray.py").exists(), "the stray commit's file must be gone too"
 
 
 def test_backstop_is_a_no_op_when_the_branch_did_not_move(tmp_path):
     root = _repo(tmp_path)
-    base = runner.current_branch(root)
-    tip = runner._git(root, "rev-parse", base).stdout.strip()
-    assert runner.assert_integration_unmoved(root, base, tip) is False
-    assert runner._git(root, "rev-parse", base).stdout.strip() == tip
+    base = hostconfig.current_branch(root)
+    tip = git.run(root, "rev-parse", base).stdout.strip()
+    assert worktree.assert_integration_unmoved(root, base, tip) is False
+    assert git.run(root, "rev-parse", base).stdout.strip() == tip
 
 
 def test_backstop_leaves_a_board_only_commit_alone(tmp_path):
@@ -1527,18 +1527,18 @@ def test_backstop_leaves_a_board_only_commit_alone(tmp_path):
     allow on `base` (`_worker_env`), so a commit confined to it is not the
     wrong-checkout defect and must survive."""
     root = _repo(tmp_path)
-    base = runner.current_branch(root)
-    tip = runner._git(root, "rev-parse", base).stdout.strip()
+    base = hostconfig.current_branch(root)
+    tip = git.run(root, "rev-parse", base).stdout.strip()
 
     (root / "Board" / "tasks").mkdir(parents=True, exist_ok=True)
     (root / "Board" / "tasks" / "a-card.md").write_text("a card\n", encoding="utf-8")
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "board: a-card carded"], cwd=root, check=True)
-    moved = runner._git(root, "rev-parse", base).stdout.strip()
+    moved = git.run(root, "rev-parse", base).stdout.strip()
     assert moved != tip
 
-    assert runner.assert_integration_unmoved(root, base, tip) is False
-    assert runner._git(root, "rev-parse", base).stdout.strip() == moved, (
+    assert worktree.assert_integration_unmoved(root, base, tip) is False
+    assert git.run(root, "rev-parse", base).stdout.strip() == moved, (
         "a Board-only commit must not be reset away"
     )
     assert (root / "Board" / "tasks" / "a-card.md").exists()
@@ -1550,8 +1550,8 @@ def test_backstop_still_resets_when_a_non_board_change_rides_along(tmp_path):
     with a legitimate board commit — the same conservative behaviour as before
     this exemption existed."""
     root = _repo(tmp_path)
-    base = runner.current_branch(root)
-    tip = runner._git(root, "rev-parse", base).stdout.strip()
+    base = hostconfig.current_branch(root)
+    tip = git.run(root, "rev-parse", base).stdout.strip()
 
     (root / "Board" / "tasks").mkdir(parents=True, exist_ok=True)
     (root / "Board" / "tasks" / "a-card.md").write_text("a card\n", encoding="utf-8")
@@ -1559,51 +1559,51 @@ def test_backstop_still_resets_when_a_non_board_change_rides_along(tmp_path):
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "mixed: board edit plus stray code"],
                    cwd=root, check=True)
-    assert runner._git(root, "rev-parse", base).stdout.strip() != tip
+    assert git.run(root, "rev-parse", base).stdout.strip() != tip
 
-    assert runner.assert_integration_unmoved(root, base, tip) is True
-    assert runner._git(root, "rev-parse", base).stdout.strip() == tip
+    assert worktree.assert_integration_unmoved(root, base, tip) is True
+    assert git.run(root, "rev-parse", base).stdout.strip() == tip
     assert not (root / "stray.py").exists()
     assert not (root / "Board" / "tasks" / "a-card.md").exists()
 
 
 def test_check_junit_passes_an_all_green_report(tmp_path):
-    ok, why = runner._check_junit(_junit(tmp_path / "j.xml", tests=42))
+    ok, why = verify._check_junit(_junit(tmp_path / "j.xml", tests=42))
     assert ok and why == ""
 
 
 def test_check_junit_fails_on_a_failure(tmp_path):
-    ok, why = runner._check_junit(_junit(tmp_path / "j.xml", tests=42, failures=1))
+    ok, why = verify._check_junit(_junit(tmp_path / "j.xml", tests=42, failures=1))
     assert not ok and "1 failure" in why
 
 
 def test_check_junit_fails_on_an_error(tmp_path):
-    ok, why = runner._check_junit(_junit(tmp_path / "j.xml", tests=42, errors=2))
+    ok, why = verify._check_junit(_junit(tmp_path / "j.xml", tests=42, errors=2))
     assert not ok and "2 error" in why
 
 
 def test_check_junit_treats_zero_collected_as_a_failure(tmp_path):
     """The silent-green guard: a selection that matched nothing is not a pass."""
-    ok, why = runner._check_junit(_junit(tmp_path / "j.xml", tests=0))
+    ok, why = verify._check_junit(_junit(tmp_path / "j.xml", tests=0))
     assert not ok and "0 tests" in why
 
 
 def test_check_junit_fails_when_no_report_was_written(tmp_path):
-    ok, why = runner._check_junit(tmp_path / "absent.xml")
+    ok, why = verify._check_junit(tmp_path / "absent.xml")
     assert not ok and "no JUnit report" in why
 
 
 def test_check_junit_fails_on_an_unreadable_report(tmp_path):
     bad = tmp_path / "j.xml"
     bad.write_text("<testsuites>not closed", encoding="utf-8")
-    ok, why = runner._check_junit(bad)
+    ok, why = verify._check_junit(bad)
     assert not ok and "unreadable" in why
 
 
 def test_run_tests_passes_the_parallel_and_junit_flags(tmp_path, monkeypatch):
     """Production must parallelise by file and report to JUnit. Restores the real
     flags (the autouse fixture blanks them for speed) and captures the argv."""
-    monkeypatch.setattr(runner, "_PYTEST_PARALLEL", ("-n", "auto", "--dist", "loadfile"))
+    monkeypatch.setattr(verify, "_PYTEST_PARALLEL", ("-n", "auto", "--dist", "loadfile"))
     captured: dict = {}
 
     def fake_run(argv, **kwargs):
@@ -1611,8 +1611,8 @@ def test_run_tests_passes_the_parallel_and_junit_flags(tmp_path, monkeypatch):
         _junit(tmp_path / "j.xml", tests=1)
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
-    ok, why, evidence = runner._run_tests(tmp_path, tmp_path / "log.txt", 60,
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    ok, why, evidence = verify._run_tests(tmp_path, tmp_path / "log.txt", 60,
                                           tmp_path / "j.xml", ["tests/"])
     assert ok, why
     assert evidence == "", "a passing run has nothing to quote"
@@ -1630,7 +1630,7 @@ def test_check_junit_sums_across_multiple_testsuites(tmp_path):
         '<testsuite tests="10" failures="0" errors="0"></testsuite>'
         '<testsuite tests="5" failures="1" errors="0"></testsuite>'
         '</testsuites>', encoding="utf-8")
-    ok, why = runner._check_junit(path)
+    ok, why = verify._check_junit(path)
     assert not ok and "1 failure" in why and "15 test" in why
 
 
@@ -1639,12 +1639,12 @@ def test_ensure_integration_checkout_creates_a_sibling_on_the_base(tmp_path):
     (never inside it — doc_scan would walk a checkout under Board/). Idempotent: a
     second night reuses the same one."""
     root, path = _split_repo(tmp_path)
-    made = runner.ensure_integration_checkout(root, "development_team")
+    made = worktree.ensure_integration_checkout(root, "development_team")
     assert made == path
     assert path.is_dir() and path != root
     assert path.parent == root.parent           # a sibling, outside the repo
-    assert runner.current_branch(path) == "development_team"
-    assert runner.ensure_integration_checkout(root, "development_team") == path  # reused
+    assert hostconfig.current_branch(path) == "development_team"
+    assert worktree.ensure_integration_checkout(root, "development_team") == path  # reused
 
 
 def test_ensure_integration_checkout_recovers_a_leftover_directory(tmp_path):
@@ -1654,8 +1654,8 @@ def test_ensure_integration_checkout_recovers_a_leftover_directory(tmp_path):
     root, path = _split_repo(tmp_path)
     path.mkdir(parents=True)
     (path / "junk.txt").write_text("stale\n", encoding="utf-8")
-    made = runner.ensure_integration_checkout(root, "development_team")
-    assert made == path and runner.current_branch(path) == "development_team"
+    made = worktree.ensure_integration_checkout(root, "development_team")
+    assert made == path and hostconfig.current_branch(path) == "development_team"
     assert not (path / "junk.txt").exists()
 
 
@@ -1667,13 +1667,13 @@ def test_the_kill_switch_trips_in_either_root(tmp_path, monkeypatch):
     ctrl, work = tmp_path / "ctrl", tmp_path / "work"
     (ctrl / ".ai").mkdir(parents=True)
     (work / ".ai").mkdir(parents=True)
-    monkeypatch.setattr(runner, "_CTRL_ROOT", ctrl)
-    monkeypatch.setattr(runner, "_WORK_ROOT", work)
-    assert not runner._stop_requested()
-    (work / runner.STOP_FILE).write_text("", encoding="utf-8")
-    assert runner._stop_requested()             # in the dedicated checkout
-    (ctrl / runner.STOP_FILE).write_text("", encoding="utf-8")
-    assert runner._stop_requested()             # in the vault
+    monkeypatch.setattr(hostconfig, "_CTRL_ROOT", ctrl)
+    monkeypatch.setattr(hostconfig, "_WORK_ROOT", work)
+    assert not hostconfig._stop_requested()
+    (work / hostconfig.STOP_FILE).write_text("", encoding="utf-8")
+    assert hostconfig._stop_requested()             # in the dedicated checkout
+    (ctrl / hostconfig.STOP_FILE).write_text("", encoding="utf-8")
+    assert hostconfig._stop_requested()             # in the vault
 
 
 def test_the_kill_switch_consumes_itself_once_honoured(tmp_path, monkeypatch):
@@ -1683,14 +1683,14 @@ def test_the_kill_switch_consumes_itself_once_honoured(tmp_path, monkeypatch):
     ctrl, work = tmp_path / "ctrl", tmp_path / "work"
     (ctrl / ".ai").mkdir(parents=True)
     (work / ".ai").mkdir(parents=True)
-    monkeypatch.setattr(runner, "_CTRL_ROOT", ctrl)
-    monkeypatch.setattr(runner, "_WORK_ROOT", work)
-    (ctrl / runner.STOP_FILE).write_text("stop", encoding="utf-8")
-    (work / runner.STOP_FILE).write_text("stop", encoding="utf-8")
-    assert runner._stop_requested()
-    assert not (ctrl / runner.STOP_FILE).exists()
-    assert not (work / runner.STOP_FILE).exists()
-    assert not runner._stop_requested()          # nothing left to consume
+    monkeypatch.setattr(hostconfig, "_CTRL_ROOT", ctrl)
+    monkeypatch.setattr(hostconfig, "_WORK_ROOT", work)
+    (ctrl / hostconfig.STOP_FILE).write_text("stop", encoding="utf-8")
+    (work / hostconfig.STOP_FILE).write_text("stop", encoding="utf-8")
+    assert hostconfig._stop_requested()
+    assert not (ctrl / hostconfig.STOP_FILE).exists()
+    assert not (work / hostconfig.STOP_FILE).exists()
+    assert not hostconfig._stop_requested()          # nothing left to consume
 
 
 def test_the_status_heartbeat_lands_in_the_control_root(tmp_path, monkeypatch):
@@ -1699,10 +1699,10 @@ def test_the_status_heartbeat_lands_in_the_control_root(tmp_path, monkeypatch):
     ctrl, work = tmp_path / "ctrl", tmp_path / "work"
     (ctrl / ".ai" / "runs").mkdir(parents=True)
     (work / ".ai" / "runs").mkdir(parents=True)
-    monkeypatch.setattr(runner, "_CTRL_ROOT", ctrl)
-    runner._status(work, phase="worker", card="x")
-    assert (ctrl / runner.STATUS_FILE).is_file()
-    assert not (work / runner.STATUS_FILE).is_file()
+    monkeypatch.setattr(hostconfig, "_CTRL_ROOT", ctrl)
+    hostconfig._status(work, phase="worker", card="x")
+    assert (ctrl / hostconfig.STATUS_FILE).is_file()
+    assert not (work / hostconfig.STATUS_FILE).is_file()
 
 
 def test_a_run_uses_a_dedicated_checkout_and_leaves_the_launch_copy_alone(tmp_path, monkeypatch):
@@ -1713,7 +1713,7 @@ def test_a_run_uses_a_dedicated_checkout_and_leaves_the_launch_copy_alone(tmp_pa
     root, path = _split_repo(tmp_path, "feat")
     (root / "scratch.py").write_text("wip = 1\n", encoding="utf-8")   # Karel mid-edit
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "done"})
-    monkeypatch.setattr(runner, "review_branch",
+    monkeypatch.setattr(review, "review_branch",
                         lambda *a, **k: ({"verdict": "ok", "notes": "clean"}, 0.1, None))
 
     runner.run(root, runner._parser(root).parse_args(
@@ -1721,9 +1721,9 @@ def test_a_run_uses_a_dedicated_checkout_and_leaves_the_launch_copy_alone(tmp_pa
 
     # Landed in testing/ on the dedicated checkout's board (rebased + merged for real).
     assert board.find(path, "feat").lane == "testing"
-    assert runner.current_branch(path) == "development_team"
+    assert hostconfig.current_branch(path) == "development_team"
     # The launch checkout never moved off Karel's branch and his edit survived.
-    assert runner.current_branch(root) == "karel/work"
+    assert hostconfig.current_branch(root) == "karel/work"
     assert (root / "scratch.py").read_text(encoding="utf-8") == "wip = 1\n"
 
 
@@ -1733,14 +1733,14 @@ def test_on_base_the_runner_works_in_place_and_cuts_no_dedicated_checkout(tmp_pa
     in-place exactly as before and cuts no sibling checkout."""
     root = _loaded_board(tmp_path, "feat")            # HEAD on development_team
     _fake_worker(monkeypatch, verdict={"outcome": "done", "summary": "x"})
-    monkeypatch.setattr(runner, "review_branch",
+    monkeypatch.setattr(review, "review_branch",
                         lambda *a, **k: ({"verdict": "needs_decision", "question": "q?"},
                                          0.0, None))
 
     runner.run(root, runner._parser(root).parse_args(
         ["--base", "development_team", "--max-cards", "1"]))
 
-    assert not runner.integration_checkout_path(root).exists()
+    assert not worktree.integration_checkout_path(root).exists()
     assert board.find(root, "feat").lane == "needs-decision"
 
 
@@ -1750,8 +1750,8 @@ def test_a_dirty_launch_checkout_off_base_does_not_block_preflight(tmp_path, mon
     operate in the checkout itself (the on-base fallback)."""
     root, _ = _split_repo(tmp_path)
     (root / "scratch.py").write_text("wip = 1\n", encoding="utf-8")
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")  # not on PATH under test
-    check = runner.preflight(root, "development_team", dry_run=False)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")  # not on PATH under test
+    check = startup.startup_checks(root, "development_team", dry_run=False)
     assert check.ok, check.reasons
 
 
@@ -1763,7 +1763,7 @@ def test_rebase_and_merge_lands_a_clean_branch(tmp_path):
     _branch_with_file(root, tmp_path, "ai/probe", "feature.py", "x = 1\n")
     card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
 
-    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+    merged, why = review.rebase_and_merge(root, card, "ai/probe", "development_team")
     assert merged, why
     assert (root / "feature.py").read_text(encoding="utf-8") == "x = 1\n"
 
@@ -1776,9 +1776,9 @@ def test_rebase_and_merge_deletes_the_branch_once_it_lands(tmp_path):
     _branch_with_file(root, tmp_path, "ai/probe", "feature.py", "x = 1\n")
     card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
 
-    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+    merged, why = review.rebase_and_merge(root, card, "ai/probe", "development_team")
     assert merged, why
-    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode != 0
+    assert git.run(root, "rev-parse", "--verify", "ai/probe").returncode != 0
 
 
 def test_rebase_and_merge_replays_over_a_non_conflicting_sibling(tmp_path):
@@ -1791,7 +1791,7 @@ def test_rebase_and_merge_replays_over_a_non_conflicting_sibling(tmp_path):
     _commit_on_base(root, tmp_path, "sibling.py", "y = 2\n")
 
     card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
-    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+    merged, why = review.rebase_and_merge(root, card, "ai/probe", "development_team")
     assert merged, why
     assert (root / "feature.py").read_text(encoding="utf-8") == "x = 1\n"
     assert (root / "sibling.py").read_text(encoding="utf-8") == "y = 2\n"
@@ -1807,21 +1807,21 @@ def test_rebase_and_merge_leaves_a_conflicting_branch_for_a_human(tmp_path, monk
     claims: since 2026-08-23 a conflict is offered to `merge-resolver` first, and
     what is under test here is the path *after* it says no."""
     root = _worktree_repo(tmp_path)
-    monkeypatch.setattr(runner, "_resolve_conflict",
+    monkeypatch.setattr(review, "_resolve_conflict",
                         lambda *a, **k: (False, "the merge-resolver declined it"))
     _branch_with_file(root, tmp_path, "ai/probe", "shared.py", "value = 'A'\n")
     _commit_on_base(root, tmp_path, "shared.py", "value = 'B'\n")
-    base_before = runner._git(root, "rev-parse", "development_team").stdout.strip()
+    base_before = git.run(root, "rev-parse", "development_team").stdout.strip()
 
     card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
-    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+    merged, why = review.rebase_and_merge(root, card, "ai/probe", "development_team")
     assert not merged
     assert "conflict" in why and "shared.py" in why
     # development_team is untouched — the sibling's version still stands.
-    assert runner._git(root, "rev-parse", "development_team").stdout.strip() == base_before
+    assert git.run(root, "rev-parse", "development_team").stdout.strip() == base_before
     assert (root / "shared.py").read_text(encoding="utf-8") == "value = 'B'\n"
     # The branch is kept — a human still needs it to resolve the conflict.
-    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode == 0
+    assert git.run(root, "rev-parse", "--verify", "ai/probe").returncode == 0
 
 
 def test_rebase_and_merge_lands_a_card_the_resolver_settles(tmp_path, monkeypatch):
@@ -1836,27 +1836,25 @@ def test_rebase_and_merge_lands_a_card_the_resolver_settles(tmp_path, monkeypatc
     root = _worktree_repo(tmp_path)
     _branch_with_file(root, tmp_path, "ai/probe", "shared.py", "value = 'A'\n")
     _commit_on_base(root, tmp_path, "shared.py", "value = 'B'\n")
-    base_before = runner._git(root, "rev-parse", "development_team").stdout.strip()
+    base_before = git.run(root, "rev-parse", "development_team").stdout.strip()
 
     def settle_it(root_, tree, card_, branch, base, out_dir, **kwargs):
         (tree / "shared.py").write_bytes(b"value = 'A and B'\n")
-        runner._git(tree, "add", "shared.py")
-        cont = runner.subprocess.run(
-            ["git", "rebase", "--continue"], cwd=tree, capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            env={**runner.os.environ, "GIT_EDITOR": "true"})
+        git.run(tree, "add", "shared.py")
+        cont = git.run(tree, "rebase", "--continue",
+                       env={**os.environ, "GIT_EDITOR": "true"})
         assert cont.returncode == 0, cont.stderr
         return True, "kept both sides"
 
-    monkeypatch.setattr(runner, "_resolve_conflict", settle_it)
+    monkeypatch.setattr(review, "_resolve_conflict", settle_it)
     card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
-    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+    merged, why = review.rebase_and_merge(root, card, "ai/probe", "development_team")
 
     assert merged, why
-    assert runner._git(root, "rev-parse", "development_team").stdout.strip() != base_before
+    assert git.run(root, "rev-parse", "development_team").stdout.strip() != base_before
     assert (root / "shared.py").read_text(encoding="utf-8") == "value = 'A and B'\n"
     # Merged, so the branch goes — the same close-out a clean rebase gets.
-    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode != 0
+    assert git.run(root, "rev-parse", "--verify", "ai/probe").returncode != 0
 
 
 def test_rebase_and_merge_deletes_the_branch_on_the_remote_too(tmp_path):
@@ -1866,15 +1864,15 @@ def test_rebase_and_merge_deletes_the_branch_on_the_remote_too(tmp_path):
     root = _worktree_repo(tmp_path)
     bare = _bare_origin(root, tmp_path)
     _branch_with_file(root, tmp_path, "ai/probe", "feature.py", "x = 1\n")
-    runner.publish(root, "origin", "development_team")
+    worktree.publish(root, "origin", "development_team")
     assert _remote_has(bare, "ai/probe"), "fixture: the branch must be on origin first"
     card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
 
-    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team",
+    merged, why = review.rebase_and_merge(root, card, "ai/probe", "development_team",
                                           remote="origin")
     assert merged, why
     assert not _remote_has(bare, "ai/probe")
-    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode != 0
+    assert git.run(root, "rev-parse", "--verify", "ai/probe").returncode != 0
 
 
 def test_rebase_and_merge_touches_no_remote_without_a_publish_remote(tmp_path):
@@ -1884,13 +1882,13 @@ def test_rebase_and_merge_touches_no_remote_without_a_publish_remote(tmp_path):
     root = _worktree_repo(tmp_path)
     bare = _bare_origin(root, tmp_path)
     _branch_with_file(root, tmp_path, "ai/probe", "feature.py", "x = 1\n")
-    runner.publish(root, "origin", "development_team")
+    worktree.publish(root, "origin", "development_team")
     card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
 
-    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+    merged, why = review.rebase_and_merge(root, card, "ai/probe", "development_team")
     assert merged, why
     assert _remote_has(bare, "ai/probe")
-    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode != 0
+    assert git.run(root, "rev-parse", "--verify", "ai/probe").returncode != 0
 
 
 def test_rebase_and_merge_refuses_to_delete_a_remote_carrying_unmerged_commits(tmp_path,
@@ -1908,22 +1906,22 @@ def test_rebase_and_merge_refuses_to_delete_a_remote_carrying_unmerged_commits(t
     root = _worktree_repo(tmp_path)
     bare = _bare_origin(root, tmp_path)
     _branch_with_file(root, tmp_path, "ai/probe", "feature.py", "x = 1\n")
-    runner.publish(root, "origin", "development_team")
+    worktree.publish(root, "origin", "development_team")
     elsewhere = _advance_on_remote(bare, tmp_path, "ai/probe", "later.py", "y = 2\n")
     card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
 
     logged: list[str] = []
-    monkeypatch.setattr(runner, "_log", lambda message: logged.append(message))
-    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team",
+    monkeypatch.setattr(hostconfig, "_log", lambda message: logged.append(message))
+    merged, why = review.rebase_and_merge(root, card, "ai/probe", "development_team",
                                           remote="origin")
 
     assert merged, why
     assert _remote_has(bare, "ai/probe"), \
         "a remote carrying commits this checkout never merged must never be deleted"
-    assert runner._git(bare, "rev-parse", "refs/heads/ai/probe").stdout.strip() == elsewhere
+    assert git.run(bare, "rev-parse", "refs/heads/ai/probe").stdout.strip() == elsewhere
     assert any("did NOT delete" in line for line in logged), logged
     # The local delete is unaffected: those commits *are* on the integration branch.
-    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode != 0
+    assert git.run(root, "rev-parse", "--verify", "ai/probe").returncode != 0
 
 
 def test_rebase_and_merge_deletes_neither_copy_when_the_merge_fails(tmp_path, monkeypatch):
@@ -1933,19 +1931,19 @@ def test_rebase_and_merge_deletes_neither_copy_when_the_merge_fails(tmp_path, mo
     Resolver stubbed to decline — see the note on
     `test_rebase_and_merge_leaves_a_conflicting_branch_for_a_human`."""
     root = _worktree_repo(tmp_path)
-    monkeypatch.setattr(runner, "_resolve_conflict",
+    monkeypatch.setattr(review, "_resolve_conflict",
                         lambda *a, **k: (False, "the merge-resolver declined it"))
     bare = _bare_origin(root, tmp_path)
     _branch_with_file(root, tmp_path, "ai/probe", "shared.py", "value = 'A'\n")
-    runner.publish(root, "origin", "development_team")
+    worktree.publish(root, "origin", "development_team")
     _commit_on_base(root, tmp_path, "shared.py", "value = 'B'\n")
     card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
 
-    merged, _ = runner.rebase_and_merge(root, card, "ai/probe", "development_team",
+    merged, _ = review.rebase_and_merge(root, card, "ai/probe", "development_team",
                                         remote="origin")
     assert not merged
     assert _remote_has(bare, "ai/probe")
-    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode == 0
+    assert git.run(root, "rev-parse", "--verify", "ai/probe").returncode == 0
 
 
 def test_rebase_and_merge_says_nothing_about_a_branch_that_was_never_published(tmp_path,
@@ -1959,22 +1957,22 @@ def test_rebase_and_merge_says_nothing_about_a_branch_that_was_never_published(t
     card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
 
     logged: list[str] = []
-    monkeypatch.setattr(runner, "_log", lambda message: logged.append(message))
-    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team",
+    monkeypatch.setattr(hostconfig, "_log", lambda message: logged.append(message))
+    merged, why = review.rebase_and_merge(root, card, "ai/probe", "development_team",
                                           remote="origin")
 
     assert merged, why
     assert not any("delete" in line for line in logged), logged
-    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode != 0
+    assert git.run(root, "rev-parse", "--verify", "ai/probe").returncode != 0
 
 
 def test_publish_is_a_no_op_with_no_remote_configured(tmp_path):
     """The local default: a laptop's `hosts.json` entry carries no
-    `publish_remote`, so `runner.host_setting` returns `""` and `publish` must
+    `publish_remote`, so `hostconfig.host_setting` returns `""` and `publish` must
     not attempt any network call — asserted by there being no `origin` at all
     and the call still succeeding."""
     root = _worktree_repo(tmp_path)
-    runner.publish(root, "", "development_team")  # must not raise
+    worktree.publish(root, "", "development_team")  # must not raise
 
 
 def test_publish_pushes_base_and_every_ai_branch(tmp_path):
@@ -1986,12 +1984,12 @@ def test_publish_pushes_base_and_every_ai_branch(tmp_path):
     _branch_with_file(root, tmp_path, "ai/parked-card", "feature.py", "x = 1\n")
     _commit_on_base(root, tmp_path, "extra.py", "y = 2\n")
 
-    runner.publish(root, "origin", "development_team")
+    worktree.publish(root, "origin", "development_team")
 
     assert _remote_tip(bare, "refs/heads/development_team") == \
-        runner._git(root, "rev-parse", "development_team").stdout.strip()
+        git.run(root, "rev-parse", "development_team").stdout.strip()
     assert _remote_tip(bare, "refs/heads/ai/parked-card") == \
-        runner._git(root, "rev-parse", "ai/parked-card").stdout.strip()
+        git.run(root, "rev-parse", "ai/parked-card").stdout.strip()
 
 
 def test_publish_is_idempotent(tmp_path):
@@ -2001,9 +1999,9 @@ def test_publish_is_idempotent(tmp_path):
     bare = _bare_origin(root, tmp_path)
     _branch_with_file(root, tmp_path, "ai/parked-card", "feature.py", "x = 1\n")
 
-    runner.publish(root, "origin", "development_team")
+    worktree.publish(root, "origin", "development_team")
     tip_before = _remote_tip(bare, "refs/heads/ai/parked-card")
-    runner.publish(root, "origin", "development_team")  # nothing changed locally
+    worktree.publish(root, "origin", "development_team")  # nothing changed locally
     assert _remote_tip(bare, "refs/heads/ai/parked-card") == tip_before
 
 
@@ -2014,7 +2012,7 @@ def test_publish_never_forces_the_integration_branch(tmp_path, monkeypatch):
     divergent push left it, and the failure logged loudly."""
     root = _worktree_repo(tmp_path)
     bare = _bare_origin(root, tmp_path)
-    runner.publish(root, "origin", "development_team")  # base now in sync
+    worktree.publish(root, "origin", "development_team")  # base now in sync
 
     # Diverge the remote: a clone pushes a commit `root` has never seen.
     clone = tmp_path / "sibling-clone"
@@ -2026,11 +2024,11 @@ def test_publish_never_forces_the_integration_branch(tmp_path, monkeypatch):
                    cwd=clone, check=True)
     subprocess.run(["git", "push", "-q", "origin", "development_team"], cwd=clone, check=True)
     diverged_tip = _remote_tip(bare, "refs/heads/development_team")
-    assert diverged_tip != runner._git(root, "rev-parse", "development_team").stdout.strip()
+    assert diverged_tip != git.run(root, "rev-parse", "development_team").stdout.strip()
 
     logged: list[str] = []
-    monkeypatch.setattr(runner, "_log", lambda message: logged.append(message))
-    runner.publish(root, "origin", "development_team")
+    monkeypatch.setattr(hostconfig, "_log", lambda message: logged.append(message))
+    worktree.publish(root, "origin", "development_team")
 
     assert _remote_tip(bare, "refs/heads/development_team") == diverged_tip, \
         "a rejected push to base must never be forced"
@@ -2046,7 +2044,7 @@ def test_publish_force_with_lease_on_the_trusted_branch(tmp_path):
     root = _worktree_repo(tmp_path)
     bare = _bare_origin(root, tmp_path)
     _branch_with_file(root, tmp_path, "ai/probe", "feature.py", "x = 1\n")
-    runner.publish(root, "origin", "development_team")
+    worktree.publish(root, "origin", "development_team")
 
     # Rewrite ai/probe locally (as a cold-start retry or a rebase replay would) —
     # `--amend` reparents onto the ORIGINAL parent, making this a sibling of the
@@ -2055,9 +2053,9 @@ def test_publish_force_with_lease_on_the_trusted_branch(tmp_path):
     subprocess.run(["git", "commit", "-q", "--amend", "-m", "ai/probe: rewritten"],
                    cwd=root, check=True)
     subprocess.run(["git", "checkout", "-q", "development_team"], cwd=root, check=True)
-    rewritten_tip = runner._git(root, "rev-parse", "ai/probe").stdout.strip()
+    rewritten_tip = git.run(root, "rev-parse", "ai/probe").stdout.strip()
 
-    runner.publish(root, "origin", "development_team", trusted_branch="ai/probe")
+    worktree.publish(root, "origin", "development_team", trusted_branch="ai/probe")
 
     assert _remote_tip(bare, "refs/heads/ai/probe") == rewritten_tip
 
@@ -2074,7 +2072,7 @@ def test_publish_refuses_a_diverged_untrusted_branch(tmp_path, monkeypatch):
     root = _worktree_repo(tmp_path)
     bare = _bare_origin(root, tmp_path)
     _branch_with_file(root, tmp_path, "ai/probe", "real-work.py", "x = 1\n")
-    runner.publish(root, "origin", "development_team")  # origin now has the real attempt
+    worktree.publish(root, "origin", "development_team")  # origin now has the real attempt
     real_tip = _remote_tip(bare, "refs/heads/ai/probe")
 
     # This checkout never talked to origin about ai/probe before independently
@@ -2083,8 +2081,8 @@ def test_publish_refuses_a_diverged_untrusted_branch(tmp_path, monkeypatch):
     _branch_with_file(root, tmp_path, "ai/probe", "dead-attempt.py", "y = 2\n")
 
     logged: list[str] = []
-    monkeypatch.setattr(runner, "_log", lambda message: logged.append(message))
-    runner.publish(root, "origin", "development_team")  # no trusted_branch
+    monkeypatch.setattr(hostconfig, "_log", lambda message: logged.append(message))
+    worktree.publish(root, "origin", "development_team")  # no trusted_branch
 
     assert _remote_tip(bare, "refs/heads/ai/probe") == real_tip, \
         "a diverged, untrusted branch must never overwrite the remote's real work"
@@ -2097,9 +2095,9 @@ def test_publish_degrades_when_the_remote_is_not_configured(tmp_path, monkeypatc
     observability gap, not a reason to end the night."""
     root = _worktree_repo(tmp_path)
     logged: list[str] = []
-    monkeypatch.setattr(runner, "_log", lambda message: logged.append(message))
+    monkeypatch.setattr(hostconfig, "_log", lambda message: logged.append(message))
 
-    runner.publish(root, "origin", "development_team")  # no `origin` remote exists
+    worktree.publish(root, "origin", "development_team")  # no `origin` remote exists
 
     assert any("not configured" in line for line in logged)
 
@@ -2110,18 +2108,18 @@ def test_card_branches_lists_only_the_ai_namespace(tmp_path):
     _branch_with_file(root, tmp_path, "ai/two", "b.py", "2\n")
     subprocess.run(["git", "branch", "not-a-card-branch"], cwd=root, check=True)
 
-    assert set(runner._card_branches(root)) == {"ai/one", "ai/two"}
+    assert set(worktree._card_branches(root)) == {"ai/one", "ai/two"}
 
 
 def test_publish_remote_is_read_from_host_config(tmp_path):
     """The one setting that gates publishing: absent on the ordinary laptop
     (`host_setting` returns the default, `""`), present when a host override
     declares it (`"origin"`)."""
-    assert runner.host_setting(tmp_path, "publish_remote", "") == ""
+    assert hostconfig.host_setting(tmp_path, "publish_remote", "") == ""
     (tmp_path / ".ai").mkdir(exist_ok=True)
-    (tmp_path / runner.HOST_FILE).write_text(
+    (tmp_path / hostconfig.HOST_FILE).write_text(
         json.dumps({"publish_remote": "origin"}), encoding="utf-8")
-    assert runner.host_setting(tmp_path, "publish_remote", "") == "origin"
+    assert hostconfig.host_setting(tmp_path, "publish_remote", "") == "origin"
 
 
 # --- commit_board's extra_paths ---------------------------------------------
@@ -2151,8 +2149,8 @@ def test_commit_board_skips_a_missing_extra_path_without_crashing(tmp_path):
 
 def test_a_night_records_every_dispatch_with_its_outcome(tmp_path, monkeypatch):
     root = _loaded_board(tmp_path, "a", "b")
-    _night(monkeypatch, root, [runner.Dispatch("failed", "gates: boom"),
-                               runner.Dispatch("review", "ok")])
+    _night(monkeypatch, root, [outcome.Dispatch("failed", "gates: boom"),
+                               outcome.Dispatch("review", "ok")])
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     record = _only_record(root)
@@ -2167,7 +2165,7 @@ def test_a_recorded_failure_survives_the_card_going_back_to_tasks(tmp_path, monk
     came from — so no lane diff can see it. The record is the only witness, and
     the digest's Failed section is built on it."""
     root = _loaded_board(tmp_path, "a")
-    _night(monkeypatch, root, [runner.Dispatch("failed", "gates: boom")])
+    _night(monkeypatch, root, [outcome.Dispatch("failed", "gates: boom")])
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     assert board.find(root, "a").lane == "tasks"          # nothing moved...
@@ -2178,7 +2176,7 @@ def test_the_stop_reason_is_recorded_not_only_logged(tmp_path, monkeypatch):
     """A night that ended for an unrecorded reason reads in the digest as a night
     that simply ran out of cards."""
     root = _loaded_board(tmp_path, "a", "b", "c", "d", "e")
-    _night(monkeypatch, root, [runner.Dispatch("failed", "boom")] * 5)
+    _night(monkeypatch, root, [outcome.Dispatch("failed", "boom")] * 5)
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     assert "failed in a row" in _only_record(root)["stop_reason"]
@@ -2186,7 +2184,7 @@ def test_the_stop_reason_is_recorded_not_only_logged(tmp_path, monkeypatch):
 
 def test_max_cards_is_recorded_as_the_stop_reason(tmp_path, monkeypatch):
     root = _loaded_board(tmp_path, "a", "b")
-    _night(monkeypatch, root, [runner.Dispatch("review", "ok")])
+    _night(monkeypatch, root, [outcome.Dispatch("review", "ok")])
     runner.run(root, runner._parser(root).parse_args(
         ["--base", "development_team", "--max-cards", "1"]))
 
@@ -2201,7 +2199,7 @@ def test_a_skipped_card_is_recorded_with_the_reason_it_was_skipped(tmp_path, mon
     card = board.find(root, "b")
     card.write({"unattended": "false"})
     board.commit_board(root, "board: b needs a human")
-    _night(monkeypatch, root, [runner.Dispatch("review", "ok")])
+    _night(monkeypatch, root, [outcome.Dispatch("review", "ok")])
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     skipped = {s["card"]: s["reason"] for s in _only_record(root)["skipped"]}
@@ -2221,10 +2219,10 @@ def test_the_record_carries_the_landing_not_just_the_outcome(tmp_path, monkeypat
         # committed first so a crash cannot retry forever. The record reads the
         # attempt number off the same object, so the fake has to move it too.
         card.write({"attempts": str(card.attempts + 1), "started": "now"})
-        return runner.Dispatch("failed", "gates: boom")
+        return outcome.Dispatch("failed", "gates: boom")
 
-    monkeypatch.setattr(runner, "dispatch", fake_dispatch)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(dispatch, "dispatch", fake_dispatch)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     entry = _only_record(root)["dispatched"][0]
@@ -2234,8 +2232,8 @@ def test_the_record_carries_the_landing_not_just_the_outcome(tmp_path, monkeypat
 
 def test_the_records_totals_match_what_the_run_logged(tmp_path, monkeypatch):
     root = _loaded_board(tmp_path, "a", "b")
-    _night(monkeypatch, root, [runner.Dispatch("review", "ok", 1.25),
-                               runner.Dispatch("review", "ok", 2.50)])
+    _night(monkeypatch, root, [outcome.Dispatch("review", "ok", 1.25),
+                               outcome.Dispatch("review", "ok", 2.50)])
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     assert _only_record(root)["cost_usd"] == 3.75
@@ -2244,7 +2242,7 @@ def test_the_records_totals_match_what_the_run_logged(tmp_path, monkeypatch):
 def test_a_dry_run_writes_no_record(tmp_path, monkeypatch):
     """`--dry-run` promises no LLM and no writes."""
     root = _loaded_board(tmp_path, "a")
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team", "--dry-run"]))
 
     assert not (root / run_record.DIR).exists()
@@ -2265,7 +2263,7 @@ def test_the_record_is_closed_before_the_board_is_committed(tmp_path, monkeypatc
         return real_commit(work, message, **kw)
 
     monkeypatch.setattr(runner.board, "commit_board", spy_commit)
-    _night(monkeypatch, root, [runner.Dispatch("review", "ok")])
+    _night(monkeypatch, root, [outcome.Dispatch("review", "ok")])
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     assert seen == [True]
@@ -2284,7 +2282,7 @@ def test_the_wrapup_commit_subject_is_prose_nothing_parses_back(tmp_path, monkey
     # and the digest's `Digest.md` write used to be the thing that guaranteed the
     # wrap-up always had a file of its own to stage.
     (root / board.ROUTING_VIEW).write_text("# Routing\n", encoding="utf-8")
-    _night(monkeypatch, root, [runner.Dispatch("review", "ok")])
+    _night(monkeypatch, root, [outcome.Dispatch("review", "ok")])
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     assert _last_commit_subject(root) == f"board: {dt.date.today().isoformat()} run"
@@ -2347,17 +2345,17 @@ def test_a_crash_in_a_later_stage_is_contained_too(tmp_path, monkeypatch):
     def fake_dispatch(root_, card, base, model, card_budget, test_timeout,
                       *, allow_local=True, worker="", effort=""):
         calls.append(card.id)
-        return runner.Dispatch("review", "ok")
+        return outcome.Dispatch("review", "ok")
 
     def fake_review_stage(root_, card, result, base, card_budget, timeout):
         if card.id == "b":
             raise ValueError("the reviewer's own machinery fell over")
-        return runner.Dispatch("reviewed", "ok")
+        return outcome.Dispatch("reviewed", "ok")
 
-    monkeypatch.setattr(runner, "dispatch", fake_dispatch)
-    monkeypatch.setattr(runner, "review_stage", fake_review_stage)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-    monkeypatch.setattr(runner, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
+    monkeypatch.setattr(dispatch, "dispatch", fake_dispatch)
+    monkeypatch.setattr(review, "review_stage", fake_review_stage)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(settle, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
 
     code = runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
@@ -2394,16 +2392,16 @@ def test_a_crash_leaves_no_worktree_and_banks_what_the_worker_managed(tmp_path, 
 
     def fake_dispatch(root_, card, base, model, card_budget, test_timeout,
                       *, allow_local=True, worker="", effort=""):
-        tree, _branch, _mode = runner.prepare_worktree(root_, card, base)
+        tree, _branch, _mode = worktree.prepare_worktree(root_, card, base)
         (tree / "half-done.txt").write_text("what the worker managed\n", encoding="utf-8")
         raise RuntimeError("crashed with the checkout still on disk")
 
-    monkeypatch.setattr(runner, "dispatch", fake_dispatch)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-    monkeypatch.setattr(runner, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
+    monkeypatch.setattr(dispatch, "dispatch", fake_dispatch)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(settle, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
-    assert not (runner.worktree_root(root) / "a").exists()
+    assert not (worktree.worktree_root(root) / "a").exists()
     # Banked before the checkout went, so the crash costs the process, not the work.
     committed = subprocess.run(["git", "show", "--name-only", "--format=%s", "ai/a"],
                                cwd=root, capture_output=True, text=True).stdout
@@ -2416,7 +2414,7 @@ def test_a_cleanup_that_itself_raises_does_not_re_crash_the_loop(tmp_path, monke
     that ends the night."""
     root = _loaded_board(tmp_path, "a", "b", "c")
     calls = _crashing_night(monkeypatch, root, RuntimeError("boom"))
-    monkeypatch.setattr(runner, "clear_handover",
+    monkeypatch.setattr(worktree, "clear_handover",
                         lambda r, cid: (_ for _ in ()).throw(OSError("cleanup died too")))
 
     code = runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
@@ -2460,9 +2458,9 @@ def test_a_systematic_crash_is_stopped_by_the_existing_failure_streak(tmp_path, 
         calls.append(card.id)
         raise FileNotFoundError("[WinError 206] The filename or extension is too long")
 
-    monkeypatch.setattr(runner, "dispatch", fake_dispatch)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-    monkeypatch.setattr(runner, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
+    monkeypatch.setattr(dispatch, "dispatch", fake_dispatch)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(settle, "settle", lambda r, cid, result: f"{cid}: {result.outcome}")
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
 
     assert calls == ["a", "b", "c"]
@@ -2502,7 +2500,7 @@ def test_api_error_with_no_verification_log_is_an_interruption(tmp_path):
     out_dir.mkdir()
     (out_dir / "worker-1.json").write_text(
         json.dumps({"terminal_reason": "api_error"}), encoding="utf-8")
-    assert runner._api_error_interruption(out_dir, 1) is True
+    assert telemetry._api_error_interruption(out_dir, 1) is True
 
 
 def test_api_error_after_gates_ran_is_not_an_interruption(tmp_path):
@@ -2514,7 +2512,7 @@ def test_api_error_after_gates_ran_is_not_an_interruption(tmp_path):
     (out_dir / "worker-1.json").write_text(
         json.dumps({"terminal_reason": "api_error"}), encoding="utf-8")
     (out_dir / "gates.txt").write_text("", encoding="utf-8")
-    assert runner._api_error_interruption(out_dir, 1) is False
+    assert telemetry._api_error_interruption(out_dir, 1) is False
 
 
 def test_api_error_after_pytest_ran_is_not_an_interruption(tmp_path):
@@ -2523,7 +2521,7 @@ def test_api_error_after_pytest_ran_is_not_an_interruption(tmp_path):
     (out_dir / "worker-1.json").write_text(
         json.dumps({"terminal_reason": "api_error"}), encoding="utf-8")
     (out_dir / "pytest.txt").write_text("", encoding="utf-8")
-    assert runner._api_error_interruption(out_dir, 1) is False
+    assert telemetry._api_error_interruption(out_dir, 1) is False
 
 
 def test_a_non_api_error_exit_1_is_never_read_as_an_interruption(tmp_path):
@@ -2533,7 +2531,7 @@ def test_a_non_api_error_exit_1_is_never_read_as_an_interruption(tmp_path):
     out_dir.mkdir()
     (out_dir / "worker-1.json").write_text(
         json.dumps({"terminal_reason": "some_other_reason"}), encoding="utf-8")
-    assert runner._api_error_interruption(out_dir, 1) is False
+    assert telemetry._api_error_interruption(out_dir, 1) is False
 
 
 def test_an_api_error_before_verification_gives_the_attempt_back_and_hands_over(
@@ -2548,10 +2546,10 @@ def test_an_api_error_before_verification_gives_the_attempt_back_and_hands_over(
             argv, 1, json.dumps({"total_cost_usd": 0.2, "terminal_reason": "api_error",
                                  "session_id": "sess-api-1"}),
             "Connection closed mid-response")
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
 
-    result = runner.dispatch(root, board.find(root, "probe"), "development_team",
+    result = dispatch.dispatch(root, board.find(root, "probe"), "development_team",
                              "sonnet", 5.0, 120)
     assert result.outcome == "interrupted"
     # `kept` means the *checkout* was preserved for a warm resume in place, and
@@ -2561,7 +2559,7 @@ def test_an_api_error_before_verification_gives_the_attempt_back_and_hands_over(
     # (`FROM_WIP`), asserted below, not on a kept worktree.
     assert result.kept is False
 
-    landed = runner.settle(root, "probe", result)
+    landed = settle.settle(root, "probe", result)
     assert "attempt given back" in landed
     assert "api_error" in landed
     assert "worktree kept" not in landed
@@ -2570,18 +2568,18 @@ def test_an_api_error_before_verification_gives_the_attempt_back_and_hands_over(
     assert settled_card.lane == "tasks"
     assert settled_card.attempts == 0, "the given-back attempt must not be spent"
 
-    handover = runner.read_handover(root, "probe")
+    handover = worktree.read_handover(root, "probe")
     assert handover.session_id == "sess-api-1"
 
     # The `wip:` commit is on the branch, not lost with the dropped worktree.
     log = subprocess.run(["git", "log", "--format=%s", "ai/probe"], cwd=root,
                          capture_output=True, text=True).stdout
     assert "wip: probe interrupted" in log
-    assert not (runner.worktree_root(root) / "probe").exists()
+    assert not (worktree.worktree_root(root) / "probe").exists()
 
     # And the next dispatch resumes from that commit rather than cold-starting.
-    _tree, _branch, mode = runner.prepare_worktree(root, settled_card, "development_team")
-    assert mode == runner.FROM_WIP
+    _tree, _branch, mode = worktree.prepare_worktree(root, settled_card, "development_team")
+    assert mode == worktree.FROM_WIP
 
 
 def test_an_interrupted_dispatch_does_not_stop_the_night(tmp_path, monkeypatch):
@@ -2590,8 +2588,8 @@ def test_an_interrupted_dispatch_does_not_stop_the_night(tmp_path, monkeypatch):
     root = _loaded_board(tmp_path, "a", "b")
 
     calls = _night(monkeypatch, root, [
-        runner.Dispatch("interrupted", "worker interrupted (api_error)"),
-        runner.Dispatch("review", "ok"),
+        outcome.Dispatch("interrupted", "worker interrupted (api_error)"),
+        outcome.Dispatch("review", "ok"),
     ])
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
     assert calls == ["a", "b"]
@@ -2607,11 +2605,11 @@ def test_interruptions_count_toward_the_consecutive_failure_breaker(tmp_path, mo
     root = _loaded_board(tmp_path, "a", "b", "c", "d", "e")
 
     calls = _night(monkeypatch, root, [
-        runner.Dispatch("interrupted", "worker interrupted (api_error)"),
-        runner.Dispatch("failed", "worker exited 1"),
-        runner.Dispatch("interrupted", "worker interrupted (api_error)"),
-        runner.Dispatch("review", "ok"),
-        runner.Dispatch("review", "ok"),
+        outcome.Dispatch("interrupted", "worker interrupted (api_error)"),
+        outcome.Dispatch("failed", "worker exited 1"),
+        outcome.Dispatch("interrupted", "worker interrupted (api_error)"),
+        outcome.Dispatch("review", "ok"),
+        outcome.Dispatch("review", "ok"),
     ])
     runner.run(root, runner._parser(root).parse_args(["--base", "development_team"]))
     assert calls == ["a", "b", "c"]
@@ -2627,7 +2625,7 @@ def test_the_modes_that_cannot_edit_are_a_named_category_not_a_literal():
     consumer had to be recalled from memory rather than found by following a
     reference, which is what the class describes.
     """
-    assert set(runner.MODES_WITHOUT_EDIT) == {"default", "plan"}
+    assert set(hostconfig.MODES_WITHOUT_EDIT) == {"default", "plan"}
 
     package = Path(runner.__file__).parent
     for module in ("ingest.py", "update.py"):
@@ -2639,7 +2637,7 @@ def test_the_modes_that_cannot_edit_are_a_named_category_not_a_literal():
 @pytest.mark.parametrize("mode", ["default", "plan"])
 def test_cannot_edit_names_the_mode_so_the_message_can_quote_it(tmp_path, mode):
     _host_mode(tmp_path, mode)
-    assert runner.cannot_edit(tmp_path) == mode
+    assert hostconfig.cannot_edit(tmp_path) == mode
 
 
 @pytest.mark.parametrize("mode", ["acceptEdits", "bypassPermissions", "aModeFromNextYear"])
@@ -2648,12 +2646,12 @@ def test_cannot_edit_is_silent_for_a_mode_that_writes_or_is_unknown(tmp_path, mo
     start on an unrecognised string is worse than one that tries and reports what
     happened."""
     _host_mode(tmp_path, mode)
-    assert runner.cannot_edit(tmp_path) == ""
+    assert hostconfig.cannot_edit(tmp_path) == ""
 
 
 def test_a_machine_with_no_host_entry_can_write():
     """A fresh clone must be able to card, so the fallback is `acceptEdits`."""
-    assert runner.cannot_edit(Path(__file__).parent) == ""
+    assert hostconfig.cannot_edit(Path(__file__).parent) == ""
 
 
 def _review_prompt_for(tmp_path, monkeypatch) -> str:
@@ -2668,11 +2666,11 @@ def _review_prompt_for(tmp_path, monkeypatch) -> str:
         Path(verdict_line).write_text(json.dumps({"verdict": "ok"}), encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    runner.review_branch(root, "probe", out_dir, "opus", "development_team",
+    review.review_branch(root, "probe", out_dir, "opus", "development_team",
                          card.fields["branch"], 0.0, 60, criteria="x", intent="y")
     return (out_dir / "review-prompt.md").read_text(encoding="utf-8")
 

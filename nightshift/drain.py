@@ -6,7 +6,7 @@ exit is supposed to be an LLM review that routes the card onward — to `testing
 when the diff is fine, to `needs-decision/` when it found something only a human
 can settle.
 
-**Nothing drained it.** `runner.review_stage` runs *inside* a dispatch, so a card
+**Nothing drained it.** `review.review_stage` runs *inside* a dispatch, so a card
 was only ever reviewed on its way through. Once a card came to rest in the lane,
 no queue picked it up: the night and the chore batch both take their work from
 `tasks/`, and the batch's single review runs over the merged diff. Every path in
@@ -59,7 +59,7 @@ session and wall accounting rather than sit beside it, and there would have to b
 evidence that cards actually pile up faster than they are looked at. Neither is
 true today.
 
-**2. An `ok` verdict merges, through `runner.settle` — nothing is hand-rolled.**
+**2. An `ok` verdict merges, through `settle.settle` — nothing is hand-rolled.**
 
 A drain reviewing a card whose branch never merged has to decide what `ok` means.
 It means exactly what it means inside a dispatch: `settle` rebases the branch onto
@@ -102,7 +102,7 @@ more often would hide it rather than fix it.
 Nor is a card routed there merely because the reviewer found something wrong with
 it (`reviewer-needs-fix-verdict`, 2026-08-19). A `needs_fix` verdict is a concrete,
 verifiable defect with one correct answer, not a choice — "apply this fix" is not
-a decision either, so `runner.settle` sends the card back to `tasks/` for another
+a decision either, so `settle.settle` sends the card back to `tasks/` for another
 attempt instead, the same bounded retry an ordinary `failed` attempt gets. Only a
 fix that keeps recurring past the card's attempt limit escalates to
 `needs-decision/`, because at that point it has stopped being mechanical.
@@ -118,13 +118,14 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import board, runner, usage
+from nightshift import board, usage
+from nightshift import hostconfig, outcome, review, settle, startup, worktree
 from nightshift.manifest import find_root
 
 #: The lane this drains, and the one a degraded review leaves a card in.
 LANE = "review"
 
-#: The section `runner.settle` writes onto a card that came back `ok` and whose branch
+#: The section `settle.settle` writes onto a card that came back `ok` and whose branch
 #: would then not rebase onto the integration tip. Its presence means the review is
 #: **done** and what is left is a conflict only a person can resolve — so a sweep skips
 #: it, for the same reason it skips an artefact-only card. Found by the first real pass:
@@ -210,7 +211,7 @@ def skip_reason(root: Path, base: str, card: board.Card, *, named: bool = False)
     waived — there is genuinely nothing to review, and no request makes a diff exist.
     """
     branch = branch_of(card)
-    if not runner.branch_has_commits(root, base, branch):
+    if not review.branch_has_commits(root, base, branch):
         return (f"no commits on `{branch}` — nothing to review as a diff; this is where an "
                 f"artefact-only card waits for a human, and it was left alone")
     if not named and board.section(card.text, BLOCKED_SECTION):
@@ -236,9 +237,9 @@ def drain(root: Path, base: str, *, card_id: str = "", limit: int = 0,
         cards = cards[:limit]
 
     for index, card in enumerate(cards):
-        stop = root / runner.STOP_FILE
+        stop = root / hostconfig.STOP_FILE
         if stop.is_file():
-            # Single-use, same as `runner._stop_requested()`: consumed the moment
+            # Single-use, same as `hostconfig._stop_requested()`: consumed the moment
             # it is seen, so it stops this pass without also blocking the very
             # next `drain` (or run) from starting. Left unconsumed, 2026-08-22 —
             # a `--allow-paid` invocation exited `stopped` on cards it had not
@@ -271,8 +272,8 @@ def drain(root: Path, base: str, *, card_id: str = "", limit: int = 0,
         # over: outcome `review` (gates and tests are green, nobody has concluded),
         # no wall, no cost. `review_stage` returns it unchanged on every path that
         # cannot conclude, which is how the degradations stay one implementation.
-        reviewed = runner.review_stage(
-            root, card, runner.Dispatch("review", _detail(card, branch),
+        reviewed = review.review_stage(
+            root, card, outcome.Dispatch("review", _detail(card, branch),
                                         how_to_test=_how_to_test(card, branch)),
             base, card_budget, test_timeout)
 
@@ -285,7 +286,7 @@ def drain(root: Path, base: str, *, card_id: str = "", limit: int = 0,
         # reaches `review/` for this pass to find.
         if reviewed.outcome in ("reviewed", "pick", "needs_fix", "needs_decision",
                                 "unreviewable"):
-            landed = runner.settle(root, card.id, reviewed)
+            landed = settle.settle(root, card.id, reviewed)
             state = (REVIEWED if reviewed.outcome == "reviewed"
                      else NEEDS_FIX if reviewed.outcome == "needs_fix"
                      else BLOCKED if reviewed.outcome == "unreviewable"
@@ -344,9 +345,9 @@ def _work_root(root: Path, base: str) -> Path:
     `run()` instead of hoping: work in place when the checkout is already on
     `base`, otherwise use the runner's dedicated `base` checkout.
     """
-    if runner.current_branch(root) == base:
+    if hostconfig.current_branch(root) == base:
         return root
-    return runner.ensure_integration_checkout(root, base)
+    return worktree.ensure_integration_checkout(root, base)
 
 
 def describe(result: Pass) -> list[str]:
@@ -389,7 +390,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     root = (args.root or find_root()).resolve()
-    base = args.base or runner.default_base(root)
+    base = args.base or hostconfig.default_base(root)
 
     if args.dry_run:
         cards = waiting(root, args.card)
@@ -406,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
     except RuntimeError as exc:
         print(f"refusing to drain — {exc}", file=sys.stderr)
         return 1
-    if dirty := runner.dirty_outside_board(work):
+    if dirty := hostconfig.dirty_outside_board(work):
         shown = ", ".join(dirty[:4]) + (f" (+{len(dirty) - 4} more)" if len(dirty) > 4 else "")
         print(f"refusing to drain — the `{base}` checkout is dirty outside the board: "
               f"{shown}. A review merges into it; commit or discard those first.",
@@ -415,22 +416,22 @@ def main(argv: list[str] | None = None) -> int:
     # A drain moves cards out of `review/`, so it is as much a board writer as a
     # night is, and the redirect above gives it the same blind spot: board edits
     # sitting in the launch checkout are not in the board it is about to rewrite.
-    if refusal := runner.stranded_board_refusal(root, work, base):
+    if refusal := worktree.stranded_board_refusal(root, work, base):
         print(f"refusing to drain — {refusal}", file=sys.stderr)
         return 1
 
     # The lock, not politeness: this merges into `base` and moves cards, and a
     # night doing the same thing at the same time is the one way a drain could
     # damage something rather than merely fail.
-    if not runner.acquire_lock(root):
+    if not hostconfig.acquire_lock(root):
         return 1
     try:
-        runner.ensure_workspace_trusted(root)
+        startup.ensure_workspace_trusted(root)
         result = drain(work, base, card_id=args.card, limit=args.limit,
                        allow_paid=args.allow_paid, card_budget=args.card_budget,
                        test_timeout=args.test_timeout)
     finally:
-        runner.release_lock(root)
+        hostconfig.release_lock(root)
 
     if not result.outcomes:
         target = f"card `{args.card}`" if args.card else "cards"

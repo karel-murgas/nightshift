@@ -20,11 +20,11 @@ from __future__ import annotations
 import ast
 import importlib.util
 import re
-import subprocess
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from nightshift import git
 from nightshift import manifest as _manifest
 from nightshift.gates import corpus
 from nightshift.manifest import AI_DIR, ManifestError
@@ -600,22 +600,11 @@ def _project_files(repo_root: Path) -> list[tuple[str, ...]] | None:
     not staleness. Ignored files are excluded, and that is the whole point:
     see `_path_suffixes`.
     """
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(repo_root), "ls-files", "--cached", "--others",
-             "--exclude-standard", "-z"],
-            capture_output=True, text=True, timeout=60,
-            # Explicit, not the locale codec: a filename byte cp1252 cannot map
-            # would otherwise make .stdout None inside the reader thread rather
-            # than raise, and this function would report "git cannot answer" and
-            # silently fall back to the disk walk it exists to replace.
-            encoding="utf-8", errors="replace",
-        )
-    except (OSError, subprocess.SubprocessError):
+    out = git.run_safe(repo_root, "ls-files", "--cached", "--others",
+                       "--exclude-standard", "-z", timeout=60)
+    if out is None or out.returncode != 0:
         return None
-    if out.returncode != 0:
-        return None
-    return [tuple(rel.split("/")) for rel in out.stdout.split("\0") if rel]
+    return [tuple(rel.split("/")) for rel in git.split(out.stdout)]
 
 
 @lru_cache(maxsize=4)

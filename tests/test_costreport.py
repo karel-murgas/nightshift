@@ -13,7 +13,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from nightshift import costreport, run_record, runner
+from nightshift import costreport, run_record
+from nightshift import hostconfig
 
 
 def _event(kind: str, content: list[dict], *, ts: str = "2026-01-01T00:00:00Z") -> dict:
@@ -126,7 +127,7 @@ def test_merge_stats_sums_across_transcripts_rather_than_averaging_shares(tmp_pa
 def test_card_transcript_stats_walks_every_attempt(tmp_path):
     root = tmp_path
     for attempt in (1, 2):
-        out = root / runner.RUNS / "probe" / f"attempt-{attempt}"
+        out = root / hostconfig.RUNS / "probe" / f"attempt-{attempt}"
         out.mkdir(parents=True)
         _write_stream(out / "stream.jsonl", [
             _tool_use("t", "Bash", {}, ts="2026-01-01T00:00:01Z"),
@@ -163,7 +164,7 @@ def test_find_record_is_none_for_no_match(tmp_path):
 
 
 def test_report_card_reads_usage_and_transcript_together(tmp_path):
-    out = tmp_path / runner.RUNS / "probe" / "attempt-1"
+    out = tmp_path / hostconfig.RUNS / "probe" / "attempt-1"
     out.mkdir(parents=True)
     (out / "worker-1.json").write_text(json.dumps({
         "duration_ms": 60_000, "num_turns": 12, "total_cost_usd": 0.75,
@@ -206,7 +207,7 @@ def test_report_run_says_so_for_a_record_from_before_phase_0_1(tmp_path):
 
 
 def test_main_reports_on_a_card_id_directly(tmp_path, capsys):
-    out = tmp_path / runner.RUNS / "probe" / "attempt-1"
+    out = tmp_path / hostconfig.RUNS / "probe" / "attempt-1"
     out.mkdir(parents=True)
     (out / "worker-1.json").write_text(json.dumps(
         {"num_turns": 5, "total_cost_usd": 0.1}), encoding="utf-8")

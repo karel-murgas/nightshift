@@ -116,7 +116,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import branches, corrections, gitpaths, manifest, suite, textio  # textio: LF-pinned writes (gate write_newline)
+from nightshift import branches, corrections, git, manifest, suite, textio  # textio: LF-pinned writes (gate write_newline)
 from nightshift.manifest import ManifestError, find_root
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -187,14 +187,8 @@ def integration_base(root: Path) -> str:
         return branches.stable(root)
 
 
-def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
-    # `encoding=` is required — see the note in `.ai/gates/deletion_sweep.py`.
-    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace")
-
-
 def head_sha(root: Path) -> str:
-    return _git(root, "rev-parse", "HEAD").stdout.strip()
+    return git.run(root, "rev-parse", "HEAD").stdout.strip()
 
 
 def tree_of(root: Path, rev: str = "HEAD") -> str:
@@ -205,7 +199,7 @@ def tree_of(root: Path, rev: str = "HEAD") -> str:
     the gates, the audit and pytest all read the working tree and nothing else, so
     a verdict about a tree is a verdict about every commit that carries it.
     """
-    return _git(root, "rev-parse", f"{rev}^{{tree}}").stdout.strip()
+    return git.run(root, "rev-parse", f"{rev}^{{tree}}").stdout.strip()
 
 
 @dataclass
@@ -261,11 +255,11 @@ def _diff_base(root: Path, base: str) -> str | None:
     caller take the no-merge-base path it already has — the conservative
     direction, and not a third behaviour to reason about.
     """
-    head = _git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    head = git.run(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     if head != base:
         return base
     remote = f"origin/{base}"
-    if _git(root, "rev-parse", "--verify", "--quiet", remote).returncode == 0:
+    if git.run(root, "rev-parse", "--verify", "--quiet", remote).returncode == 0:
         return remote
     return None
 
@@ -280,16 +274,16 @@ CORRECTIONS_LOG = corrections.LOG.as_posix()
 def _corrections_touched(root: Path, base: str) -> tuple[bool, str]:
     """Did this branch's diff against the integration base touch the log?"""
     ref = _diff_base(root, base)
-    merge_base = _git(root, "merge-base", "HEAD", ref) if ref else None
+    merge_base = git.run(root, "merge-base", "HEAD", ref) if ref else None
     if merge_base is None or merge_base.returncode != 0 or not merge_base.stdout.strip():
         # No common ancestor resolves (a fresh clone that never fetched the
         # integration branch). Fall back to "was the log touched in HEAD's
         # commit at all" rather than silently passing — the failure direction
         # that hurts is a green light on unreviewed work.
-        touched = gitpaths.committed(root)
+        touched = git.committed(root)
         return (CORRECTIONS_LOG in touched, "no merge-base; checked HEAD only")
     mb = merge_base.stdout.strip()
-    touched = gitpaths.changed(root, f"{mb}..HEAD")
+    touched = git.changed(root, f"{mb}..HEAD")
     return (CORRECTIONS_LOG in touched, f"diff against {ref} ({mb[:8]})")
 
 
@@ -336,19 +330,19 @@ def _changed_paths(root: Path, base: str) -> tuple[set[str] | None, str, str]:
     changed: set[str] = set()
 
     ref = _diff_base(root, base)
-    merge_base = _git(root, "merge-base", "HEAD", ref) if ref else None
+    merge_base = git.run(root, "merge-base", "HEAD", ref) if ref else None
     mb = merge_base.stdout.strip() if merge_base is not None and merge_base.returncode == 0 else ""
     if mb:
-        changed.update(gitpaths.changed(root, f"{mb}..HEAD"))
+        changed.update(git.changed(root, f"{mb}..HEAD"))
         how = f"vs {ref} ({mb[:8]})"
     else:
         how = f"no merge-base with {ref or base}"
 
-    # `gitpaths` reads both of these NUL-separated, which is the whole of what a
+    # `git` reads both of these NUL-separated, which is the whole of what a
     # rename needs here too: git emits the surviving path first and the one it came
     # from second, so resolving one is dropping a record rather than splitting on a
     # ` -> ` that a filename is free to contain.
-    changed.update(path for _, path in gitpaths.status(root))
+    changed.update(path for _, path in git.status(root))
 
     if not mb:
         return None, how, mb  # cannot tell what changed — not the same as nothing changed
@@ -735,7 +729,7 @@ def write_receipt(root: Path, sha: str, no_corrections: str | None,
     older receipt written before slices or reuse existed stays readable.
     """
     entries = [e for e in _load_receipt(root) if e.get("sha") != sha]
-    branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    branch = git.run(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     entries.append({
         "sha": sha,
         # The content this verdict is actually about — see `is_validated`.

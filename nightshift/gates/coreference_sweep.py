@@ -62,11 +62,10 @@ one only reports what it can be sure of.
 from __future__ import annotations
 
 import re
-import subprocess
 from pathlib import Path
 
 from nightshift.gates import doc_scan
-from nightshift import branches
+from nightshift import branches, git
 from nightshift.gates.base import Violation
 
 NAME = "coreference_sweep"
@@ -89,19 +88,9 @@ _SYMBOL = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
 _NEVER = frozenset({"TODO", "FIXME", "NOTE", "XXX"})
 
 
-def _git(repo_root: Path, args: list[str]) -> str:
-    # `encoding=` is not optional on Windows — see `deletion_sweep._git` for the
-    # decode failure this avoids and the card it cost.
-    result = subprocess.run(
-        ["git", *args], cwd=repo_root, capture_output=True, text=True, check=False,
-        encoding="utf-8", errors="replace",
-    )
-    return result.stdout or ""
-
-
 def _merge_base(repo_root: Path) -> str:
     for base in branches.merge_base_candidates(repo_root):
-        found = _git(repo_root, ["merge-base", "HEAD", base]).strip()
+        found = (git.run(repo_root, "merge-base", "HEAD", base).stdout or "").strip()
         if found:
             return found
     return ""
@@ -132,7 +121,7 @@ def replaced_tokens(repo_root: Path) -> dict[str, str]:
     # `-U0`: only the changed lines, so unchanged context cannot look removed.
     # `--no-color`, `--no-ext-diff`: a user's diff pager or external differ must
     # not decide what a gate sees.
-    diff = _git(repo_root, ["diff", "-U0", "--no-color", "--no-ext-diff", base])
+    diff = (git.run(repo_root, "diff", "-U0", "--no-color", "--no-ext-diff", base).stdout or "")
     per_file: dict[str, tuple[set[str], set[str]]] = {}
     current = ""
     for line in diff.splitlines():

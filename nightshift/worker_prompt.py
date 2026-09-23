@@ -202,7 +202,7 @@ enumerate gets no `### Decide:` heading; ask it in the context paragraphs.\
 
 #: Step 3's tail, present only on a card the maintainer has to exercise by hand. On a
 #: `verify: review` card there is no scenario to write and inventing one is worse than
-#: leaving it out — the same judgment `runner._PROMPT` makes about `how_to_test`.
+#: leaving it out — the same judgment `dispatch._PROMPT` makes about `how_to_test`.
 HOW_TO_TEST_STEP = """ Then write `## How to test` — the scenario in the \
 maintainer's terms: open the game, go here, do this, expect that. Name the door: which \
 menu, which key, which enemy, what the screen should show. It is the only thing telling \

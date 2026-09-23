@@ -43,11 +43,11 @@ import ast
 import importlib.util
 import re
 import socket
-import subprocess
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from nightshift import git
 from nightshift import manifest as _manifest
 from nightshift import tiers
 
@@ -89,18 +89,6 @@ class Proposal:
         return self.confidence == CONFIRM
 
 
-def _git(root: Path, *args: str) -> str | None:
-    """stdout, stripped — or `None` if git could not answer. Never raises: a
-    discovery pass that dies on a non-repo is a discovery pass nobody can run in
-    the one place it is most needed, which is a directory that is not set up yet."""
-    try:
-        done = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
-                              text=True, encoding="utf-8", errors="replace")
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return done.stdout.strip() if done.returncode == 0 else None
-
-
 def _pyproject(root: Path) -> dict:
     path = root / "pyproject.toml"
     if not path.is_file():
@@ -127,7 +115,7 @@ def project_name(root: Path) -> Proposal:
     declared = _pyproject(root).get("project", {}).get("name")
     if isinstance(declared, str) and declared:
         return Proposal("project.name", declared, HIGH, "pyproject.toml [project].name")
-    common_dir = _git(root, "rev-parse", "--git-common-dir")
+    common_dir = git.text(root, "rev-parse", "--git-common-dir")
     if common_dir:
         main_root = (root / common_dir).resolve().parent
         if main_root != root.resolve():
@@ -212,14 +200,14 @@ def tests_parallel(root: Path) -> Proposal:
 
 def stable_branch(root: Path) -> Proposal:
     """What the remote calls its default branch, else what this checkout started on."""
-    head = _git(root, "symbolic-ref", "refs/remotes/origin/HEAD")
+    head = git.text(root, "symbolic-ref", "refs/remotes/origin/HEAD")
     if head:
         return Proposal("branches.stable", head.rsplit("/", 1)[-1], HIGH,
                         "git symbolic-ref refs/remotes/origin/HEAD")
     for name in ("main", "master"):
-        if _git(root, "rev-parse", "--verify", f"refs/heads/{name}") is not None:
+        if git.text(root, "rev-parse", "--verify", f"refs/heads/{name}") is not None:
             return Proposal("branches.stable", name, HIGH, f"local branch {name} exists")
-    current = _git(root, "branch", "--show-current")
+    current = git.text(root, "branch", "--show-current")
     if current:
         return Proposal("branches.stable", current, HIGH,
                         "no origin/HEAD and no main/master — using the current branch")
@@ -239,7 +227,7 @@ def integration_branch(root: Path, stable: str | None = None) -> Proposal:
         proposed = stable_branch(root).value
         stable = proposed if isinstance(proposed, str) else None
 
-    heads = _git(root, "for-each-ref", "--format=%(refname:short)", "refs/heads/")
+    heads = git.text(root, "for-each-ref", "--format=%(refname:short)", "refs/heads/")
     branches = [line for line in (heads or "").splitlines() if line.strip()]
     if not branches:
         return Proposal("branches.integration", None, CONFIRM,
@@ -256,7 +244,7 @@ def integration_branch(root: Path, stable: str | None = None) -> Proposal:
     for name in branches:
         if name == stable:
             continue
-        count = _git(root, "rev-list", "--count", f"{stable}..{name}")
+        count = git.text(root, "rev-list", "--count", f"{stable}..{name}")
         if count and count.isdigit() and int(count):
             ahead.append((int(count), name))
     if ahead:
@@ -358,7 +346,7 @@ def maintainer(root: Path) -> Proposal:
     guess here is not a one-off blemish, it is permanent drift against the installed
     copies (2026-08-20, five conflicts in the Dungeoneer install).
     """
-    name = _git(root, "config", "user.name")
+    name = git.text(root, "config", "user.name")
     if not name:
         return Proposal("project.maintainer", None, CONFIRM,
                         "no git user.name to guess from — declare the name the agent "
@@ -386,7 +374,7 @@ def decision_attributor(root: Path) -> Proposal:
     exactly the failure that made it a manifest field on 2026-08-04, when it had
     been the literal `karel` since the digest was written.
     """
-    name = _git(root, "config", "user.name")
+    name = git.text(root, "config", "user.name")
     if not name:
         return Proposal("board.decision_attributor", None, CONFIRM,
                         "no git user.name to guess a handle from — declare the token you "

@@ -31,6 +31,7 @@ import pytest
 
 from nightshift import board, boardcmd, run_record
 from nightshift.gates import card_schema
+from nightshift import dispatch
 
 import _fixtures
 
@@ -262,7 +263,7 @@ def test_rejecting_a_spent_chore_gives_it_a_fresh_attempt(tmp_path):
     """A rejected chore had already used its one attempt; without a fresh budget
     the batch refused it and the panel filed it under "Do now". It must stay a
     chore the batch will take, with `attempts` itself left alone."""
-    from nightshift import chores, runner
+    from nightshift import chores
     root = _repo(tmp_path)
     path = _card(root, "testing", "played")
     path.write_text(path.read_text(encoding="utf-8")
@@ -274,7 +275,7 @@ def test_rejecting_a_spent_chore_gives_it_a_fresh_attempt(tmp_path):
 
     card = board.find(root, "played")
     assert card.attempts == 1 and card.fields["retry_from"] == "1"
-    assert card.attempts < runner.attempt_limit(card)
+    assert card.attempts < dispatch.attempt_limit(card)
     assert chores.eligible(card, capabilities=set()) == ""
 
 

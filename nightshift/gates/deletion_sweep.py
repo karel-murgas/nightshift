@@ -21,11 +21,10 @@ from __future__ import annotations
 
 import ast
 import re
-import subprocess
 from pathlib import Path
 
 from nightshift.gates import doc_scan
-from nightshift import branches, gitpaths
+from nightshift import branches, git
 from nightshift.gates.base import Violation
 
 NAME = "deletion_sweep"
@@ -48,26 +47,11 @@ def _watched_roots(repo_root: Path) -> tuple[str, ...]:
     return tuple(f"{d.rstrip('/')}/" for d in doc_scan.source_dirs(repo_root))
 
 
-def _git(repo_root: Path, args: list[str]) -> str:
-    # `encoding=` is not optional on Windows. `text=True` alone decodes with the
-    # locale codec — cp1252 here — and `dungeoneer/core/i18n.py` carries 245
-    # bytes that codec has no mapping for, in the cs and es translations. The
-    # decode then raises inside subprocess's *reader thread*, where `run()`
-    # cannot see it, so `.stdout` comes back `None` rather than raising. That is
-    # what failed `ice-damage` on 2026-07-23: a card whose work was complete was
-    # blamed for a gate that crashed on its own output.
-    result = subprocess.run(
-        ["git", *args], cwd=repo_root, capture_output=True, text=True, check=False,
-        encoding="utf-8", errors="replace",
-    )
-    return result.stdout or ""
-
-
 def _merge_base(repo_root: Path) -> str:
     # `nightshift.branches` is the one place a branch name is bound to a role;
     # hardcoding the integration branch here is what this replaced.
     for base in branches.merge_base_candidates(repo_root):
-        found = _git(repo_root, ["merge-base", "HEAD", base]).strip()
+        found = (git.run(repo_root, "merge-base", "HEAD", base).stdout or "").strip()
         if found:
             return found
     return ""
@@ -113,21 +97,21 @@ def removed_names(repo_root: Path) -> dict[str, str]:
             note(name, reason)
 
     # 1. Working-tree deletions (what a pre-commit hook sees).
-    for code, path in gitpaths.status(repo_root):
+    for code, path in git.status(repo_root):
         if "D" not in code or not path.startswith(watched):
             continue
-        old = _git(repo_root, ["show", f"HEAD:{path}"])
+        old = (git.run(repo_root, "show", f"HEAD:{path}").stdout or "")
         bury_file(path, old, f"deleted from the working tree ({path})")
 
     if not base:
         return dead
 
     # 2. Committed deletions and per-file symbol removals since the merge-base.
-    for status, path in gitpaths.name_status(repo_root, f"{base}..HEAD"):
+    for status, path in git.name_status(repo_root, f"{base}..HEAD"):
         if not path.startswith(watched) or not path.endswith(".py"):
             continue
         if status.startswith("D"):
-            bury_file(path, _git(repo_root, ["show", f"{base}:{path}"]),
+            bury_file(path, (git.run(repo_root, "show", f"{base}:{path}").stdout or ""),
                       f"deleted in this branch ({path})")
         elif status.startswith("M") and (repo_root / path).is_file():
             # `is_file()` because a path modified in the committed range can be
@@ -139,7 +123,7 @@ def removed_names(repo_root: Path) -> dict[str, str]:
             # reporting anything. Observed 2026-08-17, splitting `test_runner.py`
             # into three modules: 23 gates stopped running because one file was
             # `git rm`-ed while its edits were still in the branch.
-            before = _top_level_names(_git(repo_root, ["show", f"{base}:{path}"]))
+            before = _top_level_names((git.run(repo_root, "show", f"{base}:{path}").stdout or ""))
             after = _top_level_names((repo_root / path).read_text(encoding="utf-8", errors="replace"))
             for name in before - after:
                 note(name, f"top-level definition removed from {path}")

@@ -14,7 +14,8 @@ from pathlib import Path
 import pytest
 
 import nightshift
-from nightshift import board, boardcmd, landing, preflight, runner
+from nightshift import board, boardcmd, landing, preflight
+from nightshift import git
 
 import _runner_helpers  # noqa: F401  (fixtures register by name)
 from _runner_helpers import _card, _commit_on_base, _worktree_repo
@@ -45,7 +46,7 @@ def _git(root: Path, *args: str) -> str:
 
 
 def _has_branch(root: Path, name: str) -> bool:
-    return runner._git(root, "rev-parse", "--verify", f"refs/heads/{name}").returncode == 0
+    return git.run(root, "rev-parse", "--verify", f"refs/heads/{name}").returncode == 0
 
 
 def _repo(tmp_path: Path, *, player_visible: tuple[str, ...] = ()) -> Path:
@@ -245,8 +246,8 @@ NOT_INTO_INTEGRATION = {
     ("landing", "_merge"): "the one merge into the integration branch",
     ("chores", "_merge_prefix"): "card branches onto the batch branch, in a worktree",
     ("merge_check", "check_branch"): "a trial merge in a throwaway worktree",
-    ("runner", "_merge_with_resolver"): "builds the merge in a worktree; lands via landing",
-    ("runner", "_fast_forward"): "moves a card's own branch onto a reviewer's fix",
+    ("review", "_merge_with_resolver"): "builds the merge in a worktree; lands via landing",
+    ("review", "_fast_forward"): "moves a card's own branch onto a reviewer's fix",
     ("freshness", "pull"): "fast-forwards the framework checkout from its upstream",
 }
 

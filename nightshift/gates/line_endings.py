@@ -51,10 +51,10 @@ was killed on every edit and reported nothing, for about 16 minutes per card.
 """
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
+from nightshift import git
 from nightshift.gates.base import Violation
 
 # Public: `init` quotes it when appending the rule to a project's own
@@ -102,15 +102,8 @@ def eol_report(repo_root: Path) -> dict[str, tuple[str, str]] | None:
     are text, at their current worktree content — and a second `git ls-files --eol`
     call would just be this one, copied.
     """
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(repo_root), "ls-files", "--eol", "-z"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            check=False, timeout=60,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if out.returncode != 0:
+    out = git.run_safe(repo_root, "ls-files", "--eol", "-z", timeout=60)
+    if out is None or out.returncode != 0:
         return None
 
     report: dict[str, tuple[str, str]] = {}

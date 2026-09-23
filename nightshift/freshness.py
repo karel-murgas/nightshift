@@ -46,13 +46,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import nightshift
-from nightshift import gitpaths
+from nightshift import git
+from nightshift import hostconfig
 from nightshift.manifest import ManifestError, find_root
 
 #: Seconds a fetch may take before it is abandoned. A freshness reading is a
@@ -64,19 +64,6 @@ FETCH_TIMEOUT_S = 15
 #: The branch names to fall back on when the framework checkout has no manifest and
 #: git will not say what its remote's HEAD is. Ordered: the first that exists wins.
 _DEFAULT_GUESSES = ("main", "master")
-
-
-def _git(cwd: Path, *args: str,
-         timeout: int | None = None) -> subprocess.CompletedProcess | None:
-    """`None` when git cannot answer at all. Every caller here must survive that:
-    this module is consulted on the way to a push, and a freshness reading that
-    raises would take down the boundary it was trying to inform."""
-    try:
-        # `encoding=` is required on Windows — see the note in `doctor._git`.
-        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=timeout)
-    except (OSError, subprocess.SubprocessError):
-        return None
 
 
 def framework_checkout() -> Path:
@@ -107,11 +94,11 @@ def default_branch(checkout: Path) -> str:
         return branches.stable(checkout)
     except (ManifestError, Exception):        # noqa: BLE001 — a report must not raise
         pass
-    head = _git(checkout, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    head = git.run_safe(checkout, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
     if head is not None and head.returncode == 0 and head.stdout.strip():
         return head.stdout.strip().split("/", 1)[-1]
     for guess in _DEFAULT_GUESSES:
-        found = _git(checkout, "rev-parse", "--verify", f"refs/heads/{guess}")
+        found = git.run_safe(checkout, "rev-parse", "--verify", f"refs/heads/{guess}")
         if found is not None and found.returncode == 0:
             return guess
     return _DEFAULT_GUESSES[0]
@@ -151,23 +138,23 @@ def read(checkout: Path | None = None, *, fetch: bool = True) -> Freshness:
     """
     checkout = checkout or framework_checkout()
 
-    head = _git(checkout, "rev-parse", "--abbrev-ref", "HEAD")
+    head = git.run_safe(checkout, "rev-parse", "--abbrev-ref", "HEAD")
     if head is None or head.returncode != 0:
         return Freshness(checkout, reason="not a git checkout (installed non-editable?)")
     branch = head.stdout.strip()
     default = default_branch(checkout)
 
-    # Safe to ask through `gitpaths`, which does not have this module's "never
+    # Safe to ask through `git`, which does not have this module's "never
     # raise" contract: `rev-parse` above has already answered, so git is present.
-    dirty = len(gitpaths.status(checkout))
+    dirty = len(git.status(checkout))
 
     if fetch:
-        fetched = _git(checkout, "fetch", "--quiet", timeout=FETCH_TIMEOUT_S)
+        fetched = git.run_safe(checkout, "fetch", "--quiet", timeout=FETCH_TIMEOUT_S)
         if fetched is None or fetched.returncode != 0:
             return Freshness(checkout, branch, default, dirty=dirty,
                              reason="could not fetch — offline, or no remote configured")
 
-    counted = _git(checkout, "rev-list", "--left-right", "--count", "@{upstream}...HEAD")
+    counted = git.run_safe(checkout, "rev-list", "--left-right", "--count", "@{upstream}...HEAD")
     if counted is None or counted.returncode != 0:
         return Freshness(checkout, branch, default, dirty=dirty,
                          reason=f"`{branch}` has no upstream to compare against")
@@ -192,10 +179,9 @@ def run_is_live(project_root: Path) -> bool:
     consulted on the way to a push and on every panel page load, and neither should pay
     for that import to answer a question they will usually not ask.
     """
-    from nightshift import runner
 
     try:
-        status = json.loads((project_root / runner.STATUS_FILE).read_text(encoding="utf-8"))
+        status = json.loads((project_root / hostconfig.STATUS_FILE).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError):
         return False
     if not isinstance(status, dict):
@@ -206,7 +192,7 @@ def run_is_live(project_root: Path) -> bool:
         pid = int(status.get("pid") or 0)
     except (TypeError, ValueError):
         return False
-    return runner._pid_alive(pid)
+    return hostconfig._pid_alive(pid)
 
 
 def refuse_pull(state: Freshness, project_root: Path | None = None) -> str:
@@ -255,7 +241,7 @@ def pull(state: Freshness, project_root: Path | None = None) -> tuple[bool, str]
     why = refuse_pull(state, project_root)
     if why:
         return False, why
-    merged = _git(state.checkout, "merge", "--ff-only", "@{upstream}")
+    merged = git.run_safe(state.checkout, "merge", "--ff-only", "@{upstream}")
     if merged is None or merged.returncode != 0:
         detail = (merged.stderr or merged.stdout or "").strip().splitlines() if merged else []
         return False, f"the fast-forward failed: {detail[-1][:150] if detail else 'git said nothing'}"

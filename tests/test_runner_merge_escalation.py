@@ -29,10 +29,10 @@ import re
 import subprocess
 from pathlib import Path
 
-from nightshift import board, gitmerge, landing, runner
+from nightshift import board, gitmerge, landing
+from nightshift import git, hostconfig, review, startup, worker, worktree
 
 import _fixtures  # noqa: E402
-import _runner_helpers  # noqa: E402
 from _runner_helpers import (  # noqa: F401  (fixtures register by name)
     _branch_with_file,
     _commit_on_base,
@@ -58,26 +58,26 @@ def _card() -> board.Card:
 
 def test_bookkeeping_divergence_is_empty_for_a_board_only_change(tmp_path):
     root = _worktree_repo(tmp_path)  # on development_team
-    merge_base = runner._git(root, "rev-parse", "HEAD").stdout.strip()
+    merge_base = git.run(root, "rev-parse", "HEAD").stdout.strip()
     (root / "Board").mkdir(exist_ok=True)
     (root / "Board" / "blocked").mkdir(exist_ok=True)
     (root / "Board" / "blocked" / "probe.md").write_text("card\n", encoding="utf-8")
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "board: probe -> blocked")
 
-    production = runner._bookkeeping_divergence(root, "development_team", merge_base)
+    production = review._bookkeeping_divergence(root, "development_team", merge_base)
     assert production == []
 
 
 def test_bookkeeping_divergence_reports_a_production_path(tmp_path):
     root = _worktree_repo(tmp_path)
-    merge_base = runner._git(root, "rev-parse", "HEAD").stdout.strip()
+    merge_base = git.run(root, "rev-parse", "HEAD").stdout.strip()
     (root / "dungeoneer").mkdir(exist_ok=True)
     (root / "dungeoneer" / "combat.py").write_text("x = 1\n", encoding="utf-8")
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "combat: touch something")
 
-    production = runner._bookkeeping_divergence(root, "development_team", merge_base)
+    production = review._bookkeeping_divergence(root, "development_team", merge_base)
     assert production == ["dungeoneer/combat.py"]
 
 
@@ -85,14 +85,14 @@ def test_bookkeeping_divergence_folds_in_the_memory_fragment_directory(tmp_path)
     """`.ai/memory-fragments/` would otherwise classify as SYSTEM — `.ai/` is where
     the gates and tooling live too — and a per-card fragment is neither."""
     root = _worktree_repo(tmp_path)
-    merge_base = runner._git(root, "rev-parse", "HEAD").stdout.strip()
+    merge_base = git.run(root, "rev-parse", "HEAD").stdout.strip()
     frag_dir = root / ".ai" / "memory-fragments"
     frag_dir.mkdir(parents=True, exist_ok=True)
     (frag_dir / "probe.md").write_text("## register\n- shipped\n", encoding="utf-8")
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "memory: fold probe")
 
-    production = runner._bookkeeping_divergence(root, "development_team", merge_base)
+    production = review._bookkeeping_divergence(root, "development_team", merge_base)
     assert production == []
 
 
@@ -140,7 +140,7 @@ def test_rebase_and_merge_escalates_a_bookkeeping_only_conflict_to_a_merge(
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "board: probe -> blocked")
 
-    monkeypatch.setattr(runner, "_resolve_conflict",
+    monkeypatch.setattr(review, "_resolve_conflict",
                         lambda *a, **k: (False, "the merge-resolver declined it"))
 
     def settle_merge(root_, tree, card_, branch, base, out_dir, **kwargs):
@@ -149,10 +149,10 @@ def test_rebase_and_merge_escalates_a_bookkeeping_only_conflict_to_a_merge(
         _git(tree, "rm", "Board/tasks/probe.md")
         return True, "kept development_team's deletion — the card already moved lanes"
 
-    monkeypatch.setattr(runner, "_resolve_merge_conflict", settle_merge)
+    monkeypatch.setattr(review, "_resolve_merge_conflict", settle_merge)
 
     card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
-    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+    merged, why = review.rebase_and_merge(root, card, "ai/probe", "development_team")
 
     assert merged, why
     assert "plain merge" in why
@@ -161,7 +161,7 @@ def test_rebase_and_merge_escalates_a_bookkeeping_only_conflict_to_a_merge(
     assert (root / "Board" / "blocked" / "probe.md").exists()
     # A real merge, not a rebase replay — branch's own tip is now an ancestor,
     # so the safe `-d` delete must have succeeded.
-    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode != 0
+    assert git.run(root, "rev-parse", "--verify", "ai/probe").returncode != 0
 
 
 def test_rebase_and_merge_does_not_escalate_a_production_code_conflict(
@@ -170,24 +170,24 @@ def test_rebase_and_merge_does_not_escalate_a_production_code_conflict(
     fork, not just board/memory bookkeeping, the merge fallback must not even be
     tried — this stays exactly the human-escalation path it was before."""
     root = _worktree_repo(tmp_path)
-    monkeypatch.setattr(runner, "_resolve_conflict",
+    monkeypatch.setattr(review, "_resolve_conflict",
                         lambda *a, **k: (False, "the merge-resolver declined it"))
     escalated = []
-    monkeypatch.setattr(runner, "_merge_with_resolver",
+    monkeypatch.setattr(review, "_merge_with_resolver",
                         lambda *a, **k: escalated.append(1) or (True, "should not run"))
 
     _branch_with_file(root, tmp_path, "ai/probe", "shared.py", "value = 'A'\n")
     _commit_on_base(root, tmp_path, "shared.py", "value = 'B'\n")
-    base_before = runner._git(root, "rev-parse", "development_team").stdout.strip()
+    base_before = git.run(root, "rev-parse", "development_team").stdout.strip()
 
     card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
-    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+    merged, why = review.rebase_and_merge(root, card, "ai/probe", "development_team")
 
     assert not merged
     assert "shared.py" in why
     assert not escalated, "the merge fallback must not run for a production-code conflict"
-    assert runner._git(root, "rev-parse", "development_team").stdout.strip() == base_before
-    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode == 0
+    assert git.run(root, "rev-parse", "development_team").stdout.strip() == base_before
+    assert git.run(root, "rev-parse", "--verify", "ai/probe").returncode == 0
 
 
 def test_rebase_and_merge_leaves_development_team_untouched_when_the_merge_also_fails(
@@ -219,20 +219,20 @@ def test_rebase_and_merge_leaves_development_team_untouched_when_the_merge_also_
         "merge notes go here\nunrelated text block\n", encoding="utf-8")
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "board: probe -> blocked")
-    base_before = runner._git(root, "rev-parse", "development_team").stdout.strip()
+    base_before = git.run(root, "rev-parse", "development_team").stdout.strip()
 
-    monkeypatch.setattr(runner, "_resolve_conflict",
+    monkeypatch.setattr(review, "_resolve_conflict",
                         lambda *a, **k: (False, "the merge-resolver declined it"))
-    monkeypatch.setattr(runner, "_resolve_merge_conflict",
+    monkeypatch.setattr(review, "_resolve_merge_conflict",
                         lambda *a, **k: (False, "the two sides disagree"))
 
     card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
-    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+    merged, why = review.rebase_and_merge(root, card, "ai/probe", "development_team")
 
     assert not merged
     assert "retried as a plain merge" in why
-    assert runner._git(root, "rev-parse", "development_team").stdout.strip() == base_before
-    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode == 0
+    assert git.run(root, "rev-parse", "development_team").stdout.strip() == base_before
+    assert git.run(root, "rev-parse", "--verify", "ai/probe").returncode == 0
 
 
 # --------------------------------------------------------------------------
@@ -265,12 +265,12 @@ def test_rebase_and_merge_escalates_when_merge_branch_itself_fails(
                                 "files would be overwritten by merge"))
 
     card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
-    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+    merged, why = review.rebase_and_merge(root, card, "ai/probe", "development_team")
 
     assert merged, why
     assert "plain merge" in why
     assert (root / "feature.py").read_text(encoding="utf-8") == "x = 1\n"
-    assert runner._git(root, "rev-parse", "--verify", "ai/probe").returncode != 0
+    assert git.run(root, "rev-parse", "--verify", "ai/probe").returncode != 0
 
 
 def test_rebase_and_merge_does_not_escalate_merge_branch_failure_on_production_divergence(
@@ -281,21 +281,21 @@ def test_rebase_and_merge_does_not_escalate_merge_branch_failure_on_production_d
     root = _worktree_repo(tmp_path)
     _branch_with_file(root, tmp_path, "ai/probe", "feature.py", "x = 1\n")
     _commit_on_base(root, tmp_path, "shared.py", "value = 'B'\n")
-    base_before = runner._git(root, "rev-parse", "development_team").stdout.strip()
+    base_before = git.run(root, "rev-parse", "development_team").stdout.strip()
 
     monkeypatch.setattr(landing, "_merge",
                         lambda *a, **k: (False, "some merge_branch failure"))
     escalated = []
-    monkeypatch.setattr(runner, "_merge_with_resolver",
+    monkeypatch.setattr(review, "_merge_with_resolver",
                         lambda *a, **k: escalated.append(1) or (True, "should not run"))
 
     card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
-    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+    merged, why = review.rebase_and_merge(root, card, "ai/probe", "development_team")
 
     assert not merged
     assert "some merge_branch failure" in why
     assert not escalated, "the merge fallback must not run for a production-code divergence"
-    assert runner._git(root, "rev-parse", "development_team").stdout.strip() == base_before
+    assert git.run(root, "rev-parse", "development_team").stdout.strip() == base_before
 
 
 def test_rebase_and_merge_escalates_a_rebase_failure_with_no_conflict_markers(
@@ -335,7 +335,7 @@ def test_rebase_and_merge_escalates_a_rebase_failure_with_no_conflict_markers(
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "board: probe -> blocked")
 
-    real_unmerged = runner._unmerged_paths
+    real_unmerged = review._unmerged_paths
     rebase_tree = worktree_root_(root) / "_rebase-probe"
 
     def fake_unmerged(tree):
@@ -343,16 +343,16 @@ def test_rebase_and_merge_escalates_a_rebase_failure_with_no_conflict_markers(
             return []
         return real_unmerged(tree)
 
-    monkeypatch.setattr(runner, "_unmerged_paths", fake_unmerged)
+    monkeypatch.setattr(review, "_unmerged_paths", fake_unmerged)
 
     def settle_merge(root_, tree, card_, branch, base, out_dir, **kwargs):
         _git(tree, "rm", "Board/tasks/probe.md")
         return True, "kept development_team's deletion — the card already moved lanes"
 
-    monkeypatch.setattr(runner, "_resolve_merge_conflict", settle_merge)
+    monkeypatch.setattr(review, "_resolve_merge_conflict", settle_merge)
 
     card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
-    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+    merged, why = review.rebase_and_merge(root, card, "ai/probe", "development_team")
 
     assert merged, why
     assert "plain merge" in why
@@ -370,12 +370,12 @@ def test_rebase_and_merge_escalates_a_rebase_failure_with_no_conflict_markers(
 # --------------------------------------------------------------------------
 
 def worktree_root_(root: Path) -> Path:
-    return runner.worktree_root(root)
+    return worktree.worktree_root(root)
 
 
 def test_reconcile_dirty_bookkeeping_is_a_noop_on_a_clean_tree(tmp_path):
     root = _worktree_repo(tmp_path)
-    reconciled, detail = runner._reconcile_dirty_bookkeeping(root)
+    reconciled, detail = review._reconcile_dirty_bookkeeping(root)
     assert not reconciled
     assert detail == ""
 
@@ -392,10 +392,10 @@ def test_reconcile_dirty_bookkeeping_folds_a_stray_board_write(tmp_path):
     (root / "Board" / "tasks" / "probe.md").write_text(
         "card\nan uncommitted telemetry line\n", encoding="utf-8")
 
-    reconciled, detail = runner._reconcile_dirty_bookkeeping(root)
+    reconciled, detail = review._reconcile_dirty_bookkeeping(root)
 
     assert reconciled, detail
-    assert runner._git(root, "status", "--porcelain").stdout.strip() == ""
+    assert git.run(root, "status", "--porcelain").stdout.strip() == ""
     assert "an uncommitted telemetry line" in (
         root / "Board" / "tasks" / "probe.md").read_text(encoding="utf-8")
 
@@ -410,7 +410,7 @@ def test_reconcile_dirty_bookkeeping_leaves_production_code_alone(tmp_path):
     _git(root, "commit", "-qm", "combat: add a module")
     (root / "dungeoneer" / "combat.py").write_text("x = 2  # uncommitted\n", encoding="utf-8")
 
-    reconciled, detail = runner._reconcile_dirty_bookkeeping(root)
+    reconciled, detail = review._reconcile_dirty_bookkeeping(root)
 
     assert not reconciled
     assert detail == ""
@@ -440,13 +440,13 @@ def test_rebase_and_merge_folds_roots_own_stray_bookkeeping_write_before_merging
         "card\nan uncommitted telemetry line\n", encoding="utf-8")
 
     card = board.Card(root / "x.md", "tasks", {"id": "probe"}, "")
-    merged, why = runner.rebase_and_merge(root, card, "ai/probe", "development_team")
+    merged, why = review.rebase_and_merge(root, card, "ai/probe", "development_team")
 
     assert merged, why
     assert (root / "feature.py").read_text(encoding="utf-8") == "x = 1\n"
     assert "an uncommitted telemetry line" in (
         root / "Board" / "tasks" / "probe.md").read_text(encoding="utf-8")
-    assert runner._git(root, "status", "--porcelain").stdout.strip() == ""
+    assert git.run(root, "status", "--porcelain").stdout.strip() == ""
 
 
 # --------------------------------------------------------------------------
@@ -482,7 +482,7 @@ def _merge_conflicted(tmp_path: Path) -> tuple[Path, str, str]:
 def _pause_merge(repo: Path) -> None:
     out = _git(repo, "merge", *gitmerge.STRATEGY_ARGS, "--no-ff", "--no-commit", "feature")
     assert out.returncode != 0, "fixture must actually conflict"
-    assert runner._unmerged_paths(repo), "fixture must leave an unmerged path"
+    assert review._unmerged_paths(repo), "fixture must leave an unmerged path"
 
 
 def _verdict_path(prompt: str) -> Path:
@@ -506,9 +506,9 @@ def _resolver(monkeypatch, *, write: str | None, verdict: dict | None,
             _verdict_path(prompt).write_text(json.dumps(verdict), encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, json.dumps({"total_cost_usd": 0.1}), "")
 
-    monkeypatch.setattr(runner, "_run_worker", fake)
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-    monkeypatch.setattr(runner, "host_setting", lambda root, key, default=None: default)
+    monkeypatch.setattr(worker, "_run_worker", fake)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(hostconfig, "host_setting", lambda root, key, default=None: default)
 
 
 def test_resolve_merge_conflict_a_kept_both_resolution_lands(tmp_path, monkeypatch):
@@ -517,13 +517,13 @@ def test_resolve_merge_conflict_a_kept_both_resolution_lands(tmp_path, monkeypat
     _resolver(monkeypatch, write=BOTH_LOG,
               verdict={"resolved": True, "summary": "kept both entries"})
 
-    resolved, detail = runner._resolve_merge_conflict(
+    resolved, detail = review._resolve_merge_conflict(
         repo, repo, _card(), branch, base, tmp_path / "out", model="test-model", timeout=60)
 
     assert resolved, detail
     assert "kept both entries" in detail
     assert (repo / "log.md").read_text(encoding="utf-8") == BOTH_LOG
-    assert not runner._unmerged_paths(repo)
+    assert not review._unmerged_paths(repo)
 
 
 def test_resolve_merge_conflict_a_declined_resolution_aborts_the_merge(tmp_path, monkeypatch):
@@ -532,13 +532,13 @@ def test_resolve_merge_conflict_a_declined_resolution_aborts_the_merge(tmp_path,
     _resolver(monkeypatch, write=None,
               verdict={"resolved": False, "summary": "both sides disagree"})
 
-    resolved, detail = runner._resolve_merge_conflict(
+    resolved, detail = review._resolve_merge_conflict(
         repo, repo, _card(), branch, base, tmp_path / "out", model="test-model", timeout=60)
 
     assert not resolved
     assert "declined" in detail
     assert "both sides disagree" in detail
-    assert not runner._unmerged_paths(repo)
+    assert not review._unmerged_paths(repo)
     assert not (repo / ".git" / "MERGE_HEAD").exists(), "the merge must be aborted, not left paused"
 
 
@@ -548,7 +548,7 @@ def test_resolve_merge_conflict_a_stray_edit_aborts_the_merge(tmp_path, monkeypa
     _resolver(monkeypatch, write=BOTH_LOG, also_touch="unrelated.md",
               verdict={"resolved": True, "summary": "kept both, tidied a neighbour"})
 
-    resolved, detail = runner._resolve_merge_conflict(
+    resolved, detail = review._resolve_merge_conflict(
         repo, repo, _card(), branch, base, tmp_path / "out", model="test-model", timeout=60)
 
     assert not resolved

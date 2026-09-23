@@ -24,7 +24,7 @@ looking at Ideas. The *appearance* is the mockup's; only the mechanism differs.
 
 **Two ways to be on a different account, and the panel owns neither of them.** A repo may
 declare `[[accounts]]`, each naming its own `CLAUDE_CONFIG_DIR`; selecting one sets that
-variable for this process's dispatch subprocesses only (`runner._worker_env` inherits the
+variable for this process's dispatch subprocesses only (`worker._worker_env` inherits the
 environment wholesale, so nothing downstream needs to know a selector exists). But the
 ordinary gesture is `claude auth login` against the *one* config directory you already have —
 settings, history and MCP servers stay put and only the signed-in identity swaps. That is a
@@ -76,33 +76,29 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import urlopen
 
 from nightshift import (board, boardhealth, branches, chores, corrections, decide, drain,
-                        freshness, ingest, init, jobs, manifest, preflight, run_record,
+                        freshness, git, ingest, init, jobs, manifest, preflight, run_record,
                         runtimes, textio, tiers, update, usage, worker_prompt)
 from nightshift.manifest import ManifestError, find_root
-from nightshift.runner import (
+from nightshift.hostconfig import (
     RUNS,
     STATUS_FILE,
     STOP_FILE,
-    Candidate,
-    attempt_limit,
-    branch_has_commits,
-    card_bytes,
-    claude_binary,
     current_branch,
     default_base,
     host_capabilities,
     host_setting,
-    oversize_note,
-    read_telemetry,
-    schema_violations,
 )
+from nightshift.startup import claude_binary, schema_violations
+from nightshift.dispatch import Candidate, attempt_limit, card_bytes, oversize_note
+from nightshift.review import branch_has_commits
+from nightshift.telemetry import read_telemetry
 # Private, and imported rather than reimplemented on purpose: "is this pid still
 # alive" carries a Windows-specific subtlety (`tasklist`, not a signal) that
 # `print_status` already got right, and a second copy here would be the same
 # question answered twice. It is the one thing standing between a heartbeat file
 # and the claim that a run is live.
-from nightshift.runner import _pid_alive
-from nightshift.runner import select as select_candidates
+from nightshift.hostconfig import _pid_alive
+from nightshift.dispatch import select as select_candidates
 
 DEFAULT_PORT = 8765
 STATIC_DIR = Path(__file__).resolve().parent / "panel_static"
@@ -122,7 +118,7 @@ PHASE_STEPS: tuple[tuple[str, str], ...] = (
 _PHASE_ALIASES = {"starting": "worker", "checker": "worker"}
 #: Phases that mean the run is past every step above. `wrapup` is the board commit
 #: and the push; it was called `digest` until the digest was removed, and the token is
-#: written by `runner._status` and also read by `freshness`, so all three moved together.
+#: written by `hostconfig._status` and also read by `freshness`, so all three moved together.
 _PHASE_DONE = frozenset({"wrapup", "finished"})
 
 
@@ -652,7 +648,7 @@ def open_terminal(root: Path, *command: str) -> None:
     one-shot `-p` dispatch this module could run for them.
 
     **`claude` is resolved here, not left to the new window's PATH.** Every other
-    dispatch path in the framework goes through `runner.claude_binary()`, which
+    dispatch path in the framework goes through `startup.claude_binary()`, which
     knows the CLI may live in `%USERPROFILE%\\.local\\bin` without being on PATH —
     and on the box this was found on (2026-08-17) that is exactly where it lives.
     This function was the one place that passed the bare name and trusted `cmd` to
@@ -1012,7 +1008,7 @@ class Context:
     def chores(self) -> list[Candidate]:
         """The chore batch's work — which the night skips by *routing*, not refusal.
 
-        `runner.select` is explicit that this is "not a refusal — a routing fact":
+        `dispatch.select` is explicit that this is "not a refusal — a routing fact":
         a chore is dispatched as a *batch* — by the run's `chores` queue, which
         `--queue both` works before the task queue — because the per-card treatment
         is exactly what the batch exists to avoid. Filing it
@@ -1139,7 +1135,7 @@ def _latest_record(root: Path) -> dict:
 
 
 def attempt_dir(root: Path, card_id: str, attempt: int) -> Path:
-    """Where one attempt's artefacts are. Deliberately **not** `runner.run_dir`,
+    """Where one attempt's artefacts are. Deliberately **not** `telemetry.run_dir`,
     which creates the directory: a page load must not leave a trail of empty
     folders behind for cards it merely rendered."""
     return root / RUNS / card_id / f"attempt-{attempt}"
@@ -1227,7 +1223,7 @@ def scan_audio_candidates(root: Path) -> list[AudioGroup]:
     """Every audio artefact any run has harvested — newest run first within
     each card, cards ordered by their own newest run.
 
-    Reads `.ai/runs/*/attempt-*/artefacts/` — `runner.harvest`'s own layout,
+    Reads `.ai/runs/*/attempt-*/artefacts/` — `worktree.harvest`'s own layout,
     read here rather than reimplemented as a second guess at it (`RUNS`,
     imported from `nightshift.runner`). Nothing here is Dungeoneer-specific:
     the harvest dir's name and the `candidates.json` shape both come from
@@ -1425,9 +1421,9 @@ def answer_audio_pick(root: Path, card_id: str) -> str:
 
 # --------------------------------------------------------------------------
 # Image candidates — the visual twin of the audio block above, and the surface
-# `runner._park_for_pick`'s `## Question` points at by name. A card that
+# `settle._park_for_pick`'s `## Question` points at by name. A card that
 # generated N candidates and installed none is filed in `needs-decision/`
-# rather than `testing/` (`runner.unadopted_artefacts`), precisely because
+# rather than `testing/` (`worktree.unadopted_artefacts`), precisely because
 # what it owes the maintainer is a *choice*; before this there was nowhere to
 # make it, and the card asked him to go and play a picture that was never in
 # the game.
@@ -1464,7 +1460,7 @@ class ImageShot:
     width: int = 0  # 0 when the IHDR could not be read — shown as such, never faked
     height: int = 0
     #: Named by the checker's own verdict as the strongest candidate. Advice, not
-    #: a decision: `runner.unadopted_artefacts` exists because a checker saying
+    #: a decision: `worktree.unadopted_artefacts` exists because a checker saying
     #: `pass` is exactly what is *not* enough to install one.
     best: bool = False
 
@@ -1507,7 +1503,7 @@ def read_checker_verdict(out_dir: Path) -> dict:
     """The verdict that stood for one attempt: its **highest-numbered**
     `review-<round>.json`, or `{}`.
 
-    `runner.run_checker` writes one per round (`review-1.json`, `review-2.json`,
+    `review.run_checker` writes one per round (`review-1.json`, `review-2.json`,
     …), so the last is the one that decided the attempt. Deliberately **not**
     `review-verdict.json`, which sits in the same directory and is the *diff*
     reviewer's judgement of the branch — a different agent judging a different
@@ -1534,7 +1530,7 @@ def scan_image_candidates(root: Path) -> list[ImageGroup]:
     cards ordered by their own newest run.
 
     The same walk and the same ordering as `scan_audio_candidates` over the same
-    `runner.harvest` layout (`.ai/runs/*/attempt-*/artefacts/`), grouped by the
+    `worktree.harvest` layout (`.ai/runs/*/attempt-*/artefacts/`), grouped by the
     directory the files landed in so one attempt that wrote two harvest dirs
     reads as two groups rather than one pile. A project that harvests no images —
     or nothing at all — gets an empty list rather than an error.
@@ -1634,15 +1630,7 @@ def diff_stat(root: Path, base: str, branch: str) -> str:
     right there. A failure is silence — a missing stat must not be able to stop
     a page rendering.
     """
-    try:
-        done = subprocess.run(["git", "diff", "--shortstat", f"{base}...{branch}"],
-                              cwd=root, capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=10, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    if done.returncode != 0:
-        return ""
-    text = done.stdout.strip()
+    text = git.text(root, "diff", "--shortstat", f"{base}...{branch}")
     if not text:
         return ""
     files = insertions = deletions = 0
@@ -1700,12 +1688,7 @@ def machine_lines(root: Path) -> list[str]:
 
 
 def _git_out(cwd: Path, *args: str) -> str:
-    try:
-        done = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=10, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return done.stdout.strip() if done.returncode == 0 else ""
+    return git.text(cwd, *args) or ""
 
 
 # --------------------------------------------------------------------------
@@ -1785,7 +1768,7 @@ def _size_chip(card: board.Card) -> str:
     Replaces the mark this had until 2026-09, which was an Obsidian Bases formula in
     `Board.base` over `file.size`. The view went when Obsidian did, so the mark moved
     here — and it is strictly better placed: the formula had to restate
-    `runner.CARD_COMFORT_BYTES` and the lane name in YAML where no import could reach
+    `dispatch.CARD_COMFORT_BYTES` and the lane name in YAML where no import could reach
     them, which is why a whole gate (`board_view_sync`) existed to catch the two
     drifting apart. Here the threshold *is* the runner's, because `oversize_note` is
     the runner's own function — the same one `select()` folds into a candidate's
@@ -4804,7 +4787,7 @@ def render_decide(root: Path, card_id: str) -> str:
         blocks.append(f'<div class="doc">{markdown(question)}</div>')
 
     # Directly under the question, because on an artefact card it *is* the
-    # question: `runner._park_for_pick` writes "N candidates were produced and
+    # question: `settle._park_for_pick` writes "N candidates were produced and
     # none of them installed", and reading that with nothing on screen to look at
     # is the friction parking the card was supposed to remove. Absent on every
     # other card, which is all of them until a run harvests images.
@@ -5411,7 +5394,7 @@ class Handler(BaseHTTPRequestHandler):
                     "reload this page to see which account is in force")
 
         if path == "api/stop":
-            # The kill switch the runner already watches for (`runner.STOP_FILE`),
+            # The kill switch the runner already watches for (`hostconfig.STOP_FILE`),
             # dropped where it looks. Not a signal, not a pid: a file, so it works
             # across the dedicated integration checkout the runner may be using.
             stop = root / STOP_FILE
@@ -5547,7 +5530,7 @@ class Handler(BaseHTTPRequestHandler):
             # decision, not the panel starting anything.
             #
             # Like `api/image/pick`, a pick also *answers* the card when it is parked
-            # on the pick question (`runner._park_for_pick`) — before 2026-09-11 it
+            # on the pick question (`settle._park_for_pick`) — before 2026-09-11 it
             # only wrote the JSON file, so nothing downstream ever learned of it and
             # `sound-for-taser` sat in `testing/` playing its synth stopgap while
             # Karel's pick waited in `.ai/audio_picks.json`. The card is read off
@@ -5564,7 +5547,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "api/image/pick":
             # Two effects from one click, and the second is what closes the loop:
             # the pick is recorded, *and* — when the card is parked on exactly this
-            # question (`runner._park_for_pick`) — written into its `## Thread` as
+            # question (`settle._park_for_pick`) — written into its `## Thread` as
             # the answer. The deliberate second click stays where it is: an answer
             # is not a ticket to `tasks/` (`decide.write_answer`'s park-over-promote),
             # so "To tasks" on the decide page still releases the installing pass.

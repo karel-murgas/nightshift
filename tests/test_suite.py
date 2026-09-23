@@ -750,7 +750,7 @@ def test_junit_total_reports_the_count_and_zero_when_absent(tmp_path):
 # the same report. Karel went looking for the reason three cards failed overnight
 # and found `pytest: 2 failure(s), 0 error(s) across 1860 test(s)` plus a pointer
 # to `.ai/runs/`, which is gitignored (so absent on any other machine) and deleted
-# by `runner.prune_run_dir` the moment a card is retired (so absent on that one).
+# by `worktree.prune_run_dir` the moment a card is retired (so absent on that one).
 
 
 def _junit_cases(path: Path, *cases: tuple[str, str, str, str, str]) -> Path:

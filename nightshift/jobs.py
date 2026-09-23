@@ -51,7 +51,7 @@ from nightshift import textio
 # Same import, same reason as `panel`: "is this pid still alive" carries a
 # Windows-specific subtlety (`tasklist`, not a signal) that `runner` already got
 # right, and a second copy would be the same question answered twice.
-from nightshift.runner import EXIT_STOPPED, _pid_alive
+from nightshift.hostconfig import EXIT_STOPPED, _pid_alive
 
 #: Under `.ai/runs/` on purpose — see the module docstring. The leading underscore
 #: keeps it out of the way of the per-card attempt directories that are its
@@ -121,7 +121,7 @@ def state(job: Job, *, now: dt.datetime | None = None) -> str:
     different statement from "it failed", and both are different from the silence
     this module replaced.
 
-    `stopped` is `runner.EXIT_STOPPED` (from `nightshift.panel --dispatch-cards`,
+    `stopped` is `hostconfig.EXIT_STOPPED` (from `nightshift.panel --dispatch-cards`,
     the "run several queued cards in sequence" job): the kill switch was already
     down when the sequence tried to start its next card, so that card's own
     runner process refused before doing anything. Nonzero, so `dispatch_cards`

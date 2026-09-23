@@ -39,7 +39,7 @@ Fails **open** on anything it cannot resolve: no git repository at the target, n
 `.ai/manifest.toml`, no declared `[branches].integration`, or a current branch git
 cannot report (detached HEAD). A guard that wedges a session on a config or a git
 state it could not read is worse than none, and `manage-board`'s own backstop
-(`runner.stranded_board_refusal`) still catches what reaches the runner regardless.
+(`worktree.stranded_board_refusal`) still catches what reaches the runner regardless.
 
 Reads the PreToolUse payload on stdin, writes a JSON decision on stdout. No LLM
 (`00_architecture.md` §12): path resolution and `git branch --show-current` only.
@@ -52,20 +52,13 @@ Wired as `python -m nightshift.hooks.board_branch_fence` in a consuming project'
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 from pathlib import Path, PurePosixPath
 
+from nightshift import git
 from nightshift.manifest import AI_DIR, MANIFEST_NAME, ManifestError
 
 NAME = "board_branch_fence"
-
-
-def _git(repo_root: Path, *args: str) -> str:
-    out = subprocess.run(["git", "-C", str(repo_root), *args],
-                         capture_output=True, text=True, timeout=10,
-                         encoding="utf-8", errors="replace")
-    return (out.stdout or "").strip() if out.returncode == 0 else ""
 
 
 def _nearest_existing_dir(path: Path) -> Path | None:
@@ -99,12 +92,7 @@ def _under_board(target: str, repo_root: Path) -> str | None:
 
 
 def _toplevel(directory: Path) -> Path | None:
-    out = subprocess.run(["git", "-C", str(directory), "rev-parse", "--show-toplevel"],
-                         capture_output=True, text=True, timeout=10,
-                         encoding="utf-8", errors="replace")
-    if out.returncode != 0:
-        return None
-    line = (out.stdout or "").strip()
+    line = git.text_or_empty(directory, "rev-parse", "--show-toplevel", timeout=10)
     return Path(line).resolve() if line else None
 
 
@@ -138,7 +126,7 @@ def evaluate(payload: dict) -> str | None:
     except ManifestError:
         return None  # no declared integration branch — nothing to check against
 
-    current = _git(root, "branch", "--show-current")
+    current = git.text_or_empty(root, "branch", "--show-current")
     if not current or current == integration:
         return None
 

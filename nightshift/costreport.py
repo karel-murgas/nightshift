@@ -30,7 +30,7 @@ import json
 import sys
 from pathlib import Path
 
-from nightshift import manifest, run_record, runner
+from nightshift import hostconfig, manifest, run_record, telemetry
 
 #: A `Read`'s own tool_use_id maps back to its call through this correlation;
 #: an `Edit`/`Write` tool_result under this many UTF-8 bytes is presumed to be
@@ -100,7 +100,7 @@ def transcript_stats(stream_path: Path) -> dict:
     mid-work versus at close-out.
 
     `{}` for a file that does not exist or holds nothing parseable — the same
-    "always a lookup" contract `runner._read_verdict` follows, so a caller sums
+    "always a lookup" contract `telemetry._read_verdict` follows, so a caller sums
     a list of these without checking each one first.
     """
     events = _events(stream_path)
@@ -211,7 +211,7 @@ def card_transcript_stats(root: Path, card_id: str) -> dict:
     split already lives (see `usage_breakdown`), because it reads the clean
     per-stage result files instead of the shared transcript.
     """
-    attempts_dir = root / runner.RUNS / card_id
+    attempts_dir = root / hostconfig.RUNS / card_id
     stats = []
     for attempt_dir in sorted(attempts_dir.glob("attempt-*")):
         for stream_path in sorted(attempt_dir.glob("*.jsonl")):
@@ -256,8 +256,8 @@ def _usage_lines(usage_entries: list[dict]) -> list[str]:
         b = by_stage[stage]
         lines.append(
             f"  {stage:10} ${b['cost_usd']:.2f} · {b['turns']} turns · {b['calls']} call(s) "
-            f"· {runner._si(b['cache_read_tokens'])} cache-read "
-            f"· {runner._si(b['cache_write_tokens'])} cache-write")
+            f"· {telemetry._si(b['cache_read_tokens'])} cache-read "
+            f"· {telemetry._si(b['cache_write_tokens'])} cache-write")
     return lines
 
 
@@ -266,10 +266,10 @@ def _transcript_lines(stats: dict) -> list[str]:
         return ["  (no transcript found)"]
     lines = []
     for name in sorted(stats["tool_bytes"], key=lambda n: -stats["tool_bytes"][n]):
-        lines.append(f"  {name:10} {runner._si(stats['tool_bytes'][name]):>8} bytes "
+        lines.append(f"  {name:10} {telemetry._si(stats['tool_bytes'][name]):>8} bytes "
                      f"over {stats['tool_calls'][name]} call(s)")
-    lines.append(f"  hook output (est.)   {runner._si(stats['hook_output_bytes_est'])} bytes")
-    lines.append(f"  re-reads             {runner._si(stats['reread_bytes'])} bytes "
+    lines.append(f"  hook output (est.)   {telemetry._si(stats['hook_output_bytes_est'])} bytes")
+    lines.append(f"  re-reads             {telemetry._si(stats['reread_bytes'])} bytes "
                  f"({stats['reread_share'] * 100:.0f}% of read bytes)")
     lines.append(f"  read after 1st edit  {stats['read_share_after_first_edit'] * 100:.0f}% "
                  f"of read bytes")
@@ -280,10 +280,10 @@ def _transcript_lines(stats: dict) -> list[str]:
 
 def report_card(root: Path, card_id: str) -> str:
     lines = [f"# {card_id}", ""]
-    attempts_dir = root / runner.RUNS / card_id
+    attempts_dir = root / hostconfig.RUNS / card_id
     usage_entries = []
     for attempt_dir in sorted(attempts_dir.glob("attempt-*")):
-        usage_entries += runner.usage_breakdown(attempt_dir)
+        usage_entries += telemetry.usage_breakdown(attempt_dir)
     lines.append("## usage")
     lines += _usage_lines(usage_entries) if usage_entries else ["  (no result files found)"]
     lines.append("")
@@ -332,11 +332,11 @@ def main(argv: list[str] | None = None) -> int:
             print(str(exc), file=sys.stderr)
             return 1
 
-    if args.run and (root / runner.RUNS / args.run).is_dir():
+    if args.run and (root / hostconfig.RUNS / args.run).is_dir():
         if args.json:
             usage_entries = []
-            for attempt_dir in sorted((root / runner.RUNS / args.run).glob("attempt-*")):
-                usage_entries += runner.usage_breakdown(attempt_dir)
+            for attempt_dir in sorted((root / hostconfig.RUNS / args.run).glob("attempt-*")):
+                usage_entries += telemetry.usage_breakdown(attempt_dir)
             print(json.dumps({"card": args.run, "usage": usage_entries,
                               "transcript": card_transcript_stats(root, args.run)}, indent=2))
         else:

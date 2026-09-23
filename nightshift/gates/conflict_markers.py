@@ -18,7 +18,7 @@ On 2026-08-23 two cards' register entries collided in `.claude/memory/state.md` 
 `state_history.md`, three regions were hand-resolved in one session, and the only
 thing standing between that and a repeat of 2026-08-09 was the resolver remembering
 to grep. That is the gap this closes — and it is now load-bearing rather than
-hygienic, because `runner._resolve_conflict` lets an **agent** resolve a rebase
+hygienic, because `review._resolve_conflict` lets an **agent** resolve a rebase
 unattended. Automated resolution is only as trustworthy as the check that follows it.
 
 **Appeals are file-scope, and that concession was earned within the hour.** This gate
@@ -51,10 +51,9 @@ which cannot decode them.
 from __future__ import annotations
 
 import re
-import subprocess
 from pathlib import Path
 
-from nightshift import conflictmarkers
+from nightshift import conflictmarkers, git
 from nightshift.gates.base import Violation
 
 NAME = "conflict_markers"
@@ -75,15 +74,8 @@ def _tracked(repo_root: Path) -> list[str]:
     is no second half of the check to report, so an unanswerable scan is silent.
     A gate that invented violations from a missing git binary would be worse.
     """
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(repo_root), "ls-files", "-z"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            check=False, timeout=60,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return []
-    if out.returncode != 0:
+    out = git.run_safe(repo_root, "ls-files", "-z", timeout=60)
+    if out is None or out.returncode != 0:
         return []
     return [rel for rel in (out.stdout or "").split("\0") if rel.strip()]
 

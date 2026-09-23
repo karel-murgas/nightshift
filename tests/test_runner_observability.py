@@ -48,6 +48,7 @@ if str(_CORE_GATES) not in sys.path:
 from nightshift import board  # noqa: E402
 from nightshift import run_record  # noqa: E402
 from nightshift import runner  # noqa: E402
+from nightshift import hostconfig, outcome, settle, telemetry, verify
 
 # The card and repo fixtures are the sibling suite's; rebuilding them here would
 # be a second copy of the card template that could drift from the schema.
@@ -109,7 +110,7 @@ def test_order_is_stable_across_rescans(tmp_path):
 # ---------------------------------------------------------------------------
 
 def _fake_gates(monkeypatch, root: Path, body: str) -> None:
-    """Point `runner.GATE_ARGV` at a scripted stand-in for the gate suite.
+    """Point `verify.GATE_ARGV` at a scripted stand-in for the gate suite.
 
     This used to write the stub to `.ai/gates/run.py`, which is how the suite
     stayed green while every real dispatch died: step 3 moved the gate runner
@@ -118,7 +119,7 @@ def _fake_gates(monkeypatch, root: Path, body: str) -> None:
     """
     stub = root / "gate_stub.py"
     stub.write_text(body, encoding="utf-8")
-    monkeypatch.setattr(runner, "GATE_ARGV", [sys.executable, str(stub)])
+    monkeypatch.setattr(verify, "GATE_ARGV", [sys.executable, str(stub)])
 
 
 def test_a_crashing_gate_is_not_reported_as_the_card_failing(tmp_path, monkeypatch):
@@ -131,9 +132,9 @@ def test_a_crashing_gate_is_not_reported_as_the_card_failing(tmp_path, monkeypat
     """
     _fake_gates(monkeypatch, tmp_path, "raise TypeError('compile() arg 1 must be a string')\n")
 
-    status, why = runner._run_gates(tmp_path, tmp_path, tmp_path / "gates.txt")
+    status, why = verify._run_gates(tmp_path, tmp_path, tmp_path / "gates.txt")
 
-    assert status == runner.GATE_CRASH
+    assert status == verify.GATE_CRASH
     assert why.strip() and why != "gates: ", "the reason must not be empty"
     assert "TypeError" in why
     # The full diagnosis has to reach disk too, not only the summary line.
@@ -146,9 +147,9 @@ def test_a_gate_reporting_violations_is_still_the_cards_problem(tmp_path, monkey
     _fake_gates(monkeypatch, tmp_path,
                 "print('some/file.py:1 - a_gate: a real violation')\nraise SystemExit(1)\n")
 
-    status, why = runner._run_gates(tmp_path, tmp_path, tmp_path / "gates.txt")
+    status, why = verify._run_gates(tmp_path, tmp_path, tmp_path / "gates.txt")
 
-    assert status == runner.GATE_VIOLATION
+    assert status == verify.GATE_VIOLATION
     assert "a real violation" in why
 
 
@@ -157,16 +158,16 @@ def test_a_gate_exiting_nonzero_in_silence_is_a_crash_not_a_verdict(tmp_path, mo
     guessing that it is spends one of its three attempts for free."""
     _fake_gates(monkeypatch, tmp_path, "raise SystemExit(3)\n")
 
-    status, _ = runner._run_gates(tmp_path, tmp_path, tmp_path / "gates.txt")
+    status, _ = verify._run_gates(tmp_path, tmp_path, tmp_path / "gates.txt")
 
-    assert status == runner.GATE_CRASH
+    assert status == verify.GATE_CRASH
 
 
 def test_clean_gates_pass(tmp_path, monkeypatch):
     _fake_gates(monkeypatch, tmp_path, "print('All clear')\n")
 
-    assert runner._run_gates(tmp_path, tmp_path, tmp_path / "gates.txt") == \
-           (runner.GATE_PASS, "")
+    assert verify._run_gates(tmp_path, tmp_path, tmp_path / "gates.txt") == \
+           (verify.GATE_PASS, "")
 
 
 def test_blocked_gives_the_attempt_back_and_keeps_the_branch(tmp_path):
@@ -179,9 +180,9 @@ def test_blocked_gives_the_attempt_back_and_keeps_the_branch(tmp_path):
     root = _repo(tmp_path)
     _card(root, "tasks", "probe")
     board.find(root, "probe").write(
-        {"attempts": "1", "branch": "ai/probe", "started": runner._now()})
+        {"attempts": "1", "branch": "ai/probe", "started": hostconfig._now()})
 
-    note = runner.settle(root, "probe", runner.Dispatch("blocked", "the gate harness crashed"))
+    note = settle.settle(root, "probe", outcome.Dispatch("blocked", "the gate harness crashed"))
 
     after = board.find(root, "probe")
     assert after.lane == "tasks", "a blocked card must not move lanes"
@@ -215,7 +216,7 @@ def test_read_telemetry_sums_numbers_that_were_already_downloaded(tmp_path):
     _worker_json(out, 1, num_turns=40)
     _worker_json(out, 2, num_turns=47)
 
-    tel = runner.read_telemetry(out)
+    tel = telemetry.read_telemetry(out)
 
     assert tel["rounds"] == 2
     assert tel["turns"] == 87
@@ -224,7 +225,7 @@ def test_read_telemetry_sums_numbers_that_were_already_downloaded(tmp_path):
     assert tel["cache_read_tokens"] == 8_000_000
     assert tel["models"] == ["claude-sonnet-5"]
 
-    rendered = runner.telemetry_markdown(tel, 1)
+    rendered = telemetry.telemetry_markdown(tel, 1)
     assert "87 turns" in rendered and "$4.00" in rendered
     # 8M cache reads is the number that looks alarming and is not. It has to be
     # legible at a glance rather than as eight digits.
@@ -239,7 +240,7 @@ def test_a_stderr_sidecar_is_not_mistaken_for_a_result(tmp_path):
     _worker_json(out, 1)
     (out / "worker-1.stderr.txt").write_text("some warning\n", encoding="utf-8")
 
-    assert runner.read_telemetry(out)["rounds"] == 1
+    assert telemetry.read_telemetry(out)["rounds"] == 1
 
 
 def test_telemetry_is_empty_when_the_worker_never_reported(tmp_path):
@@ -249,7 +250,7 @@ def test_telemetry_is_empty_when_the_worker_never_reported(tmp_path):
     out = tmp_path / "attempt-1"
     out.mkdir()
 
-    assert runner.read_telemetry(out) == {}
+    assert telemetry.read_telemetry(out) == {}
 
 
 def test_unparseable_worker_output_does_not_take_the_run_down(tmp_path):
@@ -257,7 +258,7 @@ def test_unparseable_worker_output_does_not_take_the_run_down(tmp_path):
     out.mkdir()
     (out / "worker-1.json").write_text("not json at all", encoding="utf-8")
 
-    assert runner.read_telemetry(out) == {}
+    assert telemetry.read_telemetry(out) == {}
 
 
 def test_a_permission_denial_is_surfaced_and_a_zero_is_not(tmp_path):
@@ -267,11 +268,11 @@ def test_a_permission_denial_is_surfaced_and_a_zero_is_not(tmp_path):
     out = tmp_path / "attempt-1"
     out.mkdir()
     _worker_json(out, 1, permission_denials=[{"tool": "Bash"}, {"tool": "Edit"}])
-    assert "2 permission denial(s)" in runner.telemetry_markdown(
-        runner.read_telemetry(out), 1)
+    assert "2 permission denial(s)" in telemetry.telemetry_markdown(
+        telemetry.read_telemetry(out), 1)
 
     _worker_json(out, 1, permission_denials=[])
-    assert "denial" not in runner.telemetry_markdown(runner.read_telemetry(out), 1)
+    assert "denial" not in telemetry.telemetry_markdown(telemetry.read_telemetry(out), 1)
 
 
 def _stage_log(out: Path, name: str, **over: object) -> None:
@@ -304,7 +305,7 @@ def test_usage_breakdown_covers_every_stage_read_telemetry_does_not(tmp_path):
     _stage_log(out, "repair.log", num_turns=5, total_cost_usd=0.1)
     _stage_log(out, "resolve-1.log", num_turns=3, total_cost_usd=0.05)   # resolver
 
-    stages = {entry["stage"]: entry for entry in runner.usage_breakdown(out)}
+    stages = {entry["stage"]: entry for entry in telemetry.usage_breakdown(out)}
 
     assert set(stages) == {"worker", "checker", "reviewer", "repair", "resolver"}
     assert stages["worker"]["turns"] == 40
@@ -325,7 +326,7 @@ def test_usage_breakdown_does_not_confuse_the_checker_with_the_reviewer(tmp_path
     _stage_log(out, "review-2.log", total_cost_usd=1.0)
     _stage_log(out, "review.log", total_cost_usd=9.0)
 
-    stages = {entry["stage"]: entry for entry in runner.usage_breakdown(out)}
+    stages = {entry["stage"]: entry for entry in telemetry.usage_breakdown(out)}
 
     assert stages["checker"]["calls"] == 2
     assert stages["checker"]["cost_usd"] == 2.0
@@ -336,7 +337,7 @@ def test_usage_breakdown_does_not_confuse_the_checker_with_the_reviewer(tmp_path
 def test_usage_breakdown_is_empty_for_an_attempt_that_left_nothing(tmp_path):
     out = tmp_path / "attempt-1"
     out.mkdir()
-    assert runner.usage_breakdown(out) == []
+    assert telemetry.usage_breakdown(out) == []
 
 
 def test_record_usage_writes_one_event_per_stage(tmp_path):
@@ -349,7 +350,7 @@ def test_record_usage_writes_one_event_per_stage(tmp_path):
     _stage_log(out, "review.log", num_turns=25, total_cost_usd=2.0)
 
     record = run_record.start(tmp_path, kind="run")
-    runner.record_usage(record, out, card_id="probe", model="sonnet")
+    telemetry.record_usage(record, out, card_id="probe", model="sonnet")
 
     data = run_record.read_all(tmp_path)[0]
     stages = {e["stage"] for e in data["usage"]}
@@ -375,7 +376,7 @@ def test_effort_is_recorded_per_stage_and_not_attempt_wide(tmp_path):
     _stage_log(out, "review.log", num_turns=25, total_cost_usd=2.0)
 
     record = run_record.start(tmp_path, kind="chores")
-    runner.record_usage(record, out, card_id="probe", model="sonnet",
+    telemetry.record_usage(record, out, card_id="probe", model="sonnet",
                         efforts={"worker": "medium"})
 
     by_stage = {e["stage"]: e for e in run_record.read_all(tmp_path)[0]["usage"]}
@@ -392,7 +393,7 @@ def test_an_unnamed_stage_records_no_effort_rather_than_inheriting_its_neighbour
     _worker_json(out, 1, num_turns=40)
 
     record = run_record.start(tmp_path, kind="run")
-    runner.record_usage(record, out, card_id="probe", model="sonnet")
+    telemetry.record_usage(record, out, card_id="probe", model="sonnet")
 
     assert [e["effort"] for e in run_record.read_all(tmp_path)[0]["usage"]] == [""]
 
@@ -403,11 +404,11 @@ def test_settle_writes_telemetry_onto_the_card(tmp_path):
     and machine-local."""
     root = _repo(tmp_path)
     _card(root, "tasks", "probe")
-    board.find(root, "probe").write({"attempts": "1", "started": runner._now()})
-    out = runner.run_dir(root, board.find(root, "probe"), 1)
+    board.find(root, "probe").write({"attempts": "1", "started": hostconfig._now()})
+    out = telemetry.run_dir(root, board.find(root, "probe"), 1)
     _worker_json(out, 1)
 
-    runner.settle(root, "probe", runner.Dispatch("review", "done"))
+    settle.settle(root, "probe", outcome.Dispatch("review", "done"))
 
     card = board.find(root, "probe")
     assert card.lane == "review"
@@ -423,8 +424,8 @@ def test_status_is_readable_without_taking_the_lock(tmp_path, capsys):
     """`--status` is the question asked *while* a night is in flight, so it must
     not touch the lock, git or the board. A status command that could interfere
     with what it reports on would be worse than none."""
-    runner._status(tmp_path, phase="worker", card="probe", attempt=2,
-                   model="sonnet", since=runner._now())
+    hostconfig._status(tmp_path, phase="worker", card="probe", attempt=2,
+                   model="sonnet", since=hostconfig._now())
 
     assert runner.print_status(tmp_path) == 0
 
@@ -454,9 +455,9 @@ def test_status_before_any_run_is_not_an_error(tmp_path, capsys):
 def test_the_log_tee_survives_an_unwritable_path(tmp_path, monkeypatch, capsys):
     """The console is the primary record. A full disk or a locked file must not
     be the thing that ends a night."""
-    monkeypatch.setattr(runner, "_RUN_LOG", tmp_path / "no-such-dir" / "x.log")
+    monkeypatch.setattr(hostconfig, "_RUN_LOG", tmp_path / "no-such-dir" / "x.log")
 
-    runner._log("still printed")
+    hostconfig._log("still printed")
 
     assert "still printed" in capsys.readouterr().out
 
@@ -523,7 +524,7 @@ def test_stage_efforts_reads_each_stage_from_the_tier_it_actually_runs_at(tmp_pa
     resolve `lead` themselves, so they take the lead tier's."""
     root = _effort_root(tmp_path, '\n[tiers.effort]\nworker = "medium"\nlead = "high"\n')
 
-    assert runner.stage_efforts(root, "worker") == {
+    assert telemetry.stage_efforts(root, "worker") == {
         "worker": "medium", "checker": "medium", "repair": "medium",
         "reviewer": "high", "resolver": "high",
     }
@@ -534,7 +535,7 @@ def test_a_lead_tier_card_moves_its_own_stages_but_not_the_reviewer(tmp_path):
     the lead tier by definition either way."""
     root = _effort_root(tmp_path, '\n[tiers.effort]\nworker = "medium"\nlead = "high"\n')
 
-    efforts = runner.stage_efforts(root, "lead")
+    efforts = telemetry.stage_efforts(root, "lead")
 
     assert efforts["worker"] == "high"
     assert efforts["reviewer"] == "high"
@@ -546,7 +547,7 @@ def test_a_worker_override_moves_only_the_card_tier_stages(tmp_path):
     the stamping bug `record_usage`'s per-stage shape exists to prevent."""
     root = _effort_root(tmp_path, '\n[tiers.effort]\nworker = "high"\nlead = "high"\n')
 
-    efforts = runner.stage_efforts(root, "worker", worker="low")
+    efforts = telemetry.stage_efforts(root, "worker", worker="low")
 
     assert efforts["worker"] == efforts["checker"] == efforts["repair"] == "low"
     assert efforts["reviewer"] == "high"
@@ -556,4 +557,4 @@ def test_a_project_with_no_effort_table_gets_no_flags_anywhere(tmp_path):
     """Every stage inherits, exactly as before 3.3. The safe-to-ship case."""
     root = _effort_root(tmp_path)
 
-    assert set(runner.stage_efforts(root, "worker").values()) == {""}
+    assert set(telemetry.stage_efforts(root, "worker").values()) == {""}

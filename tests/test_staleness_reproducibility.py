@@ -37,9 +37,9 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import runner
 from nightshift.gates import doc_reference_liveness
 from nightshift.gates import doc_scan
+from nightshift import review, stale
 
 import _fixtures
 
@@ -146,7 +146,7 @@ def test_the_violation_message_does_not_backtick_the_token(repo: Path):
 
 def test_runner_neutralises_backticks_before_writing_a_card():
     detail = "gates: doc_reference_liveness: symbol `Ghost` does not exist"
-    safe = runner._quote_safe(detail)
+    safe = stale._quote_safe(detail)
     assert "`" not in safe
     assert "Ghost" in safe, "sanitising must not destroy the evidence"
 
@@ -169,13 +169,13 @@ def test_a_fenced_verdict_in_the_final_message_is_read():
                "findings": [{"claim": "c", "cite": "f.py:1", "why": "w"}],
                "summary": "1 drift"}
     text = f"I finished reading.\n\n```json\n{json.dumps(verdict)}\n```"
-    got = runner._verdict_from_message(text)
+    got = review._verdict_from_message(text)
     assert got["complete"] is True
     assert len(got["findings"]) == 1
 
 
 def test_an_unfenced_verdict_is_still_read():
-    got = runner._verdict_from_message('Verdict: {"complete": true, "findings": []}')
+    got = review._verdict_from_message('Verdict: {"complete": true, "findings": []}')
     assert got["complete"] is True
 
 
@@ -184,14 +184,14 @@ def test_the_last_json_block_wins():
     mis-read from its first block."""
     text = ('```json\n{"complete": false, "summary": "draft"}\n```\n'
             'On reflection:\n```json\n{"complete": true, "summary": "final"}\n```')
-    assert runner._verdict_from_message(text)["summary"] == "final"
+    assert review._verdict_from_message(text)["summary"] == "final"
 
 
 def test_prose_without_a_verdict_is_not_verified():
     """`{}` must stay the answer for "no verdict" — recording a verification that
     did not happen is the one outcome worse than re-checking."""
-    assert runner._verdict_from_message("I could not finish the document.") == {}
-    assert runner._verdict_from_message("") == {}
+    assert review._verdict_from_message("I could not finish the document.") == {}
+    assert review._verdict_from_message("") == {}
 
 
 def test_the_stale_prompt_asks_for_a_final_message_not_a_file():
@@ -204,7 +204,7 @@ def test_the_stale_prompt_asks_for_a_final_message_not_a_file():
     worth pinning: whatever a project grants, this prompt must not ask for a
     write, because the read-only grant is the charter that ships as the template.
     """
-    prompt = runner._STALE_PROMPT
+    prompt = stale._STALE_PROMPT
     assert "final message" in prompt
     assert "Write your verdict to" not in prompt
 
@@ -243,7 +243,7 @@ def test_findings_are_committed_before_the_doc_is_ledgered(tmp_path, monkeypatch
     (root / "drift.md").write_text("c is documented here.\n", encoding="utf-8")
 
     committed_when_ledgered: list[bool] = []
-    slug = runner._stale_slug("drift.md")
+    slug = stale._stale_slug("drift.md")
 
     def _spy_mark_verified(r, doc, ledger, *, authoritative=True):
         tracked = subprocess.run(
@@ -251,16 +251,16 @@ def test_findings_are_committed_before_the_doc_is_ledgered(tmp_path, monkeypatch
             capture_output=True, text=True, encoding="utf-8", errors="replace")
         committed_when_ledgered.append(bool(tracked.stdout.strip()))
 
-    monkeypatch.setattr(runner.stale_sweep, "load_ledger", lambda r: {})
-    monkeypatch.setattr(runner.stale_sweep, "select", lambda r, n, ledger: [
+    monkeypatch.setattr(stale.stale_sweep, "load_ledger", lambda r: {})
+    monkeypatch.setattr(stale.stale_sweep, "select", lambda r, n, ledger: [
         stale_sweep.Candidate("drift.md", 5, None, 5)])
-    monkeypatch.setattr(runner.stale_sweep, "mark_verified", _spy_mark_verified)
-    monkeypatch.setattr(runner, "stale_run_dir", lambda r, doc: root)
-    monkeypatch.setattr(runner, "run_stale_check", lambda *a, **k: (
+    monkeypatch.setattr(stale.stale_sweep, "mark_verified", _spy_mark_verified)
+    monkeypatch.setattr(stale, "stale_run_dir", lambda r, doc: root)
+    monkeypatch.setattr(stale, "run_stale_check", lambda *a, **k: (
         {"complete": True, "summary": "1 drift",
          "findings": [{"claim": "c", "cite": "f.py:1", "why": "w"}]}, 0.0, None))
 
-    _, verified, carded = runner.stale_phase(root, 1, "m", None, 0.0, 600)
+    _, verified, carded = stale.stale_phase(root, 1, "m", None, 0.0, 600)
 
     assert (verified, carded) == (1, 1)
     assert committed_when_ledgered == [True], (
@@ -287,16 +287,16 @@ def test_a_swept_doc_records_progress_even_if_the_run_never_finishes(tmp_path, m
     # and must contain the finding's claim, or the finding is dropped.
     (root / "drift.md").write_text("c is documented here.\n", encoding="utf-8")
 
-    monkeypatch.setattr(runner.stale_sweep, "load_ledger", lambda r: {})
-    monkeypatch.setattr(runner.stale_sweep, "select", lambda r, n, ledger: [
+    monkeypatch.setattr(stale.stale_sweep, "load_ledger", lambda r: {})
+    monkeypatch.setattr(stale.stale_sweep, "select", lambda r, n, ledger: [
         stale_sweep.Candidate("drift.md", 5, None, 5)])
-    monkeypatch.setattr(runner.stale_sweep, "mark_verified", lambda r, d, l, **kw: None)
-    monkeypatch.setattr(runner, "stale_run_dir", lambda r, doc: root)
-    monkeypatch.setattr(runner, "run_stale_check", lambda *a, **k: (
+    monkeypatch.setattr(stale.stale_sweep, "mark_verified", lambda r, d, l, **kw: None)
+    monkeypatch.setattr(stale, "stale_run_dir", lambda r, doc: root)
+    monkeypatch.setattr(stale, "run_stale_check", lambda *a, **k: (
         {"complete": True, "summary": "1 drift",
          "findings": [{"claim": "c", "cite": "f.py:1", "why": "w"}]}, 0.0, None))
 
-    runner.stale_phase(root, 1, "m", None, 0.0, 600)
+    stale.stale_phase(root, 1, "m", None, 0.0, 600)
 
     tracked = subprocess.run(
         ["git", "-C", str(root), "ls-files", "Board/tasks"],
@@ -330,26 +330,26 @@ def test_a_stale_checker_that_walls_after_a_complete_verdict_is_honoured(
     (root / "drift.md").write_text("c is documented here.\n", encoding="utf-8")
 
     ledgered: list[str] = []
-    monkeypatch.setattr(runner.stale_sweep, "load_ledger", lambda r: {})
-    monkeypatch.setattr(runner.stale_sweep, "select", lambda r, n, ledger: [
+    monkeypatch.setattr(stale.stale_sweep, "load_ledger", lambda r: {})
+    monkeypatch.setattr(stale.stale_sweep, "select", lambda r, n, ledger: [
         stale_sweep.Candidate("drift.md", 5, None, 5),
         stale_sweep.Candidate("other.md", 4, None, 4)])
-    monkeypatch.setattr(runner.stale_sweep, "mark_verified",
+    monkeypatch.setattr(stale.stale_sweep, "mark_verified",
                         lambda r, d, l, **kw: ledgered.append(d))
-    monkeypatch.setattr(runner, "stale_run_dir", lambda r, doc: root)
-    monkeypatch.setattr(runner, "run_stale_check", lambda *a, **k: (
+    monkeypatch.setattr(stale, "stale_run_dir", lambda r, doc: root)
+    monkeypatch.setattr(stale, "run_stale_check", lambda *a, **k: (
         {"complete": True, "summary": "1 drift",
          "findings": [{"claim": "c", "cite": "f.py:1", "why": "w"}]},
         0.0, limits.Wall(limits.SESSION, None, "usage limit reached")))
 
-    checked, verified, carded = runner.stale_phase(root, 2, "m", None, 0.0, 600)
+    checked, verified, carded = stale.stale_phase(root, 2, "m", None, 0.0, 600)
 
     assert (checked, verified, carded) == (1, 1, 1), (
         "the walled doc's complete verdict must be honoured — and the sweep must "
         "still stop there rather than spawning the next checker into a shut window"
     )
     assert ledgered == ["drift.md"]
-    card = root / "Board" / "tasks" / f"{runner._stale_slug('drift.md')}.md"
+    card = root / "Board" / "tasks" / f"{stale._stale_slug('drift.md')}.md"
     assert card.is_file(), "the findings card must be written before the sweep stops"
     tracked = subprocess.run(
         ["git", "-C", str(root), "ls-files", f"Board/tasks/{card.stem}.md"],
@@ -366,17 +366,17 @@ def test_a_stale_checker_that_walls_with_nothing_complete_leaves_the_ledger_alon
 
     root = _board_repo(tmp_path)
     ledgered: list[str] = []
-    monkeypatch.setattr(runner.stale_sweep, "load_ledger", lambda r: {})
-    monkeypatch.setattr(runner.stale_sweep, "select", lambda r, n, ledger: [
+    monkeypatch.setattr(stale.stale_sweep, "load_ledger", lambda r: {})
+    monkeypatch.setattr(stale.stale_sweep, "select", lambda r, n, ledger: [
         stale_sweep.Candidate("drift.md", 5, None, 5)])
-    monkeypatch.setattr(runner.stale_sweep, "mark_verified",
+    monkeypatch.setattr(stale.stale_sweep, "mark_verified",
                         lambda r, d, l, **kw: ledgered.append(d))
-    monkeypatch.setattr(runner, "stale_run_dir", lambda r, doc: root)
-    monkeypatch.setattr(runner, "run_stale_check", lambda *a, **k: (
+    monkeypatch.setattr(stale, "stale_run_dir", lambda r, doc: root)
+    monkeypatch.setattr(stale, "run_stale_check", lambda *a, **k: (
         {"complete": False}, 0.0,
         limits.Wall(limits.SESSION, None, "usage limit reached")))
 
-    checked, verified, carded = runner.stale_phase(root, 1, "m", None, 0.0, 600)
+    checked, verified, carded = stale.stale_phase(root, 1, "m", None, 0.0, 600)
 
     assert (checked, verified, carded) == (1, 0, 0)
     assert ledgered == []

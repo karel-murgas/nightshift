@@ -20,15 +20,24 @@ cost was invisible for months: a fabricated or mangled token classifies as
 to be built while it still looks like over-engineering.
 
 `-z` removes the ambiguity at the source: no quoting, no escaping, and a separator
-that cannot occur in a path. `nightshift/gitpaths.py` is the one reader, and this
-is what stops the next site being written without it.
+that cannot occur in a path. `nightshift/git.py` is the one reader now.
+
+**Narrowed by the git-module-and-runner-split workstream.** Every git call in the
+package used to be free-standing — fourteen private `_git()` helpers plus a
+scatter of raw `subprocess.run(["git", ...])` — so this gate scanned every tooling
+file for one. `nightshift/git.py` is now the *only* place a git argv may be
+written by hand anywhere in the package (a separate boundary test, not a gate,
+fails the whole tree on a `def _git(` or a bare `subprocess.run(["git", ...])`
+outside it — see `tests/test_git_module_boundary.py`). That makes scanning
+everywhere else redundant: nothing outside `git.py` can spell a path-listing argv
+at all any more, correctly or not. What is left for *this* gate to guard is
+`git.py` itself, so a future edit to it — a new path-listing function, or a
+`-z` dropped from an existing one — still gets caught here rather than only by
+whichever test happens to exercise that path.
 
 **What is watched:** a call whose string arguments form a git argv asking for
 paths — `status --porcelain`, anything with `--name-only`/`--name-status`, or
-`ls-files`. The argv may be spelled either way this package spells one: as a list
-literal (`["git", "status", "--porcelain"]`) or as loose arguments to a `_git`
-helper (`_git(root, "status", "--porcelain")`), which is why the tokens are read
-off the call rather than off a particular parameter.
+`ls-files`.
 
 **What is not:** `git worktree list --porcelain`, which is a key-value listing and
 not a path list — the trigger is `status` *with* `--porcelain`, never the flag
@@ -46,14 +55,14 @@ from pathlib import Path
 
 import appeal_markers
 from nightshift.gates import corpus
-from nightshift.gates import scope
 from nightshift.gates.base import Violation
 
 NAME = "git_path_lists"
 DESCRIPTION = "a git command that lists paths lists them NUL-separated"
 
-#: The module that owns the reading, and the only place these argvs belong.
-_READER = "nightshift/gitpaths.py"
+#: The one file this gate reads — see the module docstring for why everywhere
+#: else stopped needing it.
+_READER = "nightshift/git.py"
 
 #: Flags that make an argv a path list on their own.
 _LISTING_FLAGS = frozenset({"--name-only", "--name-status"})
@@ -101,31 +110,31 @@ def _lists_paths(tokens: list[str]) -> str:
 
 
 def check(repo_root: Path) -> list[Violation]:
+    path = repo_root / _READER
+    if not path.is_file():
+        return []
     appeals = appeal_markers.scan(repo_root)
+    rel = path.relative_to(repo_root).as_posix()
     violations: list[Violation] = []
-    for path in scope.tooling_files(repo_root):
-        rel = path.relative_to(repo_root).as_posix()
-        if rel.endswith(_READER):
+    tree = corpus.tree(path)
+    if tree is None:
+        return []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
             continue
-        tree = corpus.tree(path)
-        if tree is None:
+        tokens = _tokens(node)
+        asked = _lists_paths(tokens)
+        if not asked or "-z" in tokens:
             continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            tokens = _tokens(node)
-            asked = _lists_paths(tokens)
-            if not asked or "-z" in tokens:
-                continue
-            if appeal_markers.exempt(appeals, NAME, rel, node.lineno):
-                continue
-            violations.append(Violation(
-                rel, node.lineno,
-                f"`git {asked}` without `-z` returns paths git may quote and "
-                f"C-escape, separated by newlines a filename is free to contain — "
-                f"read it through `nightshift.gitpaths` (or pass `-z` and split on "
-                f"NUL), or appeal with `# gate-ok({NAME}): <reason>`",
-            ))
+        if appeal_markers.exempt(appeals, NAME, rel, node.lineno):
+            continue
+        violations.append(Violation(
+            rel, node.lineno,
+            f"`git {asked}` without `-z` returns paths git may quote and "
+            f"C-escape, separated by newlines a filename is free to contain — "
+            f"pass `-z` and split on NUL, or appeal with "
+            f"`# gate-ok({NAME}): <reason>`",
+        ))
     return sorted(violations, key=lambda v: (v.file, v.line))
 
 

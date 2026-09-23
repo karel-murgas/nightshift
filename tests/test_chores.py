@@ -21,9 +21,8 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
-import pytest
 
-from nightshift import board, chores
+from nightshift import chores
 
 
 _CARD = """---
@@ -116,7 +115,7 @@ def test_a_lead_tier_chore_is_a_contradiction_and_left_out(tmp_path):
 
 
 def test_a_chore_requiring_another_machine_is_left_out(tmp_path):
-    """`runner.select` has always enforced `requires:`; this did not, and the gap was
+    """`dispatch.select` has always enforced `requires:`; this did not, and the gap was
     real rather than tidy. `ad-sound-for-recharge` is `requires: gpu-box` on a laptop
     with no ComfyUI stack, and the only thing keeping it off this box was that it *also*
     carried `unattended: false`. Drop that flag — as `card_schema` now demands, since
@@ -162,7 +161,7 @@ def test_nothing_is_said_when_there_is_nothing_to_say():
 
 def test_the_dollar_figure_joins_turns_and_wall_time(tmp_path):
     """The exact gap `token-economy.md` phase 0.1 names: a chore's own attempt
-    already reports `cost_usd` (`runner.read_telemetry`), and `cost_note` used to
+    already reports `cost_usd` (`telemetry.read_telemetry`), and `cost_note` used to
     take only `turns`/`wall_s` — so the number existed and nothing printed it."""
     note = chores.cost_note(48, 420.0, 1.999)
     assert "48 turns" in note and "7 min" in note and "$2.00" in note

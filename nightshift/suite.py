@@ -1103,7 +1103,7 @@ def junit_total(path: Path) -> int:
 #   * `.ai/runs/` is gitignored (machine-local by design, `ai_team.md`), so a
 #     failure produced by the box that runs the night says nothing at all on the
 #     box Karel reads the board from; and
-#   * `runner.prune_run_dir` deletes the whole card directory the moment the card
+#   * `worktree.prune_run_dir` deletes the whole card directory the moment the card
 #     is retired to `failed/` — so for a terminal failure the pointer was dead
 #     even on the machine that wrote it, immediately, by construction.
 #
@@ -1272,13 +1272,13 @@ def _branch_paths(root: Path, base: str) -> set[str]:
     """What the runner's diff will see (`base...HEAD`), plus anything not yet
     committed — a worker checking before its last commit must not get a narrower
     slice than the one it is about to be judged on."""
-    from nightshift import gitpaths
+    from nightshift import git
 
-    paths = set(gitpaths.changed(root, f"{base}...HEAD"))
-    paths |= set(gitpaths.changed(root, "HEAD"))
-    untracked = gitpaths.git(root, "ls-files", "--others", "--exclude-standard", "-z")
+    paths = set(git.changed(root, f"{base}...HEAD"))
+    paths |= set(git.changed(root, "HEAD"))
+    untracked = git.run(root, "ls-files", "--others", "--exclude-standard", "-z")
     if untracked.returncode == 0:
-        paths |= set(gitpaths.split(untracked.stdout))
+        paths |= set(git.split(untracked.stdout))
     return paths
 
 

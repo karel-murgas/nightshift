@@ -26,7 +26,8 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import freshness, runner
+from nightshift import freshness, git
+from nightshift import hostconfig
 
 import _fixtures
 
@@ -243,7 +244,7 @@ def test_the_paired_check_does_not_touch_the_network(checkout, monkeypatch):
         return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
                               encoding="utf-8", errors="replace", check=False)
 
-    monkeypatch.setattr(freshness, "_git", no_fetch)
+    monkeypatch.setattr(git, "run_safe", no_fetch)
     doctor.paired_branches(checkout.parent / "work", checkout)
 
 
@@ -254,7 +255,7 @@ def _status(root, phase="worker", pid=None):
     """A runner heartbeat in `root`, naming this process so the pid check passes."""
     import json as _json
     import os as _os
-    path = root / "/".join(runner.STATUS_FILE.parts)
+    path = root / "/".join(hostconfig.STATUS_FILE.parts)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_json.dumps({"phase": phase, "pid": pid or _os.getpid()}),
                     encoding="utf-8")
