@@ -284,7 +284,6 @@ nightshift/
   board.py          # lanes, card read/write, the board commit
   suite.py          # the one home for which test slice runs, and how
   runner.py         # the overnight dispatcher
-  reconcile.py      # moves a card to the lane its `state:` names
   stale_sweep.py    # which docs are due a staleness check
   preflight.py      # the mandatory pre-merge check
   merge_check.py    # does this card's branch merge clean, gated, tested?
@@ -350,11 +349,10 @@ how it moves on. `review/` and `testing/` are gates-green work waiting on a
 person. `done/` and `failed/` are the archive — nothing is deleted, because the
 self-improvement loop reads them as evidence.
 
-Move a card through Command Center rather than by moving the file — the panel
-writes both halves of the fact, while a manual move leaves the old `state:`
-frontmatter behind, which reads as a re-lane request and gets pulled back.
-`python -m nightshift.reconcile` is what makes the folder catch up with a
-`state:` edit; it reports by default, `--apply` performs, `--commit` commits.
+The lane directory is a card's state, and the only copy of it — cards carry no
+`state:` field, and `card_schema` refuses one. A card changes lane through
+`board.move` (`git mv` plus one commit): the runner, Command Center's buttons and
+`python -m nightshift.boardcmd move <id> <lane>` all go through it.
 
 **Command Center is the only board surface installed, and that is deliberate.**
 `init` used to also write a `Board.base` Obsidian Bases view of these lanes and
@@ -506,7 +504,7 @@ project's one.
 | Gate | What it checks |
 |---|---|
 | `branch_role_prose` | docs naming the integration branch must agree with .ai/manifest.toml [branches] |
-| `card_schema` | cards on the board match the card schema, and `state:` agrees with the lane |
+| `card_schema` | cards on the board match the card schema, and carry no `state:` field |
 | `conflict_markers` | no tracked text file carries a git conflict marker |
 | `coreference_sweep` | a numeric series or SCREAMING_SNAKE symbol this diff replaced must not survive in a live doc |
 | `corrections_log` | the correction log parses and its class/channel values are in vocabulary |

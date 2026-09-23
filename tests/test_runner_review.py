@@ -748,7 +748,6 @@ def test_settle_reviewed_merges_and_lands_in_testing(tmp_path, monkeypatch):
     note = runner.settle(root, "probe", runner.Dispatch("reviewed", "clean"))
     settled = board.find(root, "probe")
     assert settled.lane == "testing"
-    assert settled.fields["state"] == "testing"
     assert not settled.fields.get("started")
     # Rebased onto + merged into the integration branch, and told which remote to
     # delete the branch on — `""` here, since this fixture's host declares no
@@ -814,7 +813,6 @@ def test_settle_reviewed_but_unmergeable_goes_to_blocked_not_testing(tmp_path, m
     note = runner.settle(root, "probe", runner.Dispatch("reviewed", "clean"))
     settled = board.find(root, "probe")
     assert settled.lane == board.BLOCKED_LANE
-    assert settled.fields["state"] == board.BLOCKED_LANE
     assert "could not be rebased" in settled.text
     assert "conflict in board.py" in note
 

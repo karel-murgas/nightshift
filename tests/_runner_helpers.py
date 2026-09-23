@@ -99,7 +99,6 @@ CARD = """\
 ---
 id: {id}
 title: "{id} probe"
-state: {lane}
 tier: {tier}
 worker: {worker}
 recipe: none

@@ -55,7 +55,6 @@ CARD = """\
 ---
 id: {id}
 title: "{id}, a card"
-state: {state}
 tier: worker
 worker: code-thread
 recipe: none
@@ -193,7 +192,7 @@ def test_panel_never_imports_a_write_or_dispatch_verb_directly():
             f"{forbidden!r} found — board writes and the chore batch must be run as "
             f"`python -m nightshift.<module>`, not imported")
     for forbidden in (".dispatch(", ".settle(", ".execute(", "drain.drain(",
-                      "ingest.classify(", "ingest.scribe(", "reconcile.apply("):
+                      "ingest.classify(", "ingest.scribe(", "board.move("):
         assert forbidden not in source, (
             f"{forbidden!r} found — this is a dispatch or a board write happening "
             f"in-process, which is exactly the re-implementation the panel must not do")
@@ -1236,7 +1235,7 @@ def test_a_body_read_for_editing_leaves_the_frontmatter_behind(tmp_path):
     """
     root = _repo(tmp_path)
     note = root / "Board" / "inbox" / "stamped.md"
-    note.write_text("---\nstate: inbox\ncreated: 2026-09-19\n---\n\nhalf a thought\n",
+    note.write_text("---\ncreated: 2026-09-19\n---\n\nhalf a thought\n",
                     encoding="utf-8")
     assert panel.read_body(root, "Board/inbox/stamped.md") == "\nhalf a thought\n"
 
@@ -1390,7 +1389,7 @@ def test_frontmatter_is_split_off_rather_than_rendered_as_prose():
     """Rendered as markdown the block is neither: the fences become rules and the
     fields collapse into one run-on paragraph at the top of every card."""
     fields, body = panel.split_frontmatter(
-        "---\nid: a-card\nstate: tasks\n---\n\n## Intent\n\nOne thing.\n")
+        "---\nid: a-card\n---\n\n## Intent\n\nOne thing.\n")
     assert fields["id"] == "a-card"
     assert body.lstrip().startswith("## Intent")
     assert "id: a-card" not in panel.markdown(body)
@@ -2920,7 +2919,6 @@ _PARKED = """\
 ---
 id: {id}
 title: "{id}, parked"
-state: needs-decision
 tier: worker
 worker: code-thread
 recipe: none
@@ -3061,7 +3059,7 @@ def test_the_page_says_a_settled_card_is_ready_to_be_worked_on(server):
     assert "decide-state ok" in text
     assert "reporting, not asking" in text
     # The enabled button's own tooltip — the disabled one carries a different string.
-    assert "Sets state: tasks and reconciles." in text
+    assert "Moves the card to tasks/." in text
 
 
 def test_the_page_says_an_answered_card_is_ready_to_move(server):

@@ -183,7 +183,6 @@ def test_doc_signature_drift_fires_on_a_project_that_is_not_dungeoneer(tmp_path)
 CARD = """---
 id: a-card
 title: "A card"
-state: tasks
 tier: {tier}
 worker: code-thread
 recipe: none

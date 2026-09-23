@@ -60,10 +60,10 @@ live under `.ai/`. So a game-only diff genuinely needs no `test_gate_*`/`test_bo
 
 `Board/` is card *content* — markdown, not code — and it splits off from the rest
 of the system half by the same asymmetry. A card's validity (frontmatter present
-and resolvable, `state:` agreeing with its lane, the actionable sections a `tasks/`
-card needs) is enforced by the **`card_schema` gate**, which runs separately and
-always. The `test_board_*.py` files exercise the board *machinery* — the gate's own
-logic, the digest, the reconciler, the runner — against synthetic cards in tmp
+and resolvable, the actionable sections a `tasks/` card needs) is enforced by
+the **`card_schema` gate**, which runs separately and always. The
+`test_board_*.py` files exercise the board *machinery* — the gate's own logic,
+the board verbs, the runner — against synthetic cards in tmp
 dirs, so editing a real card cannot break them; the only pytest that reads the real
 board is `test_board_schema.py::test_the_real_board_passes`, and that asserts
 exactly what the gate already checked. So:

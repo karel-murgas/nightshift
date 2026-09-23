@@ -11,7 +11,6 @@ command-center.bat                    # the Command Center (./command-center.sh 
 python -m nightshift.gates.run        # the gate suite (also runs on save, via a hook)
 python -m nightshift.preflight        # MANDATORY before push/merge — writes a receipt
 python -m nightshift.runner           # dispatch cards from Board/tasks/; run backgrounded
-python -m nightshift.reconcile        # inbox notes -> cards (state: vs. folder)
 python -m nightshift.doctor           # the per-machine preconditions git cannot carry
 python -m nightshift.update           # bring this repo's nightshift files up to date
 pytest                                # the test suite
@@ -64,8 +63,11 @@ Cards live in `Board/<lane>/<id>.md`. The lane contract is `Board/README.md`; th
 operator skills are `manage-board` and `run-the-runner` in `.claude/skills/`.
 
 `Board/ideas/` is the maintainer's private lane. **No judgment actor may open it** —
-`nightshift.hooks.ideas_fence` enforces that, and `nightshift.reconcile` is the one
-permitted reader.
+`nightshift.hooks.ideas_fence` enforces that; nothing reads the lane, and
+`boardcmd promote` moves a note out of it without opening it.
+
+A card's lane is its directory and nothing else — there is no `state:` field. Move a card
+with `python -m nightshift.boardcmd move <id> <lane>` (or `land` to close one out).
 
 ## Corrections
 

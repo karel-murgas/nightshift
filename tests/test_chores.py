@@ -29,7 +29,6 @@ from nightshift import board, chores
 _CARD = """---
 id: {id}
 title: "{title}"
-state: tasks
 kind: {kind}
 tier: {tier}
 worker: code-thread

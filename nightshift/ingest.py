@@ -125,9 +125,8 @@ _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 class Note:
     """One note in the inbox, at whatever stage of becoming a card it has reached.
 
-    Not "a bare note": on any board somebody opens in Obsidian every note already
-    carries `state:` and `kanban_order:`, and after a routing pass it carries
-    `route:` as well. What makes it a note rather than a card is the lane it is in —
+    Not "a bare note": a note may carry `kanban_order:`, and after a routing pass
+    it carries `route:` as well. What makes it a note rather than a card is the lane it is in —
     `inbox/` is `_UNTRIAGED`, where the schema asks for no sections at all.
     """
 
@@ -514,7 +513,6 @@ _INLINE_CARD = """\
 ---
 id: {ident}
 title: "{title}"
-state: tasks
 tier: worker
 worker: none
 recipe: none

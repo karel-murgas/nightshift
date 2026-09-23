@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import discover, init, manifest as _manifest, reconcile, stale_sweep
+from nightshift import boardcmd, discover, init, manifest as _manifest, stale_sweep
 from nightshift.gates import import_layering, memory_freshness, orientation_budget
 
 import _fixtures
@@ -50,49 +50,44 @@ def _project(tmp_path: Path, manifest: str = "", *, board: bool = True) -> Path:
 #
 # `Path(__file__).resolve().parent.parent`. Correct while the modules lived in the
 # project's `.ai/`; installed as a package it is a directory inside the framework's
-# own checkout. `reconcile` then reported "Board is consistent" from inside every
-# consuming project — it fails *open*, no board found, no actions, exit 0 — and
-# and `digest` (since removed) wrote its report into the framework repo.
+# own checkout. The (since removed) board reconciler then reported "Board is
+# consistent" from inside every consuming project — it failed *open* — and
+# `digest` (since removed) wrote its report into the framework repo.
 # `manifest.find_root`'s own docstring is the standing warning; these were missed by
 # the sweep that wrote it. The digest's two cases went with the digest — the property
 # they asserted is `find_root`'s, covered directly in `test_manifest.py`, and the
 # "reads the working directory's repo" half is still asserted here through
-# `reconcile` and `stale_sweep`.
+# `boardcmd` and `stale_sweep`.
 
 
 CARD = """---
 id: a-card
-state: review
 ---
 
-A card sitting in `tasks/` while claiming `review`.
+A card sitting in `tasks/`.
 """
 
 
-def test_reconcile_reads_the_working_directorys_repo(tmp_path, monkeypatch):
+def test_boardcmd_reads_the_working_directorys_repo(tmp_path, monkeypatch):
     repo = _project(tmp_path)
     (repo / "Board" / "tasks" / "a-card.md").write_text(CARD, encoding="utf-8", newline="\n")
-
-    actions = reconcile.plan(repo)
-
-    assert [a.kind for a in actions] == ["move"], (
-        "a card whose state: disagrees with its lane is the one thing this "
-        "reports; silence here is the bug it shipped with")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "card")
 
     monkeypatch.chdir(repo)
-    assert reconcile.main([]) == 0
-    assert reconcile.main(["--root", str(repo)]) == 0
+    assert boardcmd.main(["move", "a-card", "done"]) == 0
+    assert (repo / "Board" / "done" / "a-card.md").is_file(), (
+        "the verb acted on some other repo than the working directory's")
 
 
-def test_reconcile_help_does_not_die_on_its_own_docstring():
-    """`--help` prints the module docstring, which contains `≠`. The stdout
-    reconfigure happened *after* `parse_args`, so on a cp1252 console `--help`
-    raised UnicodeEncodeError instead of printing help."""
-    done = subprocess.run([sys.executable, "-m", "nightshift.reconcile", "--help"],
+def test_boardcmd_help_does_not_die_on_its_own_docstring():
+    """`--help` prints the module docstring, which carries arrows and dashes; on a
+    cp1252 console it must still print rather than raise UnicodeEncodeError."""
+    done = subprocess.run([sys.executable, "-m", "nightshift.boardcmd", "--help"],
                           cwd=REPO, capture_output=True, text=True,
                           encoding="utf-8", errors="replace")
     assert done.returncode == 0, done.stderr
-    assert "--apply" in done.stdout
+    assert "move" in done.stdout
 
 
 def test_stale_sweep_has_a_working_entry_point(tmp_path, monkeypatch):

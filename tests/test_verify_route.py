@@ -39,7 +39,6 @@ _FRONT = """\
 ---
 id: {name}
 title: "A card"
-state: {lane}
 tier: worker
 worker: code-thread
 recipe: none

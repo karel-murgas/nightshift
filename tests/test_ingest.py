@@ -71,7 +71,6 @@ _SCRIBED = """\
 ---
 id: {stem}
 title: "{stem}"
-state: tasks
 tier: worker
 worker: code-thread
 recipe: none

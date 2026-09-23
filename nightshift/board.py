@@ -1,14 +1,12 @@
 """The card model — one place that knows how to read and write a card.
 
-`digest.py` and `reconcile.py` used to each carry their own frontmatter regex,
-which was the duplication `board-parser-convergence` converged: both now
-import this module. `digest.py` subclasses `Card` for its own read-only
-judgments (`is_visual`, `waited`, `link`) and calls `parse_fields`/`section`
-through it; `reconcile.py` keeps `read_state`/`stamp_state` as its own public
-API (`Board/README.md` names them) but splices against `FRONTMATTER` from here
-rather than its own copy. `card_schema.py` keeps an independent fourth copy on
-purpose — a gate must stay importable and runnable with no siblings on the
-path, stated in its own docstring and in `run.py`'s.
+Every reader and writer of a card goes through this module
+(`board-parser-convergence`). `card_schema.py` keeps an independent copy of the
+frontmatter grammar on purpose — a gate must stay importable and runnable with
+no siblings on the path, stated in its own docstring and in `run.py`'s.
+
+**The lane directory is a card's state, and the only copy of it.** There is no
+`state:` field; `move` is the one way a card changes lane.
 
 Two rules the writer obeys, and both matter more than they look:
 
@@ -27,8 +25,8 @@ weak one: `Board/` is a framework convention, so `[board].root` is an override
 rather than a prerequisite (07_portability.md §4, "override only with a
 reason"). Everything else here — the lane names, the frontmatter grammar, the
 runner-owned field list — is framework config that a project does not get to
-redefine, because the runner, the reconciler, the digest and `card_schema` all
-have to agree on it (D5).
+redefine, because the runner, the panel and `card_schema` all have to agree on
+it (D5).
 """
 from __future__ import annotations
 
@@ -63,9 +61,8 @@ def board_dir(root: Path) -> Path:
     return root / board_rel(root)
 
 
-# The lanes the runner may move a card between. `ideas/` is absent for the same
-# reason it is absent from `reconcile.LANES`: it is Karel's private lane and no
-# judgment actor — the runner included — enumerates it.
+# The lanes the runner may move a card between. `ideas/` is absent: it is Karel's
+# private lane and no judgment actor — the runner included — enumerates it.
 LANES: tuple[str, ...] = (
     "inbox",
     "tasks",
@@ -137,8 +134,7 @@ AFTER_ANSWER_TRIAGE = "triage"
 AFTER_ANSWER_TASKS = "tasks"
 AFTER_ANSWER: tuple[str, ...] = (AFTER_ANSWER_TRIAGE, AFTER_ANSWER_TASKS)
 
-# The private lane's name, owned here because the board's vocabulary is owned here —
-# `reconcile` and `card_schema` each used to carry their own copy of the string.
+# The private lane's name, owned here because the board's vocabulary is owned here.
 #
 # **Absent from `LANES` and it must stay absent**: `ideas_fence` derives "private" from a
 # board subdirectory not being in that tuple, which is how the rule gets written down
@@ -147,8 +143,8 @@ AFTER_ANSWER: tuple[str, ...] = (AFTER_ANSWER_TRIAGE, AFTER_ANSWER_TASKS)
 #
 # Absent from the list is not the same as absent from disk, and `init` conflated the two
 # until 2026-08-03: it made lanes by iterating `LANES`, so the one lane belonging to the
-# maintainer was the one lane nobody created for them — while `Board/README.md`,
-# `CLAUDE.md` and `reconcile` all named it as the first step of the flow.
+# maintainer was the one lane nobody created for them — while `Board/README.md` and
+# `CLAUDE.md` both named it as the first step of the flow.
 PRIVATE_LANE = "ideas"
 
 # The reports the tooling writes at the repo root. Owned here beside `LANES` because
@@ -199,13 +195,9 @@ KIND_INLINE = "inline"
 ROUTES: tuple[str, ...] = ("chore", "inline", "scribe", "triage")
 
 # The one frontmatter-block regex for the board (`board-parser-convergence`).
-# `digest.py` calls through `parse_fields`/`section` below and never needs this
-# directly. `reconcile.py` still hand-splices just the `state:` line — its
-# `read_state`/`stamp_state` stay the public API `Board/README.md` names — so it
-# imports this constant rather than compiling its own copy. `card_schema.py`
-# keeps an independent fourth copy on purpose (its own docstring and
+# `card_schema.py` keeps an independent copy on purpose (its own docstring and
 # `run.py`'s: a gate must stay importable and runnable with no siblings on the
-# path) and is not part of that count.
+# path).
 FRONTMATTER = re.compile(r"\A---\r?\n(.*?)\r?\n---[ \t]*\r?\n?", re.DOTALL)
 _FIELD = re.compile(r"^([A-Za-z_][\w-]*):[ \t]*(.*?)[ \t]*$", re.MULTILINE)
 _BLOCK_ITEM = re.compile(r"^[ \t]+-[ \t]*(.+?)[ \t]*$")
@@ -773,12 +765,8 @@ class TransitionRefused(ValueError):
 
 def move(root: Path, card: Card, to_lane: str, commit: bool = True, *,
          review_owed: str = "") -> Card:
-    """`git mv` + rewrite `state:` + commit, as one commit (`03_board.md` §4).
-
-    The two writes are ordered so that a crash between them leaves the lane and
-    `state:` disagreeing, which `card_schema` reports as a half-done move. That
-    is the crash-consistency check the denormalised `state:` field exists for,
-    and it is strictly better than a crash that leaves no trace.
+    """`git mv` + commit, as one commit (`03_board.md` §4) — the one way a card
+    changes lane.
 
     A move into `review/` must say why a review is owed *and* obtainable there
     (`review_owed`); anything else belongs in `blocked/`
@@ -798,7 +786,6 @@ def move(root: Path, card: Card, to_lane: str, commit: bool = True, *,
         card.path.rename(target)
 
     moved = Card.load(target, to_lane)
-    moved.write({"state": to_lane})
 
     if commit:
         staged = subprocess.run(["git", "add", "-A", str(board_rel(root))], cwd=root, check=False,

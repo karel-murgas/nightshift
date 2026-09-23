@@ -2956,8 +2956,8 @@ def _render_verify(ctx: Context) -> str:
                                             "to tasks/."))
 
     bar = ('<div class="barbox">'
-           '<p><span id="ticked">Nothing ticked.</span> Saving reconciles every ticked '
-           'card in one pass.</p><div class="acts">'
+           '<p><span id="ticked">Nothing ticked.</span> Saving marks every ticked '
+           'card verified in one pass.</p><div class="acts">'
            + _act("Save ticked", onclick="saveTicked()", primary=True)
            + '</div></div>')
     out.append(_section("Play through", len(ctx.testing), "".join(rows),
@@ -4858,10 +4858,10 @@ def render_decide(root: Path, card_id: str) -> str:
     # Which of them is *primary* is the card's own `after_answer:` route, so the page
     # leads with the step the parker said comes next instead of always leading with
     # "Record the answer" — including on a card where recording one is already done.
-    send_title = ("Sets state: tasks and reconciles."
+    send_title = ("Moves the card to tasks/."
                   if state.send_enabled and settled else
                   "Settles ## Open questions to `none` — keeping the question as "
-                  "history — then sets state: tasks and reconciles."
+                  "history — then moves the card to tasks/."
                   if state.send_enabled else
                   "Its ## Open questions does not read `none`, and card_schema refuses "
                   "a card in tasks/ with a live question. This card declares "
@@ -5287,22 +5287,20 @@ class Handler(BaseHTTPRequestHandler):
                 message = decide.close_parked(root, card_id, picks, note)
             except decide.DecideError as exc:
                 raise PanelError(str(exc)) from exc
-            moved = run_command("reconcile", ["--apply"], root)
-            return f"{message} · {_verb(moved)}"
+            return message
 
         if path == "api/tasks":
             # The deliberate second click after an answer. The policy — including when
             # an answered `after_answer: tasks` card may settle its own questions on the
-            # way through — is `decide.promote_to_tasks`; this endpoint is the flip plus
-            # the reconcile, and the guard lives with the rest of the decide flow so the
-            # button cannot turn the board red.
+            # way through — is `decide.promote_to_tasks`, which also moves the card; the
+            # guard lives with the rest of the decide flow so the button cannot turn the
+            # board red.
             card_id = str(body.get("card_id", ""))
             try:
                 message = decide.promote_to_tasks(root, card_id)
             except decide.DecideError as exc:
                 raise PanelError(str(exc)) from exc
-            moved = run_command("reconcile", ["--apply"], root)
-            return f"{message} · {_verb(moved)}"
+            return message
 
         if path == "api/reorder":
             return _verb(run_command("boardcmd", ["reorder", str(body.get("card_id", "")),
@@ -5357,9 +5355,6 @@ class Handler(BaseHTTPRequestHandler):
         if path == "api/edit":
             return _verb(run_command("boardcmd", ["edit", str(body.get("path", "")),
                                                   "--body", str(body.get("body", ""))], root))
-
-        if path == "api/reconcile":
-            return _verb(run_command("reconcile", ["--apply", "--commit"], root))
 
         if path == "api/freshness/refresh":
             return freshness.describe(freshness.read(fetch=True))

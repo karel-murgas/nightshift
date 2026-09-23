@@ -76,7 +76,6 @@ from nightshift import limits
 from nightshift import reviewdiff     # what the diff reviewer is shown, and how
 from nightshift import manifest as _manifest
 from nightshift import memoryfold  # per-card memory records, folded serially on merge
-from nightshift import reconcile
 from nightshift import run_record
 from nightshift import runtimes       # the `runtime` axis: cloud | local (doc 04 §4)
 from nightshift import stale_sweep
@@ -1934,7 +1933,7 @@ def drop_worktree(root: Path, path: Path) -> None:
 #     `runner-worker-handover` added a second in-run path to `failed/` (the
 #     `stuck` breaker) alongside the pre-existing `MAX_ATTEMPTS` retirement.
 #   * `done/` is reached by *Karel*, by hand, outside the runner — so it is
-#     pruned in a **reconcile-time sweep at the next startup** (`sweep_terminal_
+#     pruned in a **sweep at the next startup** (`sweep_terminal_
 #     cards`, called from `run()` right after `recover()`). A card finished by
 #     hand is cleaned on the next run, which is fine: run-dirs are only logs,
 #     and are wanted *through* review anyway.
@@ -2075,7 +2074,7 @@ def enforce_worktree_ceiling(root: Path, ceiling: int = WORKTREE_KEEP_CEILING) -
 
 
 def sweep_terminal_cards(root: Path) -> list[str]:
-    """The reconcile-time half of the terminal-lane rule: `done/` and `testing/`
+    """The startup half of the terminal-lane rule: `done/` and `testing/`
     are both reached by hand sometimes (a card closed out inline, outside the
     runner: `manage-board`'s own documented gap) so they are never pruned
     eagerly — this runs once at the next startup instead, over `done/`,
@@ -3951,7 +3950,6 @@ def _stale_card_text(doc_rel: str, verdict: dict, report_dir: Path) -> str:
     return f"""---
 id: {_stale_slug(doc_rel)}
 title: "Staleness: {doc_rel} names source that has drifted"
-state: tasks
 tier: worker
 worker: code-thread
 recipe: none
@@ -7841,16 +7839,6 @@ def run_lifecycle(ctrl: Path, base: str, *, kind: str, label: str,
             # every dispatch fail with no useful message.
             ensure_workspace_trusted(ctrl)
             _status(work, phase="starting", since=_now())
-
-        # A card is dragged in the Kanban; Base Board writes `state:` and stops.
-        # Reconciling first is what makes a card readied from a phone at midnight
-        # actually dispatchable at 2 AM.
-        actions = reconcile.plan(work)
-        if actions and not dry_run:
-            reconcile.apply(work, actions, commit=True)
-            _log(f"reconciled {len(actions)} board inconsistency/ies")
-        elif actions:
-            _log(f"[dry-run] would reconcile {len(actions)} board inconsistency/ies")
 
         if not dry_run:
             _startup_housekeeping(ctrl, work)

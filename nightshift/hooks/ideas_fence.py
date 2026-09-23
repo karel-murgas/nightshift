@@ -8,15 +8,15 @@ may ever open ("Not avoid unless useful: never"). It self-reported afterwards an
 nothing from that file reached the card it wrote, so the cost that time was zero. The
 reason it happened is the part that generalises: the prohibition existed **only as
 charter prose the agent has to remember**, while the agent does its own file discovery.
-`reconcile.py`, the one component permitted in that lane, is hard-coded to read exactly
-one field from it — a boundary, not a promise. A prose-only "never open X" rule handed to
+No component reads the lane; `boardcmd promote` moves a note out of it by name without
+opening it — a boundary, not a promise. A prose-only "never open X" rule handed to
 something that greps for itself will eventually be crossed by a wide enough search.
 
 **What counts as private is derived, never listed here.** `nightshift.board.LANES` is the
 board's single home for "which lanes exist", and the private lane is defined by its
 *absence* from that tuple — that is literally what `board.py`'s own comment says
-(`ideas/` is absent "for the same reason it is absent from reconcile.LANES: it is
-Karel's private lane and no judgment actor — the runner included — enumerates it"). So
+(`ideas/` is absent: "it is Karel's private lane and no judgment actor — the runner
+included — enumerates it"). So
 this hook parses that constant out of the project's `board.py` and treats any board
 subdirectory missing from it as private, rather than writing the word "ideas" down a
 fourth time. Same technique, and the same reason, as `worktree_fence` reading
@@ -254,8 +254,9 @@ def _deny_text(board: str, lane: str) -> str:
         f"Blocked: `{board}/{lane}/` is a private lane and no judgment actor may open "
         f"it.\n"
         f"It is private because it is absent from `nightshift.board.LANES`, which is the "
-        f"board's single list of working lanes. The only component permitted in there is "
-        f"`reconcile.py`, which reads one frontmatter field and never the body.\n"
+        f"board's single list of working lanes. Nothing reads it: the maintainer readies "
+        f"a note with `python -m nightshift.boardcmd promote <note.md>`, which moves it "
+        f"into `{board}/inbox/` without opening it.\n"
         f"If you need context for a card, use `{board}/inbox/`, the card itself, and the "
         f"codebase — that is what the note you were given was built from.\n"
         f"Committing and pushing the lane *is* allowed — `git add`/`commit`/`push` naming "

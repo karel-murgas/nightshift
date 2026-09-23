@@ -24,7 +24,6 @@ from nightshift.gates import card_schema
 _GOOD = """---
 id: {id}
 title: "A card"
-state: {lane}
 tier: worker
 worker: code-thread
 recipe: none
@@ -89,10 +88,26 @@ def test_id_mismatch_is_caught(tmp_path):
     assert "does not match the filename stem" in _rules(card_schema.check(_board(tmp_path, "tasks", body)))
 
 
-def test_lane_and_state_disagreeing_is_caught(tmp_path):
-    """A half-done move: the file was `git mv`d but `state:` was not edited."""
+def test_a_state_field_is_refused_even_when_it_matches_the_lane(tmp_path):
+    """The lane directory is the only copy of a card's state; a `state:` key is a
+    template or agent reintroducing the retired field, whatever value it holds."""
+    body = _GOOD.format(id="probe", lane="tasks").replace("tier: worker",
+                                                           "state: tasks\ntier: worker")
+    rules = _rules(card_schema.check(_board(tmp_path, "tasks", body)))
+    assert "`state:` is retired" in rules
+    assert "boardcmd move" in rules
+
+
+def test_a_state_field_is_refused_on_an_inbox_note_too(tmp_path):
+    """`inbox/` notes may be bare, but frontmatter they do carry is still schema'd."""
+    rules = _rules(card_schema.check(_board(tmp_path, "inbox", "---\nstate: inbox\n---\n\nx\n")))
+    assert "`state:` is retired" in rules
+
+
+def test_a_card_without_a_state_field_passes(tmp_path):
     body = _GOOD.format(id="probe", lane="tasks")
-    assert "half-done move" in _rules(card_schema.check(_board(tmp_path, "review", body)))
+    assert "state:" not in body
+    assert card_schema.check(_board(tmp_path, "tasks", body)) == []
 
 
 def test_a_model_name_in_the_tier_field_is_rejected(tmp_path):
@@ -452,7 +467,6 @@ def test_ideas_is_not_enumerated_at_all(tmp_path):
 _CHORE = """---
 id: probe
 title: "A chore"
-state: tasks
 kind: chore
 tier: worker
 worker: code-thread
@@ -535,7 +549,7 @@ def test_a_card_with_two_sections_of_one_name_is_refused(tmp_path):
     `board.section` joined them it was the stale copy that reached the panel
     (`show-weapon-schematic-stats`, 2026-09-16). Caught when the branch lands."""
     body = _GOOD.format(id="probe", lane="needs-decision")
-    body = body.replace("state: needs-decision", "state: needs-decision\nafter_answer: tasks")
+    body = body.replace("tier: worker", "tier: worker\nafter_answer: tasks")
     body += "\n## Question\n\nthe stale one\n\n## Question\n\nthe live one\n"
     out = card_schema.check(_board(tmp_path, "needs-decision", body))
     assert "`## Question` appears more than once" in _rules(out)
@@ -543,7 +557,7 @@ def test_a_card_with_two_sections_of_one_name_is_refused(tmp_path):
 
 def test_a_card_with_one_of_each_section_is_not_flagged(tmp_path):
     body = _GOOD.format(id="probe", lane="needs-decision")
-    body = body.replace("state: needs-decision", "state: needs-decision\nafter_answer: tasks")
+    body = body.replace("tier: worker", "tier: worker\nafter_answer: tasks")
     body += "\n## Question\n\nthe only one\n"
     out = card_schema.check(_board(tmp_path, "needs-decision", body))
     assert "appears more than once" not in _rules(out)

@@ -49,7 +49,7 @@ from nightshift.manifest import AI_DIR, MANIFEST_NAME
 # drawing and arrows, and Windows' console is cp1252 — so any caller that reaches a
 # prompt without going through `main()` (a test, a skill driving one question, the
 # `nightshift` console script before it dispatches) used to die with a
-# UnicodeEncodeError about its own help text. Same trap as `reconcile --help`,
+# UnicodeEncodeError about its own help text. Same trap as a module's `--help`,
 # found the same way: by running it rather than reading it.
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -574,8 +574,8 @@ def stage_templates(plan: Plan, root: Path, tables: dict[str, dict], *,
         stage(f"{board_root}/{lane}/.gitkeep", "")
     # Named explicitly, because `ideas/` is not in `LANES` and must not be — see
     # `board.PRIVATE_LANE`. Iterating the list alone meant the maintainer's own lane was
-    # the only one the installer never made, and a `reconcile` run against a missing
-    # directory finds no notes, which reads exactly like having none.
+    # the only one the installer never made, and a lane that is missing reads
+    # exactly like one that is empty.
     stage(f"{board_root}/{PRIVATE_LANE}/.gitkeep", "")
 
     # No board *view* is installed, and that is the design rather than an omission.
