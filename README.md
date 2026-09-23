@@ -529,6 +529,7 @@ project's one.
 | `pytest_invocation` | only suite.py may spell pytest's parallel flags; callers use parallel_args() |
 | `readme_generated` | README.md's generated blocks (gate list, runner flags, manifest fields) match a fresh generation |
 | `review_lane_producer` | a card moved into review/ carries a gate-ok saying the review is owed and obtainable |
+| `review_verdict_unread` | a review/ card whose own reviewer verdict already decided it is flagged |
 | `run_stop_recorded` | runner.py logs a stop reason only via _stop(), which also records it |
 | `source_reference_liveness` | a source string literal that looks like a repo path must resolve to something real |
 | `subprocess_encoding` | no subprocess call in the tooling decodes output with the locale codec |
