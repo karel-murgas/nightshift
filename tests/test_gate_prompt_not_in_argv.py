@@ -26,7 +26,16 @@ if str(_GATES) not in sys.path:
 import prompt_not_in_argv  # noqa: E402
 
 REPO = Path(_nightshift_gates.__file__).resolve().parent.parent.parent
-REAL_RUNNER = REPO / "nightshift" / "runner.py"
+# The seven dispatch sites `runner.py` used to carry in one file now live across
+# the three split modules that spawn a worker (`git-module-and-runner-split`):
+# two in dispatch.py (producer, repair_drift), four in review.py (checker,
+# reviewer, `_resolve_conflict`, `_resolve_merge_conflict`), one in stale.py
+# (stale-hunter).
+REAL_RUNNER_SITES = (
+    REPO / "nightshift" / "dispatch.py",
+    REPO / "nightshift" / "review.py",
+    REPO / "nightshift" / "stale.py",
+)
 REAL_FIX = REPO / "nightshift" / "fix.py"
 
 
@@ -61,15 +70,18 @@ def test_reintroducing_the_crash_into_the_real_runner_goes_red(tmp_path):
     would be muted within a week, which is why this walks sequence literals instead
     of text.
     """
-    source = REAL_RUNNER.read_text(encoding="utf-8")
-    defective = source.replace('binary, "-p",', 'binary, "-p", prompt,')
-    assert defective != source, (
-        "the argv spelling in runner.py moved — this test can no longer put the "
-        "defect back, so it is no longer proving anything. Re-point it."
-    )
+    ai = tmp_path / ".ai"
+    ai.mkdir(exist_ok=True)
+    for path in REAL_RUNNER_SITES:
+        source = path.read_text(encoding="utf-8")
+        defective = source.replace('binary, "-p",', 'binary, "-p", prompt,')
+        assert defective != source, (
+            f"the argv spelling in {path.name} moved — this test can no longer put "
+            f"the defect back, so it is no longer proving anything. Re-point it."
+        )
+        (ai / f"{path.stem}_copy.py").write_text(defective, encoding="utf-8")
 
-    root = _tree(tmp_path, "runner_copy.py", defective)
-    violations = prompt_not_in_argv.check(root)
+    violations = prompt_not_in_argv.check(tmp_path)
 
     assert len(violations) == 7, \
         f"expected the seven dispatch sites, got {[str(v) for v in violations]}"

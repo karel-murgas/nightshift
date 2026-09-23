@@ -1667,8 +1667,8 @@ def test_the_kill_switch_trips_in_either_root(tmp_path, monkeypatch):
     ctrl, work = tmp_path / "ctrl", tmp_path / "work"
     (ctrl / ".ai").mkdir(parents=True)
     (work / ".ai").mkdir(parents=True)
-    monkeypatch.setattr(runner, "_CTRL_ROOT", ctrl)
-    monkeypatch.setattr(runner, "_WORK_ROOT", work)
+    monkeypatch.setattr(hostconfig, "_CTRL_ROOT", ctrl)
+    monkeypatch.setattr(hostconfig, "_WORK_ROOT", work)
     assert not hostconfig._stop_requested()
     (work / hostconfig.STOP_FILE).write_text("", encoding="utf-8")
     assert hostconfig._stop_requested()             # in the dedicated checkout
@@ -1683,8 +1683,8 @@ def test_the_kill_switch_consumes_itself_once_honoured(tmp_path, monkeypatch):
     ctrl, work = tmp_path / "ctrl", tmp_path / "work"
     (ctrl / ".ai").mkdir(parents=True)
     (work / ".ai").mkdir(parents=True)
-    monkeypatch.setattr(runner, "_CTRL_ROOT", ctrl)
-    monkeypatch.setattr(runner, "_WORK_ROOT", work)
+    monkeypatch.setattr(hostconfig, "_CTRL_ROOT", ctrl)
+    monkeypatch.setattr(hostconfig, "_WORK_ROOT", work)
     (ctrl / hostconfig.STOP_FILE).write_text("stop", encoding="utf-8")
     (work / hostconfig.STOP_FILE).write_text("stop", encoding="utf-8")
     assert hostconfig._stop_requested()
@@ -1699,7 +1699,7 @@ def test_the_status_heartbeat_lands_in_the_control_root(tmp_path, monkeypatch):
     ctrl, work = tmp_path / "ctrl", tmp_path / "work"
     (ctrl / ".ai" / "runs").mkdir(parents=True)
     (work / ".ai" / "runs").mkdir(parents=True)
-    monkeypatch.setattr(runner, "_CTRL_ROOT", ctrl)
+    monkeypatch.setattr(hostconfig, "_CTRL_ROOT", ctrl)
     hostconfig._status(work, phase="worker", card="x")
     assert (ctrl / hostconfig.STATUS_FILE).is_file()
     assert not (work / hostconfig.STATUS_FILE).is_file()

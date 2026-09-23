@@ -37,7 +37,6 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import runner
 from nightshift.gates import doc_reference_liveness
 from nightshift.gates import doc_scan
 from nightshift import review, stale
@@ -252,10 +251,10 @@ def test_findings_are_committed_before_the_doc_is_ledgered(tmp_path, monkeypatch
             capture_output=True, text=True, encoding="utf-8", errors="replace")
         committed_when_ledgered.append(bool(tracked.stdout.strip()))
 
-    monkeypatch.setattr(runner.stale_sweep, "load_ledger", lambda r: {})
-    monkeypatch.setattr(runner.stale_sweep, "select", lambda r, n, ledger: [
+    monkeypatch.setattr(stale.stale_sweep, "load_ledger", lambda r: {})
+    monkeypatch.setattr(stale.stale_sweep, "select", lambda r, n, ledger: [
         stale_sweep.Candidate("drift.md", 5, None, 5)])
-    monkeypatch.setattr(runner.stale_sweep, "mark_verified", _spy_mark_verified)
+    monkeypatch.setattr(stale.stale_sweep, "mark_verified", _spy_mark_verified)
     monkeypatch.setattr(stale, "stale_run_dir", lambda r, doc: root)
     monkeypatch.setattr(stale, "run_stale_check", lambda *a, **k: (
         {"complete": True, "summary": "1 drift",
@@ -288,10 +287,10 @@ def test_a_swept_doc_records_progress_even_if_the_run_never_finishes(tmp_path, m
     # and must contain the finding's claim, or the finding is dropped.
     (root / "drift.md").write_text("c is documented here.\n", encoding="utf-8")
 
-    monkeypatch.setattr(runner.stale_sweep, "load_ledger", lambda r: {})
-    monkeypatch.setattr(runner.stale_sweep, "select", lambda r, n, ledger: [
+    monkeypatch.setattr(stale.stale_sweep, "load_ledger", lambda r: {})
+    monkeypatch.setattr(stale.stale_sweep, "select", lambda r, n, ledger: [
         stale_sweep.Candidate("drift.md", 5, None, 5)])
-    monkeypatch.setattr(runner.stale_sweep, "mark_verified", lambda r, d, l, **kw: None)
+    monkeypatch.setattr(stale.stale_sweep, "mark_verified", lambda r, d, l, **kw: None)
     monkeypatch.setattr(stale, "stale_run_dir", lambda r, doc: root)
     monkeypatch.setattr(stale, "run_stale_check", lambda *a, **k: (
         {"complete": True, "summary": "1 drift",
@@ -331,11 +330,11 @@ def test_a_stale_checker_that_walls_after_a_complete_verdict_is_honoured(
     (root / "drift.md").write_text("c is documented here.\n", encoding="utf-8")
 
     ledgered: list[str] = []
-    monkeypatch.setattr(runner.stale_sweep, "load_ledger", lambda r: {})
-    monkeypatch.setattr(runner.stale_sweep, "select", lambda r, n, ledger: [
+    monkeypatch.setattr(stale.stale_sweep, "load_ledger", lambda r: {})
+    monkeypatch.setattr(stale.stale_sweep, "select", lambda r, n, ledger: [
         stale_sweep.Candidate("drift.md", 5, None, 5),
         stale_sweep.Candidate("other.md", 4, None, 4)])
-    monkeypatch.setattr(runner.stale_sweep, "mark_verified",
+    monkeypatch.setattr(stale.stale_sweep, "mark_verified",
                         lambda r, d, l, **kw: ledgered.append(d))
     monkeypatch.setattr(stale, "stale_run_dir", lambda r, doc: root)
     monkeypatch.setattr(stale, "run_stale_check", lambda *a, **k: (
@@ -367,10 +366,10 @@ def test_a_stale_checker_that_walls_with_nothing_complete_leaves_the_ledger_alon
 
     root = _board_repo(tmp_path)
     ledgered: list[str] = []
-    monkeypatch.setattr(runner.stale_sweep, "load_ledger", lambda r: {})
-    monkeypatch.setattr(runner.stale_sweep, "select", lambda r, n, ledger: [
+    monkeypatch.setattr(stale.stale_sweep, "load_ledger", lambda r: {})
+    monkeypatch.setattr(stale.stale_sweep, "select", lambda r, n, ledger: [
         stale_sweep.Candidate("drift.md", 5, None, 5)])
-    monkeypatch.setattr(runner.stale_sweep, "mark_verified",
+    monkeypatch.setattr(stale.stale_sweep, "mark_verified",
                         lambda r, d, l, **kw: ledgered.append(d))
     monkeypatch.setattr(stale, "stale_run_dir", lambda r, doc: root)
     monkeypatch.setattr(stale, "run_stale_check", lambda *a, **k: (

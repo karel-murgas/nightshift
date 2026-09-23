@@ -373,14 +373,14 @@ def test_a_merge_refuses_before_it_spends_anything(repo, monkeypatch):
 def _agent_that_writes_nothing(monkeypatch, repo: Path):
     """Stand in for a merge agent that exits 0 having touched no file — what a
     permission prompt it cannot answer actually looks like from out here."""
-    from nightshift import runner
+    from nightshift import startup, worker
 
     class _Done:
         returncode = 0
         stdout = json.dumps({"type": "result", "result": "merged it, honest"})
 
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-    monkeypatch.setattr(runner, "_run_worker",
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker",
                         lambda *a, **k: _Done())
 
 

@@ -455,7 +455,7 @@ def test_status_before_any_run_is_not_an_error(tmp_path, capsys):
 def test_the_log_tee_survives_an_unwritable_path(tmp_path, monkeypatch, capsys):
     """The console is the primary record. A full disk or a locked file must not
     be the thing that ends a night."""
-    monkeypatch.setattr(runner, "_RUN_LOG", tmp_path / "no-such-dir" / "x.log")
+    monkeypatch.setattr(hostconfig, "_RUN_LOG", tmp_path / "no-such-dir" / "x.log")
 
     hostconfig._log("still printed")
 

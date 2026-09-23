@@ -611,7 +611,7 @@ def _normalize_worktree(path: Path) -> None:
     buf = io.StringIO()
     try:
         with redirect_stdout(buf):
-            rc = hostconfig._now.normalize(path)
+            rc = _now.normalize(path)
     except Exception as exc:  # pragma: no cover - defensive, must never block dispatch
         hostconfig._log(f"    normalize_worktree raised on {path.name}, continuing anyway: {exc}")
         return

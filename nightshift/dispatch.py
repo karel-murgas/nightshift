@@ -997,7 +997,7 @@ def _dispatch_attempt(root: Path, card: board.Card, base: str, model: str,
     max_rounds = hostconfig.MAX_ROUNDS if checked else 1
     cost = 0.0
     verdict: dict = {}
-    review: dict = {}
+    checker_verdict: dict = {}
     rescued = 0
     feedback = ""
     tried: list[str] = []
