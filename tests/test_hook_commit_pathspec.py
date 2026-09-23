@@ -23,9 +23,14 @@ from pathlib import Path
 
 import pytest
 
-from nightshift.hooks import commit_pathspec
+from nightshift.hooks import commit_pathspec, session_memo
 
 import _fixtures
+
+
+@pytest.fixture(autouse=True)
+def _private_memo(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_memo, "_DIR", tmp_path / "memo")
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -232,3 +237,57 @@ def test_commit_segments_finds_the_call_in_a_chain():
     segments = commit_pathspec.commit_segments('git add -- a && git commit -m "x"; ls')
     assert len(segments) == 1
     assert segments[0][:2] == ["git", "commit"]
+
+
+# --- the last known gate run --------------------------------------------------
+
+
+def _bash_session(command: str, session_id: str) -> dict:
+    return {"tool_name": "Bash", "tool_input": {"command": command}, "session_id": session_id}
+
+
+def test_a_commit_is_refused_while_the_session_s_last_gate_run_is_red(repo):
+    session_memo.swap("s1", "gates", ["parity|core/i18n.py|key missing in cs"])
+    _stage(repo, "x.txt")
+    reason = commit_pathspec.evaluate(
+        _bash_session('git commit -m "x" -- x.txt', "s1"), cwd=repo)
+    assert reason is not None
+    assert "key missing in cs" in reason
+
+
+def test_a_green_gate_run_does_not_block(repo):
+    session_memo.swap("s1", "gates", ["stale"])
+    session_memo.swap("s1", "gates", [])  # fixed since
+    _stage(repo, "x.txt")
+    assert commit_pathspec.evaluate(
+        _bash_session('git commit -m "x" -- x.txt', "s1"), cwd=repo) is None
+
+
+def test_a_session_that_never_ran_the_gates_is_not_caught_out(repo):
+    """No recorded state means nothing to compare against -- fail open, same as the
+    rest of this hook."""
+    _stage(repo, "x.txt")
+    assert commit_pathspec.evaluate(
+        _bash_session('git commit -m "x" -- x.txt', "s1"), cwd=repo) is None
+
+
+def test_a_different_session_s_red_gates_do_not_block_this_one(repo):
+    session_memo.swap("s1", "gates", ["parity|core/i18n.py|key missing in cs"])
+    _stage(repo, "x.txt")
+    assert commit_pathspec.evaluate(
+        _bash_session('git commit -m "x" -- x.txt', "s2"), cwd=repo) is None
+
+
+def test_red_gates_block_even_with_an_explicit_pathspec(repo):
+    """Unlike the sweep question, gate redness is not about which paths a commit
+    names -- the tree is broken regardless of scope."""
+    session_memo.swap("s1", "gates", ["gate|f|r"])
+    _stage(repo, "x.txt")
+    reason = commit_pathspec.evaluate(
+        _bash_session('git commit -m "x" -- x.txt', "s1"), cwd=repo)
+    assert reason is not None
+
+
+def test_without_a_session_id_gate_redness_cannot_be_checked_so_it_fails_open(repo):
+    _stage(repo, "x.txt")
+    assert commit_pathspec.evaluate(_bash('git commit -m "x" -- x.txt'), cwd=repo) is None

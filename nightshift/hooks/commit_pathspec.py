@@ -46,6 +46,21 @@ Fails **open** on anything it cannot determine: an unparseable payload, no git, 
 repository, a `git` call that errors. A guard that wedges a session on confusion is
 worse than none, which is the same direction `worktree_fence` takes.
 
+**Second, unrelated check on the same seam: a commit is refused while this session's
+last known gate run is red** (`piped-gate-run-discarded-its-verdict`, 2026-08-14).
+`gates_on_edit` runs on every `Edit`/`Write` and records what it found in
+`session_memo` under the `"gates"` channel — the same store it uses to avoid
+repeating a violation's text. This hook reads that record with `session_memo.peek`,
+never re-runs the gates itself: `gates_on_edit`'s output changed shape in 2026-09
+to report only what is *news*, so scraping the model's own transcript for "was the
+last line clean" no longer works, and re-running the suite here would duplicate a
+call the project may have wired as slow or as an LLM-backed gate. `peek` returns
+`None` — fail open, same as the rest of this hook — when there is no session id or
+the session has not triggered a gate run yet; a session that never edited anything
+this run has nothing to be caught out by. This check applies regardless of
+pathspec, `-a`, `--amend` or a merge in progress: unlike the sweep question, "is the
+tree currently known-broken" does not depend on which paths a commit names.
+
 No LLM (`00_architecture.md` §12): string inspection plus two `git` reads.
 
 Wired as `python -m nightshift.hooks.commit_pathspec` in a consuming project's
@@ -69,6 +84,7 @@ import sys
 from pathlib import Path
 
 from nightshift import gitpaths
+from nightshift.hooks import session_memo
 
 NAME = "commit_pathspec"
 
@@ -196,8 +212,15 @@ def evaluate(payload: dict, cwd: Path | None = None) -> str | None:
     if "commit" not in command:
         return None
 
+    segments = commit_segments(command)
+    if segments:
+        session_id = str(payload.get("session_id") or "")
+        open_gates = session_memo.peek(session_id, "gates")
+        if open_gates:
+            return _deny_red_gates(open_gates)
+
     here = cwd or Path.cwd()
-    for tokens in commit_segments(command):
+    for tokens in segments:
         repo = _repo_dir(tokens, here)
         has_pathspec, sweeps, amend = _flags(tokens)
 
@@ -234,6 +257,19 @@ def _deny_index(staged: list[str]) -> str:
         f"typically the maintainer editing the board in their editor while a session "
         f"runs. Committing it swept up seven half-edited cards once, which is why this is "
         f"refused rather than suggested.\n"
+        f"(nightshift.hooks.commit_pathspec)"
+    )
+
+
+def _deny_red_gates(open_keys: set[str]) -> str:
+    shown = "\n".join(f"  {key}" for key in sorted(open_keys)[:40])
+    more = f"\n  ... and {len(open_keys) - 40} more" if len(open_keys) > 40 else ""
+    return (
+        f"Blocked: this session's last gate run is still red, and nothing has "
+        f"cleared it since. {len(open_keys)} violation(s) open:\n{shown}{more}\n\n"
+        f"Their full text was already shown earlier this session by the on-edit "
+        f"gate hook. Fix them, or run `python -m nightshift.gates.run` to confirm "
+        f"they are actually gone, then commit again.\n"
         f"(nightshift.hooks.commit_pathspec)"
     )
 
