@@ -2836,6 +2836,19 @@ def test_a_chore_is_not_filed_under_work_that_needs_you_at_the_keyboard(server):
     assert "a-chore" not in head, "and not in the sections above it"
 
 
+def test_a_chore_row_offers_work_on_this(server):
+    """`chores-run-setup`: the only thing the Chores section lacked was a way to
+    work one card at the keyboard instead of waiting for the batch. `_work_verb`
+    already handles any card generically, so the row only needed the button."""
+    base, root = server
+    _chore(root, "a-chore")
+
+    _, text = _get(base, "now")
+    head, _, rest = text.partition("Chores")
+    assert "Work on this" in rest
+    assert "post('/api/work',{card:'a-chore'})" in rest
+
+
 def test_a_chore_still_counts_towards_the_rails_now_total(server):
     base, root = server
     _chore(root, "a-chore")

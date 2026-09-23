@@ -2545,6 +2545,17 @@ def _chores_section(ctx: Context) -> str:
     around it are: not work waiting on a person, and not a card the night takes
     one at a time. It has a third answer — one batch, one verified suite run —
     and a heading is the cheapest way to say so.
+
+    **Each row also gets its own `Work on this`** (`chores-run-setup`, 2026-09-23).
+    `_work_verb` was already generic over every card kind — it reads `worker:`,
+    `tier:` and `finished_lane()` off whatever card it is handed, and it never
+    touched `attempts:` for any of them, since that field is the runner's own
+    dispatch bookkeeping and an interactive session is not a dispatch. So a chore
+    worked this way costs nothing the batch would have to know about: it either
+    lands and leaves `tasks/` before the batch ever looks, exactly like a `do_now`
+    card worked by hand today, or it is abandoned and sits there for the next
+    `Run chores` to pick up, `attempts:` untouched either way. The only thing
+    genuinely missing was the button.
     """
     rows = []
     for candidate in ctx.chores:
@@ -2555,7 +2566,9 @@ def _chores_section(ctx: Context) -> str:
         if card.attempts:
             meta.append(_e(f"{card.attempts} attempt(s)"))
         rows.append(_row(marker="&middot;", body=_card_body(card, root=ctx.root, meta=meta),
-                         acts=_act("Read card", href=f"/card/{card.id}")))
+                         acts=_act("Read card", href=f"/card/{card.id}")
+                              + _work_act(card=card.id, tier=card.tier, worker=card.worker,
+                                         lane=board.finished_lane(card), primary=False)))
     bar = ('<div class="barbox">'
            '<p>One batch: a cheap pass per item, then one full suite run over the '
            'merged result.</p><div class="acts">'
