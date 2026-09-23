@@ -431,7 +431,7 @@ def test_a_merge_that_really_wrote_does_not_leave_the_result_overwritable(repo, 
     recorded as `declined`."""
     _move_template(monkeypatch, TRACKED)
     _edit(repo, TRACKED)
-    from nightshift import runner
+    from nightshift import startup, worker
 
     class _Done:
         returncode = 0
@@ -442,8 +442,8 @@ def test_a_merge_that_really_wrote_does_not_leave_the_result_overwritable(repo, 
                                     encoding="utf-8", newline="")
         return _Done()
 
-    monkeypatch.setattr(runner, "claude_binary", lambda: "claude")
-    monkeypatch.setattr(runner, "_run_worker", _write)
+    monkeypatch.setattr(startup, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(worker, "_run_worker", _write)
 
     found = update.survey(repo)
     code, _ = update.merge(found, update.find(found, TRACKED),

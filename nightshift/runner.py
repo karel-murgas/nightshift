@@ -332,7 +332,6 @@ def run_lifecycle(ctrl: Path, base: str, *, kind: str, label: str,
     that started it is `asset-generation-processes-dont-shut-down`, and the paths
     that matter for it are the abnormal ones.
     """
-    global _CTRL_ROOT, _WORK_ROOT
     # Opened before preflight so a refusal is recorded too — "it refused and I did
     # not see why" is the same invisible-failure shape as a silent night.
     if not dry_run:
@@ -354,7 +353,10 @@ def run_lifecycle(ctrl: Path, base: str, *, kind: str, label: str,
     record = run_record.null()
     try:
         work = _resolve_workspace(ctrl, base, dry_run)
-        _CTRL_ROOT, _WORK_ROOT = ctrl, work
+        # Set on the module that owns them (`hostconfig._stop_requested` reads
+        # them there) -- not a `global` here, which would have created a second,
+        # disconnected pair of names in *this* module instead.
+        hostconfig._CTRL_ROOT, hostconfig._WORK_ROOT = ctrl, work
 
         if not dry_run:
             # Headless `-p` has no trust dialog, so an untrusted workspace makes
@@ -408,8 +410,8 @@ def run_lifecycle(ctrl: Path, base: str, *, kind: str, label: str,
             hostconfig.release_lock(ctrl)
         # Reset the module globals so state does not leak to another run — which
         # matters most under pytest, where the same module is reused across tests.
-        _CTRL_ROOT = None
-        _WORK_ROOT = None
+        hostconfig._CTRL_ROOT = None
+        hostconfig._WORK_ROOT = None
 
 
 # ------------------------------------------------------------------- the queues

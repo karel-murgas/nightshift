@@ -26,6 +26,7 @@ from _runner_helpers import (  # noqa: F401  (fixtures register by name)
     _JSON_AWARE_GATE,
     _RUNNER_SOURCE,
     _WALL_HANDLING_EXEMPT,
+    _spawn_source,
     _advance_on_remote,
     _art_card,
     _bare_origin,
@@ -1599,7 +1600,7 @@ def test_only_the_spawn_functions_may_execute_the_claude_cli():
     a `shutil.which` lookup. Checking that a file exists is not an LLM call, and
     checking it *before* a card's `attempts` is spent is the reason it is there.
     """
-    source = _RUNNER_SOURCE.read_text(encoding="utf-8")
+    source = _spawn_source()
     assert _functions_spawning(source, "binary") == {
         "run_producer", "run_checker", "run_stale_check", "review_branch",
         "_resolve_conflict", "_resolve_merge_conflict", "repair_drift"}
@@ -1633,7 +1634,7 @@ def test_every_spawn_sites_wall_path_routes_through_the_shared_helper():
     parked in `_WALL_HANDLING_EXEMPT`, which would have switched the check off for
     the one site whose wall handling is the newest and least reviewed.
     """
-    source = _RUNNER_SOURCE.read_text(encoding="utf-8")
+    source = _spawn_source()
     spawn_sites = _functions_spawning(source, "binary") - _WALL_HANDLING_EXEMPT
     assert spawn_sites, "the enumeration is empty; this guard would check nothing"
 

@@ -68,7 +68,7 @@ from nightshift import board
 from nightshift import limits
 from nightshift import run_record
 from nightshift import runner
-from nightshift import dispatch, git, hostconfig, outcome, review, settle, startup, verify, worker, worktree
+from nightshift import dispatch, git, hostconfig, outcome, review, settle, stale, startup, verify, worker, worktree
 
 import _fixtures
 
@@ -94,6 +94,19 @@ def fake_rebase_and_merge(ok: bool = True, why: str = "merged", seen: list | Non
 # the package, and a guard that reads a path instead of the module it is about
 # is the `fixture-created-the-file-production-lacked` shape.
 _RUNNER_SOURCE = Path(runner.__file__)
+
+
+def _spawn_source() -> str:
+    """The combined source of the three modules that carry a worker-spawning
+    site (`git-module-and-runner-split` moved the seven `runner.py` used to
+    hold in one file into `dispatch`/`review`/`stale`). The AST guards below
+    only ever look at top-level `FunctionDef`s and the calls inside them, never
+    at cross-file references, so parsing the concatenation as one module is
+    exactly as sound as parsing the one file used to be — and the alternative,
+    parsing each file separately and unioning three results, is the same guard
+    three times over."""
+    return "\n".join(Path(mod.__file__).read_text(encoding="utf-8")
+                     for mod in (dispatch, review, stale))
 
 
 CARD = """\
@@ -594,8 +607,12 @@ _WALL_HANDLING_EXEMPT: frozenset = frozenset()
 
 
 def _functions_calling(source: str, callee: str) -> dict:
-    """How many times each top-level function calls `callee` by name. AST, so a
-    mention in a docstring or a comment does not count."""
+    """How many times each top-level function calls `callee` by name — bare
+    (`callee(...)`, the shape for a call within the same module) or qualified
+    (`module.callee(...)`, the shape `git-module-and-runner-split` left behind
+    for a callee that lives in a different one of the split modules, e.g.
+    `telemetry.verdict_survives_a_wall`). AST, so a mention in a docstring or a
+    comment does not count."""
     import ast
 
     tree = ast.parse(source)
@@ -603,8 +620,9 @@ def _functions_calling(source: str, callee: str) -> dict:
     for function in [n for n in tree.body if isinstance(n, ast.FunctionDef)]:
         found = sum(
             1 for node in ast.walk(function)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-            and node.func.id == callee)
+            if isinstance(node, ast.Call)
+            and ((isinstance(node.func, ast.Name) and node.func.id == callee)
+                 or (isinstance(node.func, ast.Attribute) and node.func.attr == callee)))
         if found:
             counts[function.name] = found
     return counts

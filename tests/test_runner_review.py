@@ -1611,7 +1611,7 @@ def test_run_tests_passes_the_parallel_and_junit_flags(tmp_path, monkeypatch):
         _junit(tmp_path / "j.xml", tests=1)
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "run", fake_run)
     ok, why, evidence = verify._run_tests(tmp_path, tmp_path / "log.txt", 60,
                                           tmp_path / "j.xml", ["tests/"])
     assert ok, why
@@ -1841,10 +1841,8 @@ def test_rebase_and_merge_lands_a_card_the_resolver_settles(tmp_path, monkeypatc
     def settle_it(root_, tree, card_, branch, base, out_dir, **kwargs):
         (tree / "shared.py").write_bytes(b"value = 'A and B'\n")
         git.run(tree, "add", "shared.py")
-        cont = runner.subprocess.run(
-            ["git", "rebase", "--continue"], cwd=tree, capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            env={**runner.os.environ, "GIT_EDITOR": "true"})
+        cont = git.run(tree, "rebase", "--continue",
+                       env={**os.environ, "GIT_EDITOR": "true"})
         assert cont.returncode == 0, cont.stderr
         return True, "kept both sides"
 
