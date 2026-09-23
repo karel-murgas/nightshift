@@ -126,7 +126,6 @@ from nightshift.gates.base import Violation
 from nightshift.manifest import ManifestError, load
 
 NAME = "orientation_shape"
-FAST = True
 DESCRIPTION = "declared orientation docs hold current state, not dated history"
 
 # A heading whose text BEGINS with a date — the session-log shape. Leading decoration is

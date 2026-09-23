@@ -46,7 +46,6 @@ from nightshift.manifest import ManifestError
 from nightshift.manifest import load as load_manifest
 
 NAME = "memory_freshness"
-FAST = True
 DESCRIPTION = "a diff touching a declared source area must also touch its memory doc"
 
 

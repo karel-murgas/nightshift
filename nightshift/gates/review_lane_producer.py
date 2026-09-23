@@ -42,7 +42,6 @@ from nightshift.gates import scope
 from nightshift.gates.base import Violation
 
 NAME = "review_lane_producer"
-FAST = True
 DESCRIPTION = "a card moved into review/ carries a gate-ok saying the review is owed and obtainable"
 
 

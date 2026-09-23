@@ -26,11 +26,11 @@ against the memory doc it now requires, a deleted symbol against the recipe that
 still cites it — and those are exactly the violations a worker must see. Showing
 each one once is the saving; hiding some is not.
 
-**No gate is skipped per edit, deliberately.** Deferring the slow ones for a
-dispatched worker was built and removed the same day (2026-09-15): it saved wall
-time, not tokens, and it moved a violation's discovery from the edit that caused it
-to the end of the attempt — where a worker that forgot its final gate run would
-lose the whole attempt to the runner's gate check.
+**Every gate runs per edit unless it opts out with `ON_EDIT = False`.** Skipping gates
+for being *slow* was tried and removed (2026-09-15): it moved a violation's discovery
+from the edit that caused it to the end of the attempt. The opt-out is for a different
+reason: a gate whose subject no edit can change (the history of finished cards) re-checks
+the same answer after every keystroke. Such a gate still runs in the full suite.
 
 **A gate that defines `fix()` is fixed, silently, before it is checked.** CRLF and
 a missing trailing newline are mechanical — one correct output, no judgment a
@@ -75,8 +75,13 @@ def run(root: Path, session_id: str) -> str:
     gates = gates_run.discover(root)
     found: dict[str, str] = {}
     for name in sorted(gates):
+        module = gates[name]
+        # A gate whose subject no single edit can change (e.g. the history of
+        # finished cards) declares `ON_EDIT = False` and runs only in the full
+        # suite -- preflight, the runner, `nightshift.gates.run`.
+        if getattr(module, "ON_EDIT", True) is False:
+            continue
         try:
-            module = gates[name]
             # Mechanical hygiene (CRLF, a missing trailing newline) is fixed
             # silently, in place, before the check that would otherwise report
             # it — the tree a worker's edit just left is repaired before the

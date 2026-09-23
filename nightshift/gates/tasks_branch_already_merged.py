@@ -60,7 +60,6 @@ from nightshift.gates.base import Violation
 from nightshift.manifest import ManifestError
 
 NAME = "tasks_branch_already_merged"
-FAST = True
 DESCRIPTION = "an inline tasks/ card's own branch must not already be merged into the integration branch"
 
 

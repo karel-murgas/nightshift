@@ -158,9 +158,9 @@ PRIVATE_LANE = "ideas"
 # **They are committed, and that is the point of the tuple.** Board state that exists
 # on one machine only is a decision the other machine cannot see, and a generated file
 # is not exempt from that — being regenerable is not a reason to leave it out of git.
-# So every consumer needs the same list, and there are three of them: `commit_board`
-# stages them, `runner.dirty_outside_board` exempts them (they are rewritten on every
-# run, and a dirty tree refuses a dispatch), and `hooks.correction_prompt` ignores them.
+# So every consumer needs the same list, and there are two of them: `commit_board`
+# stages them and `runner.dirty_outside_board` exempts them (they are rewritten on every
+# run, and a dirty tree refuses a dispatch).
 #
 # Written down once because it was written down once before, wrong: the exemption and
 # the commit list each named the then-only view (`Digest.md`, since removed with the

@@ -284,8 +284,7 @@ nightshift/
   board.py          # lanes, card read/write, the board commit
   suite.py          # the one home for which test slice runs, and how
   runner.py         # the overnight dispatcher
-  night.py          # the unattended entry point around it
-  reconcile.py      # inbox notes -> cards
+  reconcile.py      # moves a card to the lane its `state:` names
   stale_sweep.py    # which docs are due a staleness check
   preflight.py      # the mandatory pre-merge check
   merge_check.py    # does this card's branch merge clean, gated, tested?
@@ -417,7 +416,7 @@ failure limit, then `failed/`. It commits the board at the end. **Stop a run: cr
 out a usage limit.
 
 <!-- stale-ok: `.ai/hosts.json` and `.ai/host.json` are per-machine config files in a
-     CONSUMING project — `nightshift init` writes the first and `night.py` the second.
+     CONSUMING project — `nightshift init` writes the first; the second is placed by hand.
      This package is not its own consumer, so neither resolves here. -->
 ### `hosts.json`
 

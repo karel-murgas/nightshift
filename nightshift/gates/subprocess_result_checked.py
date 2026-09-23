@@ -43,7 +43,6 @@ from nightshift.gates import scope
 from nightshift.gates.base import Violation
 
 NAME = "subprocess_result_checked"
-FAST = True
 DESCRIPTION = "no subprocess call in the tooling discards its result"
 
 # Scope: `.ai/` plus `[project].tooling_dirs` — see `gates/scope.py` for why this

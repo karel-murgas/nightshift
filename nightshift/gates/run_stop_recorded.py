@@ -48,7 +48,6 @@ from nightshift.gates import scope
 from nightshift.gates.base import Violation
 
 NAME = "run_stop_recorded"
-FAST = True
 DESCRIPTION = "runner.py logs a stop reason only via _stop(), which also records it"
 
 # The runner, wherever the tooling lives — `gates/scope.py`. This was

@@ -67,7 +67,6 @@ from nightshift.gates.base import Violation
 from nightshift.manifest import ManifestError
 
 NAME = "review_verdict_unread"
-FAST = True
 DESCRIPTION = "a review/ card whose own reviewer verdict already decided it is flagged"
 
 RUNS = Path(".ai/runs")

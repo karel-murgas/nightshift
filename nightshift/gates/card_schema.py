@@ -34,7 +34,6 @@ from nightshift import board as _board
 from nightshift.gates.base import Violation
 
 NAME = "card_schema"
-FAST = True
 DESCRIPTION = "cards on the board match the card schema, and `state:` agrees with the lane"
 
 # Where the board sits comes from `[board].root`, via the module that owns the

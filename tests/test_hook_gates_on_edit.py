@@ -52,6 +52,22 @@ def test_every_gate_runs_on_every_edit(tmp_path, monkeypatch):
     assert sorted(ran) == sorted(["fast", "slow_sweep", "dead_code"] * 2)
 
 
+def test_a_gate_declaring_on_edit_false_is_left_to_the_full_suite(tmp_path, monkeypatch):
+    """The one exemption: a gate whose subject no edit can change opts out by name,
+    and only that gate is skipped."""
+    ran: list[str] = []
+    _gates(monkeypatch, {"history_audit": [_v("Board/done/a.md", "r")], "tree_gate": []}, ran)
+    import nightshift.gates.run as gates_run
+    gates_run.discover(tmp_path)["history_audit"].ON_EDIT = False
+    assert gates_on_edit.run(tmp_path, "s1") == "gates: ok"
+    assert ran == ["tree_gate"]
+
+
+def test_the_history_gate_opts_out_of_the_edit_hook():
+    from nightshift.gates import player_visible_skipped_testing
+    assert player_visible_skipped_testing.ON_EDIT is False
+
+
 def test_a_violation_is_shown_once_then_counted(tmp_path, monkeypatch):
     _gates(monkeypatch, {"parity": [_v("i18n.py", "key missing in cs")]})
     first = gates_on_edit.run(tmp_path, "s1")

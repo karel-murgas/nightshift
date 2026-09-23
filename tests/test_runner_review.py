@@ -23,7 +23,6 @@ import pytest
 
 from nightshift import board
 from nightshift import limits
-from nightshift import night
 from nightshift import reviewdiff
 from nightshift import run_record
 from nightshift import runner
@@ -2132,8 +2131,8 @@ def test_card_branches_lists_only_the_ai_namespace(tmp_path):
 
 def test_publish_remote_is_read_from_host_config(tmp_path):
     """The one setting that gates publishing: absent on the ordinary laptop
-    (`host_setting` returns the default, `""`), present in the cloud override
-    `night.py` writes (`"origin"`)."""
+    (`host_setting` returns the default, `""`), present when a host override
+    declares it (`"origin"`)."""
     assert runner.host_setting(tmp_path, "publish_remote", "") == ""
     (tmp_path / ".ai").mkdir(exist_ok=True)
     (tmp_path / runner.HOST_FILE).write_text(
@@ -2315,13 +2314,11 @@ def test_the_wrapup_commit_subject_is_prose_nothing_parses_back(tmp_path, monkey
 
 
 def test_the_append_flag_is_gone_rather_than_accepted_and_ignored(tmp_path):
-    """`--append-digest` existed only to withhold the digest's read baseline, and
-    `night.py`'s unattended path passed it by default. A flag that outlives its
+    """`--append-digest` existed only to withhold the digest's read baseline. A flag that outlives its
     mechanism is a flag that silently does nothing, so the parser must reject it."""
     root = _loaded_board(tmp_path, "a")
     with pytest.raises(SystemExit):
         runner._parser(root).parse_args(["--base", "development_team", "--append-digest"])
-    assert not [a for a in night.DEFAULT_ARGS if "digest" in a]
 
 
 def test_a_crashed_dispatch_fails_that_card_and_the_queue_carries_on(tmp_path, monkeypatch):

@@ -31,7 +31,6 @@ from nightshift.gates import corpus
 from nightshift.gates.base import Violation
 
 NAME = "doc_signature_drift"
-FAST = False
 DESCRIPTION = "a signature written into a doc must match the real parameter names, in order"
 
 _FENCE = re.compile(r"^\s*```")

@@ -35,7 +35,6 @@ import appeal_markers
 from nightshift.gates.base import Violation
 
 NAME = "gate_appeals"
-FAST = True
 DESCRIPTION = "every `# gate-ok(...)` appeal names a real gate and carries a written reason"
 
 
