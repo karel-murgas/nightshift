@@ -2013,7 +2013,7 @@ def test_a_card_session_is_told_its_goal_and_where_to_land_the_card(server, monk
     prompt = opened[0][-1]
     assert "land it in `testing/`" in prompt
     assert "## How to test" in prompt, "a play card must be told to write the scenario"
-    assert "Move the card to `testing/`" in prompt
+    assert "boardcmd land stun-grenade" in prompt
     assert "testing/" in data["message"], "the page does not say where this is headed"
 
 
@@ -2177,7 +2177,7 @@ def test_work_feedback_opens_a_session_that_waits_before_fixing_anything(
     assert "Read the card below for context, then wait" in prompt
     assert "Do not touch anything" in prompt
     assert "played" in prompt
-    assert "Leave the card in `testing/`" in prompt
+    assert "the card stays in `testing/`" in prompt
     assert "waiting for your feedback" in data["message"]
 
 
@@ -2302,7 +2302,7 @@ def test_work_on_a_card_tells_it_the_branch_to_cut_and_the_base_to_leave_alone(
     # The card session moves its own card now (Karel, 2026-08-17). That is the one rule
     # this prompt reverses against the headless one, where lane moves are the runner's
     # alone — so it is asserted rather than left to the goal sentence above.
-    assert "git branch -d" in prompt, "no branch cleanup — the branch outlives the work"
+    assert "boardcmd land" in prompt, "no landing — the branch outlives the work"
 
 
 def test_work_on_a_note_gets_the_note_and_no_charter(server, monkeypatch):

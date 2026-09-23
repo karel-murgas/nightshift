@@ -337,7 +337,7 @@ def _how_to_test(card: board.Card, branch: str) -> str:
 def _work_root(root: Path, base: str) -> Path:
     """Where the merging happens — the same topology the night uses.
 
-    `merge_branch` refuses unless the checkout is on the integration branch, so a
+    `landing.land` refuses unless the checkout is on the integration branch, so a
     drain run from a checkout on someone's feature branch would review correctly
     and then fail every merge, dropping each card back into `review/` with a note.
     That is a silent uselessness rather than an error, which is why this mirrors

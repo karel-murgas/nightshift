@@ -33,6 +33,7 @@ from nightshift import board, runner  # noqa: E402
 from nightshift.gates import card_schema  # noqa: E402
 
 import _fixtures  # noqa: E402
+from _runner_helpers import fake_rebase_and_merge  # noqa: E402
 
 _FRONT = """\
 ---
@@ -192,7 +193,7 @@ def _settled(tmp_path, monkeypatch, verify: str, how_to_test: str = "Open the ga
     _card(repo, "tasks", extra=f"verify: {verify}\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "board")
-    monkeypatch.setattr(runner, "rebase_and_merge", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(runner, "rebase_and_merge", fake_rebase_and_merge(why=""))
     monkeypatch.setattr(runner, "default_base", lambda root: "main")
     monkeypatch.setattr(runner, "read_telemetry", lambda *a, **k: None)
     runner.settle(repo, "a-card",

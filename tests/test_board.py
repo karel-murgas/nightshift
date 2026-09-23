@@ -77,7 +77,7 @@ def test_a_move_follows_the_declared_root(tmp_path):
     root = _repo(tmp_path, manifest='[board]\nroot = "kanban"\n', board_root="kanban")
     card = board.cards(root, "tasks")[0]
 
-    moved = board.move(root, card, "review")
+    moved = board.move(root, card, "review", review_owed="a test fixture")
 
     assert moved.path == root / "kanban" / "review" / "probe.md"
     assert moved.fields["state"] == "review"

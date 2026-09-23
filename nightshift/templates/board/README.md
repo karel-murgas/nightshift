@@ -92,7 +92,7 @@ a re-lane request, and the next reconcile pulls the card back.
   card carries a `## Merge` section saying which branch, onto which base, and what the
   resolver hit. **Nothing is being asked of you** — unlike `needs-decision/`, there is no
   question to answer, there is a git operation to perform: rebase, resolve, re-run preflight,
-  merge, then move the card to `testing/`. Its own lane because it used to be `review/`,
+  then `python -m nightshift.boardcmd land <id>`. Its own lane because it used to be `review/`,
   where finished work read as outstanding Claude work.
 - **`testing/`** — merged to the session branch, awaiting {{maintainer}} at the keyboard.
 - **`done/` and `failed/`** are the archive. **Nothing is deleted** — Session H's

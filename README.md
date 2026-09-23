@@ -523,17 +523,13 @@ project's one.
 | `memory_freshness` | a diff touching a declared source area must also touch its memory doc |
 | `orientation_budget` | the declared orientation files stay under [memory].budget_bytes |
 | `orientation_shape` | declared orientation docs hold current state, not dated history |
-| `player_visible_skipped_testing` | a done/ card touching a declared player-visible path carries verify: play and ## How to test |
 | `prompt_not_in_argv` | no argv carries a worker prompt on `-p`; it goes down the child's stdin |
 | `pytest_invocation` | only suite.py may spell pytest's parallel flags; callers use parallel_args() |
 | `readme_generated` | README.md's generated blocks (gate list, runner flags, manifest fields) match a fresh generation |
-| `review_lane_producer` | a card moved into review/ carries a gate-ok saying the review is owed and obtainable |
-| `review_verdict_unread` | a review/ card whose own reviewer verdict already decided it is flagged |
 | `run_stop_recorded` | runner.py logs a stop reason only via _stop(), which also records it |
 | `source_reference_liveness` | a source string literal that looks like a repo path must resolve to something real |
 | `subprocess_encoding` | no subprocess call in the tooling decodes output with the locale codec |
 | `subprocess_result_checked` | no subprocess call in the tooling discards its result |
-| `tasks_branch_already_merged` | an inline tasks/ card's own branch must not already be merged into the integration branch |
 | `trailing_newline` | every tracked text file ends with a trailing newline |
 | `write_newline` | no text-mode write in the tooling leaves newline translation unpinned |
 <!-- /generated:gate-list -->

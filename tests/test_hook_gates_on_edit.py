@@ -63,11 +63,6 @@ def test_a_gate_declaring_on_edit_false_is_left_to_the_full_suite(tmp_path, monk
     assert ran == ["tree_gate"]
 
 
-def test_the_history_gate_opts_out_of_the_edit_hook():
-    from nightshift.gates import player_visible_skipped_testing
-    assert player_visible_skipped_testing.ON_EDIT is False
-
-
 def test_a_violation_is_shown_once_then_counted(tmp_path, monkeypatch):
     _gates(monkeypatch, {"parity": [_v("i18n.py", "key missing in cs")]})
     first = gates_on_edit.run(tmp_path, "s1")

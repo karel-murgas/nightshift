@@ -135,14 +135,13 @@ and what did not. Do not weaken a gate or a test to make it pass.
 
 **Closing the card out**, once the maintainer agrees the work is done:
 
-1. Run the project's preflight and get it green.
-2. Merge `{branch}` into `{base}` and delete the branch — local and remote. Use `git \
-branch -d`, never `-D`: the safe form refuses a branch that is not really merged, which is \
-the check you want.
-3. Write `## Summary` onto the card — what changed, what you tested, gate and test status. \
+1. Run the project's preflight on `{branch}` and get it green.
+2. Write `## Summary` onto the card — what changed, what you tested, gate and test status. \
 Concrete, 2-4 lines, not "implemented the card".{how_to_test}
-4. Move the card to `{finished_lane}/` (`state:` and the directory both — the project's \
-board tooling does the two together).
+3. From `{base}`, run `python -m nightshift.boardcmd land {card_id}`. It merges `{branch}`, \
+folds its memory fragment, deletes the branch locally and on the remote, moves the card \
+and commits — the same landing the runner uses. Do not merge or move the card by hand; if \
+`land` refuses, fix what it names and run it again.
 
 **If you cannot finish**, do not move the card to `{finished_lane}/`. Write a `## Question` \
 section carrying what you attempted, what is ambiguous, and what each candidate answer \
@@ -246,12 +245,11 @@ and what did not. Do not weaken a gate or a test to make it pass.
 
 **Closing the card out**, once the maintainer agrees the fix is good:
 
-1. Run the project's preflight and get it green.
-2. Merge `{branch}` into `{base}` and delete the branch — local and remote. Use `git \
-branch -d`, never `-D`.
-3. Update `## Summary` with what changed this time.
-4. Leave the card in `{finished_lane}/` — it already landed once; this is a fix to what \
-is there, not a new pass through `tasks/`.
+1. Run the project's preflight on `{branch}` and get it green.
+2. Update `## Summary` with what changed this time.
+3. From `{base}`, run `python -m nightshift.boardcmd land {card_id}`. It merges the fix, \
+folds its memory fragment and deletes the branch; the card stays in `{finished_lane}/` — it \
+already landed once, and this is a fix to what is there.
 
 **If you cannot finish**, do not guess. Write a `## Question` section and move the card to \
 `needs-decision/` — parking is a success state.
@@ -377,8 +375,8 @@ the card to exactly where it already was.\
 #: **Carries the runner's own close-out ritual, gated on the maintainer's word rather
 #: than on lane.** A resumed session already knows its own branch, base and card path
 #: from the transcript it is resuming — nothing here needs to name them again — so
-#: once told the fix is good it can run preflight, merge, delete the branch and land
-#: the card same as the runner would, from whatever lane the card is sitting in when
+#: once told the fix is good it can run preflight and `boardcmd land`, the same landing
+#: the runner uses, from whatever lane the card is sitting in when
 #: the conversation happens (Karel, 2026-08-27: "card should be able to close out
 #: from anywhere... after the work is considered ready", not tied to `testing/`).
 RESUMED_FOR_TALK = """\
@@ -390,8 +388,9 @@ not summarise what you did unless asked — wait for their question and answer t
 they ask you to change something, do it then; until they do, nothing is outstanding.
 
 **Once they tell you the change is good, close it out the way the runner would**: run \
-this project's preflight, merge your branch into base, delete the branch (local and \
-remote) once merged, and leave the card in whichever lane its own state now calls for. \
+this project's preflight on your branch, then `python -m nightshift.boardcmd land <card id>` \
+from the integration branch — it merges, folds the memory fragment, deletes the branch \
+(local and remote) and files the card in whichever lane its own state now calls for. \
 Do this only once they say the work is ready — never on your own judgment, and never \
 because the gates and tests happen to be green. This applies wherever the card sits \
 right now, not only when it was reopened from a lane it had already landed in.

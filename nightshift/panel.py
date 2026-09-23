@@ -75,9 +75,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import urlopen
 
-from nightshift import (board, branches, chores, corrections, decide, drain, freshness,
-                        ingest, init, jobs, manifest, preflight, run_record, runtimes,
-                        textio, tiers, update, usage, worker_prompt)
+from nightshift import (board, boardhealth, branches, chores, corrections, decide, drain,
+                        freshness, ingest, init, jobs, manifest, preflight, run_record,
+                        runtimes, textio, tiers, update, usage, worker_prompt)
 from nightshift.manifest import ManifestError, find_root
 from nightshift.runner import (
     RUNS,
@@ -2850,8 +2850,9 @@ def _blocked_section(ctx: Context) -> str:
                 '<p>A blocked card passed gates, tests and review, then would not '
                 'rebase onto the integration branch — and the resolver could not settle '
                 'it either; resolving one is a git operation in a real checkout: rebase '
-                'the branch, fix the conflict, re-run preflight, merge, then move the '
-                'card to <code>testing/</code>. A failed card ran out of attempts with '
+                'the branch, fix the conflict, re-run preflight, then '
+                '<code>python -m nightshift.boardcmd land &lt;id&gt;</code>. A failed card '
+                'ran out of attempts with '
                 'gates or tests still red; <b>Work on this</b> starts over on a fresh '
                 'branch. Nothing here is waiting on a decision.</p></div>')
     return _section("Blocked on you", len(ctx.blocked) + len(ctx.failed), flag + "".join(rows),
@@ -4300,6 +4301,21 @@ def _system_corrections(ctx: Context) -> str:
                     sec_id="corrections")
 
 
+def _system_board_health(ctx: Context) -> str:
+    """Cards stuck between two lanes (`nightshift.boardhealth`) — silent when none are."""
+    if not installed(ctx.root):
+        return ""
+    found = boardhealth.check(ctx.root)
+    if not found:
+        return ""
+    rows = "".join(_row(marker="!", body=f"<b>{_e(f.lane)}/{_e(f.card_id)}</b>"
+                                         f"<p class='note'>{_e(f.text)}</p>")
+                   for f in found)
+    return _section("Board health", len(found), rows,
+                    note="A merge or a verdict that never reached its lane move.",
+                    sec_id="board-health")
+
+
 def _system_verbs(ctx: Context) -> str:
     if not installed(ctx.root):
         return ""
@@ -4380,6 +4396,7 @@ def _render_system(ctx: Context) -> str:
         _system_files(ctx),
         _system_outgoing(ctx),
         _system_corrections(ctx),
+        _system_board_health(ctx),
         _system_verbs(ctx),
         _system_danger(ctx),
     ])
@@ -5618,6 +5635,7 @@ def _work_verb(root: Path, body: dict) -> str:
             raise PanelError(f"no card named {card_id!r} on the board")
         lane = board.finished_lane(card)
         prompt = worker_prompt.INTERACTIVE_CARD.format(
+            card_id=card.id,
             branch=branches.work_branch(card.id, card.fields.get("branch", "")), base=base,
             card_path=card.path.resolve().as_posix(), finished_lane=lane,
             how_to_test=(worker_prompt.HOW_TO_TEST_STEP if card.verify == "play" else ""),
@@ -5686,6 +5704,7 @@ def _work_feedback_verb(root: Path, body: dict) -> str:
     base = preflight.integration_base(root)
     lane = board.finished_lane(card)
     prompt = worker_prompt.INTERACTIVE_CARD_FEEDBACK.format(
+        card_id=card.id,
         branch=branches.work_branch(card.id, card.fields.get("branch", "")), base=base,
         card_path=card.path.resolve().as_posix(), finished_lane=lane,
         tool_economy=worker_prompt.TOOL_ECONOMY, card_body=card.text,

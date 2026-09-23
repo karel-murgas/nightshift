@@ -268,18 +268,23 @@ def _deny_text(board: str, lane: str) -> str:
     )
 
 
-def main() -> int:
+def check(payload: dict) -> str | None:
+    """The deny reason for one PreToolUse payload, or None — run by `main` and by
+    the `nightshift.hooks.pre` dispatcher."""
     if os.environ.get(_UNLOCK_ENV):
-        return 0
+        return None
+    root = _repo_root()
+    if root is None:
+        return None
+    return evaluate(payload, _board_root(root), private_lanes(root))
+
+
+def main() -> int:
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
         return 0  # never block on a payload we cannot parse
-    root = _repo_root()
-    if root is None:
-        return 0
-    reason = evaluate(payload if isinstance(payload, dict) else {},
-                      _board_root(root), private_lanes(root))
+    reason = check(payload if isinstance(payload, dict) else {})
     if reason:
         json.dump(
             {

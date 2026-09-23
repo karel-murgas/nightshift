@@ -767,16 +767,29 @@ def finished_lane(card: Card) -> str:
     return "testing" if card.verify == "play" else "done"
 
 
-def move(root: Path, card: Card, to_lane: str, commit: bool = True) -> Card:
+class TransitionRefused(ValueError):
+    """A lane move whose precondition does not hold, refused at the move."""
+
+
+def move(root: Path, card: Card, to_lane: str, commit: bool = True, *,
+         review_owed: str = "") -> Card:
     """`git mv` + rewrite `state:` + commit, as one commit (`03_board.md` §4).
 
     The two writes are ordered so that a crash between them leaves the lane and
     `state:` disagreeing, which `card_schema` reports as a half-done move. That
     is the crash-consistency check the denormalised `state:` field exists for,
     and it is strictly better than a crash that leaves no trace.
+
+    A move into `review/` must say why a review is owed *and* obtainable there
+    (`review_owed`); anything else belongs in `blocked/`
+    (`one-lane-for-owed-and-unobtainable`). Refused with `TransitionRefused`.
     """
     if to_lane not in LANES:
         raise ValueError(f"{to_lane!r} is not a lane")
+    if to_lane == "review" and not review_owed.strip():
+        raise TransitionRefused(
+            f"moving {card.id} into review/ needs `review_owed=<why a review is owed and "
+            f"obtainable here>` — a card nobody can review belongs in {BLOCKED_LANE}/")
     target = board_dir(root) / to_lane / card.path.name
     target.parent.mkdir(parents=True, exist_ok=True)
 

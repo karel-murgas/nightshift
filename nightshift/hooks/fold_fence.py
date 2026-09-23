@@ -135,15 +135,21 @@ def evaluate(payload: dict, fold_paths: list[str]) -> str | None:
     )
 
 
+def check(payload: dict) -> str | None:
+    """The deny reason for one PreToolUse payload, or None — run by `main` and by
+    the `nightshift.hooks.pre` dispatcher."""
+    root = _repo_root()
+    if not _armed(root):
+        return None
+    return evaluate(payload, _fold_paths(root))
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
         return 0  # never block on a payload we cannot parse
-    root = _repo_root()
-    if not _armed(root):
-        return 0
-    reason = evaluate(payload if isinstance(payload, dict) else {}, _fold_paths(root))
+    reason = check(payload if isinstance(payload, dict) else {})
     if reason:
         json.dump(
             {

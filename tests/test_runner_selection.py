@@ -1123,7 +1123,7 @@ def test_a_move_rewrites_state_to_match_the_new_lane(tmp_path):
     catch, and the runner must never be the one producing it."""
     root = _repo(tmp_path)
     _card(root, "tasks", "probe")
-    board.move(root, board.find(root, "probe"), "review")
+    board.move(root, board.find(root, "probe"), "review", review_owed="a test fixture")
     card = board.find(root, "probe")
     assert card.lane == "review" and card.fields["state"] == "review"
     assert not (root / "Board" / "tasks" / "probe.md").exists()

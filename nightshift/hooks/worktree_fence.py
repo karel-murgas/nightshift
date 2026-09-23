@@ -173,13 +173,18 @@ def _deny_text(target: str, roots: list[Path]) -> str:
     )
 
 
+def check(payload: dict) -> str | None:
+    """The deny reason for one PreToolUse payload, or None — run by `main` and by
+    the `nightshift.hooks.pre` dispatcher."""
+    return evaluate(payload, _allow_roots(_fence_env_name(_repo_root())))
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
         return 0  # never block on a payload we cannot parse
-    env_name = _fence_env_name(_repo_root())
-    reason = evaluate(payload if isinstance(payload, dict) else {}, _allow_roots(env_name))
+    reason = check(payload if isinstance(payload, dict) else {})
     if reason:
         json.dump(
             {
