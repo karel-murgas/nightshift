@@ -13,7 +13,12 @@
     "",
     "The PostToolUse gate run (`nightshift.hooks.gates_on_edit`) always exits 0 on",
     "purpose: a violation must show in the transcript, not block the edit that would",
-    "fix it. It prints only what is news since the previous edit, never the gate list."
+    "fix it. It prints only what is news since the previous edit, never the gate list.",
+    "",
+    "`nightshift.hooks.commit_pathspec` reads what that run last recorded and refuses",
+    "a commit while it is red, in addition to its pathspec check -- so the gap between",
+    "a red gate result shown once and the next `git push` (which is as far as",
+    "`preflight_guard` reaches) is closed at commit time instead."
   ],
   "hooks": {
     "PreToolUse": [

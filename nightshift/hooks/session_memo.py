@@ -65,6 +65,19 @@ def unseen(session_id: str, channel: str, items: Iterable[str]) -> list[str]:
     return fresh if path is not None else list(dict.fromkeys(items))
 
 
+def peek(session_id: str, channel: str) -> set[str] | None:
+    """What `swap` last recorded as open on `channel`, without recording anything.
+
+    `None` means there is nothing to act on: no session id, or this channel has
+    never been swapped this session — the same "cannot determine, fail open"
+    signal `swap`'s own `previous` return gives a first call.
+    """
+    path = _path(session_id, channel)
+    if path is None or not path.exists():
+        return None
+    return set(_load(path))
+
+
 def swap(session_id: str, channel: str, current: Iterable[str]) -> set[str] | None:
     """Record `current` as what is open now; return what was open at the last call,
     or `None` when there is no previous call to compare with.

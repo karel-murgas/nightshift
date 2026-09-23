@@ -134,3 +134,18 @@ def test_unseen_reports_each_item_once_per_session():
     assert session_memo.unseen("s2", "hints", ["a"]) == ["a"]
     assert session_memo.unseen("", "hints", ["a"]) == ["a"]
     assert session_memo.unseen("", "hints", ["a"]) == ["a"]
+
+
+def test_peek_sees_what_swap_last_recorded_without_recording_anything():
+    assert session_memo.peek("s1", "gates") is None, "nothing swapped yet"
+    session_memo.swap("s1", "gates", ["violation-a"])
+    assert session_memo.peek("s1", "gates") == {"violation-a"}
+    assert session_memo.peek("s1", "gates") == {"violation-a"}, "peek must not consume"
+    session_memo.swap("s1", "gates", [])
+    assert session_memo.peek("s1", "gates") == set(), "green is recorded, not absent"
+
+
+def test_peek_without_a_session_id_or_channel_is_none():
+    assert session_memo.peek("", "gates") is None
+    session_memo.swap("s1", "gates", ["violation-a"])
+    assert session_memo.peek("s1", "other-channel") is None
