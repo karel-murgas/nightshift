@@ -4,7 +4,7 @@
 On 2026-08-06, launching the overnight run, the `menu-unlock-indicators` card had
 grown to 36,146 B; the prompt the runner built around it was 40,716 B. Windows caps
 a `CreateProcess` command line at 32,767 characters, so `subprocess.Popen` in
-`runner._run_worker` never started the child at all — it raised
+`worker._run_worker` never started the child at all — it raised
 `FileNotFoundError: [WinError 206] The filename or extension is too long` and took
 the queue with it. The prompt was on `argv`:
 

@@ -186,7 +186,7 @@ _SECTION = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)
 # The sentinel a checker charter's own frontmatter must carry as
 # `checker_contract:` to be nameable as a card's `checker:` (see the
 # `checker-dispatch-wrong-template` note below, where it is checked). Matched
-# against `runner._CHECKER_PROMPT`'s fixed shape — a charter declares this only
+# against `review._CHECKER_PROMPT`'s fixed shape — a charter declares this only
 # once it has actually promised to answer that exact contract.
 _CHECKER_LOOP_CONTRACT = "producer-loop"
 
@@ -447,8 +447,8 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
         if checker == worker:
             bad("checker", f"`checker: {checker}` is the same agent as `worker:` — an agent "
                            f"reviewing its own output sees what it intended, not what it made (§16)")
-        # `checker-dispatch-wrong-template` (2026-09-16): `runner.run_checker` sends
-        # every checker the *same fixed prompt* (`runner._CHECKER_PROMPT`), asking for
+        # `checker-dispatch-wrong-template` (2026-09-16): `review.run_checker` sends
+        # every checker the *same fixed prompt* (`review._CHECKER_PROMPT`), asking for
         # `{"verdict": "pass"|"revise"|"reject", "best": ..., "notes": ...}` against an
         # artefacts directory. That is `art-reviewer`'s contract, not a generic one —
         # there is no per-checker template selection to get right or wrong, only this

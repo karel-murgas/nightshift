@@ -39,7 +39,7 @@ Fails **open** on anything it cannot resolve: no git repository at the target, n
 `.ai/manifest.toml`, no declared `[branches].integration`, or a current branch git
 cannot report (detached HEAD). A guard that wedges a session on a config or a git
 state it could not read is worse than none, and `manage-board`'s own backstop
-(`runner.stranded_board_refusal`) still catches what reaches the runner regardless.
+(`worktree.stranded_board_refusal`) still catches what reaches the runner regardless.
 
 Reads the PreToolUse payload on stdin, writes a JSON decision on stdout. No LLM
 (`00_architecture.md` §12): path resolution and `git branch --show-current` only.

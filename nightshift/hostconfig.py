@@ -340,7 +340,7 @@ def _log(message: str) -> None:
         pass
 
 
-# Late-bound, so a test that monkeypatches `runner._log` also captures landing's lines.
+# Late-bound, so a test that monkeypatches `hostconfig._log` also captures landing's lines.
 landing.set_log(lambda message: _log(message))
 
 

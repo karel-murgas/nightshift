@@ -18,7 +18,7 @@ On 2026-08-23 two cards' register entries collided in `.claude/memory/state.md` 
 `state_history.md`, three regions were hand-resolved in one session, and the only
 thing standing between that and a repeat of 2026-08-09 was the resolver remembering
 to grep. That is the gap this closes — and it is now load-bearing rather than
-hygienic, because `runner._resolve_conflict` lets an **agent** resolve a rebase
+hygienic, because `review._resolve_conflict` lets an **agent** resolve a rebase
 unattended. Automated resolution is only as trustworthy as the check that follows it.
 
 **Appeals are file-scope, and that concession was earned within the hour.** This gate
