@@ -140,16 +140,24 @@ and the prompt without dispatching.
 The elevation is for that pass only; your standing `permission_mode` in
 `.ai/hosts.json` is unchanged.
 
-If you would rather do it yourself, that is the same three commands the fix pass runs:
+If you would rather do it yourself, `doctor`, the gates and `preflight` are three of
+the commands below the fix pass runs. The full set, generated from one list rather
+than retyped here (docstring-and-manifest-diet slice 3):
 
+<!-- generated:command-list -->
+```bash
+command-center.bat              # the Command Center (./command-center.sh on unix)
+python -m nightshift.gates.run  # the gate suite (also runs on save, via a hook)
+python -m nightshift.preflight  # MANDATORY before push/merge -- writes a receipt
+python -m nightshift.runner     # dispatch cards from Board/tasks/; run backgrounded
+python -m nightshift.doctor     # the per-machine preconditions git cannot carry
+python -m nightshift.update     # bring this repo's nightshift files up to date
+pytest                          # the test suite
 ```
-nightshift doctor                  # this machine: line endings, claude on PATH, host config
-python -m nightshift.gates.run     # the gate suite
-python -m nightshift.preflight     # gates + your tests + a receipt
-```
+<!-- /generated:command-list -->
 
-All four are buttons on the Command Center's System page, if you would rather click
-them than remember them.
+All of them are buttons on the Command Center's System page too, if you would rather
+click than remember.
 
 </details>
 
@@ -520,6 +528,7 @@ project's one.
 | `deletion_sweep` | a removed file or top-level class/def must not still be named by any live doc |
 | `doc_reference_liveness` | docs must not name files or symbols that no longer exist |
 | `doc_signature_drift` | a signature written into a doc must match the real parameter names, in order |
+| `docstring_budget` | a module docstring stays under a line budget unless baselined, and a baselined module now under budget must be removed from the baseline |
 | `fixture_rebuild` | tests copy the shared fixture template instead of running `git init` themselves |
 | `gate_appeals` | every `# gate-ok(...)` appeal names a real gate and carries a written reason |
 | `git_path_lists` | a git command that lists paths lists them NUL-separated |

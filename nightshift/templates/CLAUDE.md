@@ -7,20 +7,18 @@
 ## How to run
 
 ```bash
-command-center.bat                    # the Command Center (./command-center.sh on unix)
-python -m nightshift.gates.run        # the gate suite (also runs on save, via a hook)
+command-center.bat   # the Command Center (./command-center.sh on unix) -- the front door
 python -m nightshift.preflight        # MANDATORY before push/merge — writes a receipt
-python -m nightshift.runner           # dispatch cards from Board/tasks/; run backgrounded
-python -m nightshift.doctor           # the per-machine preconditions git cannot carry
-python -m nightshift.update           # bring this repo's nightshift files up to date
 pytest                                # the test suite
 ```
 
-**The Command Center is the front door.** A local web panel — a launcher, a registry and
-a tail, never a chat client. Its *System* page carries the framework's own maintenance:
-what this repo's nightshift files are missing or behind on, `doctor`, the gates,
-preflight, the `fix` pass. Every button shells out to the command above that it names,
-so nothing there is a second implementation of anything.
+The full command list — the gate suite, the runner, `doctor`, `update`, and the rest —
+is one generated list in nightshift's own `README.md`, not retyped here (this file is
+loaded every session, so it stays short; docstring-and-manifest-diet slice 3). The
+Command Center's *System* page is every one of them as a button, if you would rather
+click than remember: what this repo's nightshift files are missing or behind on,
+`doctor`, the gates, preflight, the `fix` pass — nothing there is a second
+implementation of anything.
 
 **The AI-team tooling is an installed dependency, not part of this repo.** A fresh clone
 needs it before any gate, preflight or runner command works:

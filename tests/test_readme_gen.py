@@ -121,6 +121,20 @@ def test_runner_flags_falls_back_when_the_repo_has_no_manifest(tmp_path):
     assert "`--base`" in readme_gen.runner_flags(tmp_path)
 
 
+def test_command_reference_lists_every_command_once(tmp_path):
+    """One source (docstring-and-manifest-diet slice 3): every entry in
+    `COMMANDS` appears in the rendered block, in a fenced `bash` code block so
+    it drops into the README the way the hand-typed version did."""
+    body = readme_gen.command_reference(tmp_path)
+    assert body.startswith("```bash") and body.endswith("```")
+    for cmd, _ in readme_gen.COMMANDS:
+        assert cmd in body
+
+
+def test_command_list_block_name_is_registered():
+    assert readme_gen._generate("command-list", Path(".")) == readme_gen.command_reference(Path("."))
+
+
 def test_readme_gens_own_readme_is_current():
     """The actual point of the mechanism: this package's committed README.md
     has no drift from a fresh generation right now."""
