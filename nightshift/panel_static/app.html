@@ -871,6 +871,7 @@
     display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.7rem;
     padding: 0.55rem 0; border-top: 1px solid var(--line-soft);
   }
+  .opt[hidden] { display: none; }
   .opt-l { width: 4.5rem; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.1em; }
   .opt select {
     background: var(--ground); color: var(--ink); border: 1px solid var(--line);
@@ -1233,6 +1234,11 @@ function launch(title, path, body) {
   pendingLaunch = path ? { path: path, body: body || {} } : null;
   document.getElementById("launch-title").textContent = title || "Options";
   dialog.classList.toggle("settings", !path);
+  var local = document.getElementById("opt-local");
+  if (local) {
+    var interactive = JSON.parse(dialog.dataset.interactive || "[]");
+    local.hidden = !!path && interactive.indexOf(path) >= 0;
+  }
   closeMenus();
   if (!dialog.open) { dialog.showModal(); }
 }

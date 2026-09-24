@@ -175,3 +175,19 @@ def test_old_addresses_land_on_the_new_page(server, old, new):  # noqa: F811
     status, text = _get(base, old)
     assert status == 200
     assert f'href="/{new}" aria-current="page"' in text
+
+
+def test_the_local_row_is_hidden_for_interactive_launches(pages):
+    """An interactive session always runs `claude` on cloud, so offering the local
+    model there would be a control that does nothing. The dialog names which launches
+    are interactive; each must be a real route that opens a session."""
+    routes = _routes()
+    for path in panel.INTERACTIVE_PATHS:
+        assert path.lstrip("/") in routes, f"{path} is not a route"
+    session_source = inspect.getsource(panel)
+    assert session_source.count("session_argv(") >= len(panel.INTERACTIVE_PATHS)
+    dialog = pages["queue"].split("<dialog", 1)[1].split("</dialog>", 1)[0]
+    assert "data-interactive=" in dialog
+    script = panel.TEMPLATE.read_text(encoding="utf-8")
+    assert 'getElementById("opt-local")' in script and "dataset.interactive" in script
+    assert ".opt[hidden]" in script, "without it the flex rule keeps the hidden row on screen"

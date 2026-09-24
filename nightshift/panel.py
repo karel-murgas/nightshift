@@ -2326,6 +2326,12 @@ def _tier_html(ctx: Context) -> str:
             f'onchange="this.blur();{send}"> Override the card</label></div>')
 
 
+#: Launches that open an interactive `claude` session. The local model only ever runs
+#: dispatched chores and tasks, so the dialog hides its Local row for these.
+INTERACTIVE_PATHS = ("/api/session", "/api/talk", "/api/triage", "/api/work",
+                     "/api/work-feedback")
+
+
 def _local_html(ctx: Context) -> str:
     """The local-model toggle — absent on a machine that declares no local model."""
     local = runtimes.local_model(ctx.root)
@@ -2337,7 +2343,7 @@ def _local_html(ctx: Context) -> str:
     title = (f"Dispatched {agents} cards run on {local.model} when its server answers; "
              f"everything else, and every interactive session, runs on cloud."
              + (f" Start the server with {local.launcher}." if local.launcher else ""))
-    return (f'<div class="opt"><span class="opt-l">Local</span>'
+    return (f'<div class="opt" id="opt-local"><span class="opt-l">Local</span>'
             f'<label class="override soft" title="{_e(title)}">'
             f'<input type="checkbox" id="uselocal" data-server="1"{ticked} '
             f'onchange="this.blur();{send}"> Use the local model</label>'
@@ -2355,7 +2361,8 @@ def _paid_html(ctx: Context) -> str:
 
 def _launch_dialog(ctx: Context) -> str:
     """Start-run / work-on-this: the dispatch options live here, not in the header."""
-    return ('<dialog id="launch" class="launch">'
+    return (f'<dialog id="launch" class="launch" '
+            f'data-interactive="{_attr(json.dumps(list(INTERACTIVE_PATHS)))}">'
             '<h2 id="launch-title">Options</h2>'
             + _account_html(ctx) + _tier_html(ctx) + _local_html(ctx) + _paid_html(ctx)
             + '<div class="acts">'
