@@ -125,6 +125,27 @@ already an interpretation.
 
 So do not spend attention on the format. Spend it on 2 and 3 above.
 
+## The default disposition is fix + test, not a gate
+
+Framework review 2026-09-23 (`correction-loop-defaults`): the origin project logged 79
+`GATE: yes-now` entries and the framework grew +7.0k / −1.7k lines in the eight days
+before the review — a detector gate per incident, several read by nothing within a week
+(`FAST` declared on 57 gates nothing read; an unwired hook shipped and was never called).
+A gate is machinery that runs forever; most corrections are one mistake that a fix and a
+regression test already close out.
+
+**Default to `no-gap` or `n/a` plus a fix and a test**, in the same turn, and say so in
+the NOTE. Answer `yes-now` — a new gate or hook — only when:
+
+- the same **class** has now recurred, in a different place, at least twice (this entry
+  plus one earlier one — check `python -m nightshift.corrections`), or
+- the correction is about a rule **a human wrote about the product**, not about the
+  AI-team machinery's own process.
+
+Everything else stays a fix-and-test. `no-judgment` is still the honest answer when
+nothing mechanical could have caught it (§ Choosing CLASS's `derived-not-verified`, most
+often); do not reach for `yes-now` to feel more thorough.
+
 ## Marking one resolved
 
 This skill is only about the append. Separately: once a correction has produced a durable

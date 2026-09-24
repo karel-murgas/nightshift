@@ -47,6 +47,8 @@ Appeals: `# gate-ok(pytest_invocation): <reason>` — see `appeal_markers.py` an
 """
 from __future__ import annotations
 
+SUBJECT = "nightshift/suite.py"
+
 import ast
 from pathlib import Path
 

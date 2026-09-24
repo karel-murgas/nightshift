@@ -50,6 +50,8 @@ which cannot decode them.
 """
 from __future__ import annotations
 
+SUBJECT = "nightshift/conflictmarkers.py"
+
 import re
 from pathlib import Path
 

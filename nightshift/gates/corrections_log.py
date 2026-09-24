@@ -31,6 +31,8 @@ entry, and a gate that guessed at it would be re-checking what a person decided
 """
 from __future__ import annotations
 
+SUBJECT = ".ai/corrections.log"
+
 import json
 from pathlib import Path
 

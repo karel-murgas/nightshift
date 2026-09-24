@@ -20,6 +20,8 @@ project ever deleted).
 """
 from __future__ import annotations
 
+SUBJECT = "nightshift/gates/doc_scan.py"
+
 from collections import defaultdict
 from pathlib import Path
 

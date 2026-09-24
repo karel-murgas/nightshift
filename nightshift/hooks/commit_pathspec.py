@@ -76,6 +76,8 @@ Runnable by hand:
 """
 from __future__ import annotations
 
+SUBJECT = "git commit"
+
 import json
 import re
 import shlex

@@ -29,6 +29,8 @@ docstring.
 """
 from __future__ import annotations
 
+SUBJECT = ".gitattributes"
+
 import sys
 from pathlib import Path
 

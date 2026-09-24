@@ -39,6 +39,8 @@ Appeals: `# gate-ok(run_stop_recorded): <reason>` — see `appeal_markers.py` an
 """
 from __future__ import annotations
 
+SUBJECT = "nightshift/runner.py"
+
 import ast
 from pathlib import Path
 

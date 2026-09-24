@@ -38,6 +38,15 @@ the triage:
 | `no-gap` | mechanically catchable in principle, no gate yet | file a card; do not pretend it is done |
 | `n/a` | not a defect | nothing |
 
+**The default is `no-gap` or `n/a`, not `yes-now`.** `log-a-correction`'s "default
+disposition" section (`correction-loop-defaults`, 2026-09-23) is the fuller version of
+this: the origin project logged 79 `yes-now` entries and the framework grew +7.0k / −1.7k
+lines in eight days, several gates read by nothing within a week. A fix plus a regression
+test closes almost every correction on its own. Answer `yes-now` only when the *class* has
+now recurred, in a different place, at least twice, or when the rule is one a human wrote
+about the product rather than about this machinery's own process — otherwise fix the cause,
+write the test, and stop there.
+
 **The test that separates `no-judgment` from `no-gap`:** can a deterministic reader see the
 violation *in the artefact*, without knowing what the author meant? If answering needs the
 intent, it is not a gate. The largest correction class in the origin project —
@@ -216,6 +225,29 @@ imported by package path. A helper with no `check` is not a gate, which is why a
 has never required editing a list.
 
 Run it with `python -m nightshift.gates.run`, or by name.
+
+## Retirement review, monthly
+
+The counterpart to step 0: not every gate that was earned stays earned. Once a month,
+read `python -m nightshift.gates.run --json`'s `per_gate` list (seconds, violation
+count) alongside how many times each gate has fired since the last review. A gate that
+has caught **zero** violations over the period, where the structural fix it was written
+for is still in place (the code it guards has not regressed, and nothing else has quietly
+taken over its job), is a candidate to retire — the same way a resolved correction moves
+out of the active log.
+
+**Retire by deleting, not archiving.** Git history already keeps the gate; a
+`_retired/` directory is a second place to remember to look, and this project has none.
+Delete the file, remove its row from wherever it is cited (an audit matrix, a README's
+generated gate list), and note the retirement in `.ai/corrections.log` — `GATE: n/a`,
+NOTE naming which gate, since when it fired zero, and why the underlying fix is still
+trusted to hold without it.
+
+**Do not retire a gate because it is inconvenient.** The same asymmetry as step 3's
+narrowing: a gate that goes quiet because nobody triggers its rule any more looks
+identical, from the numbers alone, to a gate whose rule stopped mattering. Read the code
+it guards before retiring it, the same way step 4 says to run a new gate against the
+whole corpus before trusting it.
 
 ## Don't
 

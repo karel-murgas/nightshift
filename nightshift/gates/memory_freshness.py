@@ -37,6 +37,8 @@ specified.
 """
 from __future__ import annotations
 
+SUBJECT = ".ai/manifest.toml"
+
 from pathlib import Path
 
 from nightshift import branches, git

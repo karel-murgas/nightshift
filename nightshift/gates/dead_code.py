@@ -65,6 +65,8 @@ having — delete it.
 """
 from __future__ import annotations
 
+SUBJECT = ".ai/manifest.toml"
+
 import re
 import subprocess
 import sys

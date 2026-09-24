@@ -33,6 +33,8 @@ Reads the PreToolUse payload on stdin, writes a JSON decision on stdout. No LLM
 """
 from __future__ import annotations
 
+SUBJECT = ".ai/manifest.toml"
+
 import json
 import os
 import sys

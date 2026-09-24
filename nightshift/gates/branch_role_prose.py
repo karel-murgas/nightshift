@@ -35,6 +35,8 @@ is a no-op rather than a crash.
 """
 from __future__ import annotations
 
+SUBJECT = ("CLAUDE.md", ".ai/CLAUDE.md")  # gate-ok(source_reference_liveness): the second is written by `nightshift init` into every consuming project; this package's own checkout is the source, not a consumer, and has no .ai/CLAUDE.md of its own.
+
 import re
 from pathlib import Path
 

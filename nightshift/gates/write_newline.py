@@ -57,6 +57,8 @@ open in binary mode and skip text handling entirely.
 """
 from __future__ import annotations
 
+SUBJECT = ".ai"
+
 import ast
 from pathlib import Path
 

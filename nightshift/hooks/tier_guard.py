@@ -24,6 +24,8 @@ testing:
 """
 from __future__ import annotations
 
+SUBJECT = "Board"
+
 import json
 import re
 import sys

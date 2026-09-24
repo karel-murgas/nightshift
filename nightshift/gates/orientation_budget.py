@@ -38,6 +38,8 @@ Portable since 07_portability.md's §2 table classified it as a manifest-table g
 """
 from __future__ import annotations
 
+SUBJECT = ".ai/manifest.toml"
+
 from pathlib import Path
 
 from nightshift.gates.base import Violation
