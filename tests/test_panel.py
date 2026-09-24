@@ -2976,7 +2976,7 @@ def test_a_parked_card_offers_a_way_to_answer_it(server):
     base, root = server
     _parked(root, "forky")
 
-    _, text = _get(base, "you")
+    _, text = _get(base, "queue")
     assert "/decide/forky" in text
 
 
@@ -4036,7 +4036,7 @@ def _park(root, card_id: str):
 def test_a_card_asking_one_thing_four_ways_reports_one_question(server):
     base, root = server
     _park(root, "which-way")
-    _, text = _get(base, "you")
+    _, text = _get(base, "queue")
     assert "1 question" in text
     assert "4 decision" not in text
 
@@ -4046,7 +4046,7 @@ def test_the_option_count_still_rides_along(server):
     and "do I have to compose the answer myself" — and only the first is the count."""
     base, root = server
     _park(root, "which-way")
-    _, text = _get(base, "you")
+    _, text = _get(base, "queue")
     assert "4 option(s) offered" in text
 
 

@@ -95,8 +95,8 @@ def test_a_card_appears_in_exactly_one_place(pages):
 def test_each_lane_lands_on_the_page_whose_move_it_is(pages):
     where = {page: set(re.findall(r'data-card="([^"]+)"', pages[page]))
              for page in panel.PAGES}
-    assert {"t-run", "t-hand", "t-chore"} <= where["queue"]
-    assert {"d-one", "p-one", "r-one", "b-one", "f-one"} <= where["you"]
+    assert {"t-run", "t-hand", "t-chore", "d-one"} <= where["queue"]
+    assert {"p-one", "r-one", "b-one", "f-one"} <= where["you"]
     assert "n-chore.md" in pages["capture"] and "i-one.md" in pages["capture"]
 
 

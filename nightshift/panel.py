@@ -15,8 +15,8 @@ in that sense — `drain.py` and `ingest.py` already import `board`/`usage` dire
 same reason — so GET handlers read via the ordinary Python API and only POST handlers shell
 out.
 
-**Pages by whose move it is, server-rendered, one URL each:** `/queue` (ready work),
-`/capture` (inbox and ideas), `/you` (decide, play, blocked, review), `/running` (the
+**Pages by whose move it is, server-rendered, one URL each:** `/queue` (work in progress:
+decide and ready work), `/capture` (inbox and ideas), `/you` (play, blocked, review), `/running` (the
 current run; `/history` one click away) and `/system`. The old addresses redirect
 (`OLD_PAGES`). Every list is `_item` rows; a card appears on one page; anything that starts
 an agent opens the launch dialog, which holds the account, tier, local-model and
@@ -1057,10 +1057,10 @@ class Context:
 
     def counts(self) -> dict[str, int]:
         return {
-            "queue": len(self.tonight) + len(self.elsewhere) + len(self.chores)
-                     + len(self.do_now),
+            "queue": len(self.decisions) + len(self.tonight) + len(self.elsewhere)
+                     + len(self.chores) + len(self.do_now),
             "capture": len(self.notes) + len(self.ideas),
-            "you": len(self.decisions) + len(self.testing) + len(self.review)
+            "you": len(self.testing) + len(self.review)
                    + len(self.blocked) + len(self.failed),
             "running": (int(run_is_live(self.rail.run_status, _latest_record(self.root)))
                         + sum(1 for job in self.jobs if jobs.state(job) == jobs.RUNNING)),
@@ -2481,7 +2481,10 @@ def _keyboard_section(ctx: Context) -> str:
 
 
 def _render_queue(ctx: Context) -> str:
-    return "".join([_tonight_section(ctx), _chores_section(ctx), _keyboard_section(ctx),
+    # Decide sits here, not on You: a parked card is work in progress, and Queue is
+    # the page for everything already started (Karel, 2026-09-24).
+    return "".join([_decide_section(ctx), _tonight_section(ctx), _chores_section(ctx),
+                    _keyboard_section(ctx),
                     f'<footer>Board on {_e(current_branch(ctx.root))}</footer>'])
 
 
@@ -2703,7 +2706,7 @@ def _review_section(ctx: Context) -> str:
 
 
 def _render_you(ctx: Context) -> str:
-    return "".join([_decide_section(ctx), _playthrough_section(ctx), _blocked_section(ctx),
+    return "".join([_playthrough_section(ctx), _blocked_section(ctx),
                     _review_section(ctx), _audio_section(ctx),
                     f'<footer>{len(ctx.testing)} card(s) on {_e(ctx.base)} to play</footer>'])
 
