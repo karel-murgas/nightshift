@@ -33,6 +33,7 @@ import argparse
 import importlib
 import json
 import sys
+import time
 from pathlib import Path
 
 from nightshift.manifest import AI_DIR, find_root
@@ -98,7 +99,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true",
                         help="emit violations as structured JSON ({file, line, rule, gate}) "
                              "instead of the human-readable text, for a caller that needs to "
-                             "act on *which paths* failed rather than read a sentence about it")
+                             "act on *which paths* failed rather than read a sentence about "
+                             "it. Also emits a per_gate list ({gate, seconds, violations}) "
+                             "for every gate that ran, so a retirement review has numbers.")
     parser.add_argument("--root", type=Path, default=None,
                         help="repo to gate (default: found from the working directory)")
     # Everything EXCEPT these. The distinction from naming gates positionally matters
@@ -132,8 +135,16 @@ def main(argv: list[str] | None = None) -> int:
     # `--json`'s payload, built alongside the text output rather than instead of
     # running the gates a second time -- one pass over `selected` either way.
     structured: list[dict] = []
+    # Per-gate runtime and violation count (correction-loop-defaults, 2026-09-23
+    # framework review, part 3), so a retirement review has numbers instead of a
+    # guess -- a gate that has cost minutes and caught nothing in months is a
+    # different case from one that costs milliseconds and fires weekly, and
+    # neither was visible before this ran once and printed the sentence "all
+    # clear" or a violation list with no times attached.
+    per_gate: list[dict] = []
     for name in selected:
         module = all_gates[name]
+        started = time.perf_counter()
         violations = module.check(repo_root)  # type: ignore[attr-defined]
         if args.fix and hasattr(module, "fix"):
             module.fix(repo_root)  # type: ignore[attr-defined]
@@ -142,6 +153,9 @@ def main(argv: list[str] | None = None) -> int:
             # report (and exit non-zero on) violations `fix()` just resolved.
             # What `check` says about the tree *now* is the only honest count.
             violations = module.check(repo_root)  # type: ignore[attr-defined]
+        elapsed = time.perf_counter() - started
+        per_gate.append({"gate": name, "seconds": round(elapsed, 6),
+                          "violations": len(violations)})
         for v in violations:
             if args.json:
                 structured.append({"gate": name, "file": v.file, "line": v.line,
@@ -154,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
         # One line, one object -- a caller that only wants to know whether this
         # run was clean can check `violations == []` without touching `total`.
         print(json.dumps({"violations": structured, "total": total,
-                          "gates": selected}))
+                          "gates": selected, "per_gate": per_gate}))
         return 1 if total else 0
 
     if total:

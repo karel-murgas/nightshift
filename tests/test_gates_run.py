@@ -179,7 +179,44 @@ def test_json_on_a_clean_project_is_an_empty_list_and_exit_zero(tmp_path, capsys
     root = _project(tmp_path, always_ok="def check(root):\n    return []\n")
     assert gates_run.main(["--root", str(root), "always_ok", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload == {"violations": [], "total": 0, "gates": ["always_ok"]}
+    assert payload["violations"] == []
+    assert payload["total"] == 0
+    assert payload["gates"] == ["always_ok"]
+    assert payload["per_gate"] == [{"gate": "always_ok", "seconds": payload["per_gate"][0]["seconds"],
+                                    "violations": 0}]
+
+
+# --- --json's per_gate -----------------------------------------------------
+#
+# correction-loop-defaults, 2026-09-23 framework review, part 3: per-gate runtime
+# and violation count, so a retirement review has numbers rather than a guess.
+
+def test_json_per_gate_reports_seconds_and_violations_for_every_selected_gate(tmp_path, capsys):
+    root = _project(
+        tmp_path,
+        no_tabs=GATE.format(file="a.py", rule="tabs are forbidden"),
+        always_ok="def check(root):\n    return []\n",
+    )
+    gates_run.main(["--root", str(root), "no_tabs", "always_ok", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    per_gate = {entry["gate"]: entry for entry in payload["per_gate"]}
+    assert set(per_gate) == {"no_tabs", "always_ok"}
+    assert per_gate["no_tabs"]["violations"] == 1
+    assert per_gate["always_ok"]["violations"] == 0
+    for entry in per_gate.values():
+        assert isinstance(entry["seconds"], float) and entry["seconds"] >= 0.0
+
+
+def test_json_per_gate_counts_the_recheck_after_fix_not_the_pre_fix_count(tmp_path, capsys):
+    """The same rule `total` already follows (hygiene-rules-belong-in-a-script,
+    finding 1): `--fix` fixes the tree, so `per_gate`'s violation count must read
+    the tree AFTER the fix, not the count `check()` saw before it ran."""
+    root = _project(tmp_path, fixable=FIXABLE_GATE)
+    gates_run.main(["--root", str(root), "fixable", "--fix", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["per_gate"] == [{"gate": "fixable",
+                                    "seconds": payload["per_gate"][0]["seconds"],
+                                    "violations": 0}]
 
 
 def test_json_prints_nothing_but_the_one_json_line(tmp_path, capsys):
