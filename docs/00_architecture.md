@@ -719,24 +719,31 @@ Same one-contract-two-runtimes principle as §3, applied to sequencing instead o
 
 The table above is prose: it maps *work types* to models, and a dispatcher cannot
 resolve `tier: worker` against it without a human in the loop. So the binding is written
-once more, immediately below, in the form a script can read — **and this block, not the
-prose table, is what `nightshift/tiers.py` parses.** Prose and block must agree; the block is
-the operative one, the table is the reasoning.
+once more, in the form a script can read — **and that block, not the prose table, is
+what `nightshift.tiers` parses.** Prose and block must agree; the block is the operative
+one, the table is the reasoning.
 
-Writing it here rather than in `nightshift/tiers.py` is the whole point. The rule this section
-exists to enforce is that the tier→model binding lives in exactly one place, and a
-constant in a Python file would be a second place that drifts silently the day Phase 5
-rebinds the worker tier. Session I edits the block below and changes nothing else.
+**The block itself does not live in this doc.** `nightshift.tiers` reads it from
+`[tiers].binding_doc`, a path each consuming project's own `.ai/manifest.toml` declares
+— by default `docs/tier-binding.md`, but any project file works, and it never has to be
+this one. Writing it in *a* file the manifest points at rather than as a constant in
+`nightshift/tiers.py` is the whole point: the rule this section exists to enforce is that
+the tier→model binding lives in exactly one place per project, and a constant in a Python
+file would be a second place that drifts silently the day a project rebinds its worker
+tier. This framework repo's own binding is `docs/tier-binding.md`, alongside this doc
+(`nightshift.doctor.drift` flags any *other* file here that also carries a
+` ```tier-binding ` block, so this doc's own copy was removed rather than left to drift
+against it (framework-text-not-copied, phase 2b)). The block's shape:
 
-```tier-binding
+```
 lead   = opus
 worker = sonnet
 ```
 
 The values are CLI model aliases (`claude --model <alias>`), not full model ids, because
-an alias tracks the latest model in its family and a pinned id would silently rot. If
-Phase 5 points the worker tier at a local runtime, this becomes the endpoint's model name
-and `ANTHROPIC_BASE_URL` does the rest (§3) — still one edit, still here.
+an alias tracks the latest model in its family and a pinned id would silently rot. If a
+project points the worker tier at a local runtime, this becomes the endpoint's model name
+and `ANTHROPIC_BASE_URL` does the rest (§3) — still one edit, in that project's own file.
 
 #### Enforcement — the missing half (measured 2026-07-22)
 
