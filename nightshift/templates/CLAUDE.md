@@ -30,11 +30,14 @@ pip install -e path/to/nightshift
 ```
 
 **`python -m nightshift.update` after pulling a newer nightshift.** The framework's code
-is live immediately (the install is editable), but the files it wrote *into this repo* —
-the agent charters, the skills, the board README, the launchers — are copies, and `init`
-never overwrites them. `update` reports what moved and what you edited, and writes only
-what you never touched; a file that changed on both sides is a conflict it refuses to
-resolve on its own (`--diff`, `--take`, `--keep`, `--merge`).
+is live immediately (the install is editable), but the files it wrote *into this repo* are
+not. The agent charters and skills in `.claude/` are **generated** — the package's
+template plus this project's addendum in `.ai/addenda/` — so never edit them: put project
+text in the addendum and run `update --apply`, which regenerates them (the
+`composed_text` gate fails on a hand edit). The other copies — the board README, the
+launchers, the recipes — `update` writes only if you never touched them; one that changed
+on both sides is a conflict it refuses to resolve on its own (`--diff`, `--take`,
+`--keep`, `--merge`).
 
 **`python -m nightshift.preflight` before every push, merge or PR.** It runs the doctor
 checks, the gates, the audit matrix, the corrections check and the test slice your branch

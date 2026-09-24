@@ -204,7 +204,14 @@ nightshift update             # what moved, what you changed — writes nothing
 nightshift update --apply     # take every safe update
 ```
 
-It compares three things: the file on disk, the content hash `init` recorded when it
+Agent charters and skills are not compared at all: each is **generated** from the
+package's template plus the project's addendum in `.ai/addenda/<agents|skills>/<name>.md`
+(an addendum may open with frontmatter that overrides the template's keys one by one),
+and `--apply` regenerates it, backing a hand edit up as `.nightshift-old` first. Project
+text goes in the addendum; the `composed_text` gate fails on a generated file that
+is anything else.
+
+For every other file it wrote it compares three things: the file on disk, the content hash `init` recorded when it
 wrote it, and today's template. That is what separates *the template moved* (safe to
 overwrite — you never touched it) from *you edited this* (never touched) from a genuine
 **conflict**, where both changed. A conflict is never resolved by guessing:
