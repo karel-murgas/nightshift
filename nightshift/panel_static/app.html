@@ -892,7 +892,9 @@
 
   @media (max-width: 58rem) {
     .hmeters { margin-left: 0; }
-    .shell { grid-template-columns: 1fr; }
+    .shell { grid-template-columns: minmax(0, 1fr); }
+    .rail, .pages { min-width: 0; }
+    .machine { overflow-wrap: anywhere; }
     .rail { position: static; max-height: none; border-right: 0; border-bottom: 1px solid var(--line); gap: 1.2rem; }
     .pages { flex-direction: row; overflow-x: auto; }
     .pages a { border-left: 0; border-bottom: 2px solid transparent; }
