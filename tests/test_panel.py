@@ -406,6 +406,11 @@ def _get(base: str, path: str) -> tuple[int, str]:
         return resp.status, resp.read().decode("utf-8")
 
 
+def _launches(path: str, body: dict) -> str:
+    """What a row's button carries when it starts `path` through the launch dialog."""
+    return panel._attr(f"{json.dumps(path)}, {json.dumps(body)}")
+
+
 def _post(base: str, path: str, body: dict) -> tuple[int, dict]:
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(f"{base}/{path}", data=data, method="POST",
@@ -417,11 +422,11 @@ def _post(base: str, path: str, body: dict) -> tuple[int, dict]:
         return exc.code, json.loads(exc.read())
 
 
-def test_root_redirects_to_now(server):
+def test_root_redirects_to_queue(server):
     base, _ = server
     req = urllib.request.Request(f"{base}/")
     with urllib.request.urlopen(req, timeout=5) as resp:
-        assert resp.geturl().endswith("/now")
+        assert resp.geturl().endswith("/queue")
 
 
 @pytest.mark.parametrize("page", panel.PAGES)
@@ -557,11 +562,11 @@ def test_blocked_card_offers_work_on_this(server, monkeypatch):
     _card(root, "blocked", "b-card")
     _branch_with_a_commit(root, "b-card")
 
-    status, html = _get(base, "now")
+    status, html = _get(base, "you")
     assert status == 200, html
-    assert "Blocked on you" in html
+    assert "Blocked" in html
     assert "Work on this" in html
-    assert "post('/api/work',{card:'b-card'})" in html
+    assert _launches("/api/work", {"card": "b-card"}) in html
     # The `## Merge` excerpt is truncated and says nothing about the criteria or the
     # attempt history, so reading the card must not require opening a session.
     assert 'href="/card/b-card"' in html
@@ -590,9 +595,9 @@ def test_failed_card_joins_the_blocked_section(server, monkeypatch):
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "card f-card")
 
-    status, html = _get(base, "now")
+    status, html = _get(base, "you")
     assert status == 200, html
-    assert "Blocked on you" in html
+    assert "Blocked" in html
     assert "f-card" in html
     assert "3 attempt(s)" in html
     assert "pytest: 2 failed" in html
@@ -643,20 +648,20 @@ def _branch_with_a_commit(root: Path, card_id: str) -> None:
     _git(root, "worktree", "remove", "--force", str(tree))
 
 
-def test_review_lane_card_appears_on_now_not_only_on_verify(server):
-    """A card at rest in `review/` used to be invisible unless Verify was the
-    page open at the time. Same section, same data, on both now."""
+def test_review_lane_card_is_on_the_you_page(server):
+    """A card at rest in `review/` waits for Karel to start a reviewer — on You, once."""
     base, root = server
     _git(root, "branch", "-M", "main")
     _card(root, "review", "r-card")
     _branch_with_a_commit(root, "r-card")
 
-    for page in ("now", "verify"):
-        status, text = _get(base, page)
-        assert status == 200, text
-        assert "r-card" in text
-        assert "Review all" in text
-        assert "reviewAll()" in text
+    status, text = _get(base, "you")
+    assert status == 200, text
+    assert "r-card" in text
+    assert "Review all" in text
+    assert _launches("/api/review-all", {}) in text
+    assert _launches("/api/review", {"card_id": "r-card"}) in text
+    assert 'data-card="r-card"' not in _get(base, "queue")[1]
 
 
 def test_review_all_spawns_drain_over_the_whole_lane(server, monkeypatch):
@@ -768,9 +773,8 @@ def test_a_stale_reading_says_so_instead_of_looking_fresh(server, monkeypatch):
         fetched=True, stale=True, checked_at=checked_at)
     monkeypatch.setattr(panel.usage, "read_cached", lambda creds=None, **k: stale)
 
-    _, text = _get(base, "now")
+    _, text = _get(base, "queue")
 
-    assert "endpoint asked again too soon" in text
     assert f"as of {checked_at:%H:%M}" in text
 
 
@@ -1416,7 +1420,7 @@ def test_back_uses_browser_history_instead_of_a_hardcoded_page(server):
     base, root = server
     _card(root, "tasks", "a-card")
     back_button = ('<button type="button" class="act" '
-                   'onclick="history.length>1?history.back():location.assign(\'/now\')"')
+                   'onclick="history.length>1?history.back():location.assign(\'/queue\')"')
 
     _, card_text = _get(base, "card/a-card")
     assert back_button in card_text
@@ -1639,14 +1643,12 @@ def test_a_run_this_panel_did_not_start_still_shows_as_running(server, monkeypat
 
 
 def _lane_cell(text: str, card_id: str) -> str:
-    """The roster's own `lane` cell for `card_id`, scoped to the "This run"
-    section — `_running_section` above it renders its own row for the active
-    card with a `<td class="card">` of the same id, but a `lane` cell holding
-    elapsed time rather than a phase, and a naive first-match search finds
-    that one instead."""
+    """The roster row's lane chip for `card_id`, scoped to the run's own section —
+    "Running now" above it has its own row for the active card."""
     roster = text.split('id="sec-lastrun"', 1)[1]
-    row = roster.split(f'<td class="card">{card_id}</td>', 1)[1]
-    return row.split('<td class="lane">', 1)[1].split("</td>", 1)[0]
+    row = roster.split(f'<span class="id">{card_id}</span>', 1)[1]
+    row = row.split('<div class="acts">', 1)[0]
+    return re.findall(r"<span>(.*?)</span>", row)[1]
 
 
 def _dispatchable_card(root: Path, card_id: str) -> None:
@@ -1712,7 +1714,7 @@ def test_not_taken_reads_the_board_not_a_stale_skip_list(server):
     }), encoding="utf-8")
     _card(root, "tasks", "needs-a-human", unattended="false")
 
-    _, text = _get(base, "run")
+    _, text = _get(base, "queue")
 
     assert "already-finished" not in text, "a card from a stale run's skip list"
     assert "needs-a-human" in text, "the board's own undispatchable card"
@@ -2126,7 +2128,7 @@ def test_play_through_row_offers_not_ok_and_open_inline(server):
     assert "openEditor('feedback-played')" in html
     assert 'id="ed-feedback-played"' in html
     assert "Open inline" in html
-    assert "post('/api/work-feedback',{card_id:'played'})" in html
+    assert _launches("/api/work-feedback", {"card_id": "played"}) in html
 
 
 def test_rejected_round_trips_through_the_real_cli(server):
@@ -2415,7 +2417,7 @@ def test_no_row_still_offers_a_session_that_does_nothing(server):
     assert "Start session" not in html
     assert "Work on this" in html
     # The one exception, and it says so.
-    assert html.count("post('/api/session',{})") == 1
+    assert html.count(_launches("/api/session", {})) == 1
 
 
 def test_every_launcher_passes_the_selected_account(monkeypatch, tmp_path):
@@ -2766,7 +2768,7 @@ def test_a_note_added_after_the_pass_is_the_only_unclassified_one(server):
     _, text = _get(base, "inbox")
 
     assert "Not yet classified — 1" in text
-    assert "1 note(s) added since" in text
+    assert "1 new since" in text
 
 
 def test_a_note_edited_after_it_was_routed_says_so(server):
@@ -2803,7 +2805,7 @@ def test_with_no_routing_pass_the_page_says_which_button_fills_it_in(server):
     base, root = server
     _notes(root, **{"lonely.md": "a"})
     _, text = _get(base, "inbox")
-    assert "No routing pass yet" in text
+    assert "Not classified yet" in text
     assert "Not yet classified" in text
 
 
@@ -2847,13 +2849,13 @@ def test_a_chore_row_offers_work_on_this(server):
     _, text = _get(base, "now")
     head, _, rest = text.partition("Chores")
     assert "Work on this" in rest
-    assert "post('/api/work',{card:'a-chore'})" in rest
+    assert _launches("/api/work", {"card": "a-chore"}) in rest
 
 
 def test_a_chore_still_counts_towards_the_rails_now_total(server):
     base, root = server
     _chore(root, "a-chore")
-    assert panel.read_context(root).counts()["now"] == 1
+    assert panel.read_context(root).counts()["queue"] == 1
 
 
 def test_a_chore_that_needs_another_machine_is_filed_as_that_instead(tmp_path):
@@ -2909,8 +2911,8 @@ def test_a_do_now_card_needing_the_gpu_box_says_so(server):
     ctx = panel.read_context(root)
     assert [c.card.id for c in ctx.do_now] == ["needs-gpu"]
 
-    _, text = _get(base, "now")
-    head, _, rest = text.partition("Cards the night cannot take")
+    _, text = _get(base, "queue")
+    head, _, rest = text.partition("At the keyboard")
     assert "needs gpu-box" in rest
 
 
@@ -2974,7 +2976,7 @@ def test_a_parked_card_offers_a_way_to_answer_it(server):
     base, root = server
     _parked(root, "forky")
 
-    _, text = _get(base, "now")
+    _, text = _get(base, "you")
     assert "/decide/forky" in text
 
 
@@ -3325,10 +3327,11 @@ def test_the_triage_section_lists_the_notes_not_the_report_file(server):
     _notes(root, **{"forky.md": _routed("triage")})
     (root / board.ROUTING_VIEW).write_text(_ROUTED, encoding="utf-8")
 
-    _, text = _get(base, "now")
+    _, text = _get(base, "capture")
     assert "forky.md" in text
     assert "the fork cannot be posed without the code" in text
     assert "Routing.md" not in text.split("Waiting on triage")[1]
+    assert _launches("/api/triage", {"note": "forky.md"}) in text
 
 
 def test_the_triage_queue_survives_a_report_that_does_not_mention_the_note(server):
@@ -3339,7 +3342,7 @@ def test_the_triage_queue_survives_a_report_that_does_not_mention_the_note(serve
     base, root = server
     _notes(root, **{"forky.md": _routed("triage")})
 
-    _, text = _get(base, "now")
+    _, text = _get(base, "capture")
     assert "forky.md" in text
 
 
@@ -3351,10 +3354,10 @@ def test_inline_work_is_a_card_on_the_page_about_your_own_work(server):
 
     ctx = panel.read_context(root)
     assert [c.card.id for c in ctx.do_now] == ["needs-you"]
-    assert ctx.counts()["now"] == 1
+    assert ctx.counts()["queue"] == 1
 
-    _, text = _get(base, "now")
-    head, _, rest = text.partition("Cards the night cannot take")
+    _, text = _get(base, "queue")
+    head, _, rest = text.partition("At the keyboard")
     assert "needs-you" in rest
 
 
@@ -3369,8 +3372,8 @@ def test_inline_work_is_in_exactly_one_place_on_the_panel(server):
     base, root = server
     _inline_card(root, "needs-you")
 
-    _, now = _get(base, "now")
-    _, inbox = _get(base, "inbox")
+    _, now = _get(base, "queue")
+    _, inbox = _get(base, "capture")
     assert "needs-you" in now
     assert "needs-you" not in inbox
     assert "The inbox is empty." in inbox
@@ -3380,10 +3383,10 @@ def test_a_finished_card_stops_being_counted_as_needing_you(server):
     """The count follows the lane, so finishing the card removes it from both."""
     base, root = server
     path = _inline_card(root, "needs-you")
-    assert panel.read_context(root).counts()["now"] == 1
+    assert panel.read_context(root).counts()["queue"] == 1
 
     path.unlink()
-    assert panel.read_context(root).counts()["now"] == 0
+    assert panel.read_context(root).counts()["queue"] == 0
 
 
 def test_an_inline_note_can_be_closed_from_the_page(server):
@@ -3509,7 +3512,8 @@ def test_only_the_running_job_is_at_the_top_and_the_rest_is_history(server):
     section = text.split("Running now", 1)[1].split("</section>", 1)[0]
     assert live.ident in section
     assert done.ident not in section, "a finished job is history, not the current run"
-    assert done.ident in text.split("Earlier from here")[1], "and history is at the foot"
+    _, history = _get(base, "history")
+    assert done.ident in history.split("Earlier from here")[1], "and history is one click away"
 
 
 def test_a_finished_job_stays_on_the_run_page_after_it_leaves_the_rail():
@@ -3532,7 +3536,8 @@ def test_the_rail_does_not_claim_nothing_is_happening_while_a_job_runs(server):
 
     jobs.record(root, "ingest", ["python", "-m", "nightshift.ingest"])
     _, busy = _get(base, "now")
-    assert "No card dispatching" in busy
+    header = busy.split('id="statusrail"', 1)[1].split("<dialog", 1)[0]
+    assert "ingest" in header
     assert "No run in progress" not in busy
 
 
@@ -3574,7 +3579,7 @@ def test_a_verb_whose_output_we_do_not_parse_still_shows_its_tail(server):
 """, encoding="utf-8")
 
     _, text = _get(base, "run")
-    assert 'class="joblog"' in text
+    assert 'class="tail"' in text
     assert "[OK  ] gates" in text
 
 
@@ -3590,7 +3595,7 @@ ingest: 13 note(s) in Board/inbox
 
     _, text = _get(base, "run")
     assert "classifying" in text
-    assert "no per-note progress until it lands" in text
+    assert "one pass over the whole inbox" in text
 
 
 def test_a_finished_classify_shows_the_routes_it_produced(server):
@@ -3607,7 +3612,6 @@ ingest: 13 note(s) in Board/inbox
 
     _, text = _get(base, "run")
     assert "3 chore" in text and "6 inline" in text
-    assert "the Inbox page has each one" in text
 
 
 def test_a_classify_pass_puts_each_note_on_its_own_row_with_the_route_it_got(server):
@@ -3654,7 +3658,7 @@ def test_a_job_with_no_output_yet_gets_no_empty_box(server):
     base, root = server
     jobs.record(root, "ingest", ["python", "-m", "nightshift.ingest"])
     _, text = _get(base, "run")
-    assert 'class="joblog"' not in text
+    assert 'class="tail"' not in text
 
 
 def test_the_history_count_counts_jobs_not_table_rows(server):
@@ -3667,7 +3671,7 @@ def test_the_history_count_counts_jobs_not_table_rows(server):
         jobs.save(root, job)
         jobs.log_path(root, job.ident).write_text("some output\n", encoding="utf-8")
 
-    _, text = _get(base, "run")
+    _, text = _get(base, "history")
     head = text.split("Earlier from here", 1)[1][:200]
     assert re.search(r'class="count">2<', head), head
 
@@ -3707,7 +3711,7 @@ def test_a_panel_already_serving_is_opened_rather_than_refused(tmp_path, capsys,
         said = capsys.readouterr().out
         assert "already serving" in said
         assert "holds the code it started with" in said, "and says why to restart it"
-        assert opened == [f"http://127.0.0.1:{port}/now"]
+        assert opened == [f"http://127.0.0.1:{port}/queue"]
     finally:
         held.shutdown()
         thread.join(timeout=5)
@@ -3937,7 +3941,7 @@ def test_the_general_session_button_is_on_every_page(server):
     base, _ = server
     for page in panel.PAGES:
         _, text = _get(base, page)
-        assert "New session here" in text, page
+        assert _launches("/api/session", {}) in text, page
 
 
 def test_the_general_session_button_is_offered_exactly_once_per_page(server):
@@ -3945,7 +3949,7 @@ def test_the_general_session_button_is_offered_exactly_once_per_page(server):
     base, root = server
     _card(root, "tasks", "a-card", unattended="false")   # populates `Do now`
     _, text = _get(base, "now")
-    assert text.count("New session here") == 1
+    assert text.count(_launches("/api/session", {})) == 1
 
 
 # ------------------------------------------------------------------- Talk
@@ -4032,7 +4036,7 @@ def _park(root, card_id: str):
 def test_a_card_asking_one_thing_four_ways_reports_one_question(server):
     base, root = server
     _park(root, "which-way")
-    _, text = _get(base, "now")
+    _, text = _get(base, "you")
     assert "1 question" in text
     assert "4 decision" not in text
 
@@ -4042,7 +4046,7 @@ def test_the_option_count_still_rides_along(server):
     and "do I have to compose the answer myself" — and only the first is the count."""
     base, root = server
     _park(root, "which-way")
-    _, text = _get(base, "now")
+    _, text = _get(base, "you")
     assert "4 option(s) offered" in text
 
 
@@ -4357,16 +4361,17 @@ def test_a_picked_take_is_marked_in_the_section(tmp_path):
     assert '>Picked<' in html
 
 
-def test_the_run_page_shows_no_audio_section_with_nothing_harvested(server):
+def test_the_you_page_shows_no_audio_section_with_nothing_harvested(server):
     base, _ = server
-    _, text = _get(base, "run")
+    _, text = _get(base, "you")
     assert "Audio candidates" not in text
 
 
-def test_the_run_page_lists_a_harvested_take(server):
+def test_the_you_page_lists_a_harvested_take(server):
+    """Picking a take is Karel's move, so the candidates sit on You."""
     base, root = server
     _harvest_audio(root, "card-x", 1, sound="recharge", takes=[{"id": "take_a"}])
-    _, text = _get(base, "run")
+    _, text = _get(base, "you")
     assert "Audio candidates" in text
     assert "take_a" in text
 
@@ -5113,7 +5118,7 @@ def test_the_toggle_names_the_charters_and_the_model(tmp_path):
     assert "chore-thread" in html
     assert "ornith" in html
     # and it must say the part that is easy to assume away
-    assert "inline work is always Claude" in html.replace("&#x27;", "'")
+    assert "every interactive session" in html
 
 
 def test_the_row_chip_appears_only_for_a_card_that_would_go_local(tmp_path):
@@ -5149,10 +5154,11 @@ def test_the_row_chip_is_silent_for_a_card_with_no_worker(tmp_path):
 
 
 def _kind_cell(text: str, card_id: str) -> str:
-    """The roster's type cell for `card_id`, scoped the same way `_lane_cell` is."""
+    """The roster row's type chip for `card_id`, scoped the same way `_lane_cell` is."""
     roster = text.split('id="sec-lastrun"', 1)[1]
-    row = roster.split(f'<td class="card">{card_id}</td>', 1)[1]
-    return row.split('<td class="kind">', 1)[1].split("</td>", 1)[0]
+    row = roster.split(f'<span class="id">{card_id}</span>', 1)[1]
+    row = row.split('<div class="acts">', 1)[0]
+    return re.findall(r"<span>(.*?)</span>", row)[0]
 
 
 def test_the_roster_lists_the_run_plan_before_anything_is_dispatched(server):
@@ -5199,8 +5205,8 @@ def test_a_planned_card_turns_into_its_outcome_without_leaving_the_roster(server
                      {"card": "context-wall", "title": "Walls", "queue": "tasks"}])
 
     _, text = _get(base, "run")
-    roster = text.split('id="sec-lastrun"', 1)[1].split("</table>", 1)[0]
-    assert roster.count('<td class="card">icons-for-ice</td>') == 1
+    roster = text.split('id="sec-lastrun"', 1)[1].split("</section>", 1)[0]
+    assert roster.count('<span class="id">icons-for-ice</span>') == 1
     assert _lane_cell(text, "context-wall") == "queued"
     assert _kind_cell(text, "icons-for-ice") == "chore"
 
@@ -5221,11 +5227,9 @@ def test_a_record_with_no_plan_still_renders(server):
     assert _kind_cell(text, "perks-tinkering") == "chore"
 
 
-def test_every_roster_row_has_the_same_columns(server):
-    """One table, so a row one cell short shifts every column after it — which is
-    exactly what adding the type column did to the batch's phase notes, and did
-    invisibly: every assertion about cell *contents* still passed, because each
-    cell was still found by its own class."""
+def test_every_roster_line_is_a_row_like_any_other(server):
+    """The batch's phase notes and stop reason are rows of the same shape as the
+    cards', not a second table whose columns can drift."""
     base, root = server
     _record(root, "20260919-020000", started="2026-09-19T02:00:00", kind="both",
             dispatched=[{"card": "icons-for-ice", "outcome": "reviewed", "attempt": 1}],
@@ -5236,7 +5240,9 @@ def test_every_roster_row_has_the_same_columns(server):
                     "message": "batch branch chores/20260919-0200 - suite: green"}])
 
     _, text = _get(base, "run")
-    roster = text.split('id="sec-lastrun"', 1)[1].split("</table>", 1)[0]
-    widths = {row.count("<td") for row in roster.split("<tr")[1:] if "<td" in row}
-    assert len(widths) == 1, f"ragged roster rows: {sorted(widths)}"
+    roster = text.split('id="sec-lastrun"', 1)[1].split("</section>", 1)[0]
+    rows = re.findall(r'<div class="row(?: [^"]*)?"[^>]*>', roster)
+    assert len(rows) == 4, rows  # two cards, one batch note, one stop reason
+    assert all('data-item="run"' in row for row in rows)
+    assert "suite: green" in roster and "the window closed" in roster
 

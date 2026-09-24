@@ -2281,6 +2281,8 @@ def _runstate_html(ctx: Context) -> str:
     chips = []
     for job, state in shown:
         kind, word = _JOB_MARK.get(state, ("", state))
+        if state == jobs.FAILED and job.exit_code is not None:
+            word += f" · exit {job.exit_code}"
         dot = '<span class="live-dot"></span>' if state == jobs.RUNNING else ""
         chips.append(f'<a class="hjob" href="/log/{_e(job.ident)}" title="{_attr(job.command)}">'
                      f'{dot}{_chip(job.label, kind)}<span class="dim">{_e(word)}</span></a>')
