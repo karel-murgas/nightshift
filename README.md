@@ -471,9 +471,9 @@ finishing.
 generated morning report used to sit at the repo root, rendered at the end of
 every run and windowed by its own commit subject; the panel replaced it in
 2026-09 and it was removed, so there is no report file to read, regenerate, or
-mistakenly answer in. `/now` shows the run in flight or the last one, a row per
-card it dispatched;
-`/verify` the work waiting on you; `/system` the corrections backlog. Answer a
+mistakenly answer in. `/running` shows the run in flight or the last one, a row per
+card it dispatched (`/history` the earlier ones); `/queue` the ready work; `/you`
+what waits on you; `/system` the corrections backlog. Answer a
 `needs-decision/` card in its own `## Thread` section — through the panel's
 decide picker, or by hand — because that is the only place anything reads an
 answer from.

@@ -15,12 +15,12 @@ in that sense — `drain.py` and `ingest.py` already import `board`/`usage` dire
 same reason — so GET handlers read via the ordinary Python API and only POST handlers shell
 out.
 
-**Pages are server-rendered, one URL each.** The approved mockup switches its five pages
-with JavaScript because a static mockup has no server; here `/now`, `/verify`, `/inbox`,
-`/ideas` and `/run` are real addresses, so the left rail is links. That keeps deep-linking
-and the reload-after-an-action behaviour every button depends on, and it means a page costs
-only its own reads — the Verify page's per-card `git` calls are not paid for by someone
-looking at Ideas. The *appearance* is the mockup's; only the mechanism differs.
+**Pages by whose move it is, server-rendered, one URL each:** `/queue` (ready work),
+`/capture` (inbox and ideas), `/you` (decide, play, blocked, review), `/running` (the
+current run; `/history` one click away) and `/system`. The old addresses redirect
+(`OLD_PAGES`). Every list is `_item` rows; a card appears on one page; anything that starts
+an agent opens the launch dialog, which holds the account, tier, local-model and
+paid-override choices (`command-center-restructure`).
 
 **Two ways to be on a different account, and the panel owns neither of them.** A repo may
 declare `[[accounts]]`, each naming its own `CLAUDE_CONFIG_DIR`; selecting one sets that
@@ -1750,89 +1750,45 @@ def _meta(items: list[str]) -> str:
 
 
 def _tag_chips(card: board.Card) -> list[str]:
-    """The card's tags, as chips.
-
-    `nightshift` is the one with operational meaning — the deliverable lands in
-    the framework repo, so the runner cannot cut a worktree for it and the card
-    carries `unattended: false` to match. Worth seeing at a glance, since it is
-    the difference between a card the night can take and one it never will.
-    """
+    """The card's tags; `nightshift` is amber because the night never takes one."""
     return [_chip(tag, "warn" if tag == "nightshift" else "mute") for tag in card.tags]
 
 
 def _size_chip(card: board.Card) -> str:
-    """**Too big** on a `tasks/` card grown past the worker-input threshold, else "".
+    """**Too big** on a `tasks/` card past the runner's own `oversize_note`, else "".
 
-    Replaces the mark this had until 2026-09, which was an Obsidian Bases formula in
-    `Board.base` over `file.size`. The view went when Obsidian did, so the mark moved
-    here — and it is strictly better placed: the formula had to restate
-    `dispatch.CARD_COMFORT_BYTES` and the lane name in YAML where no import could reach
-    them, which is why a whole gate (`board_view_sync`) existed to catch the two
-    drifting apart. Here the threshold *is* the runner's, because `oversize_note` is
-    the runner's own function — the same one `select()` folds into a candidate's
-    reason and `run()` uses as its predicate — so there is nothing left to disagree.
-
-    Everything that made the original choice right still holds. Nothing is written to
-    the card, so there is no frontmatter field to maintain and none to go stale between
-    writers; compacting a card by hand clears the mark the moment the page next renders,
-    with no session running and nothing to re-run. And `tasks/` only: `oversize_note`
-    owns that rule, because a `done/` card legitimately reaches 20 KB once the runner has
-    appended `## Summary`, `## Thread`, `## Telemetry` and `## Error` after dispatch.
-
-    Advisory, never blocking — the same severity the note itself carries. A card over the
-    threshold still dispatches; this is the line that stops it doing so silently.
+    Advisory, never blocking — the card still dispatches; the tooltip carries the note.
     """
     note = oversize_note(card)
     if not note:
         return ""
-    # Not through `_chip`: the advisory is the whole explanation and belongs in a
-    # tooltip, which `_chip` has no room for.
     return (f'<span class="chip warn" title="{_attr(note)}">too big &middot; '
             f'{card_bytes(card) / 1024:.1f} KB</span>')
 
 
 def _tier_chip(card: board.Card) -> str:
-    """What tier a session opened on this card *right now* would run at.
+    """The tier a session opened on this card now would run at (`effective_tier`).
 
-    Karel, 2026-08-19: *"chosen tier should be visible on each card (lead, worker,
-    none)"*. The value is `effective_tier`'s and not the card's, so the row states
-    what the button beside it will do rather than what the frontmatter says. Those
-    are the same sentence until the rail's override is ticked — and the moment they
-    diverge is the only moment this chip earns its space.
-
-    Amber when the rail is beating a tier the card declared, because that is the
-    one reading a glance can get wrong: the card still says `tier: worker` in its
-    frontmatter and on `/card/`, and nothing else on the page would say the session
-    is not going to honour it.
+    Amber when the Options dialog's override beats the card's own `tier:`.
     """
     tier = effective_tier(card.tier)
     beaten = bool(card.tier) and tier != card.tier
     if beaten:
-        title = f"the rail's choice, overriding this card's own `tier: {card.tier}`"
+        title = f"Options override this card's own tier ({card.tier})"
     elif card.tier:
-        title = f"the card's own `tier: {card.tier}`"
+        title = "the card's own tier"
     elif tier:
-        title = "the rail's choice — this card declares no tier of its own"
+        title = "from Options — the card sets no tier"
     else:
-        title = ("no tier anywhere: the session opens on whatever model the CLI "
-                 "defaults to. Pick one in the rail.")
+        title = "no tier set: the CLI's default model"
     return (f'<span class="chip {"warn" if beaten else "mute"}" '
             f'title="{_e(title)}">tier {_e(tier or "none")}</span>')
 
 
 def _local_chip(root: Path, card: board.Card) -> str:
-    """A chip on a row whose card would be *dispatched* to the local model.
+    """`local` on a card a dispatch would send to the local model; silent otherwise.
 
-    Silent in every other case, and that asymmetry is the whole design. A `local`
-    chip is news — this card will not run on the cloud model the rest of the board
-    runs on — while a `cloud` chip on every other row would be noise stating the
-    ground state 40 times a page.
-
-    Rendered unprobed (`effective_runtime`), so it answers *"is this card
-    eligible"* and not *"is the server up"*. The gap is real and it is the cheap
-    side of the trade: the alternative is a socket per row on every page load, and
-    a card that was eligible but found the endpoint down simply runs on cloud,
-    which the run log records and no chip promised otherwise.
+    Unprobed: it says the card is eligible, not that the server is up.
     """
     worker = (card.worker or "").strip()
     if not worker or worker == "none":
@@ -1840,11 +1796,8 @@ def _local_chip(root: Path, card: board.Card) -> str:
     if effective_runtime(root, worker) != runtimes.LOCAL:
         return ""
     local = runtimes.local_model(root)
-    title = (f"`worker: {worker}` is in this machine's local-model allowlist, so a "
-             f"dispatch takes {local.model if local else 'the local model'} rather "
-             f"than the cloud — if the endpoint answers at dispatch time. It falls "
-             f"back to cloud if it does not. Untick 'Use the local model' in the "
-             f"rail, or run with `--no-local`, to force cloud.")
+    title = (f"Runs on {local.model if local else 'the local model'} when its server "
+             f"answers, else on cloud. Turn it off in Options.")
     return f'<span class="chip mute" title="{_e(title)}">local</span>'
 
 
@@ -4238,10 +4191,7 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.strip("/")
         if path == "":
-            # An uninstalled repo lands on the page that can do something about it.
-            # `/now` in a repo with no board is five empty sections and no hint that
-            # the install never happened — which is exactly the state a first-time
-            # visitor arrives in, having opened the launcher `bootstrap` just wrote.
+            # An uninstalled repo lands on the page that can install it.
             self.send_response(302)
             self.send_header("Location", "/queue" if installed(self.root) else "/system")
             self.end_headers()
