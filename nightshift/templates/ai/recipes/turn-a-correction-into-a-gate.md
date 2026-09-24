@@ -38,6 +38,15 @@ the triage:
 | `no-gap` | mechanically catchable in principle, no gate yet | file a card; do not pretend it is done |
 | `n/a` | not a defect | nothing |
 
+**The default is `no-gap` or `n/a`, not `yes-now`.** `log-a-correction`'s "default
+disposition" section (`correction-loop-defaults`, 2026-09-23) is the fuller version of
+this: the origin project logged 79 `yes-now` entries and the framework grew +7.0k / −1.7k
+lines in eight days, several gates read by nothing within a week. A fix plus a regression
+test closes almost every correction on its own. Answer `yes-now` only when the *class* has
+now recurred, in a different place, at least twice, or when the rule is one a human wrote
+about the product rather than about this machinery's own process — otherwise fix the cause,
+write the test, and stop there.
+
 **The test that separates `no-judgment` from `no-gap`:** can a deterministic reader see the
 violation *in the artefact*, without knowing what the author meant? If answering needs the
 intent, it is not a gate. The largest correction class in the origin project —
