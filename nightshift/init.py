@@ -601,10 +601,9 @@ def stage_templates(plan: Plan, root: Path, tables: dict[str, dict], *,
     memory_table["orientation"] = declared + [s for s in stubs if s not in declared]
 
     def framework_text(rel: str, template: Path) -> str:
+        """Composed, never copied: the rendered template plus this project's addendum."""
         rendered = render(template.read_text(encoding="utf-8"), values)
-        if rel in compose.COMPOSED:
-            return compose.compose(rendered, compose.read_addendum(root, rel), rel)
-        return rendered
+        return compose.compose(rendered, compose.read_addendum(root, rel), rel)
 
     for charter in sorted((TEMPLATES / "agents").glob("*.md")):
         rel = f".claude/agents/{charter.name}"
@@ -612,6 +611,9 @@ def stage_templates(plan: Plan, root: Path, tables: dict[str, dict], *,
     for skill in sorted((TEMPLATES / "skills").glob("*/SKILL.md")):
         rel = f".claude/skills/{skill.parent.name}/SKILL.md"
         stage(rel, framework_text(rel, skill))
+    # Where this project's half of each charter and skill goes; empty until it has one.
+    for kind in ("agents", "skills"):
+        stage(f"{compose.ADDENDA}/{kind}/.gitkeep", "")
 
     # Staged here as well as by `bootstrap_plan`, so a repo installed before the
     # launchers existed picks them up from `update`. `stage()` reports the second

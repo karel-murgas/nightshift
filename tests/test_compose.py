@@ -107,3 +107,17 @@ def test_a_hand_edit_is_flagged_then_replaced_with_a_backup(repo):  # noqa: F811
 
     assert "my own note" not in path.read_text(encoding="utf-8")
     assert (repo / (REL + update.BACKUP_SUFFIX)).read_text(encoding="utf-8") == edited
+
+
+def test_the_three_way_verbs_refuse_a_composed_file(repo):  # noqa: F811
+    """Nothing to take, keep or merge: the project's text belongs in the addendum."""
+    finding = update.find(update.survey(repo), REL)
+
+    with pytest.raises(update.UpdateError, match="addenda/agents/stale-hunter.md"):
+        update.three_way(finding)
+    assert update.main(["--root", str(repo), "--keep", REL]) == 2
+
+
+def test_install_lays_down_the_empty_addenda_dirs(repo):  # noqa: F811
+    for kind in ("agents", "skills"):
+        assert (repo / compose.ADDENDA / kind / ".gitkeep").is_file()
