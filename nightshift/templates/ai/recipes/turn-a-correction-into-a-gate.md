@@ -226,6 +226,29 @@ has never required editing a list.
 
 Run it with `python -m nightshift.gates.run`, or by name.
 
+## Retirement review, monthly
+
+The counterpart to step 0: not every gate that was earned stays earned. Once a month,
+read `python -m nightshift.gates.run --json`'s `per_gate` list (seconds, violation
+count) alongside how many times each gate has fired since the last review. A gate that
+has caught **zero** violations over the period, where the structural fix it was written
+for is still in place (the code it guards has not regressed, and nothing else has quietly
+taken over its job), is a candidate to retire — the same way a resolved correction moves
+out of the active log.
+
+**Retire by deleting, not archiving.** Git history already keeps the gate; a
+`_retired/` directory is a second place to remember to look, and this project has none.
+Delete the file, remove its row from wherever it is cited (an audit matrix, a README's
+generated gate list), and note the retirement in `.ai/corrections.log` — `GATE: n/a`,
+NOTE naming which gate, since when it fired zero, and why the underlying fix is still
+trusted to hold without it.
+
+**Do not retire a gate because it is inconvenient.** The same asymmetry as step 3's
+narrowing: a gate that goes quiet because nobody triggers its rule any more looks
+identical, from the numbers alone, to a gate whose rule stopped mattering. Read the code
+it guards before retiring it, the same way step 4 says to run a new gate against the
+whole corpus before trusting it.
+
 ## Don't
 
 - **Do not adopt a gate because it sounds prudent.** Selection follows observed failures.
