@@ -37,13 +37,11 @@ usage: nightshift <command> [options]
   doctor     per-machine preconditions, plus drift between the manifest and the tree
   uninstall  remove what init wrote, so a first install can be retried
 
-Everything else is a module, and stays one:
-
-  python -m nightshift.gates.run       the gate suite
-  python -m nightshift.preflight       mandatory before push/merge
-  python -m nightshift.runner          dispatch cards from the board
-  python -m nightshift.merge_check     does this branch merge clean, gated, tested?
-  python -m nightshift.corrections     read and cluster the corrections log
+Everything else is a module, and stays one. The commands you reach for daily --
+gates.run, preflight, runner, doctor, update -- are one generated list, not
+retyped here: README.md's "How to run" (docstring-and-manifest-diet slice 3).
+The rest (merge_check, corrections, boardcmd, and the others) are one
+`python -m nightshift.<module> --help` away.
 """
 
 

@@ -65,6 +65,38 @@ def gate_list(root: Path) -> str:
     return "\n".join(lines)
 
 
+#: The one list of "commands you reach for before you know the repo" -- the
+#: canonical set that used to be retyped in nightshift/README.md, the
+#: `.ai/CLAUDE.md` template, and `cli.py`'s usage text (docstring-and-manifest-
+#: diet slice 3; the drift this fixes: `cli.py` listing `merge_check` and
+#: `corrections` that neither of the other two carried, and each copy free to
+#: go stale independently since nothing checked them against each other).
+#: `command_reference()` renders it for README.md; the other two homes now
+#: point here instead of re-typing it — see their own text for why a literal
+#: copy in a `.md` template and an `argparse` usage string can't `import` this
+#: list directly.
+COMMANDS: tuple[tuple[str, str], ...] = (
+    ("command-center.bat", "the Command Center (./command-center.sh on unix)"),
+    ("python -m nightshift.gates.run", "the gate suite (also runs on save, via a hook)"),
+    ("python -m nightshift.preflight", "MANDATORY before push/merge -- writes a receipt"),
+    ("python -m nightshift.runner", "dispatch cards from Board/tasks/; run backgrounded"),
+    ("python -m nightshift.doctor", "the per-machine preconditions git cannot carry"),
+    ("python -m nightshift.update", "bring this repo's nightshift files up to date"),
+    ("pytest", "the test suite"),
+)
+
+
+def command_reference(root: Path) -> str:
+    """A fenced `bash` block, one line per `COMMANDS` entry, aligned the way
+    the hand-typed versions were -- so this generator can replace them byte
+    for byte rather than changing the README's visual shape."""
+    width = max(len(cmd) for cmd, _ in COMMANDS)
+    lines = ["```bash"]
+    lines.extend(f"{cmd:<{width}}  # {desc}" for cmd, desc in COMMANDS)
+    lines.append("```")
+    return "\n".join(lines)
+
+
 def runner_flags(root: Path) -> str:
     """One row per `python -m nightshift.runner` flag, read from the real
     `argparse.ArgumentParser` rather than copied prose — `--budget` and
@@ -158,6 +190,8 @@ def board_lanes() -> str:
 def _generate(name: str, root: Path) -> str | None:
     if name == "gate-list":
         return gate_list(root)
+    if name == "command-list":
+        return command_reference(root)
     if name == "runner-flags":
         return runner_flags(root)
     if name == "manifest-fields":
