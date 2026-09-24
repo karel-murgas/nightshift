@@ -147,6 +147,14 @@ bookkeeping can quietly corrupt the board, so:
      (keeping the question as a quote under it, so nothing is lost), re-evaluate `tier:` if
      the answer changed it, then move it to `tasks/` (below). The panel's `Send to tasks` does
      exactly this for you on an answered `after_answer: tasks` card.
+
+     **`kind: chore` needs one more edit: reset `attempts: 0`.** A chore bounced to
+     `needs-decision/` already spent its one attempt (`nightshift.chores.MAX_ATTEMPTS` is 1),
+     so leaving `attempts:` as-is strands the card the moment it lands back in `tasks/` —
+     `chores.eligible()` refuses it ("already attempted 1x") and the nightly `runner.select()`
+     refuses every `kind: chore` card outright, so nothing else will ever pick it up either.
+     The `branch:` field stays as-is (the worker resumes the existing `ai/<id>` branch rather
+     than cold-starting); only `attempts:` needs clearing.
    - **The answer opened a new question, or settled only part of a batched one:** keep it in
      `needs-decision/`, add the new question (batched, picker-shaped), and tell {{maintainer}} what is
      still open. Do **not** advance it.
@@ -212,6 +220,10 @@ branch already merged by hand is finished without a receipt, and
 Which lane: `done/` when it shipped and {{maintainer}} has already seen the result;
 `testing/` when it shipped and still needs them at the keyboard. Do not use `done/` to mean
 "I am finished typing."
+
+**"Already seen the result" means {{maintainer}} actually watched it run — not that they agreed the design in chat before you built it.** Agreeing a number, picking an option from a picker, approving an approach: none of that is having seen it. The inline route made this mistake systematically until `ingest._INLINE_CARD` stopped hardcoding `verify: review`, and that fix does not make you immune to making it by hand. If the change has a surface — anything they could open, run, read on screen or in another language — it goes to `testing/`.
+
+**A card you land in `testing/` needs a `## How to test`, and you are the one who writes it.** `card_schema` requires the section on a `verify: play` card in that lane and goes red on the move without it, but the gate is the backstop, not the reason: the runner has `settle()` to write it from the worker's verdict JSON and an inline card has nobody but you. Write the scenario in {{maintainer}}'s terms — open it, do X, expect Y — including the negative case where it applies, because "check it works" is not a scenario and they will have forgotten the diff by the time they read it.
 
 ### "Run card XYZ now" — dispatching through the runner
 

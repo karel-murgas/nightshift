@@ -60,7 +60,7 @@ def repo(tmp_path: Path) -> Path:
 #: A file `init` writes verbatim from a template, so a test can move "the template"
 #: by moving what `stage_templates` would produce. Chosen because nothing else in the
 #: tree reads it, so drifting it cannot break another assertion.
-TRACKED = ".claude/agents/stale-hunter.md"
+TRACKED = ".ai/recipes/write-a-test-that-earns-its-place.md"
 
 
 def _move_template(monkeypatch, rel: str, suffix: str = "\n## moved upstream\n") -> None:
@@ -589,7 +589,7 @@ def test_outgoing_is_sorted_worst_first(repo, monkeypatch):
     """A list nobody can triage is a list nobody reads."""
     _move_template(monkeypatch, TRACKED)
     _edit(repo, TRACKED, suffix=_para(*[f"line {i}" for i in range(20)]))
-    other = ".claude/agents/code-thread.md"
+    other = ".ai/recipes/verify-before-shipping-a-rule.md"
     _move_template(monkeypatch, other)
     _edit(repo, other, suffix=_para("a", "b", "c", "d"))
 

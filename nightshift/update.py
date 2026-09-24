@@ -1,67 +1,14 @@
 #!/usr/bin/env python3
 """`nightshift update` — bring the files an install wrote up to today's templates.
 
-**The gap this closes.** `init` never overwrites: a file that already exists is reported
-`kept` and left exactly as it was. That rule is right — it is what makes `init` safe to
-re-run and what stops it eating a `CLAUDE.md` somebody wrote — but it means a project
-installed in March is still running March's agent charters, March's skills, March's
-`Board/README.md`, forever, and nothing anywhere says so. `doctor.drift()` compares the
-*manifest* against the tree; nothing compared the *templates* against their installed
-copies. Found 2026-08-16, while answering a question about a different gap entirely.
-
-**What makes this safe is the receipt, and specifically its hashes.** A file that differs
-from today's template is one of two completely different things — one the operator edited,
-or one whose template moved — and they want opposite treatment. The disk cannot tell them
-apart; it has no memory of what it used to hold. `init` records what it wrote
-(`init.content_hash`, LF-normalised), so this can:
-
-    disk == recorded, template moved     ->  stale     overwrite; nothing of yours is there
-    disk != recorded, template unchanged ->  yours     leave it; you edited it, we did not
-    disk != recorded, template moved,
-        and the two agree                ->  current   converged; only the receipt is stale
-    disk != recorded, template moved,
-        and they disagree                ->  conflict  never overwritten, ever
-
-**The conflict case is the whole design, not an edge.** It is the one an evolving framework
-produces constantly — you customised a charter, and the charter's template also grew a
-section — and the wrong answers are "clobber it" and "shrug". So a conflict is never
-resolved by this module guessing. It is *reported*, and four verbs resolve it:
-`--diff` to see it, `--take` to accept the template, `--keep` to record that you looked at
-this version and chose your own, `--merge` to hand both to an agent. `--keep` writes the
-template's hash to the receipt's `declined` map, so the same question stays answered until
-the template moves again — a report that re-asks something you already decided is a report
-you stop reading.
-
-**Convergence is not a conflict, and the first version of this table called it one.** The
-receipt is one *point* in the past, so "both sides moved" says nothing about where they
-moved *to* — and the way a framework like this actually evolves is that an edit made in a
-project gets upstreamed, after which the two sides hold the same bytes and the receipt
-alone is behind. Comparing each side against the receipt and never against the other
-reported that as a conflict with an empty diff: the panel said "nothing is overwritten
-until you say which wins" about two versions that were byte-identical, and the DIFF button
-right beside it said `identical`. Found 2026-08-18 in the Project Tigress install, on a
-`command-center.bat` whose edit had been taken into the template. Nothing here writes the
-receipt straight — `survey` reads and never writes, which is what lets the panel call it on
-every page load — so the receipt stays behind until a verb touches the file; that costs
-nothing, because a re-derived answer is the same answer.
-
-**Three files are frozen and are never candidates.** `.ai/manifest.toml`, `.ai/hosts.json`
-and `.ai/corrections.log` are *records* — of an interview, of a machine, of what went
-wrong here — not copies of a template. The manifest says "edit freely, it is yours now" in
-its own header. The corrections log is the one artefact in the tree that cannot be
-regenerated, which is why `uninstall` already refuses to delete one with entries in it.
-
-**Report by default; `--apply` writes.** Same shape as `uninstall`, and for the same
-reason: a command whose first invocation — the one you type to find out what it does —
-rewrites files in your repo is the wrong default.
-
-**Receipt version 2 is required.** Version 1 recorded paths without content, so `stale` and
-`yours` are indistinguishable under it and every answer would be a guess. Refused outright
-rather than guessed at; there are two installs in the world that predate it and they are
-being updated by hand.
-
-No LLM in this module except `--merge`, which dispatches one through `worker._run_worker`
-exactly as `fix` does — the one place the Claude CLI is executed.
+Charters and skills are composed (`nightshift.compose`): each is regenerated from the
+template plus the project's `.ai/addenda/` file, a hand edit is backed up first, and none
+of the verdicts below applies to them (`framework-text-not-copied`). Every other copied
+file (launchers, `Board/README.md`, recipes) is judged three ways against the receipt's
+hashes: untouched and behind -> `stale` (written by `--apply`); edited here -> `yours`;
+edited and the template moved -> `conflict`, never written until `--take`, `--keep` or
+`--merge` says which wins (`--keep` is remembered as `declined`). The manifest, hosts file
+and corrections log are records and `frozen`. Reports by default; `--apply` writes.
 """
 from __future__ import annotations
 
@@ -74,7 +21,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import init, textio, tiers, uninstall
+from nightshift import compose, init, textio, tiers, uninstall
 from nightshift import hostconfig, startup, telemetry, worker
 from nightshift.manifest import AI_DIR, MANIFEST_NAME, ManifestError, find_root
 
@@ -101,10 +48,13 @@ MERGE_TIMEOUT_S = 600
 #: then what is fine.
 STALE, MISSING, CONFLICT, DECLINED, YOURS, CURRENT, UNTRACKED, FROZEN_V = (
     "stale", "missing", "conflict", "declined", "yours", "current", "untracked", "frozen")
+#: A composed file (`nightshift.compose`) that is not its composition. Always safe to
+#: write: the project's text lives in the addendum, and a hand edit is backed up first.
+REGENERATE = "regenerate"
 
 #: The verdicts `--apply` acts on. Deliberately short: everything else is either
 #: nothing to do, or something only a person can decide.
-APPLIES = (STALE, MISSING)
+APPLIES = (STALE, MISSING, REGENERATE)
 
 #: How many surplus lines a copy needs before `--outgoing` mentions it. Not a
 #: confidence threshold — it is the line between *personalisation* and *content*.
@@ -313,6 +263,14 @@ def survey(root: Path) -> Survey:
         # comparison — handled below, out of the staged loop.
         if rel == init.SETTINGS:
             continue
+        if rel in compose.COMPOSED:
+            # Generated, so never "yours" or a conflict, with or without a receipt entry:
+            # the project's passages are in the addendum by construction.
+            current = _on_disk(root / rel)
+            verdict = MISSING if current is None else (
+                CURRENT if current == staged else REGENERATE)
+            out.findings.append(Finding(rel, verdict, staged))
+            continue
         was = recorded.get(rel)
         if was is None:
             # Either the project's own file that `init` deliberately left alone, or one
@@ -457,11 +415,17 @@ def apply(found: Survey) -> list[str]:
     """
     done: list[str] = []
     written: dict[str, str] = {}
+    recorded = init.receipt_created(init.read_receipt(found.root) or {})
     for finding in found.findings:
         if not finding.actionable or finding.staged is None:
             continue
         path = found.root / finding.rel
         path.parent.mkdir(parents=True, exist_ok=True)
+        if finding.verdict == REGENERATE:
+            on_disk = _on_disk(path)
+            if on_disk is not None and init.content_hash(on_disk) != recorded.get(finding.rel):
+                # Someone edited the generated file; keep their text beside it.
+                textio.write_text_lf(path.with_name(path.name + BACKUP_SUFFIX), on_disk)
         if finding.staged == "":
             path.touch()
         else:
@@ -509,6 +473,16 @@ def find(found: Survey, rel: str) -> Finding:
     raise UpdateError(
         f"{rel} is not a file nightshift manages here. The ones it does, and which you "
         f"can act on:\n" + "\n".join(f"    {r}" for r in resolvable[:20]))
+
+
+def three_way(finding: Finding) -> Finding:
+    """`finding`, or a refusal when it is composed: its project text lives in the addendum."""
+    if finding.rel in compose.COMPOSED:
+        raise UpdateError(
+            f"{finding.rel} is generated (template + {compose.addendum_rel(finding.rel)}), "
+            f"so there is nothing to take, keep or merge. Put this project's text in the "
+            f"addendum and run `python -m nightshift.update --apply`.")
+    return finding
 
 
 def diff(finding: Finding, root: Path) -> str:
@@ -694,6 +668,8 @@ def _model(root: Path) -> str:
 _HEADINGS = {
     STALE: ("will update (the template moved; you never touched these)", "+"),
     MISSING: ("will write (ours, and gone from disk)", "+"),
+    REGENERATE: ("will regenerate (composed: template + your addendum in "
+                 f"{compose.ADDENDA}/)", "+"),
     CONFLICT: ("needs you (you edited it, and the template moved)", "!"),
     YOURS: ("yours (edited here; the template has not moved)", "="),
     DECLINED: ("declined (you kept yours against this exact version)", "="),
@@ -807,15 +783,16 @@ def main(argv: list[str] | None = None) -> int:
             print(text if text else "  identical — nothing between the two versions")
             return 0
         if args.take:
-            print(f"  {take(found, find(found, args.take))}")
+            print(f"  {take(found, three_way(find(found, args.take)))}")
             return 0
         if args.keep:
-            print(f"  {keep(found, find(found, args.keep))}")
+            print(f"  {keep(found, three_way(find(found, args.keep)))}")
             return 0
         if args.merge:
             mode = args.permission_mode or str(
                 hostconfig.host_setting(root, "permission_mode", "default"))
-            code, final = merge(found, find(found, args.merge), permission_mode=mode)
+            code, final = merge(found, three_way(find(found, args.merge)),
+                                permission_mode=mode)
             print(final or "  (the agent said nothing)")
             return code
     except UpdateError as exc:

@@ -204,7 +204,14 @@ nightshift update             # what moved, what you changed — writes nothing
 nightshift update --apply     # take every safe update
 ```
 
-It compares three things: the file on disk, the content hash `init` recorded when it
+Agent charters and skills are not compared at all: each is **generated** from the
+package's template plus the project's addendum in `.ai/addenda/<agents|skills>/<name>.md`
+(an addendum may open with frontmatter that overrides the template's keys one by one),
+and `--apply` regenerates it, backing a hand edit up as `.nightshift-old` first. Project
+text goes in the addendum; the `composed_text` gate fails on a generated file that
+is anything else.
+
+For every other file it wrote it compares three things: the file on disk, the content hash `init` recorded when it
 wrote it, and today's template. That is what separates *the template moved* (safe to
 overwrite — you never touched it) from *you edited this* (never touched) from a genuine
 **conflict**, where both changed. A conflict is never resolved by guessing:
@@ -505,6 +512,7 @@ project's one.
 |---|---|
 | `branch_role_prose` | docs naming the integration branch must agree with .ai/manifest.toml [branches] |
 | `card_schema` | cards on the board match the card schema, and carry no `state:` field |
+| `composed_text` | each composed charter/skill equals the framework template plus the project's addendum |
 | `conflict_markers` | no tracked text file carries a git conflict marker |
 | `coreference_sweep` | a numeric series or SCREAMING_SNAKE symbol this diff replaced must not survive in a live doc |
 | `corrections_log` | the correction log parses and its class/channel values are in vocabulary |

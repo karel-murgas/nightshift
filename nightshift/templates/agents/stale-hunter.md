@@ -28,33 +28,33 @@ staleness class **S5, semantic drift** (§2).
 Do not read other docs. Do not go looking for more files than the ones this doc names. If the
 doc names 30 modules, read the ones its claims actually depend on and say which you skipped.
 
-<!-- stale-ok: the example evidence path and the two worked findings below are
-     illustrations from the origin project's tree, not claims about this one. They
-     have to look like real file:line citations to teach the format, which is
-     exactly what makes them dangle here. -->
-## Output — one JSON array, nothing else
+## Output — this shape, and no other
+
+Emit **one ```json fenced block as the last thing in your final message**, nothing after it.
+You have no Write tool: do not try to create a file, and do not describe the verdict in prose
+instead of emitting the block.
 
 ```json
-[
-  {
-    "claim": "<verbatim quote from the doc, copied exactly>",
-    "doc_line": 118,
-    "verdict": "false" | "unverifiable",
-    "evidence": "{{package}}/scenes/game_scene.py:2418",
-    "note": "<one sentence: what the code actually does now>"
-  }
-]
+{"complete": true,
+ "findings": [{"claim": "<verbatim quote from the doc, copied exactly>",
+               "cite": "<file:line in source>",
+               "why": "<one sentence: what the code actually does now>"}],
+ "summary": "<one line: how many real drifts, or 'no drift found'>"}
 ```
 
-An empty array is a complete and successful answer. Say nothing else — no preamble, no
-summary, no recommendations.
+Three keys at the top level, three keys per finding. **There is no other accepted shape** —
+not a bare array, not doc_line / verdict / evidence / note. A verdict in any other shape is
+read back as empty and your work is discarded.
 
-**When the runner drives you** (`nightshift/runner.py --stale`), its prompt overrides the shape
-above: it names a verdict-file path and asks for an object with `complete`, `findings`
-and `summary`. Follow the prompt you were given — it is the per-invocation contract, and the
-runner needs the `complete` flag to know whether it may record the doc as verified or must
-re-check it next time. Same findings, same quote-or-drop rule; only the envelope differs.
-When you are run by hand with no such instruction, emit the array.
+`complete` must be `true` only if you finished reading the whole document. If you ran out of
+room, set it `false` — the caller re-checks the doc next time rather than record a
+verification that did not happen. An empty `findings` list with `complete: true` is a
+complete and successful answer: the doc is accurate. Say nothing else — no preamble, no
+recommendations.
+
+<!-- One shape only: the runner's prompt says "Follow your charter", so a second shape here
+     is a contract the consumer never reads
+     (`projected-charter-carried-a-contract-its-consumer-never-reads`). -->
 
 ## The four rules
 
