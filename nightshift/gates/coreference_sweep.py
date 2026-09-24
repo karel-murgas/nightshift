@@ -38,7 +38,7 @@ class/def; this one watches the literals inside them.
 removed against added lines *per file*, on the reasoning that a citation moved
 between paragraphs of one doc has not gone away. That reasoning skipped the case
 where a citation moves between *docs*, which is what a documentation restructure
-does to hundreds of symbols at once: Dungeoneer's
+does to hundreds of symbols at once: Project Tigress's
 `state-md-is-a-changelog-not-a-state` moved a per-card register out of an
 always-loaded orientation file into a companion and drew 100 violations, every
 one a live constant that had simply changed file, and every one reported on a
@@ -143,7 +143,7 @@ def replaced_tokens(repo_root: Path) -> dict[str, str]:
     # it moved. Subtracting the diff-wide added set is what separates a
     # *replacement*, which is what this gate is for, from a *relocation* across
     # files, which a documentation restructure does by the hundred. Measured
-    # 2026-09-06 on Dungeoneer's `state-md-is-a-changelog-not-a-state`: moving
+    # 2026-09-06 on Project Tigress's `state-md-is-a-changelog-not-a-state`: moving
     # state.md's per-card register out to a companion reported 100 violations,
     # every one of them a live constant that had simply changed file, and every
     # one on an innocent doc the branch never touched.

@@ -19,10 +19,11 @@ tool that reads an LF file and writes it back converts it:
     b'x\r\ny\r\n'
 
 That is exactly the read-modify-write shape `board.py` uses for every card, and
-`digest.py`/`corrections.py`/`stale_sweep.py` use for the files they own. Measured
-2026-07-30 (the loose-end sweep before Session K): running `corrections.py --compact`
-and `digest.py` on this box rewrote `.ai/corrections.log`, `.ai/corrections.archive.log`
-and `Digest.md` as CRLF and turned the `line_endings` gate red. The board writers had
+`corrections.py`/`stale_sweep.py` use for the files they own (`digest.py` did too,
+before it was removed 2026-09-02). Measured 2026-07-30 (the loose-end sweep before
+Session K): running `corrections.py --compact` and the now-deleted `digest.py` on this box rewrote
+`.ai/corrections.log`, `.ai/corrections.archive.log` and `Digest.md` as CRLF and
+turned the `line_endings` gate red. The board writers had
 the same bug and had simply not run since the gate landed, so the next card move
 would have tripped it.
 
@@ -30,7 +31,7 @@ would have tripped it.
 under `.ai/runs/` do not need it -- git never sees them -- but there is no cost to
 using it there either, and a uniform rule is what stops the seventh writer from
 copying the wrong pattern. `encoding="utf-8"` is not optional and not a default:
-this tree carries non-ASCII in cards, in the corrections log and in the digest.
+this tree carries non-ASCII in cards and in the corrections log.
 
 Deliberately stdlib-only and dependency-free -- it imports nothing from `nightshift`
 either -- so it is safe to import from any module regardless of import order. It is

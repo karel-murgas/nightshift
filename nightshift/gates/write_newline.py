@@ -19,7 +19,7 @@ every `.ai/` tool uses on the files it owns silently converted them:
     >>> p.read_bytes()
     b'x\r\ny\r\n'
 
-Found 2026-07-30 by running `corrections.py --compact` and `digest.py`: three tracked
+Found 2026-07-30 by running `corrections.py --compact` and the since-deleted `digest.py`: three tracked
 files went CRLF and `line_endings` went red. **The symptom gate worked; the producers
 were the bug**, and they had merely not run since it landed the same day -- so the next
 board move would have failed a card on a formality with nothing wrong with the card.

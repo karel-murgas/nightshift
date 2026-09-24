@@ -371,9 +371,9 @@ def run_lifecycle(ctrl: Path, base: str, *, kind: str, label: str,
         capabilities = hostconfig.host_capabilities(work)
         hostconfig._log(f"host capabilities: {', '.join(sorted(capabilities)) or '(none declared)'}")
 
-        # The run's own account of itself, which the digest reports instead of
+        # The run's own account of itself, which the panel reports instead of
         # inferring from lane state (`run_record`). Opened here — after the work
-        # root is fixed, so it lands in the checkout whose digest will read it, and
+        # root is fixed, so it lands in the checkout whose panel will read it, and
         # before any `select()`, so the skip list has somewhere to go. A dry run
         # gets the no-op record: `--dry-run` promises no writes.
         record = run_record.null() if dry_run else run_record.start(
@@ -685,8 +685,8 @@ def _tasks_queue(ctx: RunContext, args: argparse.Namespace) -> Queue:
     record.skipped([(c.card.id, c.reason) for c in candidates if not c.dispatchable])
     # And the ones that DID run while over `CARD_COMFORT_BYTES`. A separate field
     # because an oversized card is dispatchable by design, so it is absent from the
-    # list above — which left the digest silent about the one case the signal exists
-    # for, a card dispatched over and over while it grows.
+    # list above — which left the old digest silent about the one case the signal
+    # exists for, a card dispatched over and over while it grows.
     record.oversized(dispatch.oversized_entries(candidates))
 
     if args.card:
@@ -718,10 +718,10 @@ def _work_queue(ctx: RunContext, args: argparse.Namespace, queue: Queue,
         """End-of-loop reason, said once to both readers.
 
         The log is for tailing a run in flight; the record is what the
-        morning digest reports. One call site so they cannot disagree — the
+        panel reports. One call site so they cannot disagree — the
         first version of this instrumentation left `record.stop` off two of
         the nine `break` paths, and a night that ended for an unrecorded
-        reason reads in the digest as a night that simply ran out of cards.
+        reason reads in the panel as a night that simply ran out of cards.
         """
         hostconfig._log(f"stopping — {reason}")
         record.stop(reason)
@@ -900,7 +900,7 @@ def _work_queue(ctx: RunContext, args: argparse.Namespace, queue: Queue,
                  f"memory it needs right now")
             # `note`, not `skipped`: that one *replaces* the selection-time list
             # — one call per run, by contract — and appending here would erase
-            # the very thing the digest reads to explain a quiet night.
+            # the very thing the panel reads to explain a quiet night.
             record.note(f"{candidate.card.id} was not dispatched: a local model "
                         f"is resident, this run did not start it, and its memory "
                         f"could not be released")

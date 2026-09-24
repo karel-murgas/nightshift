@@ -215,7 +215,7 @@ def tokens(root: Path, tables: dict[str, dict]) -> dict[str, str]:
     name = project.get("name") or root.name
     board_root = tables.get("board", {}).get("root", "Board")
     # The handle the skill tells a session to sign an answer with MUST be the one
-    # `digest` matches, or the answered-but-not-moved advisory silently never fires
+    # `decide.answer_pattern` matches, or the answered-but-not-moved advisory silently never fires
     # — the two are the write side and the read side of one convention. Falls back
     # to the git handle when the field was declined, so the skill still shows a
     # concrete example rather than a bare placeholder; the manifest key is named

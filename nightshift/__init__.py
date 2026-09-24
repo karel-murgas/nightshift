@@ -1,4 +1,4 @@
-"""The Nightshift framework, extracted from Dungeoneer's `.ai/` (07_portability.md).
+"""The Nightshift framework, extracted from Project Tigress's `.ai/` (07_portability.md).
 
 Deliberately empty of re-exports. Every module here is imported by its own name
 (`from nightshift import textio`, `from nightshift.gates.base import Violation`) so that

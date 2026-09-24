@@ -1,5 +1,5 @@
 """Gate: no file under `.ai/` hand-rolls pytest's parallel flags — they belong to
-`.ai/suite.py` alone.
+`nightshift/suite.py` alone.
 
 **Earned by the bug it would have caught, not by being easy** (`00_architecture.md`
 §15). Three places in this tree run pytest on the project's behalf: `runner.py`,

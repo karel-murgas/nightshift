@@ -37,7 +37,7 @@ explaining a marker mechanism will always contain the marker; the parser has to
 know the difference between mentioning one and writing one.
 
 **Default scan roots come from the project's manifest** (07_portability.md
-§8 step 3), not a hardcoded list of Dungeoneer directories. `.ai/` is always
+§8 step 3), not a hardcoded list of Project Tigress directories. `.ai/` is always
 included -- every appeal-bearing gate lives there or checks it -- and
 `project.source_dirs` / `project.extra_source_dirs` add whatever the
 consuming project calls its code and tests. A repo with no manifest (or one

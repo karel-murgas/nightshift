@@ -1,39 +1,40 @@
-"""The structured record of one runner invocation — the digest's data source.
+"""The structured record of one runner invocation — the panel's data source.
 
-Until 2026-07-30 the digest answered "what happened last night?" by diffing the
-board's lanes against the previous `digest:` commit. That data source cannot see
-a run at all, only where cards ended up, and the difference is not academic —
-on the night of 2026-07-30 it produced a digest that said **"0 failed · Nothing
-failed"** about a night in which three cards were dispatched, all three failed
-on the same broken gate, the run aborted on `CONSECUTIVE_FAILURE_STOP`, and the
-staleness sweep then burned two and a half hours across 58 docs returning zero
-verdicts. Lane-diffing saw none of it: a failed attempt bounces the card back to
-`tasks/`, which is the lane it started in, so the diff was empty. Worse, the
-baseline is the last *digest* commit rather than the last *run*, so two days of
-Karel's own interactive work got reported as things the run had finished.
+Until 2026-07-30 the digest (removed 2026-09-02) answered "what happened last
+night?" by diffing the board's lanes against the previous `digest:` commit. That
+data source could not see a run at all, only where cards ended up, and the
+difference was not academic — on the night of 2026-07-30 it produced a digest
+that said **"0 failed · Nothing failed"** about a night in which three cards were
+dispatched, all three failed on the same broken gate, the run aborted on
+`CONSECUTIVE_FAILURE_STOP`, and the staleness sweep then burned two and a half
+hours across 58 docs returning zero verdicts. Lane-diffing saw none of it: a
+failed attempt bounces the card back to `tasks/`, which is the lane it started
+in, so the diff was empty. Worse, the baseline was the last *digest* commit
+rather than the last *run*, so two days of Karel's own interactive work got
+reported as things the run had finished.
 
 So the run reports on itself. Each invocation of `runner.py` opens a record here
 and writes its own events into it — every dispatch with its outcome, every card
-skipped and why, the sweep's real yield, why it stopped — and the digest reads
+skipped and why, the sweep's real yield, why it stopped — and the panel reads
 the records instead of guessing from lane state. Three consequences worth
-naming, because each fixes a specific failure of the old approach:
+naming, because each fixes a specific failure of the old digest approach:
 
 - **A failure is an event, not a lane.** `attempt 1 failed, will retry` is
   recorded as a failure even though the card never left `tasks/`.
 - **Daytime work is absent by construction.** A card Karel moves at 15:00 is in
   nobody's record, so it cannot be reported as something a run did (his
-  instruction, 2026-07-30). The board sections of the digest still see it —
+  instruction, 2026-07-30). The board views in the panel still see it —
   they are "what is waiting on you", not "what happened".
 - **An abandoned run still testifies.** The record is flushed after every event,
-  so the night that was killed mid-sweep and never reached its own digest is
+  so a night that was killed mid-sweep and never reached its own report is
   still there to be read by the next thing that looks.
 
-**No LLM anywhere in here** — same rule as the gates and the digest
+**No LLM anywhere in here** — same rule as the gates
 (`00_architecture.md` §12). Every field is something the runner observed.
 
 Records live in `.ai/runs/records/`, which is gitignored and machine-local, like
-the rest of `.ai/runs/`. The rendered `Digest.md` is the committed artefact; the
-evidence behind it stays on the host that produced it.
+the rest of `.ai/runs/`. Nothing renders them to a committed artefact any more;
+the panel reads the JSON directly and stays on the host that produced it.
 """
 from __future__ import annotations
 
@@ -50,8 +51,8 @@ DIR = Path(".ai/runs/records")
 # Records are small (a few KB) and only the recent ones are ever read, but
 # nothing else would delete them — the same "nothing ever unlinks anything in
 # `.ai/runs/`" hole `runner-prune-run-dirs` fixed for attempt directories. Thirty
-# is comfortably more than the digest's window (records since the last digest,
-# normally one or two) with room for a stretch of runs that never rendered one.
+# is comfortably more than the panel's window (normally one or two nights) with
+# room for a stretch of runs nobody has looked at yet.
 KEEP = 30
 
 # Dispatch outcomes that mean "a human has to decide something", "this landed",
@@ -77,12 +78,12 @@ KEEP = 30
 # where `settle` escalates it to needs-decision/ after the card's attempts run
 # out — `FAILED_OUTCOMES`'s own "failed" string has the identical retry-vs-retire
 # ambiguity already and nothing distinguishes them there either. The board-lane
-# section of the digest (not this file) is what actually shows a card now sitting
+# view in the panel (not this file) is what actually shows a card now sitting
 # in needs-decision/, regardless of how the dispatch that put it there was logged.
 # `pick` is a decision even though the diff landed (`worktree.unadopted_artefacts`):
 # the attempt produced candidates and installed none, so the card is in
 # needs-decision/ waiting to be told which one. Reporting it as landed would put
-# it in the digest’s "these are done" list, which is the misreport the outcome was
+# it in the panel's "these are done" list, which is the misreport the outcome was
 # introduced to stop.
 DECISION_OUTCOMES = frozenset({"parked", "needs_decision", "pick"})
 LANDED_OUTCOMES = frozenset({"review", "reviewed"})
@@ -226,7 +227,7 @@ class Record:
 
         Recorded in one call from the selection loop rather than accumulated,
         because selection happens once per run and the whole list is known then.
-        The digest groups these by reason: five art cards blocked on
+        The panel groups these by reason: five art cards blocked on
         `requires: gpu-box` is one fact about the host, not five about the cards.
         """
         self.data["skipped"] = [{"card": cid, "reason": reason} for cid, reason in entries]
@@ -264,13 +265,13 @@ class Record:
         `oversized-cards-are-bad-worker-input`, advisory over a hard stop — so it
         is absent from `skipped` by construction, and the case the signal exists
         for (a card dispatched again and again while it grows) was therefore the
-        one case `Digest.md` stayed silent about. Folding it into `skipped`
-        instead would have made the digest's own `### Skipped — N` heading and
+        one case the old digest's `Digest.md` stayed silent about. Folding it into
+        `skipped` instead would have made the panel's `### Skipped — N` heading and
         its *"Every card on the board was dispatchable"* fallback say something
         untrue about a card that ran.
 
         Numbers, not the sentence the run log prints. The record holds what the
-        runner observed and the digest decides how it reads in the morning — and
+        runner observed and the panel decides how it reads in the morning — and
         the two surfaces phrase it differently on purpose: one line per card in
         the log, N cards under one shared remedy on the panel.
         """
@@ -280,12 +281,12 @@ class Record:
 
     def stale(self, *, selected: int, checked: int, verified: int, carded: int,
               incomplete: int = 0, cards: list[str] | None = None) -> None:
-        """The sweep's real yield, and since `.ai/stale_status.json` went with the
-        digest, the only record of it. `selected` and `incomplete` are the two that
-        status file never carried, and they are the two that distinguish "swept,
-        nothing had drifted" from "swept 58 docs and every single verdict came back
-        unusable" — which is what actually happened on 2026-07-30 and which the
-        digest reported as silence."""
+        """The sweep's real yield, and since `.ai/stale_status.json` was removed with
+        the digest (2026-09-02), the only record of it. `selected` and `incomplete`
+        are the two that status file never carried, and they are the two that
+        distinguish "swept, nothing had drifted" from "swept 58 docs and every
+        single verdict came back unusable" — which is what actually happened on
+        2026-07-30 and which the digest reported as silence."""
         self.data["stale"] = {
             "selected": selected, "checked": checked, "verified": verified,
             "carded": carded, "incomplete": incomplete, "cards": cards or [],
@@ -382,7 +383,7 @@ def read_all(root: Path) -> list[dict]:
     """Every readable record, newest first.
 
     A record that will not parse is skipped rather than raised on: it is one
-    run's evidence, the digest's job is to report the rest, and a half-written
+    run's evidence, the panel's job is to report the rest, and a half-written
     file from a run killed mid-`save` is a thing that will happen.
     """
     try:

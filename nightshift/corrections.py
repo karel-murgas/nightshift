@@ -40,7 +40,7 @@ if hasattr(sys.stdout, "reconfigure"):
 LOG = Path(".ai/corrections.log")
 ARCHIVE = Path(".ai/corrections.archive.log")  # gate-ok(source_reference_liveness): created by
 # --compact the first time it runs; this repo's own log has never been compacted, so the file
-# does not exist here yet, though Dungeoneer's .gitignore tracks it once created.
+# does not exist here yet, though Project Tigress's .gitignore tracks it once created.
 VOCAB = Path(".ai/gates/data/corrections_vocab.json")
 
 FIELDS = ("date", "slug", "klass", "channel", "gate", "note")
@@ -64,7 +64,7 @@ _ARCHIVE_HEADER = (
     "# pipe fields as the active log; every entry here carries a `[[disposition: ...]]`\n"
     "# annotation on its NOTE -- that is what made it eligible to move. Read by\n"
     "# `corrections.report()` for historical cluster counts; never by `backlog()`, so\n"
-    "# an archived entry can never itself re-trigger the digest's harvest nudge.\n"
+    "# an archived entry can never itself re-trigger the panel's harvest nudge.\n"
     "\n"
 )
 
@@ -164,8 +164,9 @@ def validate(entries: list[Entry], vocab: dict[str, dict[str, str]]) -> list[tup
 # nudge never fired.
 #
 # Owned here rather than by the reader, which is the correction the digest's copy
-# invited: the thresholds lived inside `digest.py` beside the one line that rendered
-# them, so when the digest went there was nowhere for them to be but here — next to
+# invited: the thresholds lived inside `digest.py` (deleted 2026-09-02) beside the
+# one line that rendered them, so when the digest was removed there was nowhere for
+# them to be but here — next to
 # `backlog()`, whose answer they judge.
 HARVEST_BACKLOG_COUNT = 20
 HARVEST_BACKLOG_DAYS = 30

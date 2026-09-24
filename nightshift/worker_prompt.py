@@ -5,10 +5,10 @@ are all its own. But some of what a dispatched worker must be told is a property
 the harness runs*, not of any codebase, and putting that in each project's agent charter
 means it is written N times and drifts N ways.
 
-`TOOL_ECONOMY` is the first such block. It exists because a Dungeoneer card was measured
+`TOOL_ECONOMY` is the first such block. It exists because a Project Tigress card was measured
 on 2026-08-01: 219 turns and 216 tool calls for a 22-file, 77+/100- diff — 40 minutes of
 wall clock against 18 minutes of actual thinking. Nothing about that ratio was
-Dungeoneer-specific. The three habits below account for most of the gap, and each is
+Project Tigress-specific. The three habits below account for most of the gap, and each is
 duplication rather than diligence:
 
 * three spellings of one case-insensitive search (`stair|STAIR`, `[Ss]tair`, `stair`),
@@ -29,7 +29,7 @@ __all__ = ["TOOL_ECONOMY", "DOC_TRUTH", "INTERACTIVE_CARD", "INTERACTIVE_CARD_FE
 #: The second such block, and it is here for the same reason as the first: the rule was
 #: stated, generalised, and then lived somewhere the worker never reads.
 #:
-#: Dungeoneer's `.ai/corrections.log`, 2026-08-08,
+#: Project Tigress's `.ai/corrections.log`, 2026-08-08,
 #: `memory-recorded-the-acceptance-not-the-delivery`: *"WRITE THE MEMORY DOC FROM THE DIFF,
 #: NOT FROM THE CARD -- and when a card ships partially, the doc sentence about the
 #: unshipped half is the first one to check."* The entry ends by conceding that nothing can

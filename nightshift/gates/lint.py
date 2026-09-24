@@ -21,10 +21,10 @@ always passes `--select` and `--ignore` from the resolved config, never
 ruff's bare invocation.
 
 **Two things measured about scope, the same shape as `dead_code`'s findings
-about `main.py` and `tests/`.**
+about *main.py* and `tests/`.**
 
 1. Unlike vulture, ruff's rules here are file-local (no cross-module symbol
-   table), so there is no `main.py`-must-be-included or `tests/`-must-be-
+   table), so there is no *main.py*-must-be-included or `tests/`-must-be-
    excluded trap — a project can point `[lint].paths` at whatever it likes
    with no false positives from either direction.
 2. `F821` (undefined name) is *not* in the default `select` for a reason worth

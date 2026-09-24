@@ -9,11 +9,11 @@ orchestrator lived there.
 
 **It does not any more, and nothing noticed.** 07_portability.md §8 moved ~16,800
 lines into this package; the gates stayed pointed at the directory those lines had
-left. Measured 2026-08-02: in Dungeoneer the four AST gates covered 19 small files
+left. Measured 2026-08-02: in Project Tigress the four AST gates covered 19 small files
 instead of the 10,500-line orchestrator that earned them, in a consuming project
 they covered that project's own gates only, and in this package's own checkout they
-covered nothing at all. `run_stop_recorded` was worse — its target was
-`.ai/runner.py`, a path that had not existed since step 4, so `if not
+covered nothing at all. `run_stop_recorded` was worse — its target was the
+since-retired *.ai/runner.py*, a path that had not existed since step 4, so `if not
 path.is_file(): return []` made it green while reading zero bytes, in every repo,
 for as long as it had shipped.
 
@@ -68,8 +68,8 @@ def tooling_files(repo_root: Path, *, exclude: str = "") -> list[Path]:
     """Every `.py` file under `tooling_dirs`, sorted, `__pycache__` dropped.
 
     `exclude` drops one file *by name* — `pytest_invocation`'s owner exemption,
-    which has to survive the module living at `.ai/suite.py` in the tree that
-    earned the rule and at `nightshift/suite.py` now.
+    which has to survive the module living at the since-retired *.ai/suite.py*
+    in the tree that earned the rule and at `nightshift/suite.py` now.
     """
     found: list[Path] = []
     for base in tooling_dirs(repo_root):

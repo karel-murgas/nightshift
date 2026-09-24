@@ -110,7 +110,7 @@ _OPTIONAL_FIELDS = frozenset({"requires", "checker", "verify", "kind", "surface"
 # specific rather than a convenience: for a one-prompter the *intent is* the
 # approach, so a mandated second section gets filled with a restatement of the
 # first. That is worse than its absence — it reads as a considered "how" and is
-# not one, and the digest inlines it as though it were. Everything else a card
+# not one, and the panel inlines it as though it were. Everything else a card
 # owes stays owed.
 #
 # The same sentence is exactly true of inline work, and it is the reason `inline`
@@ -504,7 +504,7 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
             )
 
     # A `tasks/` card must state the core of *how* the work is done in one place a
-    # human reads first — `## Approach` (the one-paragraph principle the digest
+    # human reads first — `## Approach` (the one-paragraph principle the panel
     # inlines), or `## Subject` for a visual asset whose substance is the picture,
     # not prose (03_board.md §12b). Only `tasks/`, not every actionable lane:
     # archived cards predate the rule and must not be retroactively reddened, and
@@ -522,7 +522,7 @@ def _check_card(path: Path, lane: str, repo_root: Path) -> list[Violation]:
                 "card_schema: missing `## Approach` — a `tasks/` code card must state the "
                 "core of how the change works in one paragraph (or `## Subject` for an "
                 "art/audio card, or `kind: chore` for a one-prompter whose intent *is* "
-                "its approach); it is what the digest shows the maintainer",
+                "its approach); it is what the panel shows the maintainer",
             )
         )
 
@@ -585,7 +585,7 @@ def _orphans(repo_root: Path) -> list[Violation]:
     gate said "All clear", because it enumerates lanes and a file in no lane is
     in no glob. That is the worst possible blind spot for this particular gate —
     a card outside every lane has no state, so it is invisible to the runner,
-    absent from the digest, and silently not-done. A drag that lands slightly
+    absent from the panel, and silently not-done. A drag that lands slightly
     wrong produces exactly this, so it will recur.
 
     **A dot-prefixed subdirectory is never a lane, and is skipped rather than
@@ -620,7 +620,7 @@ def _orphans(repo_root: Path) -> list[Violation]:
                 rel,
                 1,
                 f"card_schema: card sits in {where} — it has no state, so the runner "
-                f"cannot see it and the digest will not report it — one state means one lane",
+                f"cannot see it and the panel will not report it — one state means one lane",
             )
         )
     return out
@@ -632,7 +632,7 @@ def _duplicates(found: list[tuple[Path, str]], repo_root: Path) -> list[Violatio
     The exact mirror of `_orphans`, and the same sentence justifies both: *one state
     means one lane*. A card in no lane has no state; a card in two has two, and every
     reader picks a different one — `board.find` returns whichever lane it enumerates
-    first, the digest counts the card twice, and the runner can re-dispatch work that
+    first, the panel counts the card twice, and the runner can re-dispatch work that
     already shipped.
 
     Found the hard way on 2026-08-23. A board move ran `git mv`, but the commit that

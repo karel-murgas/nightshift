@@ -5,7 +5,7 @@
 design (`00_architecture.md` §12): each is importable and runnable on its own,
 and none may assume another ran first. That independence was quietly paid for
 in the only currency nobody was measuring — the same files, read and parsed
-from scratch by every gate that needed them. On Dungeoneer, 2026-08-01:
+from scratch by every gate that needed them. On Project Tigress, 2026-08-01:
 
 * `appeal_markers.scan()` tokenizes every `.py` file in the appeal scan roots
   (276 of them here). **Seven** gates call it, because seven gates support
@@ -40,7 +40,7 @@ hundreds of gate tests in one process, each against its own fixture tree, and
 an unbounded dict of parsed ASTs would grow for the length of the session.
 Eviction is oldest-first (dicts are insertion-ordered) at `_MAX_ENTRIES`,
 which is set well above any single repo's file count so the real run never
-evicts (Dungeoneer's full 31-gate run holds ~900 entries).
+evicts (Project Tigress's full 31-gate run holds ~900 entries).
 """
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ __all__ = ["cached", "read_text", "tree", "clear", "stats"]
 
 T = TypeVar("T")
 
-# Comfortably above a single run's entry count (Dungeoneer: ~900 across all
+# Comfortably above a single run's entry count (Project Tigress: ~900 across all
 # namespaces), so a one-shot gate run never evicts and the cap only bites a
 # pytest session accumulating fixture trees.
 _MAX_ENTRIES = 8192

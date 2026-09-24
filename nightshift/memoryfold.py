@@ -7,7 +7,7 @@ same list, so two cards finishing the same night conflict **by construction** �
 because they disagree, but because they chose the same anchor. Git cannot merge that
 and should not: it is two additions at one insertion point.
 
-Dungeoneer paid for it four times — 2026-08-09 (`menu-art-cyberware`), 2026-08-13
+Project Tigress paid for it four times — 2026-08-09 (`menu-art-cyberware`), 2026-08-13
 (`hack-end-protection`), and both cards of 2026-08-22 — each resolved by hand, each
 looking like a one-off. Karel, 2026-08-23, on being asked to fix the escalation and
 then the escalation's cause: *"Fix the cause too (the append, state.md and all that
@@ -155,7 +155,7 @@ def insert_under(text: str, heading: str, entry: str) -> str | None:
     """`text` with `entry` inserted directly below `heading`, or None.
 
     **The match is a prefix, and it must be unique.** Exact would be tighter and does
-    not survive contact: Dungeoneer's register heading is `## Current State (updated
+    not survive contact: Project Tigress's register heading is `## Current State (updated
     2026-08-18, branch \\`ai/perks-tinkering\\`)` — a stamp that changes whenever
     someone edits the file, so an exact `under` would silently stop matching one day
     and the fold would start reporting a missing heading for a file that is fine.
@@ -164,7 +164,7 @@ def insert_under(text: str, heading: str, entry: str) -> str | None:
 
     **Where exactly: immediately before the section's current newest entry**, not
     immediately after the heading. The two are the same thing only when the heading
-    is followed straight away by the list, and Dungeoneer's register is not —
+    is followed straight away by the list, and Project Tigress's register is not —
     `## Current State` is followed by a two-line paragraph explaining what a register
     entry is, and inserting "directly below the heading" wedged the new entry between
     the heading and its own preamble. Verified by running it against the real file

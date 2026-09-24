@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """PreToolUse hook: a card-execution spawn must resolve its tier explicitly.
 
-00_architecture.md §16, enforcement point 3. Dungeoneer's `adrenaline-pump`
+00_architecture.md §16, enforcement point 3. Project Tigress's `adrenaline-pump`
 card once ran at the lead tier because the dispatch call passed no `model` and
 a subagent silently inherits the parent's. The tier table had existed for a
 day and nothing read it. Card frontmatter (`tier:`) and a dispatcher lookup are

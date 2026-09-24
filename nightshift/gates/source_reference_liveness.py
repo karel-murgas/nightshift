@@ -1,14 +1,14 @@
 """Gate: a Python string literal that looks like a repo path must resolve to
 something real (`hook-parsed-a-module-that-moved`, 2026-08-02, still open in
-Dungeoneer's `.ai/corrections.log` until this lands).
+Project Tigress's `.ai/corrections.log` until this lands).
 
 `doc_reference_liveness` catches a **doc** naming a file or symbol that no
 longer exists. Nothing did the same for **source** — the one form neither the
 type checker, the import graph, nor the test suite can follow. Three real
 incidents share the same shape: `worktree_fence._fence_env_name` and
-`ideas_fence.known_lanes` AST-parsed `.ai/runner.py` and `.ai/board.py` as
-paths after both modules had moved into this package, and both fenced
-functions fail *open* by design, so the guards they fed simply stopped
+`ideas_fence.known_lanes` AST-parsed the since-retired *.ai/runner.py* and
+*.ai/board.py* as paths after both modules had moved into this package, and
+both fenced functions fail *open* by design, so the guards they fed simply stopped
 arming — no error, no log line, only a test that happened to check. A fourth,
 found the same day: `tiers.py` held `ARCHITECTURE =
 Path(".claude/plans/ai_team/00_architecture.md")`, a doc that
@@ -55,7 +55,7 @@ now handled structurally rather than by marker:**
   on the doc side. But this project's docstrings are long and discursive by
   house style, and scanning them turned up dozens of sites that were never
   the defect this gate exists to catch: a framework module narrating "here
-  is how a *consuming* project would reference this" using Dungeoneer as the
+  is how a *consuming* project would reference this" using Project Tigress as the
   worked example, or `init.py`/`uninstall.py` describing paths they write
   into *whatever repo installs this package*, never their own. All four
   historical incidents this gate is proving out are *live* literals —  an
@@ -107,7 +107,7 @@ otherwise get wrong by omission:
   `.claude/plans/ai_team/SESSIONS.md` *and* the live
   `.claude/memory/ai_team/SESSIONS.md`, because self-gating this repo can
   never confirm either: the doc they name lives only in a consuming project
-  (Dungeoneer), never in nightshift's own tree, and `branch_role_prose.check()`
+  (Project Tigress), never in nightshift's own tree, and `branch_role_prose.check()`
   already resolves the real question — which home the checked project has —
   at runtime. Appealed in place, both lines, with that reasoning; narrowing
   the gate to somehow accept one and not the other would have meant

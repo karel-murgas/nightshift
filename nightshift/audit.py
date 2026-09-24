@@ -100,8 +100,8 @@ def core_gate_names(repo_root: Path) -> frozenset[str]:
 
 # `| 5 ★ | rule text | source | enforcement | checkability |`
 _ROW = re.compile(r"^\|\s*(\d+)\s*(★?)\s*\|(.+)$")
-# A gate citation, project-side (`.ai/gates/name.py`) or core
-# (`nightshift/gates/name.py`, or the dotted `nightshift.gates.name` form) — a
+# A gate citation, project-side (`.ai/gates/<name>.py`) or core
+# (`nightshift/gates/<name>.py`, or the dotted `nightshift.gates.<name>` form) — a
 # row's enforcement can name either home (07_portability.md §8 step 3).
 _GATE_REF = re.compile(r"(?:\.ai/gates/|nightshift/gates/|nightshift\.gates\.)(\w+?)(?:\.py)?(?=[`\s,.)]|$)")
 # The rule matrix is §A. The doc has other numbered tables — §B's work-type
@@ -174,7 +174,7 @@ def local_gate_files(repo_root: Path) -> set[str]:
     helpers, which `nightshift.gates.run` identifies by their having no `check`
     rather than by name. This used to keep its own hand-written skip list of
     those, which was wrong in the direction a list is always wrong — it named
-    core's helpers (`doc_scan`) and could not name a *project's*. Dungeoneer's
+    core's helpers (`doc_scan`) and could not name a *project's*. Project Tigress's
     `i18n_adapter_loader` arrived on 2026-08-03 with the three i18n gates it
     serves and was counted as a seventeenth gate in a report whose whole job is
     to be the honest number. Intersecting with `discover` asks the runner what a
@@ -189,7 +189,7 @@ def local_gate_files(repo_root: Path) -> set[str]:
 
 def gate_files(repo_root: Path) -> set[str]:
     """Every gate name §A may legitimately cite: this project's own gates, plus
-    every gate the `nightshift` core package ships. A Dungeoneer rule can be
+    every gate the `nightshift` core package ships. A Project Tigress rule can be
     enforced by a shared core gate — row 22 (branch_role_prose) is exactly
     this — so a project rule citing a gate that moved to core
     (07_portability.md §8) must not read as drift merely because the file now

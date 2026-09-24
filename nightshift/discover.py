@@ -16,7 +16,7 @@ differently:
 
   - **`branches.integration` is required and is asked every time**, including under
     `--yes`, because nothing downstream works without it and a plausible wrong
-    answer is worse than none. Dungeoneer is the cautionary case: `dev` is *stable*
+    answer is worse than none. Project Tigress is the cautionary case: `dev` is *stable*
     there and is a forbidden base, which no heuristic would ever guess.
   - **`memory.orientation`, `layering.forbid`, `board.decision_attributor` and
     `project.maintainer` are optional**, so the honest non-interactive answer is to
@@ -108,7 +108,7 @@ def project_name(root: Path) -> Proposal:
     "The directory's" means the *main* checkout's, not a linked worktree's own —
     a worktree the runner cuts for a card is named after the card
     (`.dungeoneer-worktrees/<card-id>`), and a project with no `pyproject.toml`
-    (Dungeoneer has none) would otherwise misreport its own name the moment
+    (Project Tigress has none) would otherwise misreport its own name the moment
     discovery runs inside one. `--git-common-dir` is shared by every worktree and
     points at the main checkout regardless of which one `root` is.
     """
@@ -219,7 +219,7 @@ def integration_branch(root: Path, stable: str | None = None) -> Proposal:
 
     `forbidden_bases()` is built from it, so a wrong answer means the runner builds
     every card on a branch nobody wanted — and unlike most misconfigurations that
-    one produces work, commits and merges before anybody notices. Dungeoneer is the
+    one produces work, commits and merges before anybody notices. Project Tigress is the
     case that proves no heuristic suffices: `dev` looks exactly like an integration
     branch and is in fact *stable* there, with `development_team` carrying the work.
     """
@@ -301,7 +301,7 @@ _UNRENDERED = re.compile(r"\{\{[a-z_]+\}\}")
 def tier_binding_doc(root: Path) -> Proposal:
     """A document already carrying a ```tier-binding block, if there is one.
 
-    Searched rather than defaulted, because the default is a path into *Dungeoneer's*
+    Searched rather than defaulted, because the default is a path into *Project Tigress's*
     plan directory — the coupling that made a fresh repo refuse to run with a message
     about a file it had never heard of (`deferral-note-nobody-collected`).
     """
@@ -344,7 +344,7 @@ def maintainer(root: Path) -> Proposal:
     *"a choice only karel-murgas can make"* is not wrong so much as nobody's actual
     name, and `update` re-renders every template on every survey — so an unconfirmed
     guess here is not a one-off blemish, it is permanent drift against the installed
-    copies (2026-08-20, five conflicts in the Dungeoneer install).
+    copies (2026-08-20, five conflicts in the Project Tigress install).
     """
     name = git.text(root, "config", "user.name")
     if not name:
@@ -365,14 +365,14 @@ def decision_attributor(root: Path) -> Proposal:
 
     Proposed from `git config user.name`'s first word, lowercased, because that is
     the only handle this tool can see. It is a *guess about a convention*, not a
-    fact about the repo: the digest matches this token literally against
+    fact about the repo: `decide.answer_pattern` matches this token literally against
     `### <date> · <token>` headings, and the same token distinguishes a recorded
-    human decision from an agent's own note (`digest._ATTRIBUTED_ANSWER`).
+    human decision from an agent's own note.
 
     Never HIGH, and never silently defaulted. Getting it wrong is invisible — the
-    advisory simply never fires and the digest reports a clean board — which is
-    exactly the failure that made it a manifest field on 2026-08-04, when it had
-    been the literal `karel` since the digest was written.
+    answered-but-not-moved advisory simply never fires and the panel reports a clean
+    board — which is exactly the failure that made it a manifest field on 2026-08-04,
+    when it had been the literal `karel` hardcoded since before this field existed.
     """
     name = git.text(root, "config", "user.name")
     if not name:
@@ -382,7 +382,7 @@ def decision_attributor(root: Path) -> Proposal:
                         "answered-but-not-moved nudge")
     handle = name.split()[0].lower()
     return Proposal("board.decision_attributor", handle, CONFIRM,
-                    f"guessed from git user.name — the digest matches `### <date> · "
+                    f"guessed from git user.name — `decide.answer_pattern` matches `### <date> · "
                     f"{handle}` literally, so confirm it is how you actually sign a "
                     f"decision in a card's ## Thread")
 
@@ -497,7 +497,7 @@ def layering(root: Path, dirs: list[str] | None = None) -> Proposal:
         return Proposal("layering.forbid", None, HIGH,
                         "no one-way dependency between subpackages to pin")
     if len(rules) > _LAYERING_READABLE:
-        # Measured on Dungeoneer, 2026-08-02: 62 one-way pairs. Writing all of them
+        # Measured on Project Tigress, 2026-08-02: 62 one-way pairs. Writing all of them
         # would be the D4 defect in its purest form — a generated list, accepted
         # unread, that then has to be maintained. "Do not retype a generated list"
         # applies just as much when the generator is this function.

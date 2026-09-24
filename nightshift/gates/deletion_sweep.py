@@ -12,7 +12,7 @@ It is also aimed at the *observed* failure. §1d: nobody forgets to document a
 feature they just built — the enjoyable part carries its own documentation.
 Deletions have no body, nothing announces them, and that is exactly how
 `hack_scene.py` stayed documented as live for 124 days after `e2e2f51`
-removed it.
+deleted it.
 
 Scope and exemptions come from `doc_scan.py`, so `doc_scope: history` files —
 which are *supposed* to say "hack_scene.py was deleted" — never fail this.
@@ -141,8 +141,8 @@ def removed_names(repo_root: Path) -> dict[str, str]:
             # already buried it as a working-tree deletion, so there is nothing to
             # add here; without the guard the `read_text` raised FileNotFoundError
             # and took the whole gate run down with a traceback rather than
-            # reporting anything. Observed 2026-08-17, splitting `test_runner.py`
-            # into three modules: 23 gates stopped running because one file was
+            # reporting anything. Observed 2026-08-17, splitting the since-retired
+            # `test_runner.py` into three modules: 23 gates stopped running because one file was
             # `git rm`-ed while its edits were still in the branch.
             before = _top_level_names((git.run(repo_root, "show", f"{base}:{path}").stdout or ""))
             after = _top_level_names((repo_root / path).read_text(encoding="utf-8", errors="replace"))
@@ -171,8 +171,8 @@ def removed_names(repo_root: Path) -> dict[str, str]:
 def _pattern(name: str) -> re.Pattern[str]:
     """A plain-word name (`night`, `panel`) is matched only where prose writes it as
     code — backticked or after a dot — because the same word in a sentence is not a
-    reference. Anything identifier-shaped (`hack_scene`, `GameApp`, `night.py`) is
-    matched bare, as before."""
+    reference. Anything identifier-shaped (`hack_scene`, `GameApp`, or a bare
+    *.py* filename) is matched bare, as before."""
     if name.isalpha() and name.islower():
         return re.compile(rf"`{re.escape(name)}`|(?<=\.){re.escape(name)}(?![\w])")
     return re.compile(rf"(?<![\w.]){re.escape(name)}(?![\w])")

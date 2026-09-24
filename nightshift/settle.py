@@ -147,8 +147,8 @@ def _park_for_pick(root: Path, card: board.Card, result: outcome.Dispatch,
     card, it releases the second pass that installs the pick.
 
     The question is written in the shape `decide.parse` reads, so the panel's
-    answer form and the morning digest both offer the options rather than only
-    quoting the prose around them.
+    answer form offers the options rather than only quoting the prose around
+    them.
     """
     _write_pick_question(card, result)
     board.move(root, card, "needs-decision")

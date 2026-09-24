@@ -54,9 +54,9 @@ LEDGER = Path(".ai") / "stale_ledger.json"
 def _package_prefixes(repo_root: Path) -> tuple[str, ...]:
     """Prefixes a package-relative reference may be resolved under.
 
-    House style writes `core/i18n.py` for `dungeoneer/core/i18n.py`, so a
+    House style writes *core/i18n.py* for *project_tigress/core/i18n.py*, so a
     reference is tried bare and then under each of the project's source dirs.
-    Was the hardcoded `("", "dungeoneer/")` until 07_portability.md §8 step 4;
+    Was the hardcoded `("", "project_tigress/")` until 07_portability.md §8 step 4;
     a project that declares no `source_dirs` gets `("",)`, which is the same
     answer the bare half always gave.
     """
@@ -110,7 +110,7 @@ def named_source_files(doc: Path, repo_root: Path) -> set[str]:
             for candidate in (ref.text, *ref.alts):
                 token = candidate.strip().lstrip("./")
                 if not token.endswith(".py"):
-                    # Package-relative shorthand (`core/i18n.py` → <pkg>/…)
+                    # Package-relative shorthand (e.g. core/i18n.py -> <pkg>/…)
                     continue
                 for prefix in _package_prefixes(repo_root):
                     p = repo_root / (prefix + token)

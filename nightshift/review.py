@@ -535,7 +535,7 @@ def _land_review_fix(root: Path, tree: Path, branch: str,
     """Move `branch` onto a prose-only fix the reviewer applied itself.
 
     **Why the reviewer is allowed to edit here, having been forbidden to
-    everywhere else.** A census of every `needs_fix` on Dungeoneer's record
+    everywhere else.** A census of every `needs_fix` on Project Tigress's record
     (2026-08-29) found 11 of 14 were not defective code but false prose — a number
     re-tuned after the sentence was written, a symbol the diff deleted still cited
     in a recipe, a comment naming a mechanism the change replaced. The reviewer had
@@ -1653,7 +1653,7 @@ def _bookkeeping_divergence(root: Path, base: str, merge_base: str) -> list[str]
     is that function's catch-all for "docs, memory, `.claude/` config — anything no
     pytest asserts on" (its own docstring), which is the right answer for deciding
     which *tests* to run but the wrong one here: it also covers a bare top-level
-    production file outside every declared `source_dir` (a `main.py`, a
+    production file outside every declared `source_dir` (a *main.py*, a
     `pyproject.toml`), and this function's whole job is telling those apart from
     board and memory bookkeeping. So this checks `BOARD`/`NOTE` — the same
     board-lane split `suite.select` already trusts — plus two explicit

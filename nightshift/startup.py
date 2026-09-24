@@ -150,7 +150,7 @@ def schema_violations(root: Path) -> dict[str, list[str]]:
     """`card_schema` violations, grouped by card id.
 
     A malformed card is not dispatched. It is not a failure either — it is a
-    card that is not finished being written, and the digest is where it should
+    card that is not finished being written, and the panel is where it should
     surface. Running the gate rather than reimplementing its rules is the point:
     the schema has exactly one owner.
     """

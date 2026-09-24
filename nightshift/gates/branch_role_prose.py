@@ -1,5 +1,5 @@
 """Gate: prose naming the integration branch must agree with
-`.ai/manifest.toml`'s `[branches].integration`. Dungeoneer audit row 22.
+`.ai/manifest.toml`'s `[branches].integration`. Project Tigress audit row 22.
 
 `nightshift.branches` was written to make a branch-role migration a one-line
 edit: change `integration`, and `forbidden_bases()` and
@@ -8,7 +8,7 @@ hole — a standing rule restated in prose elsewhere names the branch too, which
 no import can reach. A one-line edit with a manual step attached is a two-line
 edit that will be done once and forgotten.
 
-It had already drifted in Dungeoneer, which is how this gate came to exist. On
+It had already drifted in Project Tigress, which is how this gate came to exist. On
 2026-07-24 `CLAUDE.md` still read *"Active development branch: `dev` / Always
 commit to `dev`"* — written before a branch-role migration, never revised.
 `dev` had since become *stable*, so `forbidden_bases()` rejected it: the
@@ -28,7 +28,7 @@ branch name — the docs discuss branch history, and a gate that fired on the
 word would be muted within a week. It fires on the *claim*, which is the thing
 that misleads.
 
-`_DOCS` names Dungeoneer's own doc set (`CLAUDE.md` plus its session log) —
+`_DOCS` names Project Tigress's own doc set (`CLAUDE.md` plus its session log) —
 the one place this gate is not purely config-free (07_portability.md §8 D3):
 a project without those exact files simply has nothing for it to check, which
 is a no-op rather than a crash.
@@ -67,7 +67,7 @@ _DOCS = (
     # here by construction.
     # gate-ok(source_reference_liveness): neither line resolves against this
     # repo's own tree -- the doc these name lives only in a consuming project
-    # (Dungeoneer), never in nightshift, so self-gating this repo can never
+    # (Project Tigress), never in nightshift, so self-gating this repo can never
     # confirm either. That is not staleness: check() above already resolves
     # the real question (which of the two homes the checked project actually
     # has) at runtime, by trying both and skipping whichever is missing.

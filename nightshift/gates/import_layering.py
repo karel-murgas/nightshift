@@ -13,8 +13,8 @@ not import the web layer". They are also trivially checkable from the AST, which
 exactly `00_architecture.md` §12's line: what Python can do, Python should do.
 
 **Relative imports are resolved, not pattern-matched.** `from ..rendering import x`
-inside `myapp/combat/melee.py` is `myapp.rendering`, and the version of this gate
-that shipped in Dungeoneer approximated that with a `startswith("rendering")` test
+inside *myapp/combat/melee.py* is `myapp.rendering`, and the version of this gate
+that shipped in Project Tigress approximated that with a `startswith("rendering")` test
 on the raw module string — which is right for one level and wrong for two, and
 silently right-looking either way. Resolving properly costs four lines.
 
@@ -44,7 +44,7 @@ DESCRIPTION = "a declared one-way dependency between packages stays one-way"
 
 
 def _module_name(rel: Path) -> str:
-    """`a/b/c.py` → `a.b.c`; `a/b/__init__.py` → `a.b`."""
+    """*a/b/c.py* → `a.b.c`; *a/b/__init__.py* → `a.b`."""
     parts = list(rel.with_suffix("").parts)
     if parts and parts[-1] == "__init__":
         parts.pop()

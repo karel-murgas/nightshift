@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The Command Center — a launcher, a registry and a tail, never a chat client.
 
-`.claude/plans/dispatch-cost-and-control-panel.md` (a Dungeoneer doc) §3.4 is the design
+`.claude/plans/dispatch-cost-and-control-panel.md` (a Project Tigress doc) §3.4 is the design
 session this implements; the plan itself is project-side because it is that project's own
 programme, but the panel is framework — any project with a board can run one.
 
@@ -561,9 +561,9 @@ def dispatch_cards(card_ids: list[str], root: Path, *, sessions: int = 0) -> int
     record — ten cards otherwise leave nine of them visible only as a
     one-line "N dispatched" in `/run`'s "Earlier runs" list, with no outcome,
     no matter how many needed a fix. The sequence's own record is written
-    last, so it is the one `_latest_record` (and therefore `/run` and the
-    digest) actually shows — with a row for every card the sequence ran, in
-    order, need-a-fix included.
+    last, so it is the one `_latest_record` (and therefore `/run`) actually
+    shows — with a row for every card the sequence ran, in order, need-a-fix
+    included.
     """
     remaining = sessions
     accumulated: list[dict] = []
@@ -1225,7 +1225,7 @@ def scan_audio_candidates(root: Path) -> list[AudioGroup]:
 
     Reads `.ai/runs/*/attempt-*/artefacts/` — `worktree.harvest`'s own layout,
     read here rather than reimplemented as a second guess at it (`RUNS`,
-    imported from `nightshift.runner`). Nothing here is Dungeoneer-specific:
+    imported from `nightshift.runner`). Nothing here is Project Tigress-specific:
     the harvest dir's name and the `candidates.json` shape both come from
     whatever the project's own worker wrote, so a project that harvests no
     audio — or none at all — gets an empty list rather than an error.
@@ -5555,7 +5555,7 @@ class Handler(BaseHTTPRequestHandler):
             # No dispatch guard and no `paid`, like `api/audio/pick` and
             # `api/answer`: this spends nothing, starts nothing and calls no model.
             #
-            # **Nothing is copied or installed.** Adoption means Dungeoneer nouns —
+            # **Nothing is copied or installed.** Adoption means Project Tigress nouns —
             # `assets/items/`, a factory row — and the framework deliberately does
             # not own that vocabulary; see `audio-audition-review-in-command-center`
             # on why the panel records a pick and stops.

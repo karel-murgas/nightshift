@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The `nightshift` command — the five things you reach for before you know the repo.
+"""The `nightshift` command — the six things you reach for before you know the repo.
 
 **Why only these.** Every other entry point is already `python -m nightshift.<module>`,
 and adding `nightshift gates` beside `python -m nightshift.gates.run` would give each
@@ -15,6 +15,9 @@ reason: they are the two halves of an install that a *human* should not have to 
 `bootstrap` writes one skill file and nothing else, so the next thing that happens is
 `/install-nightshift` inside Claude; `fix` is the loop that reads the checks and repairs
 what they report, which is the job the closing checklist used to delegate to a person.
+`update` is the sixth: it is what a repo that already ran `init` reaches for after
+pulling a newer nightshift, and it needs the same "before you know the module layout"
+visibility as `init` does, for the same reason.
 
 Each subcommand delegates to the module that owns it and passes the remaining
 argv straight through, so `nightshift init --help` and `python -m nightshift.init
