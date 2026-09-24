@@ -2,10 +2,10 @@
 
 A composed file under `.claude/` is exactly `compose(rendered template, addendum)`: the
 package's template, rendered with the project's tokens, plus the project's own addendum
-from `.ai/addenda/` under one heading. `nightshift update --apply` regenerates it and the
-`composed_text` gate fails when the file on disk is anything else, so project text has one
-home (the addendum) and framework text has one home (the package). No three-way merge.
-(`framework-text-not-copied`)
+from `.ai/addenda/` under one heading. An addendum that opens with a frontmatter block
+overrides the template's frontmatter key by key. `nightshift update --apply` regenerates
+the file and the `composed_text` gate fails when it is anything else, so project text has
+one home (the addendum) and framework text one (the package). (`framework-text-not-copied`)
 """
 from __future__ import annotations
 
@@ -13,10 +13,14 @@ from pathlib import Path
 
 from nightshift.manifest import AI_DIR
 
-#: The `.claude/` paths composed rather than copied. Phase 1 proves the mechanism on one
-#: charter; the rest of `templates/agents` and `templates/skills` join once it is chosen.
-# gate-ok(source_reference_liveness): a path in the project being installed, not this checkout.
-COMPOSED: tuple[str, ...] = (".claude/agents/stale-hunter.md",)
+_TEMPLATES = Path(__file__).resolve().parent / "templates"
+
+#: Every charter and skill the package ships: each is composed, none is copied.
+# gate-ok(source_reference_liveness): paths in the project being installed, not this checkout.
+COMPOSED: tuple[str, ...] = tuple(
+    [f".claude/agents/{p.name}" for p in sorted((_TEMPLATES / "agents").glob("*.md"))]
+    + [f".claude/skills/{p.parent.name}/SKILL.md"
+       for p in sorted((_TEMPLATES / "skills").glob("*/SKILL.md"))])
 
 ADDENDA = f"{AI_DIR}/addenda"
 HEADING = "## In this project"
@@ -27,6 +31,9 @@ MARKER = ("<!-- stale-ok: the addendum named below is optional and may not exist
           "then run `python -m nightshift.update --apply`. -->\n"
           "<!-- /stale-ok -->")
 
+_FENCE = "---\n"
+_CLOSE = "\n---\n"
+
 
 def addendum_rel(rel: str) -> str:
     """`.claude/agents/x.md` -> `.ai/addenda/agents/x.md`; a skill -> `.ai/addenda/skills/x.md`."""
@@ -36,15 +43,67 @@ def addendum_rel(rel: str) -> str:
     return f"{ADDENDA}/{'/'.join(parts[1:])}"
 
 
+def split_frontmatter(text: str) -> tuple[list[str], str]:
+    """`(frontmatter lines without the fences, body)`; `([], text)` when there is none."""
+    if not text.startswith(_FENCE):
+        return [], text
+    if text.startswith(_FENCE + _FENCE[:-1]):      # an empty block: `---` then `---`
+        return [], text[2 * len(_FENCE):]
+    end = text.find(_CLOSE, len(_FENCE) - 1)
+    if end < 0:
+        return [], text
+    return text[len(_FENCE):end].split("\n"), text[end + len(_CLOSE):]
+
+
+def _is_key(line: str) -> bool:
+    key = line.split(":", 1)[0]
+    return (":" in line and bool(key) and not line[0].isspace()
+            and key.replace("-", "").replace("_", "").isalnum())
+
+
+def _entries(lines: list[str]) -> list[tuple[str, list[str]]]:
+    """Top-level `key:` entries in order. A comment rides with the key below it; an
+    indented continuation with the key above it."""
+    out: list[tuple[str, list[str]]] = []
+    pending: list[str] = []
+    for line in lines:
+        if _is_key(line):
+            out.append((line.split(":", 1)[0], pending + [line]))
+            pending = []
+        elif pending or not out or line.startswith("#"):
+            pending.append(line)
+        else:
+            out[-1][1].append(line)
+    if pending:
+        out.append(("", pending))
+    return out
+
+
+def override(template: list[str], addendum: list[str]) -> list[str]:
+    """The template's frontmatter with each key the addendum sets replaced in place.
+
+    A key the addendum does not name keeps the template's value; a key the template
+    lacks is appended. Comments above an addendum key travel with it.
+    """
+    mine = dict(_entries(addendum))
+    merged = [(key, mine.pop(key, lines) if key else lines)
+              for key, lines in _entries(template)]
+    merged += list(mine.items())
+    return [line for _, lines in merged for line in lines]
+
+
 def compose(framework: str, addendum: str | None, rel: str) -> str:
-    """The file's only correct content. Frontmatter stays first, so discovery is unchanged."""
+    """The file's only correct content: the template's frontmatter with the addendum's
+    overrides, the marker, the template body, then the addendum body under `HEADING`.
+    Frontmatter stays first, so discovery by path and by `name:` is unchanged."""
     marker = MARKER.format(addendum=addendum_rel(rel))
-    head, body = "", framework
-    if framework.startswith("---\n"):
-        end = framework.index("\n---\n", 4) + len("\n---\n")
-        head, body = framework[:end], framework[end:]
+    lines, body = split_frontmatter(framework)
+    extra_head, extra = split_frontmatter(addendum or "")
+    head = ""
+    if lines or extra_head:
+        head = _FENCE + "\n".join(override(lines, extra_head)) + _CLOSE
     out = f"{head}\n{marker}\n{body.lstrip(chr(10))}"
-    extra = (addendum or "").strip()
+    extra = extra.strip()
     if extra:
         out = f"{out.rstrip()}\n\n{HEADING}\n\n{extra}\n"
     return out if out.endswith("\n") else out + "\n"

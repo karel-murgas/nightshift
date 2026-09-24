@@ -28,6 +28,31 @@ def test_compose_keeps_frontmatter_first_and_appends_the_addendum():
     assert out.rstrip().endswith(f"{compose.HEADING}\n\nProject fact.")
 
 
+def test_addendum_frontmatter_overrides_key_by_key():
+    addendum = ("---\n# local: the install is finished\ntools: Read, Grep\n"
+                "disable-model-invocation: true\n---\n\nProject fact.\n")
+    out = compose.compose(TEMPLATE, addendum, REL)
+
+    assert _frontmatter(out.replace("# local: the install is finished\n", "")) == {
+        "name": "stale-hunter", "tools": "Read, Grep", "disable-model-invocation": "true"}
+    assert out.index("# local") < out.index("tools: Read, Grep")
+    assert out.count("---\n") == 2, "the addendum's own fences must not leak into the body"
+    assert out.rstrip().endswith(f"{compose.HEADING}\n\nProject fact.")
+
+
+def test_a_frontmatter_only_addendum_adds_no_heading():
+    out = compose.compose(TEMPLATE, "---\ntools: Read, Glob\n---\n", REL)
+
+    assert _frontmatter(out)["tools"] == "Read, Glob"
+    assert compose.HEADING not in out
+
+
+def test_every_shipped_charter_and_skill_is_composed():
+    assert ".claude/agents/triage.md" in compose.COMPOSED
+    assert ".claude/skills/manage-board/SKILL.md" in compose.COMPOSED
+    assert len(compose.COMPOSED) == 10
+
+
 def test_no_addendum_means_no_project_heading():
     assert compose.HEADING not in compose.compose(TEMPLATE, None, REL)
     assert compose.HEADING not in compose.compose(TEMPLATE, "  \n", REL)
