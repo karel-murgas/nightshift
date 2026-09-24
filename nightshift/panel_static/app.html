@@ -817,7 +817,81 @@
   #ticker:hover { color: var(--phosphor); border-color: var(--phosphor-d); }
   #ticker.now { color: var(--phosphor); }
 
+  /* ---------------- the one-line header ---------------- */
+
+  .hline {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.4rem;
+    padding: 0.75rem 1.5rem; font-family: var(--mono); font-size: var(--step--1);
+  }
+  .hrun, .hmeters, .hacts { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.7rem; }
+  .hrun .card-id { color: var(--phosphor); text-decoration: none; font-size: var(--step-0); }
+  .hmeters { margin-left: auto; }
+  .hacts { gap: 0.4rem; }
+  .hjob { display: inline-flex; align-items: center; gap: 0.4rem; text-decoration: none; }
+  .dim { color: var(--ink-faint); }
+  .mi { display: inline-flex; align-items: center; gap: 0.4rem; }
+  .mi-l { color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.08em; }
+  .mi .track { width: 3.5rem; }
+  .mi b { font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  /* ---------------- the row's ⋯ menu ---------------- */
+
+  .more { position: relative; }
+  .more > summary {
+    list-style: none; cursor: pointer; font-family: var(--mono); color: var(--ink-dim);
+    border: 1px solid var(--line); padding: 0.15rem 0.5rem; line-height: 1.5; user-select: none;
+  }
+  .more > summary::-webkit-details-marker { display: none; }
+  .more > summary:hover, .more[open] > summary { color: var(--phosphor); border-color: var(--phosphor-d); }
+  .more .menu {
+    position: absolute; right: 0; top: calc(100% + 0.25rem); z-index: 50; min-width: 11rem;
+    display: flex; flex-direction: column; gap: 0.3rem; padding: 0.45rem;
+    background: var(--panel-2); border: 1px solid var(--line);
+  }
+  .more .menu .act { text-align: left; }
+  .more-slot { display: inline-block; width: 2rem; }
+  .row .acts { flex-wrap: nowrap; align-items: flex-start; }
+
+  pre.tail {
+    margin: 0.5rem 0 0; padding: 0.5rem 0.7rem; background: var(--panel-2);
+    border-left: 2px solid var(--line); color: var(--ink-dim); font-size: var(--step--1);
+    white-space: pre-wrap; overflow-x: auto;
+  }
+
+  /* ---------------- the launch dialog ---------------- */
+
+  dialog.launch {
+    background: var(--panel); color: var(--ink); border: 1px solid var(--phosphor-d);
+    padding: 1.2rem 1.4rem; width: min(34rem, calc(100vw - 2rem));
+    font-family: var(--mono); font-size: var(--step--1);
+  }
+  dialog.launch::backdrop { background: rgba(0, 0, 0, 0.6); }
+  dialog.launch h2 { margin: 0 0 0.9rem; font-size: var(--step-1); letter-spacing: 0.08em; }
+  .opt {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.7rem;
+    padding: 0.55rem 0; border-top: 1px solid var(--line-soft);
+  }
+  .opt-l { width: 4.5rem; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.1em; }
+  .opt select {
+    background: var(--ground); color: var(--ink); border: 1px solid var(--line);
+    font-family: var(--mono); font-size: var(--step--1); padding: 0.1rem 0.2rem; margin-right: 0.4rem;
+  }
+  dialog.launch > .acts { margin-top: 0.9rem; justify-content: flex-end; }
+  dialog.launch.settings #launch-go { display: none; }
+
+  /* ---------------- System's one status line ---------------- */
+
+  details.sys > summary.sys-line {
+    list-style: none; cursor: pointer; display: flex; flex-wrap: wrap; align-items: center;
+    gap: 0.5rem 0.9rem; padding: 1.1rem 1.5rem; font-family: var(--mono);
+  }
+  details.sys > summary.sys-line::-webkit-details-marker { display: none; }
+  details.sys > summary.sys-line b { font-size: var(--step-1); letter-spacing: 0.08em; }
+  details.sys > summary.sys-line .dim { font-size: var(--step--1); }
+  details.sys section { border-top: 1px solid var(--line); border-bottom: 0; }
+
   @media (max-width: 58rem) {
+    .hmeters { margin-left: 0; }
     .shell { grid-template-columns: 1fr; }
     .rail { position: static; max-height: none; border-right: 0; border-bottom: 1px solid var(--line); gap: 1.2rem; }
     .pages { flex-direction: row; overflow-x: auto; }
@@ -1140,12 +1214,48 @@ function sessionsWanted() {
 function runTicked() {
   var ids = pickedIds();
   if (!ids.length) { toast("nothing ticked — tick a card, or drag the slider", true); return; }
-  post("/api/night", { card_ids: ids, sessions: sessionsWanted() });
+  launch("Run " + ids.length + " ticked card(s)", "/api/night",
+         { card_ids: ids, sessions: sessionsWanted() });
 }
 
-function runNight() { post("/api/night", { sessions: sessionsWanted() }); }
-function runChores() { post("/api/chores/run", {}); }
-function reviewAll() { post("/api/review-all", {}); }
+function runNight() { launch("Run the whole queue", "/api/night", { sessions: sessionsWanted() }); }
+function runChores() { launch("Run the chore batch", "/api/chores/run", {}); }
+
+/* ---- the launch dialog: every button that starts an agent opens it first ----
+   It carries the account, tier, local-model and paid-override choices; `Start`
+   posts the pending action. `launch(null)` opens it as plain Options. */
+var pendingLaunch = null;
+function launch(title, path, body) {
+  var dialog = document.getElementById("launch");
+  if (!dialog) { if (path) { post(path, body); } return; }
+  pendingLaunch = path ? { path: path, body: body || {} } : null;
+  document.getElementById("launch-title").textContent = title || "Options";
+  dialog.classList.toggle("settings", !path);
+  closeMenus();
+  if (!dialog.open) { dialog.showModal(); }
+}
+function startLaunch() {
+  var go = pendingLaunch;
+  closeLaunch();
+  if (go) { post(go.path, go.body); }
+}
+function closeLaunch() {
+  var dialog = document.getElementById("launch");
+  if (dialog && dialog.open) { dialog.close(); }
+  pendingLaunch = null;
+}
+
+/* ---- the row's ⋯ menu: one open at a time, closed by any click outside it ---- */
+function closeMenus(except) {
+  document.querySelectorAll("details.more[open]").forEach(function (d) {
+    if (d !== except) { d.open = false; }
+  });
+}
+document.addEventListener("click", function (e) {
+  var inside = e.target.closest ? e.target.closest("details.more") : null;
+  if (inside && e.target.closest(".menu")) { closeMenus(); return; }
+  closeMenus(inside);
+});
 
 /* ---- verify: mark one OK now, or tick several and save ---- */
 
@@ -1535,7 +1645,7 @@ function applyRefresh(html) {
 
 function currentPage() {
   var page = location.pathname.replace(/^\/+|\/+$/g, "");
-  return page || "now";
+  return page || "queue";
 }
 
 /* Only the rendered pages can refresh: a diff or a log is a document that does not
@@ -1544,7 +1654,7 @@ function currentPage() {
    carries the card id (`decide/<id>`) — without this a decide page never refreshed
    at all, so a recorded answer or a Close click left the page looking untouched
    until you navigated away and back (Karel, 2026-08-22). */
-var REFRESHABLE = ["now", "verify", "inbox", "ideas", "run", "system"];
+var REFRESHABLE = ["queue", "capture", "you", "running", "system", "history"];
 var REFRESHABLE_PREFIXES = ["decide/"];
 
 function isRefreshable(page) {
