@@ -333,6 +333,8 @@ what the dead ends were, the constraint you found the hard way. That is worth it
 What is **not** worth keeping is thinking-out-loud: restating a rejected option three times,
 narrating the search. Write the conclusion and the one fact that supports it.
 
+**Stamp every finding with `(measured: YYYY-MM-DD)`, at the end of the numbered entry, using the day you verified it — not the day the card was opened.** A finding is a claim about the code as it stood when you read it, and the code moves without the card knowing; a dated finding can be re-read when it is old instead of trusted as-is (`triage-findings-have-a-shelf-life`). One date per finding, not one for the section — a card can be re-triaged and grow a new finding long after the first, and each is a claim about a different day.
+
 ### The bar: would the worker get it *wrong*?
 
 **A finding earns its place if the worker would plausibly get it wrong — not merely spend a

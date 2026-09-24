@@ -71,13 +71,26 @@ is created automatically the first time. So:
   merged** automatically. A rebase conflict or a re-verify failure leaves the card in
   `review/` with a `## Merge` note for a human — never a guessed resolution.
 
-### Run it in the background, always
+### Run it in the background, always — and then leave it alone
 
 One card is minutes to an hour (the worker's own timeout is `--test-timeout × 6`, so 60 min
 by default; the checker gets ×2). The Bash tool caps at 10 minutes, so a foreground run is
 guaranteed to time out and leave a night running with nobody reading it. Launch with
-`run_in_background: true` and you are notified when it exits; meanwhile
-`python -m nightshift.runner --status` answers "is it stuck?" from disk without touching the run.
+`run_in_background: true` and you are notified when it exits.
+
+**Launch, background, report once when it ends. Do not babysit it.** No polling loop, no
+tailing `stream.jsonl`, no `--status` every few minutes to narrate progress. A watching
+session pays full context for every check and changes nothing about the run — the run writes
+its own record, and the notification is what tells you it finished.
+
+Two things are still fine, because each is one call that answers a question someone asked:
+
+- `python -m nightshift.runner --status` when **{{maintainer}} asks** what it is doing. It
+  reads `.ai/runs/status.json` from disk and never touches the run.
+- Reading the run record once, after the notification, to report what landed.
+
+Better still, start it from the Command Center or a plain terminal. Then no session is
+holding the run at all, and nothing is tempted to watch it.
 
 ## Every flag, with its default
 
