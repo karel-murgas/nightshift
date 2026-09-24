@@ -15,12 +15,12 @@ in that sense — `drain.py` and `ingest.py` already import `board`/`usage` dire
 same reason — so GET handlers read via the ordinary Python API and only POST handlers shell
 out.
 
-**Pages are server-rendered, one URL each.** The approved mockup switches its five pages
-with JavaScript because a static mockup has no server; here `/now`, `/verify`, `/inbox`,
-`/ideas` and `/run` are real addresses, so the left rail is links. That keeps deep-linking
-and the reload-after-an-action behaviour every button depends on, and it means a page costs
-only its own reads — the Verify page's per-card `git` calls are not paid for by someone
-looking at Ideas. The *appearance* is the mockup's; only the mechanism differs.
+**Pages by whose move it is, server-rendered, one URL each:** `/queue` (ready work),
+`/capture` (inbox and ideas), `/you` (decide, play, blocked, review), `/running` (the
+current run; `/history` one click away) and `/system`. The old addresses redirect
+(`OLD_PAGES`). Every list is `_item` rows; a card appears on one page; anything that starts
+an agent opens the launch dialog, which holds the account, tier, local-model and
+paid-override choices (`command-center-restructure`).
 
 **Two ways to be on a different account, and the panel owns neither of them.** A repo may
 declare `[[accounts]]`, each naming its own `CLAUDE_CONFIG_DIR`; selecting one sets that
@@ -104,7 +104,10 @@ DEFAULT_PORT = 8765
 STATIC_DIR = Path(__file__).resolve().parent / "panel_static"
 TEMPLATE = STATIC_DIR / "app.html"
 
-PAGES = ("now", "verify", "inbox", "ideas", "run", "system")
+#: The rail, in order — pages by whose move it is.
+PAGES = ("queue", "capture", "you", "running", "system")
+PAGE_LABELS = {"queue": "Queue", "capture": "Capture", "you": "You",
+               "running": "Running", "system": "System"}
 
 #: The run's phases, as the pills across the status rail: `(status.json value, label)`.
 #: `starting` and `checker` fold onto `worker` because they are the same span of the run
@@ -1054,19 +1057,14 @@ class Context:
 
     def counts(self) -> dict[str, int]:
         return {
-            # `blocked` counts here, not under `verify`: it is work waiting on a
-            # person's hands, which is what the NOW rail number means. It used to be
-            # invisible inside the `review` count, which is the whole complaint.
-            "now": len(self.decisions) + len(self.do_now) + len(self.tonight)
-                   + len(self.elsewhere) + len(self.chores) + len(self.blocked)
-                   + len(self.failed),
-            "verify": len(self.testing) + len(self.review),
-            "inbox": len(self.notes),
-            "ideas": len(self.ideas),
-            "run": len(_latest_record(self.root).get("dispatched", [])),
-            # What the System page would ask you to look at: files needing an update
-            # or a decision. Deliberately not "everything nightshift could do here" —
-            # a rail number that is never zero is a rail number nobody reads.
+            "queue": len(self.tonight) + len(self.elsewhere) + len(self.chores)
+                     + len(self.do_now),
+            "capture": len(self.notes) + len(self.ideas),
+            "you": len(self.decisions) + len(self.testing) + len(self.review)
+                   + len(self.blocked) + len(self.failed),
+            "running": (int(run_is_live(self.rail.run_status, _latest_record(self.root)))
+                        + sum(1 for job in self.jobs if jobs.state(job) == jobs.RUNNING)),
+            # Things the System page wants you for — never "everything it could do".
             "system": system_attention(self.root),
         }
 
@@ -1721,12 +1719,12 @@ def _act(label: str, *, onclick: str = "", href: str = "", primary: bool = False
 
 
 def _row(*, body: str, acts: str = "", marker: str = "&middot;", grip: bool = False,
-         control: str = "", card_id: str = "") -> str:
-    """One register line: grip · control · marker · body · actions."""
+         control: str = "", card_id: str = "", data: str = "") -> str:
+    """One register line: grip · control · marker · body · actions. Only `_item` calls it."""
     classes = "row" if grip else "row no-grip"
     grip_cell = ('<span class="grip" title="Drag to reorder">&#x2059;</span>'
                  if grip else '<span class="grip">&nbsp;</span>')
-    data = f' data-id="{_e(card_id)}"' if card_id else ""
+    data += f' data-id="{_e(card_id)}"' if card_id else ""
     draggable = ' draggable="true"' if grip else ""
     return (f'<div class="{classes}"{draggable}{data}>{grip_cell}'
             f'{control or "<span></span>"}'
@@ -1752,89 +1750,45 @@ def _meta(items: list[str]) -> str:
 
 
 def _tag_chips(card: board.Card) -> list[str]:
-    """The card's tags, as chips.
-
-    `nightshift` is the one with operational meaning — the deliverable lands in
-    the framework repo, so the runner cannot cut a worktree for it and the card
-    carries `unattended: false` to match. Worth seeing at a glance, since it is
-    the difference between a card the night can take and one it never will.
-    """
+    """The card's tags; `nightshift` is amber because the night never takes one."""
     return [_chip(tag, "warn" if tag == "nightshift" else "mute") for tag in card.tags]
 
 
 def _size_chip(card: board.Card) -> str:
-    """**Too big** on a `tasks/` card grown past the worker-input threshold, else "".
+    """**Too big** on a `tasks/` card past the runner's own `oversize_note`, else "".
 
-    Replaces the mark this had until 2026-09, which was an Obsidian Bases formula in
-    `Board.base` over `file.size`. The view went when Obsidian did, so the mark moved
-    here — and it is strictly better placed: the formula had to restate
-    `dispatch.CARD_COMFORT_BYTES` and the lane name in YAML where no import could reach
-    them, which is why a whole gate (`board_view_sync`) existed to catch the two
-    drifting apart. Here the threshold *is* the runner's, because `oversize_note` is
-    the runner's own function — the same one `select()` folds into a candidate's
-    reason and `run()` uses as its predicate — so there is nothing left to disagree.
-
-    Everything that made the original choice right still holds. Nothing is written to
-    the card, so there is no frontmatter field to maintain and none to go stale between
-    writers; compacting a card by hand clears the mark the moment the page next renders,
-    with no session running and nothing to re-run. And `tasks/` only: `oversize_note`
-    owns that rule, because a `done/` card legitimately reaches 20 KB once the runner has
-    appended `## Summary`, `## Thread`, `## Telemetry` and `## Error` after dispatch.
-
-    Advisory, never blocking — the same severity the note itself carries. A card over the
-    threshold still dispatches; this is the line that stops it doing so silently.
+    Advisory, never blocking — the card still dispatches; the tooltip carries the note.
     """
     note = oversize_note(card)
     if not note:
         return ""
-    # Not through `_chip`: the advisory is the whole explanation and belongs in a
-    # tooltip, which `_chip` has no room for.
     return (f'<span class="chip warn" title="{_attr(note)}">too big &middot; '
             f'{card_bytes(card) / 1024:.1f} KB</span>')
 
 
 def _tier_chip(card: board.Card) -> str:
-    """What tier a session opened on this card *right now* would run at.
+    """The tier a session opened on this card now would run at (`effective_tier`).
 
-    Karel, 2026-08-19: *"chosen tier should be visible on each card (lead, worker,
-    none)"*. The value is `effective_tier`'s and not the card's, so the row states
-    what the button beside it will do rather than what the frontmatter says. Those
-    are the same sentence until the rail's override is ticked — and the moment they
-    diverge is the only moment this chip earns its space.
-
-    Amber when the rail is beating a tier the card declared, because that is the
-    one reading a glance can get wrong: the card still says `tier: worker` in its
-    frontmatter and on `/card/`, and nothing else on the page would say the session
-    is not going to honour it.
+    Amber when the Options dialog's override beats the card's own `tier:`.
     """
     tier = effective_tier(card.tier)
     beaten = bool(card.tier) and tier != card.tier
     if beaten:
-        title = f"the rail's choice, overriding this card's own `tier: {card.tier}`"
+        title = f"Options override this card's own tier ({card.tier})"
     elif card.tier:
-        title = f"the card's own `tier: {card.tier}`"
+        title = "the card's own tier"
     elif tier:
-        title = "the rail's choice — this card declares no tier of its own"
+        title = "from Options — the card sets no tier"
     else:
-        title = ("no tier anywhere: the session opens on whatever model the CLI "
-                 "defaults to. Pick one in the rail.")
+        title = "no tier set: the CLI's default model"
     return (f'<span class="chip {"warn" if beaten else "mute"}" '
             f'title="{_e(title)}">tier {_e(tier or "none")}</span>')
 
 
 def _local_chip(root: Path, card: board.Card) -> str:
-    """A chip on a row whose card would be *dispatched* to the local model.
+    """`local` on a card a dispatch would send to the local model; silent otherwise.
 
-    Silent in every other case, and that asymmetry is the whole design. A `local`
-    chip is news — this card will not run on the cloud model the rest of the board
-    runs on — while a `cloud` chip on every other row would be noise stating the
-    ground state 40 times a page.
-
-    Rendered unprobed (`effective_runtime`), so it answers *"is this card
-    eligible"* and not *"is the server up"*. The gap is real and it is the cheap
-    side of the trade: the alternative is a socket per row on every page load, and
-    a card that was eligible but found the endpoint down simply runs on cloud,
-    which the run log records and no chip promised otherwise.
+    Unprobed: it says the card is eligible, not that the server is up.
     """
     worker = (card.worker or "").strip()
     if not worker or worker == "none":
@@ -1842,34 +1796,9 @@ def _local_chip(root: Path, card: board.Card) -> str:
     if effective_runtime(root, worker) != runtimes.LOCAL:
         return ""
     local = runtimes.local_model(root)
-    title = (f"`worker: {worker}` is in this machine's local-model allowlist, so a "
-             f"dispatch takes {local.model if local else 'the local model'} rather "
-             f"than the cloud — if the endpoint answers at dispatch time. It falls "
-             f"back to cloud if it does not. Untick 'Use the local model' in the "
-             f"rail, or run with `--no-local`, to force cloud.")
+    title = (f"Runs on {local.model if local else 'the local model'} when its server "
+             f"answers, else on cloud. Turn it off in Options.")
     return f'<span class="chip mute" title="{_e(title)}">local</span>'
-
-
-def _card_body(card: board.Card, *, root: Path | None = None,
-               meta: list[str] | None = None, why: str = "",
-               clickable: bool = False) -> str:
-    if clickable:
-        out = [f'<span class="id clickable" onclick="toggleInfo(\'{_attr(card.id)}\')" '
-              f'title="Goal and how to test">{_e(card.id)}</span>']
-    else:
-        out = [f'<span class="id">{_e(card.id)}</span>']
-    if card.title and card.title != card.id:
-        out.append(f'<span class="title">{_e(card.title)}</span>')
-    if why:
-        out.append(f'<p class="why">{_e(why)}</p>')
-    # The tier chip sits on *every* card row rather than only the ones with a
-    # `Work on this` beside them. A card in `review/` or `needs-decision/` is one
-    # click from a session too — `/decide/` carries the button — and a fact that
-    # appears on some rows and not others reads as a property of the card.
-    out.append(_meta(_tag_chips(card) + [_tier_chip(card)]
-                     + [c for c in [_local_chip(root, card) if root else "",
-                                    _size_chip(card)] if c] + (meta or [])))
-    return "".join(out)
 
 
 def _info_box(card: board.Card, *, how_to_test: bool = False) -> str:
@@ -1945,27 +1874,6 @@ def _section(title: str, count: int, rows: str, *, note: str = "", sub: str = ""
 
 def _group(label: str) -> str:
     return f'<div class="group-label">{_e(label)}</div>'
-
-
-def _rail_html(ctx: Context, active: str) -> str:
-    counts = ctx.counts()
-    try:
-        project = manifest.load(ctx.root).project.name
-    except ManifestError:
-        project = ctx.root.name
-    links = []
-    for page in PAGES:
-        current = ' aria-current="page"' if page == active else ""
-        links.append(f'<a href="/{page}"{current}>{page.capitalize()} '
-                     f'<span class="n">{counts[page]}</span></a>')
-    links = "".join(links)
-    return (
-        '<nav class="rail" id="rail">'
-        f'<div class="wordmark"><b>Command Center</b><span>{_e(project)}</span></div>'
-        f'<div class="pages">{links}</div>'
-        f'<div class="machine">{"<br>".join(machine_lines(ctx.root))}</div>'
-        '</nav>'
-    )
 
 
 def _phases_html(phase: str) -> str:
@@ -2091,79 +1999,6 @@ def read_sessions(body: dict) -> int:
     return sessions
 
 
-def _runbox_html(ctx: Context) -> str:
-    status = ctx.rail.run_status
-    record = _latest_record(ctx.root)
-    card_id = str(status.get("card") or "") if run_is_live(status, record) else ""
-    landed = len(run_record.landed(record))
-    failed = len(run_record.failures(record))
-    queued = len(ctx.tonight)
-
-    shown = shown_jobs(ctx.jobs)
-    live_jobs = [job for job, state in shown if state == jobs.RUNNING]
-
-    if not card_id:
-        last = str(status.get("card") or "")
-        when = str(status.get("updated") or "")
-        tail = (f"Last was {last} at {when[11:16]}." if last and when else
-                "Nothing has dispatched on this machine yet.")
-        # **"No run in progress" over a pulsing `ingest` is a contradiction**, and
-        # it is one a reader resolves against us: Karel read the rail with a live
-        # classify pass on it and reported the panel as showing nothing about it.
-        # The eyebrow is a claim about the *queue* — no card is being dispatched —
-        # so when a background command is running it says that instead of implying
-        # the machine is idle. Both statements were always true; only one of them
-        # was on screen.
-        eyebrow = ("No card dispatching" if live_jobs else "No run in progress")
-        head = (f'<p class="eyebrow">{_e(eyebrow)}</p>'
-                f'<div class="runline"><span class="dim">{_e(tail)}</span></div>')
-    elif status.get("phase") == "sleeping":
-        # The runner met a usage-limit wall and is sleeping out the reset
-        # (`_window_closed`) rather than doing anything a heartbeat would move
-        # for — `run_is_live` trusts `resume_at` here instead of the heartbeat's
-        # age, which is exactly why this needs its own head: rendering it as
-        # "Running now" over a process that has not touched a phase in hours
-        # would be its own, opposite lie.
-        try:
-            resume_label = dt.datetime.fromisoformat(
-                str(status.get("resume_at") or "")).strftime("%H:%M")
-        except (TypeError, ValueError):
-            resume_label = "an unknown time"
-        head = (
-            '<p class="eyebrow"><span class="live-dot"></span> Waiting for usage limit to reset</p>'
-            f'<div class="runline"><span class="card-id">{_e(card_id)}</span>'
-            f'<span class="dim">resumes at {_e(resume_label)}</span></div>'
-            + _act("Stop run", onclick="post('/api/stop',{})",
-                   extra='title="Drops .ai/STOP. The runner gives up the wait and stops '
-                         'at the top of the loop instead of resuming when the window '
-                         'reopens."')
-        )
-    else:
-        attempt = status.get("attempt")
-        telemetry = read_telemetry(attempt_dir(ctx.root, card_id, int(attempt or 1)))
-        facts = [("worker", status.get("worker", "?")), ("model", status.get("model", "?"))]
-        if attempt:
-            facts.append(("attempt", str(attempt)))
-        if elapsed := elapsed_since(str(status.get("since") or "")):
-            facts.append(("elapsed", elapsed))
-        if telemetry.get("turns"):
-            facts.append(("turns", str(telemetry["turns"])))
-        pairs = "".join(f"<dt>{_e(k)}</dt><dd>{_e(v)}</dd>" for k, v in facts)
-        head = (
-            '<p class="eyebrow"><span class="live-dot"></span> Running now</p>'
-            f'<div class="runline"><span class="card-id">{_e(card_id)}</span>'
-            f'<dl>{pairs}</dl></div>'
-            + _phases_html(str(status.get("phase") or ""))
-            + _act("Stop run", onclick="post('/api/stop',{})",
-                   extra='title="Drops .ai/STOP. The runner finishes this card, then '
-                         'stops at the top of the loop rather than dispatching another."')
-        )
-    tally = (f'<p class="tallyline"><b>{landed}</b> landed &middot; '
-             f'<b>{failed}</b> back in tasks &middot; <b>{queued}</b> queued'
-             f'{_act("Run detail", href="/run")}</p>')
-    return f'<div class="runbox">{head}{_jobs_html(shown)}{tally}</div>'
-
-
 #: How long a finished job stays in the rail. Long enough that a classify pass
 #: started, watched, and left alone for a coffee still says how it went when you
 #: come back; short enough that the rail is not a history page. `/run` is where
@@ -2247,36 +2082,6 @@ def shown_jobs(all_jobs: list[jobs.Job], *,
     return current[:JOB_ROWS]
 
 
-def _jobs_html(shown: list[tuple[jobs.Job, str]]) -> str:
-    """The rail's line per background command the panel started.
-
-    This is the panel saying what *it* set in motion, which is a different
-    question from `status.json`'s "where is the runner up to" — and it is the one
-    that was unanswerable. A dispatch shows both: the phase pills above say how
-    far the night has got, this line says the process is alive and where its
-    output is.
-
-    Takes the already-computed list rather than the context, because the caller
-    needs the same answer for its own eyebrow and `jobs.state` is not free — it
-    shells out to `tasklist` on Windows for every job with no finish on file.
-    """
-    if not shown:
-        return ""
-    rows = []
-    for job, status in shown:
-        kind, word = _JOB_MARK.get(status, ("", status))
-        took = jobs.elapsed(job)
-        when = f"{word} &middot; {_e(took)}" if took else word
-        if status == jobs.FAILED and job.exit_code is not None:
-            when += f" &middot; exit {job.exit_code}"
-        dot = '<span class="live-dot"></span>' if status == jobs.RUNNING else ""
-        rows.append(
-            f'<p class="jobline">{dot}{_chip(job.label, kind)}'
-            f'<span class="dim">{when}</span>'
-            f'{_act("Output", href=f"/log/{job.ident}")}</p>')
-    return f'<div class="jobs">{"".join(rows)}</div>'
-
-
 #: The two windows worth a permanent meter, and what to call them. The endpoint
 #: returns a dozen-odd others — most null, several with internal codenames that
 #: mean nothing here (`nimbus_quill`, `tangelo`, …) — and a rail that renders all
@@ -2303,134 +2108,209 @@ def shown_buckets(snapshot: usage.Snapshot) -> list[usage.Bucket]:
     return shown
 
 
+# ------------------------------------------------------------------ the pages
+
+
+# ------------------------------------------------------------------ one row
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]", "_", text)
+
+
+def _more(menu: list[str], key: str) -> str:
+    """The ⋯ menu: every action on a row except its primary one."""
+    items = "".join(m for m in menu if m)
+    if not items:
+        return '<span class="more-slot"></span>'
+    return (f'<details class="more" id="more-{_e(_slug(key))}">'
+            f'<summary aria-label="More actions" title="More">&middot;&middot;&middot;</summary>'
+            f'<div class="menu">{items}</div></details>')
+
+
+#: What a row is a row *of*. `card` rows carry `data-card`, which the one-place test counts.
+ITEM_KINDS = ("card", "note", "idea", "run", "job", "take", "check")
+
+
+def _item(ident: str, *, kind: str, title: str = "", chips: list[str] | None = None,
+          why: str = "", extra: str = "", primary: str = "",
+          menu: list[str] | None = None, marker: str = "&middot;", control: str = "",
+          grip: bool = False, card_id: str = "", info: bool = False) -> str:
+    """One row — id · title · chips · one primary action · a ⋯ menu for the rest.
+
+    Every list on every page goes through here (`test_every_row_is_an_item`), so the
+    rows read as one system. `primary` is the lane's one next step; `menu` is the rest.
+    """
+    if kind not in ITEM_KINDS:
+        raise ValueError(f"unknown row kind {kind!r}")
+    if info and card_id:
+        head = (f'<span class="id clickable" onclick="toggleInfo(\'{_attr(card_id)}\')" '
+                f'title="Goal and how to test">{_e(ident)}</span>')
+    else:
+        head = f'<span class="id">{_e(ident)}</span>'
+    body = [head]
+    if title and title != ident:
+        body.append(f'<span class="title">{_e(title)}</span>')
+    if why:
+        body.append(f'<p class="why">{_e(why)}</p>')
+    body.append(_meta([c for c in (chips or []) if c]))
+    body.append(extra)
+    data = f' data-item="{kind}"' + (f' data-card="{_e(card_id)}"' if kind == "card" else "")
+    return _row(body="".join(body), acts=primary + _more(menu or [], f"{kind}-{ident}"),
+                marker=marker, grip=grip, control=control,
+                card_id=card_id if grip else "", data=data)
+
+
+def _card_item(ctx: Context, card: board.Card, *, chips: list[str] | None = None,
+               why: str = "", primary: str = "", menu: list[str] | None = None,
+               marker: str = "&middot;", control: str = "", grip: bool = False,
+               how_to_test: bool = False) -> str:
+    """A board card's row: its own chips first, then the lane's, then the goal box."""
+    own = (_tag_chips(card) + [_tier_chip(card)]
+           + [c for c in (_local_chip(ctx.root, card), _size_chip(card)) if c])
+    return (_item(card.id, kind="card", title=card.title, chips=own + (chips or []),
+                  why=why, primary=primary,
+                  menu=list(menu or []) + [_act("Read card", href=f"/card/{card.id}")],
+                  marker=marker, control=control, grip=grip, card_id=card.id, info=True)
+            + _info_box(card, how_to_test=how_to_test))
+
+
+def _launch(label: str, title: str, path: str, body: dict, *,
+            primary: bool = False, disabled: bool = False) -> str:
+    """A button that starts an agent: it opens the launch dialog, which carries the
+    account, tier, local-model and paid-override choices, and posts on Start."""
+    args = _attr(json.dumps([title, path, body]))
+    return _act(label, onclick=f"launch.apply(null,{args})", primary=primary,
+                disabled=disabled)
+
+
+def _work_act(*, card: str = "", note: str = "", tier: str = "", worker: str = "",
+              lane: str = "", primary: bool | None = None) -> str:
+    """`Work on this`: an interactive session on a card or a note, via the launch dialog."""
+    target = {"card": card} if card else {"note": note}
+    return _launch("Work on this", f"Work on {card or note}", "/api/work", target,
+                   primary=bool(card) if primary is None else primary)
+
+
+def _short_reason(reason: str) -> str:
+    """`unattended: false — declared as needing a human` → `unattended: false`."""
+    first = reason.split(";")[0]
+    return re.split(r" — | \(", first, maxsplit=1)[0].strip()[:48]
+
+
+def _reason_chip(reason: str) -> str:
+    return (f'<span class="chip mute" title="{_attr(reason)}">'
+            f'{_e(_short_reason(reason))}</span>')
+
+
+# ------------------------------------------------------------------ the header
+
+
+def _runstate_html(ctx: Context) -> str:
+    """The header's left half: what is running right now, and the kill switch."""
+    status = ctx.rail.run_status
+    record = _latest_record(ctx.root)
+    stop = _act("Stop run", onclick="post('/api/stop',{})",
+                extra='title="The run finishes the card it is on, then stops."')
+    if run_is_live(status, record):
+        card_id = str(status.get("card") or "") or _kind_label(record)
+        if status.get("phase") == "sleeping":
+            try:
+                resume = dt.datetime.fromisoformat(
+                    str(status.get("resume_at") or "")).strftime("%H:%M")
+            except (TypeError, ValueError):
+                resume = "?"
+            said = f"waiting for the usage reset · resumes {resume}"
+        else:
+            phase = _active_row_lane(status)
+            elapsed = elapsed_since(str(status.get("since") or ""))
+            said = " · ".join(x for x in (phase, elapsed) if x)
+        return (f'<span class="hrun"><span class="live-dot"></span>'
+                f'<a class="card-id" href="/running">{_e(card_id)}</a>'
+                f'<span class="dim">{_e(said)}</span>{stop}</span>')
+    shown = shown_jobs(ctx.jobs)
+    if not shown:
+        return '<span class="hrun"><span class="dim">No run in progress</span></span>'
+    chips = []
+    for job, state in shown:
+        kind, word = _JOB_MARK.get(state, ("", state))
+        if state == jobs.FAILED and job.exit_code is not None:
+            word += f" · exit {job.exit_code}"
+        dot = '<span class="live-dot"></span>' if state == jobs.RUNNING else ""
+        chips.append(f'<a class="hjob" href="/log/{_e(job.ident)}" title="{_attr(job.command)}">'
+                     f'{dot}{_chip(job.label, kind)}<span class="dim">{_e(word)}</span></a>')
+    return f'<span class="hrun">{"".join(chips)}</span>'
+
+
 def _meters_html(ctx: Context) -> str:
+    """The header's allowance: a short bar per window, and the spend state."""
     snapshot = ctx.rail.snapshot
-    out = ['<p class="eyebrow">Allowance</p>']
+    out = []
     if not snapshot.fetched:
-        out.append(f'<p class="resets">{_e(snapshot.reason or "no reading")}</p>')
-    elif snapshot.stale and snapshot.checked_at:
-        # A failed live call kept the last good reading rather than blanking to
-        # the raw error — see `usage.read_cached`. Said plainly here rather than
-        # silently, since a stale number should not read as a fresh one.
-        out.append(f'<p class="resets">as of {snapshot.checked_at:%H:%M} '
-                   f'(endpoint asked again too soon)</p>')
+        out.append(f'<span class="dim" title="{_attr(snapshot.reason or "")}">'
+                   f'allowance unknown</span>')
+    stale = (f" (as of {snapshot.checked_at:%H:%M})"
+             if snapshot.stale and snapshot.checked_at else "")
     for bucket in shown_buckets(snapshot):
         fill = min(100.0, max(0.0, bucket.utilization))
         kind = "bad" if bucket.exhausted else ("warn" if bucket.headroom_pct <= 15 else "")
-        resets = (f'<p class="resets">resets {bucket.resets_at:%d %b %H:%M}</p>'
-                  if bucket.resets_at else "")
+        resets = f"resets {bucket.resets_at:%d %b %H:%M}" if bucket.resets_at else ""
         label = METER_LABELS.get(bucket.name, bucket.name.replace("_", " "))
-        out.append(
-            f'<div class="meter"><div class="meter-head">'
-            f'<span>{_e(label)}</span>'
-            f'<span>{bucket.utilization:.0f}%</span></div>'
-            f'<div class="track"><i class="{kind}" style="width:{fill:.0f}%"></i></div>'
-            f'{resets}</div>'
-        )
-
-    spend = []
+        out.append(f'<span class="mi" title="{_attr(resets + stale)}">'
+                   f'<span class="mi-l">{_e(label)}</span>'
+                   f'<span class="track"><i class="{kind}" style="width:{fill:.0f}%"></i></span>'
+                   f'<b>{bucket.utilization:.0f}%</b></span>')
     if snapshot.paid_enabled:
         used = snapshot.paid_used_display
-        spend.append(_chip(f"paid overage on{f' · {used}' if used else ''}", "warn"))
+        out.append(_chip(f"paid overage on{f' · {used}' if used else ''}", "warn"))
     elif snapshot.fetched:
-        spend.append(_chip("paid overage off", "ok"))
+        out.append(_chip("paid overage off", "ok"))
     if ctx.rail.identity.fetched and ctx.rail.identity.has_extra_usage_enabled:
-        spend.append(_chip("API spend enabled — dispatch refused", "bad"))
-    out.append(f'<div class="spend">{"".join(spend)}{_account_html(ctx)}</div>')
-    return f'<div class="meters">{"".join(out)}</div>'
+        out.append(_chip("API spend enabled — dispatch refused", "bad"))
+    rail = ctx.rail
+    never = (_chip("dispatch: never", "bad")
+             if rail.account_label and rail.account_dispatch == "never" else "")
+    out.append(f'<span class="dim">{_e(rail.account_label or "ambient")}</span>{never}')
+    return f'<span class="hmeters">{"".join(out)}</span>'
+
+
+def _statusrail_html(ctx: Context) -> str:
+    """The one-line header: run state · allowance · the two launchers."""
+    return ('<div class="statusrail" id="statusrail"><div class="hline">'
+            + _runstate_html(ctx) + _meters_html(ctx)
+            + '<span class="hacts">'
+            + _launch("New session", "New session in this repo", "/api/session", {})
+            + _act("Options", onclick="launch(null)")
+            + '</span></div></div>')
 
 
 def _account_html(ctx: Context) -> str:
     rail = ctx.rail
     label = rail.account_label or "ambient"
     email = rail.identity.email if rail.identity.fetched else "identity unavailable"
-    never = (' <span class="chip bad">dispatch: never</span>'
-             if rail.account_label and rail.account_dispatch == "never" else "")
-    # Two different ways to be on a different account, and only one of them is a
-    # dropdown. `[[accounts]]` + `CLAUDE_CONFIG_DIR` points at a *separate config
-    # directory*, which is a per-invocation choice this server can make. The
-    # ordinary way, though, is `claude auth login` against the one config
-    # directory you already have — settings and history stay put and the logged-in
-    # identity swaps underneath. That needs a browser, so the panel can only
-    # *launch* it; what it does own is reading who is logged in now, on every page
-    # load, so the answer is never stale.
     selector = ""
     if rail.accounts:
-        # `this.blur()` rides in front of the post, and it is the whole of the
-        # freeze Karel reported on 2026-08-19. A `<select>` keeps focus after its
-        # own `onchange`; the live refresh treated any focus inside a region as
-        # work in flight; `#statusrail` is the region this control sits in. So the
-        # account changed on the server and the one panel that names it was the one
-        # panel that would not redraw — "the information doesn't refresh until I
-        # reload the page (or go to other)". `regionBusy` no longer counts a select
-        # as busy either; both halves are kept, because either alone leaves a route
-        # back to a rail that never updates.
         options = ['<option value="">(ambient)</option>']
         for account in rail.accounts:
             selected = " selected" if account.label == rail.account_label else ""
             options.append(f'<option value="{_e(account.label)}"{selected}>'
                            f'{_e(account.label)}</option>')
-        selector = ('<br><select title="Accounts declared in [[accounts]], each a '
-                    'separate CLAUDE_CONFIG_DIR" '
-                    'onchange="this.blur();post(\'/api/account\',{label:this.value})">'
+        selector = ('<select onchange="this.blur();post(\'/api/account\',{label:this.value})">'
                     + "".join(options) + "</select>")
-    # The override lives here, next to the account it waives and on every page —
-    # §3.4 is explicit that the account in force must be visible *at the moment of
-    # dispatch*, and a waiver parked on one page while the Dispatch buttons sit on
-    # three is the same failure as a switcher that is off-screen when you click.
-    # One control, one state: two copies would be two selections that can disagree.
-    override = ('<label class="override" title="Two waivers, one tick, and neither is '
-                'remembered: the account exclusion (this panel refuses an account with API '
-                'spend enabled) and the money rule (checked by the chore batch, ingest and '
-                'the drain before they spend). A night is not gated on headroom at all — '
-                'limits.py stops it reactively after a wall — so the money half cannot '
-                'change what a night does.">'
-                '<input type="checkbox" id="allowpaid"> Override, this once</label>')
     switch = _act("Switch account", onclick="post('/api/switch-account',{})",
-                  extra='title="Opens a terminal running `claude auth login`. The '
-                        'sign-in is a browser flow, so the panel launches it and does '
-                        'not carry it out; the rail will name whoever is logged in '
-                        'within a refresh tick."')
-    # The one session on the page that carries nothing. It lived in the `Do now`
-    # bar on `/now` until 2026-08-19, which put the panel's only general-purpose
-    # session on one page, below the fold, inside a section about something else —
-    # Karel: *"I don't see general purpose 'start conversation' button ... It
-    # should be part of the 'always on' panel."* It belongs beside the account and
-    # the tier for the plain reason that those are the two things it spends, and
-    # this block is the one that is on every page.
-    general = _act("New session here", onclick="post('/api/session',{})",
-                   extra='title="Opens an interactive session in this repo with no '
-                         'card and no charter — on the account and at the tier named '
-                         'just above, like every other session this panel starts."')
-    return (f'<p class="account">account <b>{_e(label)}</b>{never}<br>{_e(email)}'
-            f'{selector}</p>{_tier_html(ctx)}{_local_html(ctx)}'
-            f'<div class="acts" style="justify-content:flex-start">'
-            f'{switch}{general}{override}</div>')
+                  extra='title="Opens a terminal running claude auth login."')
+    return (f'<div class="opt"><span class="opt-l">Account</span>'
+            f'<span><b>{_e(label)}</b> <span class="dim">{_e(email)}</span></span>'
+            f'<span>{selector}{switch}</span></div>')
 
 
 def _tier_html(ctx: Context) -> str:
-    """The tier control: one dropdown, one tick, beside the account it spends on.
-
-    Here rather than on a row because a tier is a property of *this sitting at the
-    panel* — the same argument `_account_html` makes for the account and the paid
-    override, and the same "one control, one state" rule: a second copy on a card
-    row would be a second selection that can disagree with this one.
-
-    The options name the tier **and** what §16 currently binds it to, because the
-    choice being made is about spend and `worker` alone does not say `sonnet`. The
-    aliases are read from the binding on every render and never written down here.
-
-    Both controls post the same verb carrying both values, so the pair is always
-    written together — a tick that arrived without its tier would be a state the
-    server can hold and no page ever showed.
-    """
+    """Tier for interactive sessions, and whether it beats a card's own `tier:`."""
     menu = tier_menu(ctx.root)
     if not menu:
-        # No readable binding — an uninstalled repo, or a `binding_doc` that has
-        # moved. Say so, rather than render an empty dropdown that looks broken.
-        return ('<p class="account dim">no tier binding &mdash; sessions open on '
-                "the CLI's default model</p>")
-    options = ["<option value=\"\">(no choice &mdash; the CLI's default)</option>"]
+        return ('<div class="opt"><span class="opt-l">Tier</span>'
+                "<span class=\"dim\">no tier binding — the CLI's default model</span></div>")
+    options = ['<option value="">(card\'s own, else the CLI default)</option>']
     for name, model in menu:
         chosen = " selected" if name == _TIER.tier else ""
         options.append(f'<option value="{_e(name)}"{chosen}>'
@@ -2438,130 +2318,583 @@ def _tier_html(ctx: Context) -> str:
     ticked = " checked" if _TIER.override else ""
     send = ("post('/api/tier',{tier:document.getElementById('tierpick').value,"
             "override:document.getElementById('tieroverride').checked})")
-    # `this.blur()` first, and it is not cosmetic. The live refresh treats a region
-    # it is focused inside as busy and skips it, so a select that keeps focus after
-    # its own onchange freezes the whole status rail — the account dropdown's bug,
-    # reported the same day, and this control would have inherited it verbatim.
-    select_title = ("The tier every interactive session this panel opens runs at. "
-                    "Dispatched cards are unaffected: a run honours the tier its "
-                    "own card declares.")
-    tick_title = ("Off: a card's own `tier:` wins, and this choice fills in only "
-                  "for cards that declare none. On: this choice wins everywhere, "
-                  "and every row's tier chip turns amber to say so.")
-    return (
-        '<p class="account">tier '
-        f'<select id="tierpick" onchange="this.blur();{send}" '
-        f'title="{_e(select_title)}">' + "".join(options) + '</select></p>'
-        f'<label class="override soft" title="{_e(tick_title)}">'
-        f'<input type="checkbox" id="tieroverride" data-server="1"{ticked} '
-        f'onchange="this.blur();{send}"> Override the card</label>'
-    )
+    return ('<div class="opt"><span class="opt-l">Tier</span>'
+            f'<select id="tierpick" onchange="this.blur();{send}">' + "".join(options)
+            + '</select>'
+            f'<label class="override soft" title="On: this tier wins over the card\'s own.">'
+            f'<input type="checkbox" id="tieroverride" data-server="1"{ticked} '
+            f'onchange="this.blur();{send}"> Override the card</label></div>')
 
 
 def _local_html(ctx: Context) -> str:
-    """The local-model toggle, in the status rail's top-right beside the tier.
-
-    Karel, 2026-09-19: *"I think that 'use local model' should be a toggle in
-    right upper corner of Command Center. With the information about when it is
-    used."* Both halves are load-bearing. The toggle belongs with `account` and
-    `tier` because it is the same kind of thing — a property of this sitting, held
-    server-side, one control with one state. And it needs the second line more
-    than either of those do, because **"local is on" does not mean "this card runs
-    local"**: four independent terms have to hold, and a toggle that implied
-    otherwise would be read as broken the first time an allowlisted card ran on
-    cloud because the server was down.
-
-    So the control renders nothing at all on a machine that declares no
-    `local_model`. That is not the toggle being hidden — it is §6's first off
-    switch, which is permanent here, and a disabled tick on the laptop would
-    suggest a setting someone could turn on. There is none; the answer is the
-    absence of the block.
-    """
+    """The local-model toggle — absent on a machine that declares no local model."""
     local = runtimes.local_model(ctx.root)
     if local is None:
         return ""
     agents = ", ".join(local.agents) or "no charters allowlisted"
     ticked = " checked" if local_enabled() else ""
     send = "post('/api/local',{on:document.getElementById('uselocal').checked})"
-    # Everything the "when is it used" line has to carry, in the order someone
-    # reading it wants: which charters (the answer to "why did my card not"),
-    # then which model, then the endpoint, then how to start it when it is down.
-    title = (
-        f"On, a dispatched card whose worker is one of: {agents} — runs on "
-        f"{local.model} at {local.base_url} instead of the cloud, but only when "
-        f"that server answers a probe at dispatch time. Everything else runs on "
-        f"cloud, which is the ground state. Interactive sessions this panel opens "
-        f"are never affected: inline work is always Claude's. "
-        + (f"Start the server with {local.launcher}. " if local.launcher else "")
-        + "Off forces cloud for everything, and so does `--no-local` on a run."
-    )
+    title = (f"Dispatched {agents} cards run on {local.model} when its server answers; "
+             f"everything else, and every interactive session, runs on cloud."
+             + (f" Start the server with {local.launcher}." if local.launcher else ""))
+    return (f'<div class="opt"><span class="opt-l">Local</span>'
+            f'<label class="override soft" title="{_e(title)}">'
+            f'<input type="checkbox" id="uselocal" data-server="1"{ticked} '
+            f'onchange="this.blur();{send}"> Use the local model</label>'
+            f'<span class="dim">{_e(agents)} &middot; {_e(local.model)} &middot; '
+            f'only when its server answers</span></div>')
+
+
+def _paid_html(ctx: Context) -> str:
+    """The one-shot waiver for the money rule and the account exclusion."""
+    return ('<div class="opt"><span class="opt-l">Spend</span>'
+            '<label class="override" title="Waives the paid-credit check and the '
+            'account exclusion for what you start next. Never remembered.">'
+            '<input type="checkbox" id="allowpaid"> Override, this once</label></div>')
+
+
+def _launch_dialog(ctx: Context) -> str:
+    """Start-run / work-on-this: the dispatch options live here, not in the header."""
+    return ('<dialog id="launch" class="launch">'
+            '<h2 id="launch-title">Options</h2>'
+            + _account_html(ctx) + _tier_html(ctx) + _local_html(ctx) + _paid_html(ctx)
+            + '<div class="acts">'
+            + _act("Start", onclick="startLaunch()", primary=True, extra='id="launch-go"')
+            + _act("Close", onclick="closeLaunch()")
+            + '</div></dialog>')
+
+
+def _rail_html(ctx: Context, active: str) -> str:
+    counts = ctx.counts()
+    try:
+        project = manifest.load(ctx.root).project.name
+    except ManifestError:
+        project = ctx.root.name
+    links = []
+    for page in PAGES:
+        current = ' aria-current="page"' if page == active else ""
+        links.append(f'<a href="/{page}"{current}>{PAGE_LABELS[page]} '
+                     f'<span class="n">{counts[page]}</span></a>')
     return (
-        f'<label class="override soft" title="{_e(title)}">'
-        f'<input type="checkbox" id="uselocal" data-server="1"{ticked} '
-        f'onchange="this.blur();{send}"> Use the local model</label>'
-        f'<p class="account dim" style="margin:0.25rem 0 0">'
-        f'{_e(agents)} &middot; {_e(local.model)}</p>'
+        '<nav class="rail" id="rail">'
+        f'<div class="wordmark"><b>Command Center</b><span>{_e(project)}</span></div>'
+        f'<div class="pages">{"".join(links)}</div>'
+        f'<div class="machine">{"<br>".join(machine_lines(ctx.root))}</div>'
+        '</nav>'
     )
 
 
-def _statusrail_html(ctx: Context) -> str:
-    fresh_class = "" if ctx.rail.freshness_known else "warn"
-    return (
-        '<div class="statusrail" id="statusrail"><div class="top">'
-        + _runbox_html(ctx) + _meters_html(ctx) +
-        '</div>'
-        f'<p class="tallyline" style="padding:0 1.5rem 0.9rem;margin:0">'
-        f'<span class="{fresh_class}">{_e(ctx.rail.freshness_line)}</span>'
-        f'{_act("Refresh", onclick="post(\'/api/freshness/refresh\',{})")}'
-        f'{_act("Pull", onclick="post(\'/api/freshness/pull\',{})")}</p>'
-        '</div>'
-    )
+# ------------------------------------------------------------------ Queue
 
 
-# ------------------------------------------------------------------ the pages
+def _live_card(ctx: Context) -> str:
+    return (str(ctx.rail.run_status.get("card") or "")
+            if run_is_live(ctx.rail.run_status, _latest_record(ctx.root)) else "")
+
+
+def _tonight_section(ctx: Context) -> str:
+    tonight = ctx.tonight
+    live_card = _live_card(ctx)
+    rows = []
+    for position, candidate in enumerate(tonight, start=1):
+        card = candidate.card
+        running = live_card == card.id
+        chips = [_e(f"verify: {card.verify}")]
+        if card.attempts:
+            chips.append(_e(f"attempt {card.attempts + 1}"))
+        if running:
+            chips.append(_chip("running", "ok"))
+        control = (f'<input type="checkbox" class="pick" data-id="{_e(card.id)}" checked '
+                   f'aria-label="include {_e(card.id)}">')
+        primary = (_act("Running", disabled=True) if running else
+                   _launch("Run", f"Run {card.id}", "/api/dispatch", {"card_id": card.id},
+                           primary=True))
+        menu = [] if running else [_work_act(card=card.id, primary=False)]
+        rows.append(_card_item(ctx, card, chips=chips, primary=primary, menu=menu,
+                               marker=str(position), control=control, grip=True))
+    if ctx.elsewhere:
+        rows.append(_group(f"Another machine — {len(ctx.elsewhere)}"))
+        for c in ctx.elsewhere:
+            rows.append(_card_item(ctx, c.card, chips=[_chip(f"requires {c.card.requires}")],
+                                   marker="&mdash;"))
+    sessions = (
+        '<label class="runopt" title="Usage windows a run may spend: 1 stops at the '
+        'limit, more sleeps through each reset and carries on.">Sessions'
+        f'<input type="range" id="sessions" min="1" max="{SESSIONS_MAX}" value="1">'
+        '<output for="sessions" id="sessionsout">1</output></label>')
+    bar = (
+        '<div class="barbox">'
+        '<p><span id="picked">0 of 0</span> ticked</p>'
+        '<label class="runopt">Take first'
+        f'<input type="range" id="takefirst" min="0" max="{len(tonight)}" value="{len(tonight)}">'
+        '<output for="takefirst" id="takefirstout">0</output></label>'
+        + sessions
+        + '<div class="acts">'
+        + _act("Run the whole queue", onclick="runNight()")
+        + _act("Run the ticked", onclick="runTicked()", primary=True)
+        + '</div></div>')
+    return _section("Tonight", len(tonight), "".join(rows), rows_id="queue",
+                    note="Drag to set the order.", bar=bar if tonight else "",
+                    empty="Nothing the night can take right now.", sec_id="tonight")
 
 
 def _chores_section(ctx: Context) -> str:
-    """The chore batch, as its own section with its own button.
-
-    Its own section because a chore is neither of the two things the sections
-    around it are: not work waiting on a person, and not a card the night takes
-    one at a time. It has a third answer — one batch, one verified suite run —
-    and a heading is the cheapest way to say so.
-
-    **Each row also gets its own `Work on this`** (`chores-run-setup`, 2026-09-23).
-    `_work_verb` was already generic over every card kind — it reads `worker:`,
-    `tier:` and `finished_lane()` off whatever card it is handed, and it never
-    touched `attempts:` for any of them, since that field is the runner's own
-    dispatch bookkeeping and an interactive session is not a dispatch. So a chore
-    worked this way costs nothing the batch would have to know about: it either
-    lands and leaves `tasks/` before the batch ever looks, exactly like a `do_now`
-    card worked by hand today, or it is abandoned and sits there for the next
-    `Run chores` to pick up, `attempts:` untouched either way. The only thing
-    genuinely missing was the button.
-    """
     rows = []
     for candidate in ctx.chores:
         card = candidate.card
-        meta = [_chip("chore", "ok"), _e(card.worker)]
+        chips = [_chip("chore", "ok")]
         if card.surface:
-            meta.append(_e(card.surface))
+            chips.append(_e(card.surface))
         if card.attempts:
-            meta.append(_e(f"{card.attempts} attempt(s)"))
-        rows.append(_row(marker="&middot;", body=_card_body(card, root=ctx.root, meta=meta),
-                         acts=_act("Read card", href=f"/card/{card.id}")
-                              + _work_act(card=card.id, tier=card.tier, worker=card.worker,
-                                         lane=board.finished_lane(card), primary=False)))
-    bar = ('<div class="barbox">'
-           '<p>One batch: a cheap pass per item, then one full suite run over the '
-           'merged result.</p><div class="acts">'
-           + _act("Run chores", onclick="runChores()", primary=True)
+            chips.append(_e(f"{card.attempts} attempt(s)"))
+        rows.append(_card_item(ctx, card, chips=chips,
+                               primary=_work_act(card=card.id, primary=False)))
+    bar = ('<div class="barbox"><p>One batch, one suite run over the merged result.</p>'
+           '<div class="acts">' + _act("Run chores", onclick="runChores()", primary=True)
            + '</div></div>')
-    return _section("Chores", len(ctx.chores), "".join(rows),
-                    note="Batched, not dispatched one at a time.",
-                    bar=bar if rows else "",
-                    empty="No chores are waiting.",
-                    sec_id="chores")
+    return _section("Chores", len(ctx.chores), "".join(rows), bar=bar if rows else "",
+                    empty="No chores waiting.", sec_id="chores")
+
+
+def _keyboard_section(ctx: Context) -> str:
+    capabilities = host_capabilities(ctx.root)
+    rows = []
+    for candidate in ctx.do_now:
+        card = candidate.card
+        chips = [_reason_chip(candidate.reason)]
+        if card.requires and card.requires not in capabilities:
+            chips.append(_chip(f"needs {card.requires}", "warn"))
+        if card.attempts:
+            chips.append(_e(f"{card.attempts} attempt(s)"))
+        rows.append(_card_item(ctx, card, chips=chips, marker="&rsaquo;",
+                               primary=_work_act(card=card.id)))
+    return _section("At the keyboard", len(ctx.do_now), "".join(rows),
+                    note="The night will not take these.",
+                    empty="Nothing needs you at the keyboard.", sec_id="keyboard")
+
+
+def _render_queue(ctx: Context) -> str:
+    return "".join([_tonight_section(ctx), _chores_section(ctx), _keyboard_section(ctx),
+                    f'<footer>Board on {_e(current_branch(ctx.root))}</footer>'])
+
+
+# ------------------------------------------------------------------ Capture
+
+
+def _note_primary(note: str, route: str) -> str:
+    if route in ingest.WRITABLE_ROUTES:
+        return _launch("Write the card", f"Write the card for {note}", "/api/ingest/one",
+                       {"note": note}, primary=True)
+    if route == "triage":
+        return _launch("Triage this", f"Triage {note}", "/api/triage", {"note": note},
+                       primary=True)
+    return _work_act(note=note, primary=True)
+
+
+def _note_menu(root: Path, note: ingest.Note, route: str) -> list[str]:
+    rel = _rel(root, note.path)
+    menu = [_act("Edit", href=_body_href(rel, edit=True)),
+            _act("Open note", href=_body_href(rel))]
+    if route in ingest.WRITABLE_ROUTES or route == "triage":
+        menu.append(_work_act(note=note.name, primary=False))
+    if route != "triage":
+        menu.append(_launch("Triage this", f"Triage {note.name}", "/api/triage",
+                            {"note": note.name}))
+    menu.append(_act("Done", onclick=f"post('/api/close',{{note:'{_attr(note.name)}'}})",
+                     extra='title="Files it in done/ without carding it."'))
+    menu.append(_delete_act(note.name, "inbox"))
+    return menu
+
+
+def _delete_act(name: str, lane: str) -> str:
+    """`git rm` a bare note, after the typed-name guard in `confirmDeleteNote`."""
+    return _act("Delete", onclick=f"confirmDeleteNote('{_attr(name)}','{_attr(lane)}')")
+
+
+def _inbox_section(ctx: Context) -> str:
+    view = ctx.routing
+    ordered: dict[str, list[tuple[ingest.Note, ingest.Decision | None]]] = {
+        route: [] for route, _, _ in _ROUTE_GROUPS}
+    for note in ctx.notes:
+        route = note.route if note.route in ordered else ""
+        decision = view.of(note.name)
+        ordered[route].append(
+            (note, decision if decision and decision.route == route else None))
+    rows = []
+    for route, heading, kind in _ROUTE_GROUPS:
+        bucket = ordered.get(route) or []
+        if not bucket:
+            continue
+        rows.append(_group(f"{heading} — {len(bucket)}"))
+        for note, decision in bucket:
+            chips = [_chip(route, kind)] if route else []
+            chips += [f"{note.size} B", _e(_stamp_of(note.path))]
+            if decision:
+                if decision.confidence != "high":
+                    chips.append(_chip(f"confidence {decision.confidence}", "warn"))
+                if not decision.dispatchable:
+                    chips.append(_chip("needs a human", "warn"))
+                if _changed_since(note.path, view.written):
+                    chips.append(_chip("edited since routing", "warn"))
+            rows.append(_item(note.name, kind="note", marker="&rsaquo;", chips=chips,
+                              why=decision.why if decision and decision.why else "",
+                              primary=_note_primary(note.name, route),
+                              menu=_note_menu(ctx.root, note, route)))
+    writable = sum(1 for note in ctx.notes if note.route in ingest.WRITABLE_ROUTES)
+    bar = ('<div class="barbox"><div class="acts">'
+           + _act("New note", onclick="openEditor('new-note')")
+           + _launch(f"Write {writable} card(s)" if writable else "Write the cards",
+                     "Write the cards for the routed notes", "/api/ingest", {"write": True},
+                     disabled=not writable)
+           + _launch("Classify all", "Classify the inbox", "/api/ingest", {"scribe": True},
+                     primary=True)
+           + '</div></div>'
+           + _editor("new-note", save="saveNew('new-note','inbox')", named=True,
+                     placeholder="One or two sentences is enough."))
+    if not view.known and not any(note.route for note in ctx.notes):
+        note_line = "Not classified yet."
+    else:
+        when = f"{view.written:%d %b %H:%M}" if view.written else "at an unrecorded time"
+        unrouted = len(ordered.get("") or [])
+        note_line = f"Routed {when}" + (f" · {unrouted} new since" if unrouted else "")
+    return _section("Inbox", len(ctx.notes), "".join(rows), note=note_line, bar=bar,
+                    empty="The inbox is empty.", sec_id="inbox")
+
+
+def _ideas_section(ctx: Context) -> str:
+    """Idea *names* only — the panel never opens an idea to summarise it."""
+    rows = []
+    for name in ctx.ideas:
+        path = f"{board.board_rel(ctx.root).as_posix()}/{board.PRIVATE_LANE}/{name}"
+        rows.append(_item(name, kind="idea",
+                          primary=_act("Promote", primary=True,
+                                       onclick=f"post('/api/promote',{{name:'{_attr(name)}'}})"),
+                          menu=[_act("Read", href=_body_href(path)),
+                                _act("Edit", href=_body_href(path, edit=True)),
+                                _delete_act(name, board.PRIVATE_LANE)]))
+    bar = ('<div class="barbox"><div class="acts">'
+           + _act("New idea", onclick="openEditor('new-idea')", primary=True)
+           + '</div></div>'
+           + _editor("new-idea", save="saveNew('new-idea','ideas')", named=True,
+                     placeholder="Half a thought is fine."))
+    return _section("Ideas", len(ctx.ideas), "".join(rows),
+                    note="Private. Promote moves one to the inbox.", bar=bar,
+                    empty="No ideas parked.", sec_id="ideas")
+
+
+def _render_capture(ctx: Context) -> str:
+    return _inbox_section(ctx) + _ideas_section(ctx) + (
+        f'<footer>{len(ctx.notes)} note(s) · {len(ctx.ideas)} idea(s)</footer>')
+
+
+# ------------------------------------------------------------------ You
+
+
+def _decide_section(ctx: Context) -> str:
+    rows = []
+    for card in ctx.decisions:
+        subs = decide.parse(card.text)
+        questions, options = len(subs), sum(len(s.options) for s in subs)
+        chips = [_e(str(card.fields.get("created", "")))]
+        if questions:
+            chips.append(_chip(_asks(questions, options), "warn"))
+        rows.append(_card_item(ctx, card, chips=chips, marker="?",
+                               primary=_act("Answer", href=f"/decide/{card.id}",
+                                            primary=True)))
+    return _section("Decide", len(ctx.decisions), "".join(rows),
+                    note="Nothing else moves until this does.",
+                    empty="Nothing is waiting on a decision.", sec_id="decide")
+
+
+def _playthrough_section(ctx: Context) -> str:
+    by_surface: dict[str, list[board.Card]] = {}
+    for card in ctx.testing:
+        by_surface.setdefault(card.surface or "unsorted", []).append(card)
+    rows = []
+    for surface in sorted(by_surface):
+        cards = by_surface[surface]
+        rows.append(_group(f"{surface} — {len(cards)}"))
+        for card in cards:
+            branch = card.fields.get("branch") or f"ai/{card.id}"
+            chips = []
+            if stat := diff_stat(ctx.root, ctx.base, branch):
+                chips.append(_e(stat))
+            if card.attempts:
+                chips.append(_e(f"{card.attempts} attempt(s)"))
+            if card.verify == "review":
+                chips.append(_chip("verify: review", "ok"))
+            control = (f'<input type="checkbox" class="tick" data-id="{_e(card.id)}" '
+                       f'aria-label="{_e(card.id)} verified">')
+            menu = [_act("Not OK", onclick=f"openEditor('feedback-{_attr(card.id)}')"),
+                    _launch("Open inline", f"Reopen {card.id}'s session",
+                            "/api/work-feedback", {"card_id": card.id}),
+                    _act("Diff", href=f"/diff/{card.id}")]
+            rows.append(_card_item(ctx, card, chips=chips, control=control, menu=menu,
+                                   primary=_act("Mark OK", primary=True,
+                                                onclick=f"markOK(this,'{_attr(card.id)}')"),
+                                   how_to_test=True))
+            rows.append(_editor(f"feedback-{card.id}",
+                                save=f"submitFeedback('{_attr(card.id)}')",
+                                placeholder="What was wrong — it goes onto the card and "
+                                            "sends it back to tasks/."))
+    bar = ('<div class="barbox"><p><span id="ticked">Nothing ticked.</span></p>'
+           '<div class="acts">' + _act("Mark ticked OK", onclick="saveTicked()")
+           + '</div></div>')
+    return _section("Play through", len(ctx.testing), "".join(rows),
+                    note=f"On {ctx.base}, grouped by where you would see it.",
+                    bar=bar if ctx.testing else "",
+                    empty="Nothing is waiting to be played.", sec_id="playthrough")
+
+
+def _blocked_section(ctx: Context) -> str:
+    """`blocked/` (reviewed, will not land) and `failed/` (out of attempts)."""
+    rows = []
+    for card in ctx.blocked:
+        branch = card.fields.get("branch") or f"ai/{card.id}"
+        why = (board.section(card.text, "Merge") or "").strip()
+        chips = [_e(stat) for stat in [diff_stat(ctx.root, ctx.base, branch)] if stat]
+        chips.append(_chip("reviewed ok · will not merge", "warn"))
+        rows.append(_card_item(ctx, card, chips=chips, why=why[:400], marker="!",
+                               primary=_work_act(card=card.id),
+                               menu=[_act("Diff", href=f"/diff/{card.id}")]))
+    for card in ctx.failed:
+        why = (board.section(card.text, "Error") or "").strip()
+        chips = [_chip(f"failed · {card.attempts} attempt(s)"
+                       if card.attempts else "failed", "bad")]
+        rows.append(_card_item(ctx, card, chips=chips, why=why[:400], marker="!",
+                               primary=_work_act(card=card.id)))
+    return _section("Blocked", len(ctx.blocked) + len(ctx.failed), "".join(rows),
+                    note="Only your hands move these.",
+                    empty="Nothing is blocked or failed.", sec_id="blocked")
+
+
+def _review_section(ctx: Context) -> str:
+    """`review/`: nothing schedules a reviewer, so each row carries its own button."""
+    stuck = 0
+    rows = []
+    for card in ctx.review:
+        reason = drain.skip_reason(ctx.root, ctx.base, card)
+        branch = card.fields.get("branch") or f"ai/{card.id}"
+        chips = [_e(stat) for stat in [diff_stat(ctx.root, ctx.base, branch)] if stat]
+        if reason:
+            chips.append(_chip("left alone", "mute"))
+            primary = ""
+        else:
+            stuck += 1
+            primary = _launch("Review it", f"Review {card.id}", "/api/review",
+                              {"card_id": card.id}, primary=True)
+        rows.append(_card_item(ctx, card, chips=chips, why=reason, marker="!",
+                               primary=primary,
+                               menu=[_act("Diff", href=f"/diff/{card.id}")]))
+    bar = ('<div class="barbox"><div class="acts">'
+           + _launch(f"Review all ({stuck})", "Review the review/ lane", "/api/review-all",
+                     {}, primary=True)
+           + '</div></div>') if stuck else ""
+    return _section("Review", len(ctx.review), "".join(rows),
+                    note="Waiting for a reviewer run.", bar=bar,
+                    empty="Nothing is waiting for review.", sec_id="review")
+
+
+def _render_you(ctx: Context) -> str:
+    return "".join([_decide_section(ctx), _playthrough_section(ctx), _blocked_section(ctx),
+                    _review_section(ctx), _audio_section(ctx),
+                    f'<footer>{len(ctx.testing)} card(s) on {_e(ctx.base)} to play</footer>'])
+
+
+# ------------------------------------------------------------------ Running
+
+
+def _job_tail(ctx: Context, job: jobs.Job) -> str:
+    """A job's own progress: per-note rows for `ingest`, the raw tail otherwise."""
+    text = jobs.read_log(ctx.root, job.ident, tail=JOB_TAIL_BYTES)
+    if not text.strip():
+        return ""
+    if job.label == "ingest":
+        return _ingest_rows(ingest.parse_progress(text))
+    lines = text.strip().splitlines()[-JOB_TAIL_LINES:]
+    return f'<pre class="tail">{_e(chr(10).join(lines))}</pre>'
+
+
+def _ingest_rows(progress: ingest.Progress) -> str:
+    """One row per note, with what became of it — for a classify or a carding pass."""
+    marks = {"m-ok": "&check;", "m-bad": "&times;", "m-now": "&middot;"}
+    rows = []
+    for item in progress.items:
+        css, glyph = ingest.ITEM_STATES.get(item.state, ("m-wait", "&middot;"))
+        said = {"done": "carded as", "bounced": "bounced to triage —",
+                "stranded": "stranded —"}.get(item.state, "")
+        rows.append(_item(item.name, kind="job", marker=f'<span class="{css}">{glyph}</span>',
+                          chips=[_e(item.route or item.state)],
+                          why=f"{said} {item.detail}".strip()))
+    routed = any(item.route for item in progress.items)
+    if progress.routes and not routed:
+        counts = " · ".join(f"{n} {route}" for route, n in progress.routes.items())
+        rows.append(_item("routed", kind="job", marker=marks["m-ok"],
+                          chips=[_e(f"{progress.total} note(s)")], why=counts))
+    if not rows:
+        rows.append(_item(progress.phase or "starting", kind="job",
+                          chips=[_e(f"{progress.total} note(s)")],
+                          why="one pass over the whole inbox"))
+    elif progress.total and not routed and not progress.routes:
+        rows.append(_item(f"{progress.finished}/{progress.total}", kind="job",
+                          why=progress.phase))
+    return "".join(rows)
+
+
+def _job_item(ctx: Context, job: jobs.Job, status: str, *, detail: bool) -> str:
+    _, word = _JOB_MARK.get(status, ("", status))
+    said = word if status != jobs.FAILED else f"{word} — exit {job.exit_code}"
+    marker = ('<span class="live-dot"></span>' if status == jobs.RUNNING else
+              {jobs.DONE: '<span class="m-ok">&check;</span>',
+               jobs.FAILED: '<span class="m-bad">&times;</span>'}.get(status, "?"))
+    chips = [_e(said), _e(jobs.elapsed(job))]
+    if job.started_at:
+        chips.append(_e(f"{job.started_at:%d %b %H:%M}"))
+    return (_item(job.label, kind="job", marker=marker, chips=chips, why=job.command,
+                  primary=_act("Output", href=f"/log/{job.ident}"))
+            + (_job_tail(ctx, job) if detail else ""))
+
+
+def _now_section(ctx: Context) -> str:
+    """Everything automated that is going right now, wherever it was started."""
+    rows = []
+    status = ctx.rail.run_status
+    record = _latest_record(ctx.root)
+    if run_is_live(status, record):
+        card_id = str(status.get("card") or "") or _kind_label(record)
+        attempt = status.get("attempt")
+        chips = [_e(str(status.get(k) or "")) for k in ("worker", "model")]
+        if attempt:
+            chips.append(_e(f"attempt {attempt}"))
+        if elapsed := elapsed_since(str(status.get("since") or "")):
+            chips.append(_e(elapsed))
+        if status.get("card"):
+            telemetry = read_telemetry(attempt_dir(ctx.root, card_id, int(attempt or 1)))
+            if telemetry.get("turns"):
+                chips.append(_e(f"{telemetry['turns']} turns"))
+        rows.append(_item(card_id, kind="run", marker='<span class="live-dot"></span>',
+                          chips=chips, extra=_phases_html(str(status.get("phase") or "")),
+                          primary=_act("Stop run", onclick="post('/api/stop',{})")))
+    count = len(rows)
+    for job in ctx.jobs:
+        if jobs.state(job) == jobs.RUNNING:
+            count += 1
+            rows.append(_job_item(ctx, job, jobs.RUNNING, detail=True))
+    return _section("Running now", count, "".join(rows),
+                    empty="Nothing automated is running.", sec_id="running")
+
+
+def _roster_item(ctx: Context, entry: dict, kind: str) -> str:
+    """One card the run has a verdict for."""
+    outcome = str(entry.get("outcome", ""))
+    cls = ("m-ok" if outcome in run_record.LANDED_OUTCOMES else
+           "m-bad" if outcome in run_record.FAILED_OUTCOMES else
+           "m-now" if outcome in run_record.DECISION_OUTCOMES else "m-wait")
+    cls = _live_mark(ctx, entry, cls)
+    glyph = {"m-ok": "&check;", "m-bad": "&times;", "m-now": "?"}.get(cls, "&middot;")
+    card_id = str(entry.get("card", ""))
+    out_dir = attempt_dir(ctx.root, card_id, int(entry.get("attempt") or 1))
+    telemetry = read_telemetry(out_dir)
+    session = session_id(out_dir)
+    took = f"{telemetry['wall_s'] / 60:.0f} min" if telemetry.get("wall_s") else ""
+    cost = entry.get("cost_usd") or 0
+    return _item(card_id, kind="run", marker=f'<span class="{cls}">{glyph}</span>',
+                 chips=[_e(kind), _e(_live_lane(ctx, entry)), _e(took), _e(f"${cost:.2f}")],
+                 why=_said(entry),
+                 primary=_launch("Talk", f"Talk to {card_id}'s session", "/api/talk",
+                                 {"session_id": session}) if session else "")
+
+
+def _run_section(ctx: Context) -> str:
+    """The newest run's roster — every card it set out to work, and where each is."""
+    record = _latest_record(ctx.root)
+    dispatched = record.get("dispatched", [])
+    planned = record.get("planned", [])
+    by_card = {str(d.get("card") or ""): d for d in dispatched}
+    status = ctx.rail.run_status
+    live = run_is_live(status, record)
+    active_id = str(status.get("card") or "") if live else ""
+
+    def pending(card_id: str, kind: str) -> str:
+        active = live and card_id == active_id
+        return _item(card_id, kind="run", marker=("&rsaquo;" if active else "&middot;"),
+                     chips=[_e(kind), _e(_active_row_lane(status) if active else "queued")])
+
+    body: list[str] = []
+    seen: set[str] = set()
+    for item in planned:
+        card_id = str(item.get("card") or "")
+        seen.add(card_id)
+        kind = _QUEUE_LABEL.get(str(item.get("queue") or ""), "task")
+        entry = by_card.get(card_id)
+        body.append(_roster_item(ctx, entry, kind) if entry is not None
+                    else pending(card_id, kind))
+    for entry in dispatched:
+        card_id = str(entry.get("card") or "")
+        if card_id not in seen:
+            seen.add(card_id)
+            body.append(_roster_item(ctx, entry, _roster_kind(record, entry)))
+    if live and not planned:
+        for candidate in ctx.tonight:
+            if candidate.card.id not in seen:
+                seen.add(candidate.card.id)
+                body.append(pending(candidate.card.id, "task"))
+    if str(record.get("kind") or "") in ("chores", "both"):
+        for note in record.get("notes", []):
+            body.append(_item("batch", kind="run", why=str(note.get("message", ""))))
+        if reason := str(record.get("stop_reason") or ""):
+            body.append(_item("stopped", kind="run", marker='<span class="m-bad">&times;</span>',
+                              why=reason))
+    started = str(record.get("started", ""))
+    today = started[:10] == dt.date.today().isoformat()
+    heading = "This run" if live else ("Today's run" if today else "Last run")
+    when = ("today " + started[11:16] if today
+            else f"{started[:10]} {started[11:16]}") if started else ""
+    note = (f"{_kind_label(record)} · {when} on {record.get('host', '?')} · "
+            f"{'in flight' if live else ('complete' if record.get('complete') else 'ended early')}"
+            f" · ${record.get('cost_usd', 0) or 0:.2f}") if started else ""
+    return _section(heading, len(seen), "".join(body), note=note,
+                    empty="No run recorded on this machine yet.", sec_id="lastrun")
+
+
+def _render_running(ctx: Context) -> str:
+    out = [_now_section(ctx)]
+    source, _, newest_job = latest_activity(ctx)
+    if source == "job" and newest_job is not None:
+        out.append(_section(f"Last {newest_job.label}", 1,
+                            _job_item(ctx, newest_job, jobs.state(newest_job), detail=True),
+                            note="the most recent thing that ran here", sec_id="lastjob"))
+    out.append(_run_section(ctx))
+    out.append('<footer>' + _act("Earlier runs and jobs", href="/history") + '</footer>')
+    return "".join(out)
+
+
+def _render_history(ctx: Context) -> str:
+    """Earlier runs and everything the buttons started — one click from Running."""
+    rows = []
+    earlier = run_record.read_all(ctx.root)[1:6]
+    for old in earlier:
+        mark = ('<span class="m-ok">&check;</span>' if old.get("complete")
+                else '<span class="m-bad">&times;</span>')
+        when = str(old.get("started", ""))[:16].replace("T", " ")
+        took = span(str(old.get("started", "")), str(old.get("finished") or ""))
+        cost = old.get("cost_usd", 0) or 0
+        rows.append(_item(when, kind="run", marker=mark,
+                          chips=[_e(str(old.get("kind", ""))), _e(took), _e(f"${cost:.2f}")],
+                          why=str(old.get("stop_reason")
+                                  or f"{len(old.get('dispatched', []))} dispatched")))
+    out = [_section("Earlier runs", len(earlier), "".join(rows),
+                    empty="No earlier runs on this machine.", sec_id="earlierruns")]
+    jobs_rows = []
+    for job in ctx.jobs[:JOBS_ON_RUN_PAGE]:
+        status = jobs.state(job)
+        if status != jobs.RUNNING:
+            jobs_rows.append(_job_item(ctx, job, status, detail=False))
+    out.append(_section("Earlier from here", len(jobs_rows), "".join(jobs_rows),
+                        empty="No button here has started anything yet.",
+                        sec_id="jobhistory"))
+    out.append(f'<footer>Records in {run_record.DIR.as_posix()}</footer>')
+    return "".join(out)
 
 
 def _asks(questions: int, options: int) -> str:
@@ -2576,388 +2909,11 @@ def _asks(questions: int, options: int) -> str:
     return f"{head} · {options} option(s) offered" if options else head
 
 
-def _render_now(ctx: Context) -> str:
-    out = []
-
-    # **Questions, not options.** This counted `sum(len(s.options) ...)` and called
-    # the result "decision(s)", so a card asking one thing four ways announced
-    # itself as "4 decisions" — Karel, 2026-08-19: *"these are 4 answers to 1
-    # decision. It is confusing."* A parked card's cost is how many things it asks
-    # you, and the options are what makes each one cheap to answer, so the two
-    # numbers pull in opposite directions and only the first belongs in the chip.
-    # The option count rides along as the reassuring half of the same sentence.
-    rows = "".join(
-        _row(marker="?", body=_card_body(
-                card, root=ctx.root, meta=[_e(f"in needs-decision/ · {card.fields.get('created', '')}")]
-                     + ([_chip(_asks(questions, options), "warn")] if questions else [])),
-             acts=_act("Read card", href=f"/card/{card.id}")
-                  # The one row on the page whose action is *answering* rather than
-                  # dispatching. Until this existed the section could only point at the
-                  # card, so the cheapest possible decision — tick B, done — still cost
-                  # an editor, the `## Thread` convention and the attributor token from
-                  # memory. Cards sat parked for weeks with the answer already known.
-                  + _act("Answer", href=f"/decide/{card.id}", primary=True))
-        for card, questions, options in (
-            (c, len(subs), sum(len(s.options) for s in subs))
-            for c, subs in ((c, decide.parse(c.text)) for c in ctx.decisions))
-    )
-    out.append(_section("Decide", len(ctx.decisions), rows,
-                        note="Nothing else moves until this does.",
-                        empty="Nothing is waiting on a decision.",
-                        sec_id="decide"))
-
-    # Blocked before review, because it is the one of the two that is *waiting on
-    # Karel*: the work is finished and reviewed and only the landing is stuck, so it
-    # sits with the other things a person has to do rather than under a heading that
-    # says a reviewer still owes something.
-    out.append(_blocked_section(ctx))
-
-    # `review/` used to be invisible unless you opened Verify — a card could sit
-    # there for weeks with nothing on the page you actually land on saying so.
-    # Same section, same data, shown here too, so it cannot be missed just
-    # because Verify was not the page open at the time. See `_review_section`.
-    out.append(_review_section(ctx))
-
-    do_now = ctx.do_now
-    # A card can land here (a person is needed regardless of machine) while
-    # *also* declaring `requires: gpu-box` — needing a person is not the same
-    # fact as being doable on whichever machine that person is sitting at. The
-    # chip is the only thing on the row that says so; without it "Do now" reads
-    # as "safe to start here", which for one of these cards is false.
-    capabilities = host_capabilities(ctx.root)
-    inline_rows = []
-    for candidate in do_now:
-        card = candidate.card
-        meta = [_chip(candidate.reason.split(";")[0][:70])]
-        if card.requires and card.requires not in capabilities:
-            meta.append(_chip(f"needs {card.requires}", "warn"))
-        if card.attempts:
-            meta.append(_e(f"{card.attempts} attempt(s)"))
-        inline_rows.append(_row(
-            marker="&rsaquo;", body=_card_body(card, root=ctx.root, meta=meta),
-            acts=_act("Read card", href=f"/card/{card.id}")
-                 + _work_act(card=card.id, tier=card.tier, worker=card.worker,
-                            lane=board.finished_lane(card))))
-    # One list, and it used to be two. A note routed `inline` was work for Karel that
-    # never became a card, so this page drew it from the routing view under a second
-    # heading — while the Inbox page drew the same note from the same lane under a
-    # third. Karel, 2026-08-18: *"some cards are duplicated between now and inbox"*.
-    # `ingest` now cards an inline note into `tasks/` the moment it is routed, so it
-    # arrives here as an ordinary candidate the night refuses, and it is in exactly
-    # one place on the whole panel.
-    body = ((_group("Cards the night cannot take") + "".join(inline_rows))
-            if inline_rows else "")
-    # `New session here` used to be this section's bar. It is in the status rail
-    # now (`_account_html`), which is on every page rather than below the fold on
-    # one — see that function. Nothing replaced it here: a bar exists to act on the
-    # rows above it, and this section's rows each carry their own button.
-    out.append(_section("Do now", len(do_now), body,
-                        note="Work that needs you at the keyboard.",
-                        empty="Nothing needs you at the keyboard.",
-                        sec_id="donow"))
-
-    out.append(_chores_section(ctx))
-
-    tonight = ctx.tonight
-    # The same liveness question the rail asks, asked once here: a stale heartbeat
-    # must not grey out a card's Dispatch button for a run that ended days ago.
-    live_card = (str(ctx.rail.run_status.get("card") or "")
-                 if run_is_live(ctx.rail.run_status, _latest_record(ctx.root)) else "")
-    queue_rows = []
-    for position, candidate in enumerate(tonight, start=1):
-        card = candidate.card
-        meta = [_e(card.worker), _e(f"verify: {card.verify}")]
-        if card.attempts:
-            meta.append(_e(f"attempt {card.attempts + 1}"))
-        running = live_card == card.id
-        if running:
-            meta.append(_chip("running", "ok"))
-        control = (f'<input type="checkbox" class="pick" data-id="{_e(card.id)}" checked '
-                   f'aria-label="include {_e(card.id)}">')
-        acts = _act("Read card", href=f"/card/{card.id}")
-        # `Work on this` next to `Dispatch`, on the same row, because they are the two
-        # answers to the same question and the row is where the choice is made: hand
-        # the card to the night, or sit down with it now. Not offered while the card is
-        # the one running — two sessions on one card's branch is a merge conflict with
-        # extra steps.
-        if not running:
-            acts += _work_act(card=card.id, tier=card.tier, worker=card.worker,
-                              lane=board.finished_lane(card), primary=False)
-        acts += (_act("Running", disabled=True) if running else
-                 _act("Dispatch", onclick=f"post('/api/dispatch',{{card_id:'{_attr(card.id)}'}})",
-                      primary=True))
-        queue_rows.append(_row(grip=True, card_id=card.id, control=control,
-                               marker=str(position), body=_card_body(card, root=ctx.root, meta=meta),
-                               acts=acts))
-
-    elsewhere_rows = "".join(
-        _row(marker="&mdash;", body=_card_body(
-                c.card, root=ctx.root, meta=[_chip(f"requires {c.card.requires}"), _e("waits for the other machine")]),
-             acts=_act("Read card", href=f"/card/{c.card.id}"))
-        for c in ctx.elsewhere
-    )
-    body = "".join(queue_rows)
-    if elsewhere_rows:
-        body += _group(f"Dispatchable, but not here — {len(ctx.elsewhere)}") + elsewhere_rows
-
-    # **Two numbers, and they are the two halves of "how much of a night is this".**
-    # `Take first` says how much work goes in; `Sessions` says how long the run may
-    # keep at it — 1 stops at the usage wall, 2 sleeps through one reset and carries
-    # on. The second existed only as `runner --sessions` and therefore only for
-    # whoever was in a terminal, which is the gap this closes; the tooltip says what
-    # a window is, because the word means nothing until someone tells you once.
-    sessions = (
-        f'<label class="runopt" title="How many usage-limit windows a dispatch may '
-        f'spend. 1 stops when the session allowance runs out; more than that sleeps '
-        f'until the allowance resets and carries on, which is how a run reaches past '
-        f'tonight into the small hours. Each dispatch gets this budget — the queue '
-        f'run as a whole, or each card of a ticked sequence in turn. The chore batch '
-        f'ignores it: it never waits out a window.">Sessions'
-        f'<input type="range" id="sessions" min="1" max="{SESSIONS_MAX}" value="1">'
-        f'<output for="sessions" id="sessionsout">1</output></label>')
-    bar = (
-        '<div class="barbox">'
-        '<p>Order is saved to each card as you drag. <span id="picked">0 of 0</span> ticked.</p>'
-        '<label class="runopt">Take first'
-        f'<input type="range" id="takefirst" min="0" max="{len(tonight)}" value="{len(tonight)}">'
-        '<output for="takefirst" id="takefirstout">0</output></label>'
-        + sessions
-        + '<div class="acts">'
-        + _act("Run chores", onclick="runChores()")
-        + _act("Run the whole queue", onclick="runNight()")
-        + _act("Run the ticked", onclick="runTicked()", primary=True)
-        + '</div></div>'
-    )
-    out.append(_section("Tonight", len(tonight), body, rows_id="queue",
-                        note="Drag to set the order. Ticked cards are what a run takes.",
-                        bar=bar if tonight else "",
-                        empty="Nothing is dispatchable here right now.",
-                        sec_id="tonight"))
-
-    # The notes themselves, one row each, each with its own button — not a single
-    # row for `Routing.md` and one "Launch triage" that named no note. Triage takes
-    # exactly one note per call and is the route whose cost is the reason the
-    # classifier exists, so "which one, and on purpose" is the entire gesture.
-    waiting = ctx.triage_notes
-    triage_rows = "".join(
-        _row(marker="&rsaquo;",
-             # `decision` is None when the note carries `route: triage` but the last
-             # report does not describe it — a hand-set route, or a report older than
-             # the note. The route is still true; only the classifier's sentence about
-             # it is missing, so the row renders without it rather than not at all.
-             body=(f'<span class="id">{_e(note.name)}</span>'
-                   + (f'<p class="why">{_e(decision.why)}</p>'
-                      if decision and decision.why else "")
-                   + _meta([_chip("triage", "warn"), f"{note.size} B"]
-                           + ([_chip(f"confidence {decision.confidence}", "warn")]
-                              if decision and decision.confidence != "high" else []))),
-             acts=_act("Open note", href=_body_href(_rel(ctx.root, note.path)))
-                  + _act("Triage this",
-                         onclick=f"post('/api/triage',{{note:'{_attr(note.name)}'}})",
-                         primary=True))
-        for note, decision in waiting)
-    out.append(_section("Waiting on triage", len(waiting), triage_rows,
-                        note="One at a time, deliberately — it is the expensive route.",
-                        empty="Nothing is waiting on triage.",
-                        sec_id="triage"))
-
-    out.append(f'<footer>Board on {_e(current_branch(ctx.root))} &middot; '
-               f'{_e(ctx.rail.freshness_line)}</footer>')
-    return "".join(out)
-
-
 def _stamp_of(path: Path) -> str:
     try:
         return f"written {dt.datetime.fromtimestamp(path.stat().st_mtime):%d %b %H:%M}"
     except OSError:
         return ""
-
-
-def _blocked_section(ctx: Context) -> str:
-    """The `blocked/` and `failed/` lanes: nothing further to review, a person's
-    hands fix it — not a decision, so this is not `Decide`.
-
-    Karel, 2026-08-23, having found two finished cards sitting under **Under review**:
-    *"we again got into 'human needs to resolve it' being in review — that is not what
-    review is for."* They were not awaiting review; they had passed it, and their
-    branches would not rebase onto a `test` that had moved under them. The lane split
-    is in `board.BLOCKED_LANE`; this is the half of it he actually sees.
-
-    `failed/` joined the same section rather than getting its own (Karel, 2026-08-26):
-    both lanes mean "reviewed nothing further, only your hands move this" — one because
-    the merge won't land, the other because gates stayed red past `MAX_ATTEMPTS`. A
-    blocked row carries its `## Merge` note; a failed row carries its `## Error`
-    excerpt — the only trace left of the attempt, since the runner reaps a card's
-    rescue branches the moment it is retired to `failed/` (README's runner section), so
-    unlike a blocked row there is no branch left to diff.
-
-    `Work on this` opens an interactive session on the card's own branch. For a blocked
-    row that branch still exists and is the one the flag text tells you to rebase by
-    hand — the button does not attempt the merge itself, only gets you into the seat to
-    do it (Karel, 2026-08-26: cards stuck here need a way to start working on them from
-    the panel, same as any other lane). For a failed row the branch is gone, so the
-    session cuts a fresh one from the integration base, same as any other first click on
-    a card nothing has touched yet.
-
-    Both rows lead with `Read card`, like every other lane's row (Karel, 2026-09-03).
-    A row's `why` is a 400-character excerpt of `## Merge` or `## Error`, which is
-    enough to see *that* the merge would not land but not the criteria, the approach or
-    the attempt history — and this is the one section where the card is finished, so
-    the excerpt is all there was. Reading it should not require opening a session.
-    """
-    rows = []
-    for card in ctx.blocked:
-        branch = card.fields.get("branch") or f"ai/{card.id}"
-        why = (board.section(card.text, "Merge") or "").strip()
-        meta = [_e(stat) for stat in [diff_stat(ctx.root, ctx.base, branch)] if stat]
-        meta.append(_chip("reviewed ok", "ok"))
-        acts = (_act("Read card", href=f"/card/{card.id}")
-                + _act("Diff", href=f"/diff/{card.id}")
-                + _work_act(card=card.id, tier=card.tier, worker=card.worker,
-                           lane=board.finished_lane(card), primary=True))
-        rows.append(_row(marker="!", acts=acts,
-                         body=_card_body(card, root=ctx.root, meta=meta, why=why[:400])))
-    for card in ctx.failed:
-        why = (board.section(card.text, "Error") or "").strip()
-        meta = [_chip(f"failed · {card.attempts} attempt(s)"
-                      if card.attempts else "failed", "bad")]
-        acts = (_act("Read card", href=f"/card/{card.id}")
-                + _work_act(card=card.id, tier=card.tier, worker=card.worker,
-                            lane=board.finished_lane(card), primary=True))
-        rows.append(_row(marker="!", acts=acts,
-                         body=_card_body(card, root=ctx.root, meta=meta, why=why[:400])))
-    flag = ""
-    if ctx.blocked or ctx.failed:
-        flag = ('<div class="flag"><h3>Finished work that cannot land, or never turned '
-                'green</h3>'
-                '<p>A blocked card passed gates, tests and review, then would not '
-                'rebase onto the integration branch — and the resolver could not settle '
-                'it either; resolving one is a git operation in a real checkout: rebase '
-                'the branch, fix the conflict, re-run preflight, then '
-                '<code>python -m nightshift.boardcmd land &lt;id&gt;</code>. A failed card '
-                'ran out of attempts with '
-                'gates or tests still red; <b>Work on this</b> starts over on a fresh '
-                'branch. Nothing here is waiting on a decision.</p></div>')
-    return _section("Blocked on you", len(ctx.blocked) + len(ctx.failed), flag + "".join(rows),
-                    note="Reviewed and done, or out of attempts — either way, your hands fix it.",
-                    empty="Nothing is blocked or failed.",
-                    sec_id="blocked")
-
-
-def _review_section(ctx: Context) -> str:
-    """The `review/` lane, shared by `/now` and `/verify`.
-
-    Karel, 2026-08-22: a card at rest here used to be visible only if you opened
-    Verify — `review-lane-has-no-drain` gave the lane a way out, but nothing said
-    a card had *taken* it unless you went looking. Showing the same section on
-    `/now` means a card sitting unreviewed shows up on the page you actually land
-    on, and **Review all** is the bulk form of the per-row **Review it** button:
-    both spawn `nightshift.drain`, `--card <id>` for one, no argument for the
-    whole lane — the same sweep `drain`'s own module docstring describes.
-    """
-    stuck = []
-    review_rows = []
-    for card in ctx.review:
-        reason = drain.skip_reason(ctx.root, ctx.base, card)
-        branch = card.fields.get("branch") or f"ai/{card.id}"
-        meta = [_e(stat) for stat in [diff_stat(ctx.root, ctx.base, branch)] if stat]
-        if reason:
-            meta.append(_chip("left alone", "mute"))
-        else:
-            stuck.append(card.id)
-        acts = (_act("Read card", href=f"/card/{card.id}")
-                + _act("Diff", href=f"/diff/{card.id}"))
-        if not reason:
-            acts += _act("Review it", onclick=f"post('/api/review',{{card_id:'{_attr(card.id)}'}})",
-                         primary=True)
-        review_rows.append(_row(marker="!", acts=acts,
-                                body=_card_body(card, root=ctx.root, meta=meta, why=reason, clickable=True)))
-        review_rows.append(_info_box(card))
-
-    flag = ""
-    bar = ""
-    if stuck:
-        flag = ('<div class="flag"><h3>No reviewer is scheduled for '
-                f'{"this one" if len(stuck) == 1 else "these"}</h3>'
-                '<p>The night takes its queue from <code>tasks/</code>, so nothing picks this '
-                'lane up on its own — that is deliberate, and it is why the buttons are here. '
-                '<b>Review it</b> runs the drain over one card; <b>Review all</b> runs it over '
-                'every reviewable card in the lane.</p></div>')
-        bar = ('<div class="barbox"><div class="acts">'
-               + _act(f"Review all ({len(stuck)})", onclick="reviewAll()", primary=True)
-               + '</div></div>')
-    return _section("Under review", len(ctx.review), flag + "".join(review_rows),
-                    note="The reviewer's lane, not yours.",
-                    empty="Nothing is at rest in review/.",
-                    bar=bar,
-                    sec_id="underreview")
-
-
-def _render_verify(ctx: Context) -> str:
-    out = []
-    by_surface: dict[str, list[board.Card]] = {}
-    for card in ctx.testing:
-        by_surface.setdefault(card.surface or "unsorted", []).append(card)
-
-    rows = []
-    for surface in sorted(by_surface):
-        cards = by_surface[surface]
-        rows.append(_group(f"{surface} — {len(cards)}"))
-        for card in cards:
-            branch = card.fields.get("branch") or f"ai/{card.id}"
-            # The diff stat is only available while the branch still exists, and a
-            # card reaches `testing/` by merging — after which the branch is deleted
-            # by the standing cleanup rule. So it is shown when it can be and the
-            # row falls back to the facts the card itself carries, rather than
-            # rendering an empty meta line for every card that actually landed.
-            meta = []
-            if stat := diff_stat(ctx.root, ctx.base, branch):
-                meta.append(_e(stat))
-            elif card.worker != "none":
-                meta.append(_e(card.worker))
-            if card.attempts:
-                meta.append(_e(f"{card.attempts} attempt(s)"))
-            if card.verify == "review":
-                meta.append(_chip("verify: review", "ok"))
-            control = (f'<input type="checkbox" class="tick" data-id="{_e(card.id)}" '
-                       f'aria-label="{_e(card.id)} verified">')
-            acts = (_act("Read card", href=f"/card/{card.id}")
-                    + _act("Diff", href=f"/diff/{card.id}")
-                    + _act("Not OK", onclick=f"openEditor('feedback-{_attr(card.id)}')")
-                    + _act("Open inline",
-                           onclick=f"post('/api/work-feedback',{{card_id:'{_attr(card.id)}'}})",
-                           extra='title="Resumes the session that built this card, waiting '
-                                 'for you to say what was wrong before it fixes anything."')
-                    + _act("Mark OK", onclick=f"markOK(this,'{_attr(card.id)}')", primary=True))
-            rows.append(_row(control=control, marker="&nbsp;", acts=acts,
-                             body=_card_body(card, root=ctx.root, meta=meta, clickable=True)))
-            rows.append(_info_box(card, how_to_test=True))
-            rows.append(_editor(f"feedback-{card.id}",
-                                save=f"submitFeedback('{_attr(card.id)}')",
-                                placeholder="What was wrong, in your own words — this goes "
-                                            "onto the card as ## Feedback and sends it back "
-                                            "to tasks/."))
-
-    bar = ('<div class="barbox">'
-           '<p><span id="ticked">Nothing ticked.</span> Saving marks every ticked '
-           'card verified in one pass.</p><div class="acts">'
-           + _act("Save ticked", onclick="saveTicked()", primary=True)
-           + '</div></div>')
-    out.append(_section("Play through", len(ctx.testing), "".join(rows),
-                        note="Grouped by where in the game you would see it.",
-                        sub=("Everything below is on <code>"
-                             f"{_e(ctx.base)}</code> at once. <b>Mark OK</b> moves that card "
-                             "to <code>done/</code> straight away; ticking several and saving "
-                             "does the same in one go."),
-                        bar=bar if ctx.testing else "",
-                        empty="Nothing is waiting to be played.",
-                        sec_id="playthrough"))
-
-    out.append(_review_section(ctx))
-
-    out.append(f'<footer>{len(ctx.testing)} card(s) on {_e(ctx.base)} awaiting a '
-               f'play-through</footer>')
-    return "".join(out)
 
 
 #: Route → (group heading, chip kind). The headings are the report's own, minus
@@ -2976,251 +2932,6 @@ _ROUTE_GROUPS: tuple[tuple[str, str, str], ...] = (
     # group that does not exist is how a note becomes invisible rather than pending.
     ("inline", "Inline — carded on the next pass", "mute"),
 )
-
-
-def _render_inbox(ctx: Context) -> str:
-    """The inbox, grouped by what the last routing pass decided about each note.
-
-    **The page used to state the opposite of the truth.** Every note was listed
-    under "Not yet classified", because a note does not leave `inbox/` when it is
-    routed — `ingest.RoutingView` has the full account. The routing was written to
-    `Routing.md`, which this page linked by name and timestamp without reading, so
-    a classification that had worked perfectly was indistinguishable from one that
-    had never run.
-
-    A note edited *after* the pass that routed it is marked rather than trusted:
-    the routing describes text that has since changed, and the whole value of the
-    view is that it says what is true of the note as it stands.
-    """
-    view = ctx.routing
-    ordered: dict[str, list[tuple[ingest.Note, ingest.Decision | None]]] = {
-        route: [] for route, _, _ in _ROUTE_GROUPS}
-    for note in ctx.notes:
-        # **The note's own `route:` decides the group, not the view.** The view is a
-        # report regenerated from these files; keying the page on it meant the page
-        # could disagree with the lane it was drawing, and a note that had left the
-        # lane went on being listed. `Note.route` already folds an unrecognised value
-        # to "", so an unknown route lands with the unclassified rather than in a
-        # bucket nothing renders.
-        route = note.route if note.route in ordered else ""
-        decision = view.of(note.name)
-        ordered[route].append(
-            (note, decision if decision and decision.route == route else None))
-
-    rows = []
-    for route, heading, kind in _ROUTE_GROUPS:
-        bucket = ordered.get(route) or []
-        if not bucket:
-            continue
-        rows.append(_group(f"{heading} — {len(bucket)}"))
-        for note, decision in bucket:
-            rel = _rel(ctx.root, note.path)
-            meta = [f"{note.size} B", _e(_stamp_of(note.path))]
-            # The group chip follows `route` — the bucket the row is actually in,
-            # true whether a classifier decision backs it or the frontmatter was
-            # hand-set — not `decision`, which is None for a note routed by hand
-            # after the last pass (route: triage typed into a note nobody has
-            # classified yet). Gating the chip on `decision` left such a row
-            # grouped under "Waiting on triage" but wearing no chip saying so.
-            if route:
-                meta.insert(0, _chip(route, kind))
-            if decision:
-                if decision.confidence != "high":
-                    meta.append(_chip(f"confidence {decision.confidence}", "warn"))
-                if not decision.dispatchable:
-                    meta.append(_chip("needs a human", "warn"))
-                if _changed_since(note.path, view.written):
-                    meta.append(_chip("edited since routing", "warn"))
-            body = f'<span class="id">{_e(note.name)}</span>'
-            if decision and decision.why:
-                body += f'<p class="why">{_e(decision.why)}</p>'
-            # Both buttons open the same page in its two modes (`render_body`),
-            # which is why Edit is a link and no longer opens a box on this row.
-            rows.append(_row(
-                marker="&rsaquo;", body=body + _meta(meta),
-                acts=_act("Edit", href=_body_href(rel, edit=True))
-                     + _act("Open note", href=_body_href(rel))
-                     + _route_act(note.name, route)
-                     + _delete_act(note.name, "inbox")))
-    rows = "".join(rows)
-
-    # **Classify writes the cards it can, in the same pass, because triage is
-    # the only route the "opt-in" step was ever protecting.** The
-    # look-before-you-spend caution in `ingest`'s own docstring is about
-    # *triage* — the expensive route, never dispatched from here whatever this
-    # button does — not about a chore or scribe card, whose *writing* is cheap
-    # either way: both are the note turned into a card, with no codebase read.
-    # What the two routes differ in is how the finished card is later run, which
-    # this button does not pay for.
-    # Splitting those two into a second manual click bought no real safety and
-    # cost a step Karel asked to have back (2026-08-22: chore-routed notes
-    # from a still-earlier classify pass were still sitting in `inbox/`,
-    # unwritten, because nobody had come back to press the second button).
-    # `--scribe` already did both halves in one command for exactly this
-    # reason; the button just did not use it. "Write the N card(s)" stays, for
-    # the case that pass is *for*: a route decided outside this button
-    # entirely — hand-set frontmatter (`route: chore` on a brand new note) or
-    # a per-row override via `_route_act` — with nothing left to reclassify.
-    writable = sum(1 for note in ctx.notes if note.route in ingest.WRITABLE_ROUTES)
-    write_label = f"Write the {writable} card(s)" if writable else "Write the cards"
-    bar = ('<div class="barbox">'
-           '<p>Classify sorts every note and writes the card for each chore or scribe '
-           'route on the spot — triage is the only route left for you to spend '
-           'deliberately, one note at a time.</p>'
-           '<div class="acts">'
-           + _act("New note", onclick="openEditor('new-note')")
-           + _act(write_label, onclick="post('/api/ingest',{write:true})",
-                  disabled=not writable,
-                  extra='title="One scribe dispatch per chore- or scribe-routed note, on '
-                        'the routing already on disk — for a route set by hand rather than '
-                        'by Classify. Each note becomes its card and leaves the lane; '
-                        'nothing is reclassified."')
-           + _act("Classify all", onclick="post('/api/ingest',{scribe:true})", primary=True,
-                  extra='title="One classifier dispatch over the whole lane, then one scribe '
-                        'dispatch per chore- or scribe-routed note it found. Writes '
-                        'Routing.md and every card that route can write on its own — a note '
-                        'routed triage is left for you to dispatch by hand."')
-           + '</div></div>'
-           + _editor("new-note", save="saveNew('new-note','inbox')", named=True,
-                     placeholder="One or two sentences is enough."))
-    unrouted = len(ordered.get("") or [])
-    # Keyed on the notes as well as the view, because the two can now disagree in the
-    # one direction that matters: routes survive on the notes, so a `Routing.md` that
-    # was never written — or was deleted, it being a regenerable view — must not make
-    # a fully routed lane read as one nothing has looked at.
-    if not view.known and not any(note.route for note in ctx.notes):
-        note = "No routing pass yet — Classify all is what fills this in."
-    else:
-        when = f"{view.written:%d %b %H:%M}" if view.written else "at an unrecorded time"
-        note = (f"Routed {when}"
-                + (f" · {unrouted} note(s) added since" if unrouted else "")
-                + f" · {board.ROUTING_VIEW} has the full report")
-    return _section("Inbox", len(ctx.notes), rows, note=note,
-                    bar=bar, empty="The inbox is empty.", sec_id="inbox") + (
-        f'<footer>{len(ctx.notes)} note(s) in inbox</footer>')
-
-
-def _route_act(note: str, route: str) -> str:
-    """The actions a note's route implies, on the note's own row.
-
-    Four routes, four different next steps, and before this the page offered the
-    same two — Edit and Open — to all of them. The bar's bulk buttons could not
-    stand in for it: the write button takes the whole writable set, and triage is
-    explicitly the route you spend on **one** note at a time, chosen deliberately.
-    So the choice belongs on the row, where the note you are looking at is the note
-    the button acts on.
-
-    **`Triage this`, `Work on this` and `Done` are on every row, whatever the route
-    says**, including a note no pass has reached. The route is a recommendation from
-    an agent that deliberately never opened the codebase — the classifier's own
-    charter says *"route from the shape of the request, not the shape of the work"*
-    and *"a wrong answer from you is affordable"* — so the human overruling it is the
-    design working, not a bypass of it. All three are also actions that cannot be
-    spent wrongly by accident: each opens an interactive session, or a `git`-tracked
-    move, that you are sitting in front of. `Work on this` used to be gated on
-    `route == "inline"`, which meant bypassing classify/triage entirely — the whole
-    point of working a note at the keyboard before any pass has judged it — required
-    the classifier to have already agreed with you first.
-
-    Karel, 2026-08-17, asking for exactly this: *"change the classification if
-    needed (like run triage on non triaged card for example)"*.
-
-    The reverse override — forcing the scribe onto a triage-routed note — is
-    deliberately **not** here. `ingest --only` refuses it and says why, because
-    that direction is the one that spends on an agent forbidden to read the code
-    and produces a confidently wrong `## Acceptance` if it guesses. Re-run the
-    classify pass, or triage it.
-    """
-    target = _attr(note)
-    acts = []
-    if route in ingest.WRITABLE_ROUTES:
-        acts.append(_act("Write the card",
-                         onclick=f"post('/api/ingest/one',{{note:'{target}'}})",
-                         primary=True,
-                         extra='title="One scribe dispatch on this note, on the route the '
-                               'last pass gave it. The note becomes the card and leaves the '
-                               'lane; a bounce sends it to triage instead."'))
-    acts.append(_work_act(note=note))
-    acts.append(_done_act(note))
-    acts.append(_act("Triage this", onclick=f"post('/api/triage',{{note:'{target}'}})",
-                     primary=route == "triage",
-                     extra='title="Opens a terminal running the triage charter on this '
-                           'note, whatever the routing said. Interactive on purpose — '
-                           'triage is investigative work you drive, and it is the '
-                           'expensive route, so it is never dispatched for you."'))
-    return "".join(acts)
-
-
-def _work_act(*, card: str = "", note: str = "", tier: str = "", worker: str = "",
-              lane: str = "", primary: bool | None = None) -> str:
-    """`Work on this` — the button that used to say `Start session` and mean nothing.
-
-    Three rows offered `Start session`, all three posted the same empty
-    `/api/session`, and all three opened a bare CLI in the repo: no prompt, no
-    model, no charter, no account. The label was accurate and that was the problem —
-    it described what the panel did rather than what the row is for. Named for the
-    work now, because the button carries it (Karel, 2026-08-17: *"cards should start
-    working on themselves"*).
-
-    The tooltip names the model tier and the charter, so what the click is about to
-    spend is legible *before* the click rather than in the session's own header —
-    the same principle §3.4 applies to the account chip.
-    """
-    if card:
-        target = f"{{card:'{_attr(card)}'}}"
-        # The tier the click will actually use, which is the rail's when it is
-        # overriding — `tier` here is the card's own. A tooltip promising the
-        # frontmatter's tier beside a chip showing the rail's would be the two
-        # halves of `effective_tier` disagreeing in the one place a click is
-        # about to spend money on the answer.
-        opens_at = effective_tier(tier)
-        detail = " · ".join(x for x in (f"{opens_at} tier" if opens_at else "",
-                                        worker if worker and worker != "none" else "") if x)
-        title = ("Opens an interactive session on this card"
-                 + (f" ({detail})" if detail else "")
-                 + ". It reads the card, cuts the card's own branch and works with you "
-                   "at the keyboard — nothing is dispatched and no verdict is written."
-                 + (f" Its goal is to land the card in {lane}/." if lane else ""))
-    else:
-        target = f"{{note:'{_attr(note)}'}}"
-        title = ("Opens an interactive session on this note. A note routed to you is "
-                 "your own work at the keyboard — the session gets the note's text, not "
-                 "a card, and files nothing when it is done.")
-    return _act("Work on this", onclick=f"post('/api/work',{target})",
-                primary=bool(card) if primary is None else primary,
-                extra=f'title="{title}"')
-
-
-def _done_act(note: str) -> str:
-    """The gesture that files a note in `done/` without ever carding it.
-
-    Every route's note is moved by the process that works it — the scribe and triage
-    move theirs as they card it, `apply_routing` cards an inline one into `tasks/`,
-    the runner moves cards as it goes. What is left for this is the note nothing will
-    process: one somebody handled at the keyboard before any pass reached it, or one
-    that has been overtaken and should be recorded rather than deleted. `done/` is
-    the board's record of what happened, so it goes there rather than to `rm`.
-    """
-    return _act("Done", onclick=f"post('/api/close',{{note:'{_attr(note)}'}})",
-                extra='title="Files this note in done/ as a minimal card — what it '
-                      'asked for, and that you closed it by hand. It leaves the inbox, '
-                      'so the next classify pass will not route it again."')
-
-
-def _delete_act(name: str, lane: str) -> str:
-    """The one destructive row action on the board: `git rm` a bare note.
-
-    Confined to `inbox/` and `ideas/` — the two lanes a note with no history can
-    live in — for the reason `boardcmd.delete_note` itself gives: anything that
-    reached a further lane carries state (attempts, a review, a summary) this
-    button knows nothing about. `confirmDeleteNote` is the typed-name guard, the
-    same shape as `confirmUninstall`'s: the cheapest confirmation a stray click
-    cannot produce, checked again by the button's own label matching the file.
-    """
-    return _act("Delete", onclick=f"confirmDeleteNote('{_attr(name)}','{_attr(lane)}')",
-                extra='title="Permanently removes this note via git rm — recoverable '
-                      'only from git history, same as any other commit. Asks you to '
-                      'type the filename first."')
 
 
 def _changed_since(path: Path, when: dt.datetime | None) -> bool:
@@ -3263,42 +2974,6 @@ def _editor(slug: str, *, save: str, named: bool = False, placeholder: str = "")
             f'<textarea placeholder="{_e(placeholder)}"></textarea>'
             f'<div class="acts">{_act("Save", onclick=save, primary=True)}'
             f'{_act("Cancel", onclick=f"closeEditor(&#39;{slug}&#39;)")}</div></div>')
-
-
-def _render_ideas(ctx: Context) -> str:
-    rows = []
-    for position, name in enumerate(ctx.ideas, start=1):
-        # The path travels verbatim and url-encoded, which is the whole reason this
-        # can be a link: real idea names carry spaces, en dashes and diacritics
-        # ("Animation – attack.md"), none of which may appear in an HTML id, and one
-        # apostrophe would have ended the JS string the old inline editor was handed.
-        path = f"{board.board_rel(ctx.root).as_posix()}/{board.PRIVATE_LANE}/{name}"
-        acts = (_act("Read", href=_body_href(path))
-                + _act("Edit", href=_body_href(path, edit=True))
-                + _act("Promote", onclick=f"post('/api/promote',{{name:'{_attr(name)}'}})",
-                       primary=True)
-                + _delete_act(name, board.PRIVATE_LANE))
-        rows.append(_row(marker=str(position), acts=acts,
-                         body=f'<span class="id">{_e(name)}</span>'))
-
-    bar = ('<div class="barbox">'
-           '<p>A new idea is one line and a filename. It costs nothing and commits you '
-           'to nothing.</p><div class="acts">'
-           + _act("New idea", onclick="openEditor('new-idea')", primary=True)
-           + '</div></div>'
-           + _editor("new-idea", save="saveNew('new-idea','ideas')", named=True,
-                     placeholder="Half a thought is fine."))
-    sub = ("Yours alone. Nothing reads these but you and this page &mdash; and promoting one "
-           "<em>moves the file</em> rather than summarising it, so no idea's text reaches a "
-           "card except by your hand. <b>They do not drag.</b> An idea is a bare file with "
-           "no frontmatter, so there is no <code>kanban_order</code> to write and no verb "
-           "that could add one without this tool authoring inside the private lane &mdash; "
-           "they are listed by name instead. Cards drag, on Now.")
-    return _section("Ideas", len(ctx.ideas), "".join(rows), note="Edit in place; promote "
-                    "when one is ready.", sub=sub, bar=bar,
-                    empty="No ideas parked.", sec_id="ideas") + (
-        f'<footer>{board.board_rel(ctx.root).as_posix()}/{board.PRIVATE_LANE} &middot; '
-        f'committed and pushed, never read by anything else</footer>')
 
 
 def _landed_lane(entry: dict) -> str:
@@ -3398,176 +3073,6 @@ JOB_TAIL_LINES = 14
 JOB_TAIL_BYTES = 8_000
 
 
-def _running_section(ctx: Context) -> str:
-    """Every automated process running right now, wherever it was started.
-
-    **Only the live ones.** Karel, 2026-08-17: *"started from here — I don't think
-    we need a full history at the top of the page ... only current run."* Right:
-    the top of a page called Run is where "what is happening" belongs, and a
-    fortnight of finished jobs above the night's own roster pushes the thing you
-    came for below the fold. The history moved to `_job_history_section`, beside
-    the earlier nights it belongs with.
-
-    **"Wherever it was started" is new, and the old scope was a real blind spot.**
-    This section used to be documented as "what this panel has started, and nothing
-    else" — it listed `jobs` records, which only exist for commands a button here
-    spawned. A night or a batch started from a terminal, or by a cloud routine,
-    was therefore absent from the one section on the panel whose whole subject is
-    what is running: the heartbeat in `status.json` said a card was mid-dispatch and
-    the page said nothing was happening. The run itself is now a row, via the same
-    `run_is_live` the rail asks — never a second liveness rule, because that
-    question carries a pid-recycling trap documented once at `run_is_live` and
-    nowhere else.
-    """
-    live = [job for job in ctx.jobs if jobs.state(job) == jobs.RUNNING]
-    rows = []
-    status = ctx.rail.run_status
-    record = _latest_record(ctx.root)
-    dispatching = run_is_live(status, record)
-    # The run first: it is the expensive thing, and a batch that a panel button did
-    # start would otherwise be represented only by the wrapper's command line.
-    if dispatching:
-        card_id = str(status.get("card") or "")
-        facts = [str(status.get("phase") or ""), str(status.get("worker") or ""),
-                 str(status.get("model") or "")]
-        elapsed = elapsed_since(str(status.get("since") or ""))
-        rows.append(
-            f'<tr><td class="mark m-now">&middot;</td>'
-            f'<td class="card">{_e(card_id or _kind_label(record))}</td>'
-            f'<td class="lane">{_e(elapsed)}</td>'
-            f'<td class="said">{_e(" · ".join(f for f in facts if f))}</td>'
-            f'<td class="num">{_act("Stop after this card", onclick="post(\'/api/stop\',{})")}'
-            f'</td></tr>')
-    for job in live:
-        rows.append(
-            f'<tr><td class="mark m-now">&middot;</td>'
-            f'<td class="card">{_e(job.label)}</td>'
-            f'<td class="lane">{_e(jobs.elapsed(job))}</td>'
-            f'<td class="said"><code>{_e(job.command)}</code></td>'
-            f'<td class="num">{_act("Output", href=f"/log/{job.ident}")}</td></tr>')
-        rows.append(_job_detail(ctx, job))
-    count = len(live) + (1 if dispatching else 0)
-    return _section("Running now", count,
-                    f'<div class="roster"><table><tbody>{"".join(rows)}</tbody></table></div>'
-                    if rows else "",
-                    note="Anything automated that is going right now, wherever it "
-                         "was started from.",
-                    empty="Nothing automated is running.",
-                    sec_id="running")
-
-
-def _job_detail(ctx: Context, job: jobs.Job) -> str:
-    """A job's own progress, as a roster where the format is ours and a tail where
-    it is not.
-
-    Karel again, on seeing the raw tail: *"I would expect for the ingest (and other
-    bulk actions) similar overview as for runs. Card xxx classified as XYZ, Card
-    yyy in progress."* A log tail is what a command happens to print; a roster is
-    the question answered. So a verb whose output this package owns gets parsed —
-    `ingest` first, since it is the bulk action that exists — and everything else
-    still gets the tail, which is honest about being raw rather than pretending to
-    a structure nobody has written yet.
-    """
-    text = jobs.read_log(ctx.root, job.ident, tail=JOB_TAIL_BYTES)
-    if not text.strip():
-        return ""
-    if job.label == "ingest":
-        return _ingest_roster(ingest.parse_progress(text))
-    lines = text.strip().splitlines()[-JOB_TAIL_LINES:]
-    return (f'<tr class="joblog"><td></td><td colspan="3">'
-            f'<pre>{_e(chr(10).join(lines))}</pre></td><td></td></tr>')
-
-
-def _ingest_roster(progress: ingest.Progress) -> str:
-    """One line per note, with what became of it — for both passes.
-
-    **The middle column is the answer to a different question in each.** A
-    carding run reports what happened to the note (done, bounced, stranded); a
-    classify run reports the route it decided. Both are "what became of it", and
-    both belong in the same column, so a reader who has watched one roster can
-    read the other without being told which pass they are looking at.
-
-    A classify pass still has nothing per-note *while it runs* — it is one
-    dispatch over the whole lane, which is the entire economy of the step — so
-    mid-flight it says its phase and nothing finer. The four route counts are
-    kept for a log written before `ingest` printed its per-note lines, where they
-    are the only account of the pass there is; once the lines are there the rows
-    say the same thing and say it per note, and a summary row repeating them
-    under eight rows that already carry them is the tally this replaced.
-    """
-    rows = []
-    for item in progress.items:
-        css, glyph = ingest.ITEM_STATES.get(item.state, ("m-wait", "&middot;"))
-        said = {"done": "carded as", "bounced": "bounced to triage —",
-                "stranded": "stranded —"}.get(item.state, "")
-        rows.append(f'<tr><td class="mark {css}">{glyph}</td>'
-                    f'<td class="card">{_e(item.name)}</td>'
-                    f'<td class="lane">{_e(item.route or item.state)}</td>'
-                    f'<td class="said">{_e(said)} {_e(item.detail)}</td>'
-                    f'<td class="num"></td></tr>')
-    routed = any(item.route for item in progress.items)
-    if progress.routes and not routed:
-        counts = " · ".join(f"{n} {route}" for route, n in progress.routes.items())
-        rows.append(f'<tr><td class="mark m-ok">&check;</td>'
-                    f'<td class="card">routed</td>'
-                    f'<td class="lane">{progress.total} note(s)</td>'
-                    f'<td class="said">{_e(counts)} — the Inbox page has each one</td>'
-                    f'<td class="num"></td></tr>')
-    if not rows:
-        # Mid-classify: one dispatch over the lane, with nothing per-note yet.
-        rows.append(f'<tr><td class="mark m-wait">&middot;</td>'
-                    f'<td class="card">{_e(progress.phase or "starting")}</td>'
-                    f'<td class="lane">{progress.total} note(s)</td>'
-                    f'<td class="said">one dispatch over the whole lane; there is no '
-                    f'per-note progress until it lands</td>'
-                    f'<td class="num"></td></tr>')
-    elif progress.total and not routed and not progress.routes:
-        # The carding fan-out's own progress line, and only ever that. A classify
-        # pass has no use for it: its notes are decided together, so the count is
-        # either none of them or all of them, and `0/8 routed` under a landed pass
-        # is a contradiction rather than progress — `progress.total` counts the
-        # lane, and the pass only ever ran over the unrouted part of it.
-        rows.append(f'<tr class="pend"><td></td><td class="card"></td>'
-                    f'<td class="lane">{progress.finished}/{progress.total}</td>'
-                    f'<td class="said">{_e(progress.phase)}</td>'
-                    f'<td class="num"></td></tr>')
-    return "".join(rows)
-
-
-def _job_history_section(ctx: Context) -> str:
-    """Everything this panel started that has stopped, newest first.
-
-    At the foot of the page with the earlier nights, because that is what it is:
-    history. One line each, no inlined output — the link is enough for something
-    you are looking up rather than watching.
-    """
-    rows = []
-    shown = 0
-    for job in ctx.jobs[:JOBS_ON_RUN_PAGE]:
-        status = jobs.state(job)
-        if status == jobs.RUNNING:
-            continue
-        shown += 1
-        _, word = _JOB_MARK.get(status, ("", status))
-        mark = {jobs.DONE: '<td class="mark m-ok">&check;</td>',
-                jobs.FAILED: '<td class="mark m-bad">&times;</td>'}.get(
-                    status, '<td class="mark m-wait">?</td>')
-        started = job.started_at
-        said = word if status != jobs.FAILED else f"{word} — exit {job.exit_code}"
-        rows.append(
-            f'<tr>{mark}<td class="card">{_e(job.label)}</td>'
-            f'<td class="lane">{_e(f"{started:%d %b %H:%M}" if started else "")}</td>'
-            f'<td class="num">{_e(jobs.elapsed(job))}</td>'
-            f'<td class="said">{_e(said)} &mdash; <code>{_e(job.command)}</code></td>'
-            f'<td class="num">{_act("Output", href=f"/log/{job.ident}")}</td></tr>')
-    return _section("Earlier from here", shown,
-                    f'<div class="roster"><table><tbody>{"".join(rows)}</tbody></table></div>'
-                    if rows else "",
-                    note="Every verb the buttons have spawned on this machine.",
-                    empty="No button on this panel has started anything yet.",
-                    sec_id="jobhistory")
-
-
 #: How a run record's `kind` reads on the page. The record's own vocabulary is the
 #: runner's argv (`run` is a night, `card` is one named card, `chores` is a batch,
 #: `both` is one run that worked the chore batch and then the task queue); none of
@@ -3629,65 +3134,6 @@ def latest_activity(ctx: Context) -> tuple[str, dict, jobs.Job | None]:
     return ("job", {}, newest_job) if newest_job is not None else ("none", {}, None)
 
 
-def _last_job_section(ctx: Context, job: jobs.Job) -> str:
-    """The newest background command that wrote no run record, with its overview.
-
-    Same treatment `_job_detail` gives a *live* job, applied to a finished one: a verb
-    whose output this package owns gets parsed into a roster (`ingest`), and everything
-    else gets its tail, which is honest about being raw rather than pretending to a
-    structure nobody has written. The difference from `_job_history_section` is that
-    this one is at the top and carries the detail — because it is the answer to "what
-    just happened", not a row in a list you are looking something up in.
-    """
-    status = jobs.state(job)
-    _, word = _JOB_MARK.get(status, ("", status))
-    mark = {jobs.DONE: '<td class="mark m-ok">&check;</td>',
-            jobs.FAILED: '<td class="mark m-bad">&times;</td>'}.get(
-                status, '<td class="mark m-wait">?</td>')
-    said = word if status != jobs.FAILED else f"{word} — exit {job.exit_code}"
-    rows = [f'<tr>{mark}<td class="card">{_e(job.label)}</td>'
-            f'<td class="lane">{_e(jobs.elapsed(job))}</td>'
-            f'<td class="said">{_e(said)} &mdash; <code>{_e(job.command)}</code></td>'
-            f'<td class="num">{_act("Output", href=f"/log/{job.ident}")}</td></tr>',
-            _job_detail(ctx, job)]
-    started = job.started_at
-    when = f"{started:%d %b %H:%M}" if started else ""
-    today = bool(started) and started.date() == dt.date.today()
-    return _section(f"Last {job.label}", 1,
-                    f'<div class="roster"><table><tbody>{"".join(rows)}</tbody></table></div>',
-                    note=f"{'today ' + when[-5:] if today else when} · "
-                         f"the most recent thing that ran here",
-                    sec_id="lastjob")
-
-
-def _chores_phase_rows(record: dict) -> str:
-    """A chore batch's phase notes, as rows rather than a paragraph.
-
-    A batch's story is not told by its dispatch list alone: which branch it built,
-    whether the one suite run over the merged result was green, and why it did not
-    land are all facts about the *batch*, and the batch records them as notes. A
-    task queue has no equivalent — it merges card by card — so this is rendered for
-    the two kinds that carry a batch (`chores`, and `both` since one run can work
-    the batch and then the tasks) rather than for every record.
-    """
-    rows = []
-    for note in record.get("notes", []):
-        rows.append(f'<tr><td class="mark m-wait">&middot;</td>'
-                    f'<td class="card"></td><td class="kind"></td>'
-                    f'<td class="lane"></td>'
-                    f'<td class="num"></td><td class="num"></td>'
-                    f'<td class="said">{_e(str(note.get("message", "")))}</td>'
-                    f'<td class="num"></td></tr>')
-    if reason := str(record.get("stop_reason") or ""):
-        rows.append(f'<tr><td class="mark m-bad">&times;</td>'
-                    f'<td class="card"></td><td class="kind"></td>'
-                    f'<td class="lane"></td>'
-                    f'<td class="num"></td><td class="num"></td>'
-                    f'<td class="said">{_e(reason)}</td>'
-                    f'<td class="num"></td></tr>')
-    return "".join(rows)
-
-
 def _audio_section(ctx: Context) -> str:
     """Every audio artefact a run harvested, with a player and the
     `candidates.json` facts beside each take — the review surface the card's
@@ -3745,20 +3191,17 @@ def _audio_blocks(root: Path, groups: list[AudioGroup]) -> tuple[str, int]:
                 chips.append(_chip("no candidates.json — metadata unknown", "mute"))
             if take.rel == picked_rel:
                 chips.append(_chip("picked", "ok"))
-            body = [f'<b>{_e(take.id)}</b>']
-            if meta.get("prompt"):
-                body.append(f'<p class="why">{_e(meta["prompt"])}</p>')
             problems = meta.get("problems") or []
-            if problems:
-                body.append(f'<p class="why">{_e("; ".join(str(p) for p in problems))}</p>')
-            body.append(_meta(chips))
-            body.append(f'<audio controls preload="none" '
-                        f'src="/audio/{quote(take.rel, safe="/")}"></audio>')
+            why = " — ".join(x for x in (str(meta.get("prompt") or ""),
+                                         "; ".join(str(p) for p in problems)) if x)
+            player = (f'<audio controls preload="none" '
+                      f'src="/audio/{quote(take.rel, safe="/")}"></audio>')
             acts = (_act("Picked", disabled=True) if take.rel == picked_rel else
                     _act("Pick", onclick=f"post('/api/audio/pick',"
                                          f"{{key:'{_attr(group.pick_key())}',"
                                          f"rel:'{_attr(take.rel)}'}})"))
-            rows.append(_row(marker="&#9835;", body="".join(body), acts=acts))
+            rows.append(_item(take.id, kind="take", marker="&#9835;", chips=chips,
+                              why=why, extra=player, primary=acts))
         heading = group.sound or group.rel_dir
         when = f" · {group.generated}" if group.generated else ""
         blocks.append(_group(f"{heading} — {group.card} attempt {group.attempt}{when}")
@@ -3811,17 +3254,16 @@ def _image_blocks(root: Path, groups: list[ImageGroup]) -> tuple[str, int]:
                 f'alt="{_e(shot.id)}" loading="lazy">'
                 f'<span class="shot-name">{_e(shot.id)}</span>'
                 f'{_meta(chips)}<div class="acts">{act}</div></div>')
-        body = [_meta([_chip(f"checker: {group.verdict}",
+        chips = ([_chip(f"checker: {group.verdict}",
                              "ok" if group.verdict == "pass" else "warn")]
                       if group.verdict else
                       # Degrades honestly rather than pretending to know, the way
                       # a missing `candidates.json` does one section up.
-                      [_chip("no checker verdict on disk", "mute")])]
-        if group.notes:
-            body.append(f'<p class="why">{_e(group.notes)}</p>')
-        body.append(f'<div class="shots">{"".join(shots)}</div>')
+                      [_chip("no checker verdict on disk", "mute")])
         blocks.append(_group(f"{group.card} attempt {group.attempt} — {group.rel_dir}")
-                      + _row(marker="&#9635;", body="".join(body)))
+                      + _item(group.rel_dir, kind="take", marker="&#9635;", chips=chips,
+                              why=group.notes or "",
+                              extra=f'<div class="shots">{"".join(shots)}</div>'))
     return "".join(blocks), total
 
 
@@ -3887,191 +3329,6 @@ def _decide_audio(root: Path, card_id: str) -> str:
             f'<div class="rows">{blocks}</div>')
 
 
-def _render_run(ctx: Context) -> str:
-    record = _latest_record(ctx.root)
-    # **No image candidates here.** They are drawn on `/decide/<card>` and only
-    # there — see `_decide_images` for why a per-card question does not belong on
-    # the page that answers "what happened last night".
-    out = [_running_section(ctx), _audio_section(ctx)]
-
-    # When the newest thing that ran wrote no record — an `ingest` pass, a preflight —
-    # it goes above the newest record rather than only into the history at the foot of
-    # the page. "What happened most recently" is the question this page is opened with,
-    # and answering it with the newest *record* is exactly the substitution that made
-    # the page report a fortnight-old night while a batch had just finished.
-    source, _, newest_job = latest_activity(ctx)
-    if source == "job" and newest_job is not None:
-        out.append(_last_job_section(ctx, newest_job))
-
-    dispatched = record.get("dispatched", [])
-    # The run's own roster, written before the first dispatch (`run_record.planned`).
-    # Everything else here is written as it happens, so before this existed the page
-    # could only show what had already finished and had to reconstruct "what is still
-    # coming" by re-reading `tasks/` — which knows nothing of the run's order and
-    # cannot see a chore batch at all, because chores are not in the night's
-    # candidate list. One run, one roster, whichever queues it worked.
-    planned = record.get("planned", [])
-    by_card = {str(d.get("card") or ""): d for d in dispatched}
-    live = run_is_live(ctx.rail.run_status, record)
-    status = ctx.rail.run_status
-    active_id = str(status.get("card") or "") if live else ""
-
-    def _settled_row(entry: dict, kind: str) -> str:
-        """One card the run has a verdict for."""
-        outcome = str(entry.get("outcome", ""))
-        if outcome in run_record.LANDED_OUTCOMES:
-            cls = "m-ok"
-        elif outcome in run_record.FAILED_OUTCOMES:
-            cls = "m-bad"
-        elif outcome in run_record.DECISION_OUTCOMES:
-            cls = "m-now"
-        else:
-            cls = "m-wait"
-        cls = _live_mark(ctx, entry, cls)
-        mark = ('<td class="mark m-ok">&check;</td>' if cls == "m-ok"
-                else '<td class="mark m-bad">&times;</td>' if cls == "m-bad"
-                else '<td class="mark m-now">?</td>' if cls == "m-now"
-                else '<td class="mark m-wait">&middot;</td>')
-        cost = entry.get("cost_usd") or 0
-        out_dir = attempt_dir(ctx.root, str(entry.get("card", "")),
-                              int(entry.get("attempt") or 1))
-        telemetry = read_telemetry(out_dir)
-        session = session_id(out_dir)
-        talk = (_act("Talk", onclick=f"post('/api/talk',{{session_id:'{_attr(session)}'}})")
-                if session else "")
-        took = f"{telemetry['wall_s'] / 60:.0f} min" if telemetry.get("wall_s") else ""
-        return (f'<tr>{mark}<td class="card">{_e(entry.get("card", ""))}</td>'
-                f'<td class="kind">{_e(kind)}</td>'
-                f'<td class="lane">{_e(_live_lane(ctx, entry))}</td>'
-                f'<td class="num">{_e(took)}</td>'
-                f'<td class="num">${cost:.2f}</td>'
-                f'<td class="said">{_e(_said(entry))}</td>'
-                f'<td class="num">{talk}</td></tr>')
-
-    def _pending_row(card_id: str, kind: str, *, active: bool) -> str:
-        """One card the run has not reached, or the one it is on right now.
-
-        `details-on-run`: the card currently dispatching has no `dispatched` entry
-        yet, so without the live branch it read as "queued" like every card still
-        waiting its turn — even while the heartbeat said it was mid-`gates` on a
-        retry. The data was already in `status`; it just was not being read here.
-        """
-        lane = _active_row_lane(status) if active else "queued"
-        return (f'<tr class="pend"><td class="mark {"m-now" if active else "m-wait"}">'
-                f'&middot;</td>'
-                f'<td class="card">{_e(card_id)}</td>'
-                f'<td class="kind">{_e(kind)}</td>'
-                f'<td class="lane">{_e(lane)}</td><td class="num"></td>'
-                f'<td class="num"></td><td class="said"></td>'
-                f'<td class="num"></td></tr>')
-
-    body = []
-    seen: set[str] = set()
-    for item in planned:
-        card_id = str(item.get("card") or "")
-        seen.add(card_id)
-        kind = _QUEUE_LABEL.get(str(item.get("queue") or ""), "task")
-        entry = by_card.get(card_id)
-        body.append(_settled_row(entry, kind) if entry is not None
-                    else _pending_row(card_id, kind, active=live and card_id == active_id))
-    # Dispatched but not planned: a `--card` run, or a record written before the
-    # roster was recorded up front.
-    for entry in dispatched:
-        card_id = str(entry.get("card") or "")
-        if card_id not in seen:
-            seen.add(card_id)
-            body.append(_settled_row(entry, _roster_kind(record, entry)))
-    if live and not planned:
-        # A run recorded before `planned` existed. Reconstructed off the board the
-        # old way, which is exactly the reconstruction the plan replaced: it cannot
-        # see a chore batch, and it does not know the order the run chose.
-        for candidate in ctx.tonight:
-            if candidate.card.id in seen:
-                continue
-            seen.add(candidate.card.id)
-            body.append(_pending_row(candidate.card.id, "task",
-                                     active=candidate.card.id == active_id))
-
-    # The batch's phase notes — which branch it built, whether the one suite run
-    # over the merged result was green, why it did not land. Facts about the batch
-    # rather than about any one card, so they sit under the roster rather than in it.
-    if str(record.get("kind") or "") in ("chores", "both"):
-        body.append(_chores_phase_rows(record))
-
-    # "This run" is a claim about *now*, and the newest record can be weeks old —
-    # on first inspection this page presented a run from two weeks earlier under
-    # that heading, with a start time and no date, which reads as this morning.
-    #
-    # **The heading now names the kind too**, for the sequel to that same bug: the
-    # dates were right and the page was still misread, because "Last run" over a
-    # roster of cards reads as the night, and the thing that had actually just run
-    # was a chore batch. A date fixes "when"; only the kind fixes "what".
-    started = str(record.get("started", ""))
-    today = started[:10] == dt.date.today().isoformat()
-    heading = "This run" if live else ("Today's run" if today else "Last run")
-    when = ("today " + started[11:16] if today
-            else f"{started[:10]} {started[11:16]}") if started else ""
-    note = (f"{_kind_label(record)} · {when} on {record.get('host', '?')} · "
-            f"{'in flight' if live else ('complete' if record.get('complete') else 'ended without finishing')}"
-            ) if started else ""
-    bar = ('<div class="barbox">'
-           f'<p>Spent this run: <b>${record.get("cost_usd", 0) or 0:.2f}</b>. '
-           'Stopping lets the current card finish and merges nothing after it.</p>'
-           '<div class="acts">'
-           + _act("Stop after this card", onclick="post('/api/stop',{})")
-           + '</div></div>') if live else ""
-    out.append(_section(heading, len(seen),
-                        f'<div class="roster"><table><tbody>{"".join(body)}</tbody></table></div>'
-                        if body else "", note=note, bar=bar,
-                        sub="Every card this run set out to work — chores first, "
-                            "then tasks — and where each one is.",
-                        empty="No run has been recorded on this machine yet.",
-                        sec_id="lastrun"))
-
-    # Read off the board as it stands, **not** off the record's `skipped` list.
-    # That list belongs to whichever run wrote it, and the newest run here was two
-    # weeks old — so the section confidently listed cards that had since been
-    # finished and moved to `done/`. A card the night will not take is a fact
-    # about `tasks/` right now, and derived this way it cannot name a done card,
-    # because a done card is no longer in the lane.
-    left_out = ctx.do_now + ctx.elsewhere
-    rows = "".join(
-        _row(body=_card_body(c.card, root=ctx.root, meta=[_e(c.reason.split(";")[0][:80])]),
-             acts=_act("Read card", href=f"/card/{c.card.id}"))
-        for c in left_out
-    )
-    out.append(_section("Not taken", len(left_out), rows,
-                        note="As the board stands now — never silent, a card left "
-                             "out says why.",
-                        empty="Every card in tasks/ is dispatchable here.",
-                        sec_id="nottaken"))
-
-    earlier = run_record.read_all(ctx.root)[1:6]
-    rows = []
-    for old in earlier:
-        mark = ('<td class="mark m-ok">&check;</td>' if old.get("complete")
-                else '<td class="mark m-bad">&times;</td>')
-        when = str(old.get("started", ""))[:16].replace("T", " ")
-        took = span(str(old.get("started", "")), str(old.get("finished") or ""))
-        cost = old.get("cost_usd", 0) or 0
-        said = old.get("stop_reason") or f"{len(old.get('dispatched', []))} dispatched"
-        rows.append(
-            f'<tr>{mark}<td class="card">{_e(when)} &mdash; {_e(old.get("kind", ""))}</td>'
-            f'<td class="num">{_e(took)}</td><td class="num">${cost:.2f}</td>'
-            f'<td class="said">{_e(said)}</td></tr>'
-        )
-    out.append(_section("Earlier runs", len(earlier),
-                        f'<div class="roster"><table><tbody>{"".join(rows)}</tbody></table></div>'
-                        if rows else "", empty="No earlier runs on this machine.",
-                        sec_id="earlierruns"))
-
-    out.append(_job_history_section(ctx))
-
-    out.append(f'<footer>Records in {run_record.DIR.as_posix()} &middot; transcripts stay '
-               f'on the machine that produced them</footer>')
-    return "".join(out)
-
-
 # --------------------------------------------------------------------------
 # System — the framework maintaining itself
 # --------------------------------------------------------------------------
@@ -4119,6 +3376,10 @@ def system_attention(root: Path) -> int:
     except (update.UpdateError, OSError):
         return 0
     attention = found.changes + len(found.by(update.CONFLICT))
+    try:
+        attention += len(boardhealth.check(root))
+    except OSError:
+        pass
     # The harvest nudge counts as one thing to look at, not as N corrections: the rail
     # number is "how many things on this page want you", and a backlog is one of them.
     try:
@@ -4127,217 +3388,6 @@ def system_attention(root: Path) -> int:
     except OSError:
         pass
     return attention
-
-
-def _system_setup(ctx: Context) -> str:
-    """Install if there is none; otherwise what the install was and how to update it."""
-    if not installed(ctx.root):
-        body = (
-            "<b>nightshift is not installed in this repo.</b>"
-            "<p class='note'>The button opens an interactive Claude session running "
-            "the install skill. It asks you two things that are never guessed — the "
-            "branch work merges into, and what a dispatched worker may do on this "
-            "machine — then writes the manifest, the board, the gates and the hooks.</p>")
-        acts = _act("Set up nightshift", onclick="post('/api/setup')", primary=True)
-        return _section("Setup", 1, _row(marker="+", body=body, acts=acts),
-                        note="This page works before the install. That is the point.",
-                        sec_id="setup")
-
-    receipt = init.read_receipt(ctx.root) or {}
-    created = init.receipt_created(receipt)
-    rows = _row(marker="=", body=(
-        f"<b>Installed</b><p class='note'>{len(created)} file(s) written by nightshift, "
-        f"recorded in {_e(init.RECEIPT)} — that record is what lets an update tell your "
-        f"edits from ours.</p>"))
-    return _section("Setup", 0, rows, note="What this install put in the repo.",
-                    sec_id="setup")
-
-
-def _system_files(ctx: Context) -> str:
-    """The update survey: what moved, what you changed, what needs deciding."""
-    if not installed(ctx.root):
-        return ""
-    try:
-        found = update.survey(ctx.root)
-    except update.UpdateError as exc:
-        return _section("Project files", 0, "", empty=str(exc), sec_id="projectfiles")
-
-    rows = []
-    for finding in found.by(update.STALE, update.MISSING):
-        label = ("the template moved; you never edited this" if finding.verdict
-                 == update.STALE else "ours, and missing from disk")
-        rows.append(_row(marker="+", body=(
-            f"<b>{_e(finding.rel)}</b><p class='note'>{label}</p>")))
-    for finding in found.by(update.CONFLICT):
-        # Four actions, one per `update` verb. The panel owns no resolution logic:
-        # every button below POSTs to a flag that already works from a terminal.
-        acts = "".join([
-            _act("Diff", href=f"/update-diff?path={finding.rel}"),
-            _act("Take theirs", onclick=f"post('/api/update/take',"
-                                        f"{{path:'{_attr(finding.rel)}'}})"),
-            _act("Keep mine", onclick=f"post('/api/update/keep',"
-                                      f"{{path:'{_attr(finding.rel)}'}})"),
-            _act("Merge", onclick=f"post('/api/update/merge',"
-                                  f"{{path:'{_attr(finding.rel)}'}})"),
-        ])
-        rows.append(_row(marker="!", body=(
-            f"<b>{_e(finding.rel)}</b><p class='note'>you edited this and the template "
-            f"moved — nothing is overwritten until you say which wins</p>"), acts=acts))
-
-    bar = ""
-    if found.changes:
-        bar = (f'<div class="barbox"><p>{found.changes} safe change(s) — conflicts are '
-               f'never included</p><div class="acts">'
-               f'{_act("Update these", onclick="post(&#39;/api/update/apply&#39;)", primary=True)}'
-               f'</div></div>')
-    note = (f"{len(found.by(update.CURRENT))} current, "
-            f"{len(found.by(update.YOURS))} edited by you, "
-            f"{len(found.by(update.DECLINED))} declined, "
-            f"{len(found.by(update.FROZEN_V))} frozen")
-    return _section("Project files", found.changes + len(found.by(update.CONFLICT)),
-                    "".join(rows), note=note, bar=bar,
-                    empty="Every file nightshift owns here matches its template.",
-                    sec_id="projectfiles")
-
-
-def _system_outgoing(ctx: Context) -> str:
-    """What this install carries that the templates never received.
-
-    On the System page and not behind a flag, because the direction it watches is
-    the one that failed silently for four months: `update` answered "should I take
-    the template's version" every time anyone looked, and nothing ever asked
-    whether a rule written here should go the other way. A report nobody runs is
-    the same as no report, and the person who would run it is the one already
-    reading this page.
-    """
-    if not installed(ctx.root):
-        return ""
-    try:
-        found = update.survey(ctx.root)
-    except update.UpdateError:
-        return ""
-    rows = [
-        _row(marker="^", body=(
-            f"<b>{_e(f.rel)}</b><p class='note'>{f.ahead} line(s) here that the "
-            f"template does not have</p>"),
-             acts=_act("Read", href=f"/update-outgoing?path={f.rel}"))
-        for f in found.outgoing
-    ]
-    return _section(
-        "Outgoing", len(rows), "".join(rows),
-        note="passages this project wrote that the framework never received",
-        empty="Nothing here that the templates do not already carry.",
-        sec_id="outgoing")
-
-
-#: The read-only and repair verbs, as one table rather than five near-identical
-#: blocks. `(id, label, button, blurb, dispatches)` — `dispatches` is what decides
-#: whether the account veto applies, because it is what decides whether it spends.
-SYSTEM_VERBS = (
-    ("doctor", "Health", "Run doctor",
-     "Per-machine preconditions and drift between the manifest and the tree. "
-     "Reports; changes nothing.", False),
-    ("gates", "Gates", "Run gates",
-     "The gate suite, exactly as the save hook and preflight run it.", False),
-    ("preflight", "Preflight", "Run preflight",
-     "Gates, the audit matrix, the corrections check and the test slice this branch "
-     "can affect. Required before a push, and it writes the receipt that unblocks one.",
-     False),
-    ("fix", "Repair", "Dispatch fix",
-     "Runs every check, then dispatches an agent to repair what failed — up to three "
-     "rounds. It never weakens a check to make it pass, and never commits.", True),
-)
-
-
-def _system_corrections(ctx: Context) -> str:
-    """The harvest nudge: corrections written down and never acted on.
-
-    The one thing the morning digest said that nothing else did. A correction with no
-    `[[disposition: ...]]` is a lesson nobody has turned into a gate, a rule or a card
-    yet, and the pile is invisible unless you go and run `python -m nightshift.corrections`
-    — which is exactly the trip nobody makes. So it is stated here, where the rest of the
-    maintenance lives, on the same two thresholds the digest used (`corrections`
-    owns them now).
-
-    Silent below both thresholds rather than reporting a healthy number. A backlog is
-    normal — corrections are *supposed* to accumulate between harvests — so a permanent
-    count on the page would train the eye past it, and the count that matters is the one
-    that only appears when it is time to do something.
-    """
-    if not installed(ctx.root):
-        return ""
-    try:
-        count, oldest = corrections.backlog(ctx.root)
-    except OSError:
-        return ""
-    due, age = corrections.harvest_due(count, oldest)
-    if not due:
-        return ""
-    age_clause = (f", oldest from {oldest} ({age} days ago)" if age is not None else "")
-    body = (f"<b>{count} correction(s) carry no disposition</b>"
-            f"<p class='note'>Written down in {_e(str(corrections.LOG))} and never acted "
-            f"on{_e(age_clause)}. A learn-now pass reads them clustered and turns each into "
-            f"a gate, a rule or a card &mdash; or dispositions it as understood.</p>")
-    acts = _act("Read them clustered", onclick="post('/api/system/corrections')")
-    return _section("Corrections to harvest", count, _row(marker="!", body=body, acts=acts),
-                    note="Lessons logged and not yet turned into anything.",
-                    sec_id="corrections")
-
-
-def _system_board_health(ctx: Context) -> str:
-    """Cards stuck between two lanes (`nightshift.boardhealth`) — silent when none are."""
-    if not installed(ctx.root):
-        return ""
-    found = boardhealth.check(ctx.root)
-    if not found:
-        return ""
-    rows = "".join(_row(marker="!", body=f"<b>{_e(f.lane)}/{_e(f.card_id)}</b>"
-                                         f"<p class='note'>{_e(f.text)}</p>")
-                   for f in found)
-    return _section("Board health", len(found), rows,
-                    note="A merge or a verdict that never reached its lane move.",
-                    sec_id="board-health")
-
-
-def _system_verbs(ctx: Context) -> str:
-    if not installed(ctx.root):
-        return ""
-    rows = []
-    for ident, label, button, blurb, dispatches in SYSTEM_VERBS:
-        note = blurb + (" Spends on the account in force." if dispatches else "")
-        rows.append(_row(marker="&middot;", body=f"<b>{_e(label)}</b>"
-                                                 f"<p class='note'>{_e(note)}</p>",
-                         acts=_act(button, onclick=f"post('/api/system/{ident}')")))
-    return _section("Checks and repair", 0, "".join(rows),
-                    note="Each one is the command you would have typed.",
-                    sec_id="checks")
-
-
-def _system_danger(ctx: Context) -> str:
-    """Uninstall. Shown last, and armed only by typing the project's own name.
-
-    A dry run is always what the button produces first — `uninstall` is dry-run by
-    default and that default is not overridden here. The typed confirmation is for the
-    second step, because this is the one control on the page that removes work, and
-    because it takes the launcher and the manifest with it: the panel serving this page
-    stops answering immediately afterwards, which is confusing rather than dangerous
-    but is worth being told before rather than after.
-    """
-    if not installed(ctx.root):
-        return ""
-    name = ctx.root.name
-    body = ("<b>Uninstall nightshift from this repo</b>"
-            "<p class='note'>Removes what the install wrote, strips our hook entries "
-            "out of settings.json and leaves your own files — including the corrections "
-            "log, if it has anything in it. It also deletes the launcher and the "
-            "manifest, so this page stops working the moment it succeeds.</p>")
-    acts = "".join([
-        _act("Show what it would remove", onclick="post('/api/system/uninstall')"),
-        _act("Uninstall", onclick=f"confirmUninstall('{_attr(name)}')"),
-    ])
-    return _section("Danger", 0, _row(marker="!", body=body, acts=acts),
-                    note="Nothing here runs without a second, typed confirmation.",
-                    sec_id="danger")
 
 
 def _system_verb(name: str, root: Path, *, waived: bool, body: dict) -> str:
@@ -4373,20 +3423,172 @@ def _system_verb(name: str, root: Path, *, waived: bool, body: dict) -> str:
     raise PanelError(f"no such system verb: {name}")
 
 
+def _system_setup(ctx: Context) -> str:
+    """Install if there is none; otherwise what the install wrote."""
+    if not installed(ctx.root):
+        return _section("Setup", 1, _item(
+            "nightshift is not installed here", kind="check", marker="+",
+            why="Opens a session running the install skill. It asks which branch work "
+                "merges into and what a dispatched worker may do on this machine.",
+            primary=_act("Set up nightshift", onclick="post('/api/setup')", primary=True)),
+            sec_id="setup")
+    created = init.receipt_created(init.read_receipt(ctx.root) or {})
+    return _section("Setup", 0, _item("Installed", kind="check", marker="=",
+                                      chips=[_e(f"{len(created)} file(s) in {init.RECEIPT}")]),
+                    sec_id="setup")
+
+
+def _system_files(ctx: Context) -> str:
+    """The update survey: what moved, and what needs deciding."""
+    try:
+        found = update.survey(ctx.root)
+    except update.UpdateError as exc:
+        return _section("Project files", 0, "", empty=str(exc), sec_id="projectfiles")
+    rows = []
+    for finding in found.by(update.STALE, update.MISSING):
+        rows.append(_item(finding.rel, kind="check", marker="+",
+                          why=("the template moved; you never edited this"
+                               if finding.verdict == update.STALE else "missing from disk")))
+    for finding in found.by(update.CONFLICT):
+        target = {"path": finding.rel}
+        rows.append(_item(
+            finding.rel, kind="check", marker="!",
+            why="you edited this and the template moved — nothing is overwritten until "
+                "you choose",
+            primary=_act("Diff", href=f"/update-diff?path={finding.rel}", primary=True),
+            menu=[_act("Take theirs", onclick=f"post('/api/update/take',"
+                                              f"{{path:'{_attr(finding.rel)}'}})"),
+                  _act("Keep mine", onclick=f"post('/api/update/keep',"
+                                            f"{{path:'{_attr(finding.rel)}'}})"),
+                  _launch("Merge", f"Merge {finding.rel}", "/api/update/merge", target)]))
+    bar = ""
+    if found.changes:
+        bar = (f'<div class="barbox"><p>{found.changes} safe change(s)</p><div class="acts">'
+               f'{_act("Update these", onclick="post(&#39;/api/update/apply&#39;)", primary=True)}'
+               f'</div></div>')
+    note = (f"{len(found.by(update.CURRENT))} current · "
+            f"{len(found.by(update.YOURS))} yours · "
+            f"{len(found.by(update.DECLINED))} declined · "
+            f"{len(found.by(update.FROZEN_V))} frozen")
+    return _section("Project files", found.changes + len(found.by(update.CONFLICT)),
+                    "".join(rows), note=note, bar=bar,
+                    empty="Every file matches its template.", sec_id="projectfiles")
+
+
+def _system_outgoing(ctx: Context) -> str:
+    """What this install carries that the templates never received — silent when none."""
+    try:
+        found = update.survey(ctx.root)
+    except update.UpdateError:
+        return ""
+    rows = [_item(f.rel, kind="check", marker="^",
+                  chips=[_e(f"{f.ahead} line(s) the template lacks")],
+                  primary=_act("Read", href=f"/update-outgoing?path={f.rel}"))
+            for f in found.outgoing]
+    if not rows:
+        return ""
+    return _section("Outgoing", len(rows), "".join(rows),
+                    note="Project text the framework never received.", sec_id="outgoing")
+
+
+#: The read-only and repair verbs: `(id, label, button, blurb, dispatches)`.
+SYSTEM_VERBS = (
+    ("doctor", "Health", "Run doctor",
+     "Per-machine preconditions and manifest drift. Changes nothing.", False),
+    ("gates", "Gates", "Run gates", "The gate suite, as the save hook runs it.", False),
+    ("preflight", "Preflight", "Run preflight",
+     "Gates, audit matrix, corrections and the affected tests. Required before a push.",
+     False),
+    ("fix", "Repair", "Dispatch fix",
+     "Runs every check, then an agent repairs what failed — up to three rounds. "
+     "Never weakens a check, never commits.", True),
+)
+
+
+def _system_corrections(ctx: Context) -> str:
+    """The harvest nudge — silent until the backlog crosses `corrections`' thresholds."""
+    try:
+        count, oldest = corrections.backlog(ctx.root)
+    except OSError:
+        return ""
+    due, age = corrections.harvest_due(count, oldest)
+    if not due:
+        return ""
+    age_clause = f", oldest {age} days" if age is not None else ""
+    return _section("Corrections to harvest", count, _item(
+        f"{count} correction(s) with no disposition", kind="check", marker="!",
+        why=f"In {corrections.LOG}{age_clause}. Turn each into a gate, a rule or a card.",
+        primary=_act("Read them clustered", onclick="post('/api/system/corrections')")),
+        sec_id="corrections")
+
+
+def _system_board_health(ctx: Context) -> str:
+    """Cards stuck between two lanes (`nightshift.boardhealth`) — silent when none are."""
+    if not installed(ctx.root):
+        return ""
+    found = boardhealth.check(ctx.root)
+    if not found:
+        return ""
+    rows = "".join(_item(f"{f.lane}/{f.card_id}", kind="check", marker="!", why=f.text)
+                   for f in found)
+    return _section("Board health", len(found), rows,
+                    note="A merge or a verdict that never reached its lane.",
+                    sec_id="board-health")
+
+
+def _system_verbs(ctx: Context) -> str:
+    rows = []
+    for ident, label, button, blurb, dispatches in SYSTEM_VERBS:
+        primary = (_launch(button, "Dispatch the fix pass", f"/api/system/{ident}", {})
+                   if dispatches else
+                   _act(button, onclick=f"post('/api/system/{ident}')"))
+        rows.append(_item(label, kind="check", why=blurb, primary=primary))
+    fresh = ctx.rail.freshness_line
+    rows.append(_item("Framework", kind="check", why=fresh,
+                      chips=[] if ctx.rail.freshness_known else [_chip("unknown", "warn")],
+                      primary=_act("Pull", onclick="post('/api/freshness/pull',{})"),
+                      menu=[_act("Refresh", onclick="post('/api/freshness/refresh',{})")]))
+    return _section("Checks and repair", 0, "".join(rows), sec_id="checks")
+
+
+def _system_danger(ctx: Context) -> str:
+    """Uninstall: a dry run first, then only after typing the project's own name."""
+    name = ctx.root.name
+    return _section("Danger", 0, _item(
+        "Uninstall nightshift", kind="check", marker="!",
+        why="Removes what the install wrote, including the launcher and the manifest — "
+            "this page stops working when it succeeds. Your own files stay.",
+        primary=_act("Show what it would remove", onclick="post('/api/system/uninstall')"),
+        menu=[_act("Uninstall", onclick=f"confirmUninstall('{_attr(name)}')")]),
+        sec_id="danger")
+
+
 def _render_system(ctx: Context) -> str:
-    return "".join([
-        _system_setup(ctx),
-        _system_files(ctx),
-        _system_outgoing(ctx),
-        _system_corrections(ctx),
-        _system_board_health(ctx),
-        _system_verbs(ctx),
-        _system_danger(ctx),
-    ])
+    """One status line; the detail opens on its own only when something needs you."""
+    if not installed(ctx.root):
+        return _system_setup(ctx)
+    attention = system_attention(ctx.root)
+    line = ("All good" if not attention else
+            f"{attention} thing{'s' if attention != 1 else ''} need{'' if attention != 1 else 's'} you")
+    dot = ('<span class="chip ok">ok</span>' if not attention
+           else '<span class="chip warn">look</span>')
+    inner = "".join([_system_files(ctx), _system_outgoing(ctx), _system_corrections(ctx),
+                     _system_board_health(ctx), _system_verbs(ctx), _system_setup(ctx),
+                     _system_danger(ctx)])
+    return (f'<section id="sec-status"><details class="sys" id="sys-all"'
+            f'{" open" if attention else ""}><summary class="sys-line">{dot}'
+            f'<b>{_e(line)}</b><span class="dim">{_e(ctx.rail.freshness_line)}</span>'
+            f'</summary>{inner}</details></section>')
 
 
-_RENDER = {"now": _render_now, "verify": _render_verify, "inbox": _render_inbox,
-           "ideas": _render_ideas, "run": _render_run, "system": _render_system}
+#: The pages, in rail order. `history` renders too but is reached from Running.
+_RENDER = {"queue": _render_queue, "capture": _render_capture, "you": _render_you,
+           "running": _render_running, "system": _render_system,
+           "history": _render_history}
+
+#: Old addresses, kept working: each redirects to the page that now holds its content.
+OLD_PAGES = {"now": "queue", "verify": "you", "inbox": "capture", "ideas": "capture",
+             "run": "running"}
 
 
 # --------------------------------------------------------------------------
@@ -4573,13 +3775,15 @@ def render_shell(ctx: Context, *, title: str, active: str, content: str) -> str:
     template = TEMPLATE.read_text(encoding="utf-8")
     out = template.replace("{{TITLE}}", f"Command Center — {title}")
     out = out.replace("{{RAIL}}", _rail_html(ctx, active))
-    out = out.replace("{{STATUSRAIL}}", _statusrail_html(ctx))
+    out = out.replace("{{STATUSRAIL}}", _statusrail_html(ctx) + _launch_dialog(ctx))
     return out.replace("{{CONTENT}}", content)
 
 
 def render_page(page: str, root: Path) -> str:
+    page = OLD_PAGES.get(page, page)
     ctx = read_context(root)
-    return render_shell(ctx, title=page.capitalize(), active=page,
+    active = "running" if page == "history" else page
+    return render_shell(ctx, title=page.capitalize(), active=active,
                         content=_RENDER[page](ctx))
 
 
@@ -4610,17 +3814,12 @@ def render_job(root: Path, ident: str) -> str:
     live = ('<p class="note">This job is still running; the page reloads every '
             'five seconds.</p><script>setTimeout(function(){location.reload();},5000);'
             '</script>' if status == jobs.RUNNING else "")
-    # **The roster belongs here too, not only on a live run.** The Run page leads
-    # with what is running, by request — which would otherwise mean that the moment
-    # a fan-out finishes, the structured account of it is replaced by a raw log. So
-    # the job's own page carries both: what became of each item, and the output it
-    # was read from.
+    # The per-note account survives the fan-out finishing: both it and the raw log.
     roster = ""
     if job.label == "ingest":
-        rows = _ingest_roster(ingest.parse_progress(text))
+        rows = _ingest_rows(ingest.parse_progress(text))
         if rows:
-            roster = (f'<div class="roster"><table><tbody>{rows}'
-                      f'</tbody></table></div>')
+            roster = f'<div class="rows">{rows}</div>'
     return render_document(
         root, title=f"{job.label} · output", subtitle=job.started.replace("T", " "),
         body=f'{_meta(facts)}{live}{roster}<pre>{_e(text)}</pre>',
@@ -4943,7 +4142,7 @@ def render_document(root: Path, *, title: str, subtitle: str, body: str,
     head = (f'<div class="sec-head"><h2>{_e(title)}</h2>'
             f'<p class="note">{_e(subtitle)}</p></div>')
     back = _act("Back",
-               onclick="history.length>1?history.back():location.assign('/now')")
+               onclick="history.length>1?history.back():location.assign('/queue')")
     # `editor` is the second mode a document may have (see `render_body`); a page
     # with none renders exactly as it always did, which is every page but a note.
     doc = f'<div class="doc{" hidden" if editing else ""}" id="bodyview">{body}</div>'
@@ -4992,12 +4191,14 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.strip("/")
         if path == "":
-            # An uninstalled repo lands on the page that can do something about it.
-            # `/now` in a repo with no board is five empty sections and no hint that
-            # the install never happened — which is exactly the state a first-time
-            # visitor arrives in, having opened the launcher `bootstrap` just wrote.
+            # An uninstalled repo lands on the page that can install it.
             self.send_response(302)
-            self.send_header("Location", "/now" if installed(self.root) else "/system")
+            self.send_header("Location", "/queue" if installed(self.root) else "/system")
+            self.end_headers()
+            return
+        if path in OLD_PAGES:
+            self.send_response(302)
+            self.send_header("Location", f"/{OLD_PAGES[path]}")
             self.end_headers()
             return
         if path in _RENDER:
@@ -5011,7 +4212,7 @@ class Handler(BaseHTTPRequestHandler):
             # added, and the first time it fell behind the panel would quietly stop
             # updating the part nobody remembered to add to it.
             wanted = parse_qs(parsed.query).get("page", [""])[0]
-            if wanted in _RENDER:
+            if wanted in _RENDER or wanted in OLD_PAGES:
                 self._send(200, render_page(wanted, self.root).encode("utf-8"))
                 return
             # `decide/<id>` is not in `_RENDER` — it takes a card id, not a bare page
@@ -5801,7 +5002,7 @@ def already_serving(port: int) -> bool:
     probe cannot distinguish a panel from anything else that happens to listen.
     """
     try:
-        with urlopen(f"http://127.0.0.1:{port}/now", timeout=2) as answer:
+        with urlopen(f"http://127.0.0.1:{port}/queue", timeout=2) as answer:
             return b"Command Center" in answer.read(4096)
     except Exception:                             # noqa: BLE001 — any failure is "not ours"
         return False
@@ -5820,7 +5021,7 @@ def serve(root: Path, port: int = DEFAULT_PORT, *, open_browser: bool = True) ->
         # vanished before the reason could be read. Karel, 2026-08-17: *"Running
         # the bat opens and immediately closes the window and no browser page
         # opens."*
-        url = f"http://127.0.0.1:{port}/now"
+        url = f"http://127.0.0.1:{port}/queue"
         if already_serving(port):
             print(f"Command Center is already serving at {url} — opening that one.\n"
                   f"  Stop it and run this again if you want it restarted "
@@ -5832,7 +5033,7 @@ def serve(root: Path, port: int = DEFAULT_PORT, *, open_browser: bool = True) ->
               f"panel ({exc}).\n"
               f"  Free the port, or start on another one with --port.")
         raise SystemExit(2) from exc
-    url = f"http://127.0.0.1:{port}/now"
+    url = f"http://127.0.0.1:{port}/queue"
     print(f"Command Center serving {root} at {url}")
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
