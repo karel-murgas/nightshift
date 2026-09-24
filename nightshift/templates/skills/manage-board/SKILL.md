@@ -225,6 +225,34 @@ not implement the card yourself in the chat session**, and do not spawn the work
 `Agent` by hand. Either bypasses the branch isolation, the gate run and the attempt
 bookkeeping, and it is the path that produced the 2026-07-22 tier violation.
 
+## Preparing work for a local runtime
+
+A local model runs each step with a cleared window, so the *step* has to carry what a
+session normally would. Four rules, each earned on a plan that stalled at the first step
+whose check the model could not run:
+
+- **Every step ends in a command the model can run, with a literally-quoted expected
+  output.** "Tests pass" and "it works when you play it" are not that. A step whose check
+  the model cannot perform is a step it cannot close, and it re-reads, re-plans and laps
+  instead of stopping.
+- **The check must prove the artefact exists, not that the model believes it does.** A
+  completion was once reported over an empty directory; `ls <file>` plus a syntax check
+  catches that in one command, and restarting the session does not.
+- **Steps record their own completion** — a commit per step, or a progress file the next
+  step reads first. With no record, a cleared window re-derives progress from the tree,
+  and a step that wrote nothing looks exactly like a step not yet started. That is how the
+  same work gets done twice.
+- **Split what the model can close from what {{maintainer}} must judge.** Play-tests, visual
+  checks and anything needing the running product are theirs, named as their own steps,
+  never buried in the model's done-condition.
+
+Shape: one file and a bounded edit per step, an explicit tool-call budget, and a stop
+condition — *about to re-read a file you already read → stop and report what you have*.
+The worker charters in `.claude/agents/` carry the budget wording to copy.
+
+**This is not extra checking on your side.** The whole point is a step the local model can
+close alone; if preparing one costs more than doing the work would, do it yourself.
+
 ## Dispatching triage
 
 For turning a raw `inbox/` note into a card, prefer the `triage` agent over doing it inline
