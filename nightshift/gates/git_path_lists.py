@@ -50,6 +50,8 @@ its shape: the output is not being read as a list of paths at all.
 """
 from __future__ import annotations
 
+SUBJECT = "nightshift/git.py"
+
 import ast
 from pathlib import Path
 

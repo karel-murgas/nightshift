@@ -50,6 +50,8 @@ Wired as `python -m nightshift.hooks.worktree_fence` in a consuming project's
 """
 from __future__ import annotations
 
+SUBJECT = ".ai/manifest.toml"
+
 import json
 import os
 import re

@@ -80,6 +80,8 @@ Wired as `python -m nightshift.hooks.ideas_fence` under `PreToolUse` for
 """
 from __future__ import annotations
 
+SUBJECT = "Board/ideas"
+
 import json
 import os
 import re

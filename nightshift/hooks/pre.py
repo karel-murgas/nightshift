@@ -29,6 +29,11 @@ RULES: tuple[tuple[str, frozenset[str]], ...] = (
     ("tool_economy", frozenset({"Read", "Bash"})),
 )
 
+#: This dispatcher's own subject is exactly what it dispatches to -- derived
+#: from `RULES` rather than restated, so a fence added there needs no second
+#: edit here to stay covered by the "every hook names its subject" rule.
+SUBJECT = tuple(f"nightshift/hooks/{name}.py" for name, _ in RULES)
+
 #: The hook modules this dispatcher replaced as separate settings entries —
 #: `nightshift.update` strips an entry naming one of them.
 SUPERSEDED = frozenset(f"nightshift.hooks.{name}" for name, _ in RULES)

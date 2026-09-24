@@ -26,6 +26,8 @@ here rather than manifest fields.
 """
 from __future__ import annotations
 
+SUBJECT = "Board"
+
 import re
 from pathlib import Path
 

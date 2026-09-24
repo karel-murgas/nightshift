@@ -29,6 +29,8 @@ hand-maintained list to update here.
 """
 from __future__ import annotations
 
+SUBJECT = "nightshift/gates/appeal_markers.py"
+
 from pathlib import Path
 
 import appeal_markers

@@ -70,6 +70,8 @@ Wired as `python -m nightshift.hooks.tool_economy` in a consuming project's
 """
 from __future__ import annotations
 
+SUBJECT = "pytest"
+
 import json
 import os
 import re

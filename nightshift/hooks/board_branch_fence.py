@@ -51,6 +51,8 @@ Wired as `python -m nightshift.hooks.board_branch_fence` in a consuming project'
 """
 from __future__ import annotations
 
+SUBJECT = "Board"
+
 import json
 import sys
 from pathlib import Path, PurePosixPath

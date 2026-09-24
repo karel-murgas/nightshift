@@ -44,6 +44,8 @@ open with a one-line note on anything unexpected.
 """
 from __future__ import annotations
 
+SUBJECT = "nightshift/gates/run.py"
+
 import json
 import sys
 from pathlib import Path

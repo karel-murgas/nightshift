@@ -37,6 +37,8 @@ binary, pass neither `text=True` nor `encoding=` and handle bytes.
 """
 from __future__ import annotations
 
+SUBJECT = ".ai"
+
 import ast
 from pathlib import Path
 

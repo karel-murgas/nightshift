@@ -21,6 +21,8 @@ first parameter is not one.
 """
 from __future__ import annotations
 
+SUBJECT = "nightshift/gates/doc_scan.py"
+
 import ast
 import re
 from collections import defaultdict

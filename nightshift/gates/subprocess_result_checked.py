@@ -34,6 +34,8 @@ Appeals: `# gate-ok(subprocess_result_checked): <reason>` — see
 """
 from __future__ import annotations
 
+SUBJECT = ".ai"
+
 import ast
 from pathlib import Path
 

@@ -49,6 +49,8 @@ that had to be established rather than assumed.
 """
 from __future__ import annotations
 
+SUBJECT = "tests/_fixtures.py"
+
 import ast
 from pathlib import Path
 

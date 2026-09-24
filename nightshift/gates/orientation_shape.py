@@ -119,6 +119,8 @@ session. Orientation is the budgeted thing, so orientation is the checked thing.
 """
 from __future__ import annotations
 
+SUBJECT = ".ai/manifest.toml"
+
 import re
 from pathlib import Path
 

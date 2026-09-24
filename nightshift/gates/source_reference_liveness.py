@@ -140,6 +140,8 @@ re-reads, which is the defect this gate is about.
 """
 from __future__ import annotations
 
+SUBJECT = ".ai"
+
 import ast
 import re
 import subprocess

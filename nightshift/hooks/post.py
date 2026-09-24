@@ -11,6 +11,8 @@ exits 0: a failing script is reported, not allowed to block the edit that would 
 """
 from __future__ import annotations
 
+SUBJECT = "nightshift/hooks/gates_on_edit.py"
+
 import contextlib
 import io
 import json

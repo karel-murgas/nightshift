@@ -97,6 +97,8 @@ Wired as `python -m nightshift.hooks.preflight_guard` in a consuming project's
 """
 from __future__ import annotations
 
+SUBJECT = "nightshift/preflight.py"
+
 import json
 import re
 import shlex

@@ -61,6 +61,8 @@ one only reports what it can be sure of.
 """
 from __future__ import annotations
 
+SUBJECT = "nightshift/gates/doc_scan.py"
+
 import re
 from pathlib import Path
 

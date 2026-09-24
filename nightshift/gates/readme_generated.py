@@ -16,6 +16,8 @@ package's own.
 """
 from __future__ import annotations
 
+SUBJECT = "README.md"
+
 from pathlib import Path
 
 from nightshift import readme_gen

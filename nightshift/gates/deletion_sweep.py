@@ -16,16 +16,37 @@ removed it.
 
 Scope and exemptions come from `doc_scan.py`, so `doc_scope: history` files —
 which are *supposed* to say "hack_scene.py was deleted" — never fail this.
+
+**Also flags a project-local gate whose own `SUBJECT` no longer resolves**
+(`correction-loop-defaults`, 2026-09-23 framework review, part 2). Every gate now
+declares `SUBJECT` — the path, module or field it guards — precisely so this
+question can be asked mechanically instead of discovered the way `scope.py`'s own
+docstring describes: four discipline gates pointed at a directory that had moved,
+silently checking nothing, until someone measured it.
+
+**Scoped to a project's own `.ai/gates/`, not core.** A core gate's `SUBJECT` has
+to mean something across every consuming repo, including this package's own
+checkout, which has no `Board/` and no game source — checking core subjects
+against an arbitrary `repo_root` would flag `card_schema`'s `SUBJECT = "Board"` as
+"deleted" in a repo that never had one, which is a different failure from drift.
+A project gate is different: it was written *because* something in that project's
+own tree existed, so a `SUBJECT` that no longer resolves there is exactly the
+drift this gate exists to catch — the same one line up move for gates that
+`doc_reference_liveness` already makes for prose.
 """
 from __future__ import annotations
+
+SUBJECT = "nightshift/gates/doc_scan.py"
 
 import ast
 import re
 from pathlib import Path
 
 from nightshift.gates import doc_scan
+from nightshift.gates import run as gates_run
 from nightshift import branches, git
 from nightshift.gates.base import Violation
+from nightshift.manifest import AI_DIR
 
 NAME = "deletion_sweep"
 DESCRIPTION = "a removed file or top-level class/def must not still be named by any live doc"
@@ -157,13 +178,51 @@ def _pattern(name: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![\w.]){re.escape(name)}(?![\w])")
 
 
+def _project_gate_subjects(repo_root: Path) -> dict[str, tuple[str, ...]]:
+    """`{gate name: SUBJECT paths}`, for gates that live in this project's own
+    `.ai/gates/` — never core, see the module docstring for why."""
+    project_dir = (repo_root / AI_DIR / "gates").resolve()
+    if not project_dir.is_dir():
+        return {}
+    out: dict[str, tuple[str, ...]] = {}
+    for name, module in gates_run.discover(repo_root).items():
+        origin = getattr(module, "__file__", None)
+        if not origin or Path(origin).resolve().parent != project_dir:
+            continue
+        subject = getattr(module, "SUBJECT", None)
+        if subject is None:
+            continue
+        out[name] = (subject,) if isinstance(subject, str) else tuple(subject)
+    return out
+
+
+def stale_subjects(repo_root: Path) -> list[Violation]:
+    """A project gate's `SUBJECT` naming a path that does not exist in this
+    tree — reported against the gate file itself, not the missing path (the
+    gate is what needs fixing or appealing; the path may be gone on purpose)."""
+    violations: list[Violation] = []
+    for name, subjects in sorted(_project_gate_subjects(repo_root).items()):
+        rel_gate = f"{AI_DIR}/gates/{name}.py"
+        for subject in subjects:
+            if (repo_root / subject).exists():
+                continue
+            violations.append(Violation(
+                rel_gate, 1,
+                f"deletion_sweep: SUBJECT names {subject!r}, which no longer exists in "
+                f"this tree — update SUBJECT to what the gate now inspects, or retire "
+                f"the gate (turn-a-correction-into-a-gate.md's retirement review) if "
+                f"its subject is gone for good.",
+            ))
+    return violations
+
+
 def check(repo_root: Path) -> list[Violation]:
+    violations = stale_subjects(repo_root)
     dead = removed_names(repo_root)
     if not dead:
-        return []
+        return violations
 
     patterns = {name: _pattern(name) for name in dead}
-    violations: list[Violation] = []
 
     for path in doc_scan.doc_files(repo_root):
         text = path.read_text(encoding="utf-8", errors="replace")

@@ -45,6 +45,8 @@ about, and JSON sidesteps it rather than fixing the regex twice.
 """
 from __future__ import annotations
 
+SUBJECT = ".ai/manifest.toml"
+
 import json
 import subprocess
 import sys

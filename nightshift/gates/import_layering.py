@@ -29,6 +29,8 @@ been reading present in `manifest.py` and read by nothing.
 """
 from __future__ import annotations
 
+SUBJECT = ".ai/manifest.toml"
+
 import ast
 from pathlib import Path
 

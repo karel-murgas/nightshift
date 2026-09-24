@@ -48,6 +48,8 @@ line rather than the file.
 """
 from __future__ import annotations
 
+SUBJECT = ".ai"
+
 import ast
 from pathlib import Path
 
