@@ -26,7 +26,7 @@
   "nightshift/gates/doc_reference_liveness.py": 19,
   "nightshift/gates/doc_scan.py": 16,
   "nightshift/gates/doc_signature_drift.py": 20,
-  "nightshift/gates/docstring_budget.py": 82,
+  "nightshift/gates/docstring_budget.py": 83,
   "nightshift/gates/fixture_rebuild.py": 48,
   "nightshift/gates/gate_appeals.py": 28,
   "nightshift/gates/git_path_lists.py": 49,

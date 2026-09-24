@@ -3,9 +3,10 @@
 docstring-and-manifest-diet (2026-09-23 framework review) found 43% of nightshift's
 lines are prose — 13.8k lines of docstrings, mostly dated incident narrative that
 the staleness gates never look at because they scan `docs/`, not docstrings. Slice 1
-fixed the sites that were factually wrong (`digest.py` surviving as a live reference,
-false counts) and added `prose_reference_liveness` to keep dead references from
-coming back. Neither stops a docstring from simply being long — a module docstring
+fixed the sites that were factually wrong (`digest.py`, since deleted, surviving as a
+live-sounding reference, plus false counts) and added `prose_reference_liveness` to
+keep dead references from coming back. Neither stops a docstring from simply being
+long — a module docstring
 can cite only real things and still run to 60 lines of history nobody needs to load
 to use the module. This gate is the guard for *that*: a module docstring should say
 what the module is, what it guarantees, and what not to do, in about `BUDGET_LINES`.
@@ -125,11 +126,36 @@ DATE_THRESHOLD = 3
 
 _DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 
-_CORE_BASELINE = Path(__file__).resolve().parent / "data" / "docstring_budget_baseline.json"
+#: This module's own directory name, relative to the installed package --
+#: `gates`, with `docstring_budget.py` living directly in it. Used only to
+#: build `_core_baseline_path` from a *repo_root*, never from `__file__`; see
+#: that function for why the distinction matters.
+_CORE_BASELINE_REL = ("nightshift", "gates", "data", "docstring_budget_baseline.json")
 
 
 def _local_baseline_path(repo_root: Path) -> Path:
     return repo_root / AI_DIR / "gates" / "data" / "docstring_budget_baseline.json"
+
+
+def _core_baseline_path(repo_root: Path) -> Path:
+    """The framework's own baseline, resolved *inside `repo_root`* rather than
+    from this module's installed `__file__`.
+
+    The two coincide when `repo_root` is this package's own checkout -- the
+    only place `nightshift/*.py` is ever in `scope.tooling_files(repo_root)`'s
+    output, since that requires `[project].tooling_dirs = ["nightshift"]`,
+    which only this package's own manifest declares. They do NOT coincide for
+    a consuming project's `tmp_path` fixture, or for a real consuming repo:
+    resolving from `__file__` there would silently read and -- worse, on
+    `refresh()` -- overwrite the actual installed package's committed
+    baseline as a side effect of scanning an unrelated tree. That happened
+    once, mid-slice: `refresh()` on a repo with no `nightshift/` tooling dir
+    computed an empty `core_new` and wrote it straight over the real file
+    through the `__file__`-derived path, twice, before this fixed it -- gate-
+    self-bug-shaped, and now structurally impossible, since a repo_root with
+    no `nightshift/gates/` cannot resolve to any real file to overwrite.
+    """
+    return repo_root.joinpath(*_CORE_BASELINE_REL)
 
 
 def _load_baseline(path: Path) -> dict[str, int]:
@@ -199,12 +225,20 @@ def refresh(repo_root: Path) -> tuple[dict[str, int], dict[str, int]]:
     A module now at or under `BUDGET_LINES` is dropped from the baseline outright
     — the ratchet's "remove from baseline" step, applied by the tool that would
     otherwise leave the entry to rot.
+
+    The core baseline is written only when `repo_root` actually holds
+    `nightshift/gates/` — i.e. only in this package's own checkout, per
+    `_core_baseline_path`. Anywhere else `scope.tooling_files` never returns a
+    non-`.ai/` file to begin with, so there is nothing to record; writing an
+    empty (or any) core baseline into an unrelated repo would create a stray
+    `nightshift/gates/data/` directory that repo has no reason to have.
     """
     measured = measure(repo_root)
     local_path = _local_baseline_path(repo_root)
-    core_path = _CORE_BASELINE
+    core_path = _core_baseline_path(repo_root)
+    write_core = (repo_root / "nightshift" / "gates").is_dir()
     local_existing = _load_baseline(local_path)
-    core_existing = _load_baseline(core_path)
+    core_existing = _load_baseline(core_path) if write_core else {}
 
     local_new: dict[str, int] = {}
     core_new: dict[str, int] = {}
@@ -217,6 +251,8 @@ def refresh(repo_root: Path) -> tuple[dict[str, int], dict[str, int]]:
         (local_new if is_local else core_new)[rel] = value
 
     _write_baseline(local_path, local_new)
+    if not write_core:
+        return local_new, core_new
     _write_baseline(core_path, core_new)
     return local_new, core_new
 
@@ -224,7 +260,7 @@ def refresh(repo_root: Path) -> tuple[dict[str, int], dict[str, int]]:
 def check(repo_root: Path) -> list[Violation]:
     appeals = appeal_markers.scan(repo_root)
     local_baseline = _load_baseline(_local_baseline_path(repo_root))
-    core_baseline = _load_baseline(_CORE_BASELINE)
+    core_baseline = _load_baseline(_core_baseline_path(repo_root))
 
     violations: list[Violation] = []
     for path in scope.tooling_files(repo_root):
@@ -235,14 +271,20 @@ def check(repo_root: Path) -> list[Violation]:
         rel = path.relative_to(repo_root).as_posix()
         is_local = _is_local(path, repo_root)
         baseline = local_baseline if is_local else core_baseline
-        baseline_rel = (_local_baseline_path(repo_root) if is_local else _CORE_BASELINE)
+        baseline_rel = (_local_baseline_path(repo_root) if is_local
+                        else _core_baseline_path(repo_root))
         n = len(doc.splitlines())
         recorded = baseline.get(rel)
 
-        def _report(message: str) -> None:
-            if appeal_markers.exempt(appeals, NAME, rel, line):
+        def _report(message: str, *, _rel: str = rel, _line: int = line) -> None:
+            # `_rel`/`_line` are bound as defaults at definition time, not looked
+            # up from the enclosing scope at call time -- B023's whole complaint
+            # (a closure over a loop variable) does not apply once the value is
+            # captured this way, and `_report` still reads like a closure at
+            # every call site below.
+            if appeal_markers.exempt(appeals, NAME, _rel, _line):
                 return
-            violations.append(Violation(rel, line, f"{NAME}: {message}"))
+            violations.append(Violation(_rel, _line, f"{NAME}: {message}"))
 
         if recorded is None:
             if n > BUDGET_LINES:
@@ -302,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
         local_new, core_new = refresh(root)
         print(f"local baseline: {len(local_new)} module(s) -> "
               f"{_local_baseline_path(root)}")
-        print(f"core baseline: {len(core_new)} module(s) -> {_CORE_BASELINE}")
+        print(f"core baseline: {len(core_new)} module(s) -> {_core_baseline_path(root)}")
         return 0
 
     found = check(root)
