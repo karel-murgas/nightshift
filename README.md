@@ -505,6 +505,7 @@ project's one.
 |---|---|
 | `branch_role_prose` | docs naming the integration branch must agree with .ai/manifest.toml [branches] |
 | `card_schema` | cards on the board match the card schema, and carry no `state:` field |
+| `composed_text` | each composed charter/skill equals the framework template plus the project's addendum |
 | `conflict_markers` | no tracked text file carries a git conflict marker |
 | `coreference_sweep` | a numeric series or SCREAMING_SNAKE symbol this diff replaced must not survive in a live doc |
 | `corrections_log` | the correction log parses and its class/channel values are in vocabulary |

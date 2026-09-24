@@ -38,6 +38,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from nightshift import compose
 from nightshift import discover
 from nightshift import git
 from nightshift import hostconfig
@@ -599,12 +600,18 @@ def stage_templates(plan: Plan, root: Path, tables: dict[str, dict], *,
     declared = list(memory_table.get("orientation") or [])
     memory_table["orientation"] = declared + [s for s in stubs if s not in declared]
 
+    def framework_text(rel: str, template: Path) -> str:
+        rendered = render(template.read_text(encoding="utf-8"), values)
+        if rel in compose.COMPOSED:
+            return compose.compose(rendered, compose.read_addendum(root, rel), rel)
+        return rendered
+
     for charter in sorted((TEMPLATES / "agents").glob("*.md")):
-        stage(f".claude/agents/{charter.name}",
-              render(charter.read_text(encoding="utf-8"), values))
+        rel = f".claude/agents/{charter.name}"
+        stage(rel, framework_text(rel, charter))
     for skill in sorted((TEMPLATES / "skills").glob("*/SKILL.md")):
-        stage(f".claude/skills/{skill.parent.name}/SKILL.md",
-              render(skill.read_text(encoding="utf-8"), values))
+        rel = f".claude/skills/{skill.parent.name}/SKILL.md"
+        stage(rel, framework_text(rel, skill))
 
     # Staged here as well as by `bootstrap_plan`, so a repo installed before the
     # launchers existed picks them up from `update`. `stage()` reports the second

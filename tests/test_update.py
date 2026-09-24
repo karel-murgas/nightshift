@@ -60,7 +60,7 @@ def repo(tmp_path: Path) -> Path:
 #: A file `init` writes verbatim from a template, so a test can move "the template"
 #: by moving what `stage_templates` would produce. Chosen because nothing else in the
 #: tree reads it, so drifting it cannot break another assertion.
-TRACKED = ".claude/agents/stale-hunter.md"
+TRACKED = ".claude/agents/merge-resolver.md"
 
 
 def _move_template(monkeypatch, rel: str, suffix: str = "\n## moved upstream\n") -> None:

@@ -74,7 +74,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nightshift import init, textio, tiers, uninstall
+from nightshift import compose, init, textio, tiers, uninstall
 from nightshift import hostconfig, startup, telemetry, worker
 from nightshift.manifest import AI_DIR, MANIFEST_NAME, ManifestError, find_root
 
@@ -101,10 +101,13 @@ MERGE_TIMEOUT_S = 600
 #: then what is fine.
 STALE, MISSING, CONFLICT, DECLINED, YOURS, CURRENT, UNTRACKED, FROZEN_V = (
     "stale", "missing", "conflict", "declined", "yours", "current", "untracked", "frozen")
+#: A composed file (`nightshift.compose`) that is not its composition. Always safe to
+#: write: the project's text lives in the addendum, and a hand edit is backed up first.
+REGENERATE = "regenerate"
 
 #: The verdicts `--apply` acts on. Deliberately short: everything else is either
 #: nothing to do, or something only a person can decide.
-APPLIES = (STALE, MISSING)
+APPLIES = (STALE, MISSING, REGENERATE)
 
 #: How many surplus lines a copy needs before `--outgoing` mentions it. Not a
 #: confidence threshold — it is the line between *personalisation* and *content*.
@@ -323,6 +326,12 @@ def survey(root: Path) -> Survey:
         if current is None:
             out.findings.append(Finding(rel, MISSING, staged))
             continue
+        if rel in compose.COMPOSED:
+            # Generated, so never "yours" and never a conflict, and no outgoing drift:
+            # the project's passages are in the addendum by construction.
+            out.findings.append(Finding(rel, CURRENT if current == staged else REGENERATE,
+                                        staged))
+            continue
         now = init.content_hash(current)
         ahead = init.content_hash(staged)
         out.drifts[rel] = drift(staged, current)
@@ -457,11 +466,17 @@ def apply(found: Survey) -> list[str]:
     """
     done: list[str] = []
     written: dict[str, str] = {}
+    recorded = init.receipt_created(init.read_receipt(found.root) or {})
     for finding in found.findings:
         if not finding.actionable or finding.staged is None:
             continue
         path = found.root / finding.rel
         path.parent.mkdir(parents=True, exist_ok=True)
+        if finding.verdict == REGENERATE:
+            on_disk = _on_disk(path)
+            if on_disk is not None and init.content_hash(on_disk) != recorded.get(finding.rel):
+                # Someone edited the generated file; keep their text beside it.
+                textio.write_text_lf(path.with_name(path.name + BACKUP_SUFFIX), on_disk)
         if finding.staged == "":
             path.touch()
         else:
@@ -694,6 +709,8 @@ def _model(root: Path) -> str:
 _HEADINGS = {
     STALE: ("will update (the template moved; you never touched these)", "+"),
     MISSING: ("will write (ours, and gone from disk)", "+"),
+    REGENERATE: ("will regenerate (composed: template + your addendum in "
+                 f"{compose.ADDENDA}/)", "+"),
     CONFLICT: ("needs you (you edited it, and the template moved)", "!"),
     YOURS: ("yours (edited here; the template has not moved)", "="),
     DECLINED: ("declined (you kept yours against this exact version)", "="),
