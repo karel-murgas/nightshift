@@ -197,6 +197,35 @@ run — the on-save hook after your next `Write`/`Edit`, or `preflight` if none 
 — with no index comparison at all (hygiene-rules-belong-in-a-script card).
 `write_bytes`/`newline=""` is still the cleaner habit, not a workaround you have to apply.
 
+### Never leave a board edit in a checkout that is not on `{{integration}}`
+
+**Check `git branch --show-current` before you finish any board conversation.** If it is
+not `{{integration}}`, the board you just edited is not the board the runner will read.
+
+`{{board}}/` is a tracked directory, so every branch carries its own copy of it, and the
+launch checkout is on whatever branch you have out. On `{{integration}}` there is one copy
+and everything agrees — that is the normal case and nothing below applies. Once the launch
+checkout moves to a feature branch, `nightshift.runner`, `nightshift.chores` and
+`nightshift.drain` all redirect to the dedicated integration checkout named by
+`[worker].integration_checkout_dir` — a sibling directory, permanently on `{{integration}}` —
+which holds a **second** copy of `{{board}}/`. An edit made here does not exist there.
+
+So:
+
+- **On `{{integration}}`** — edit in place, commit (or `boardcmd move`, which commits). Done.
+- **On any other branch** — the edit has to reach `{{integration}}`. Either make it in the
+  integration checkout (permanently on `{{integration}}`) and commit it there, or commit it
+  here and merge it to `{{integration}}`. **Committing it on the feature branch alone does
+  not count**: board commits belong on the integration branch, and one sitting on a feature
+  branch is as invisible to the runner as an uncommitted edit while looking considerably
+  more finished.
+
+`runner.stranded_board_refusal` is the backstop, not the check: a night, a chore batch or a
+drain that redirects to the integration checkout **refuses to start** while the launch
+checkout holds board edits `{{integration}}` does not, and names the files. It converts a
+silent wrong answer into a refusal you can read. Do not lean on it — a refused batch is
+still a batch that did not run.
+
 ### Closing out a card you did yourself
 
 Occasionally {{maintainer}} authorises a card to be done **inline**, in this session, rather
