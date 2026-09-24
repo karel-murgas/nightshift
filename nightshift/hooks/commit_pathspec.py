@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """PreToolUse hook: `git commit` must name what it is committing.
 
-The failure this exists to prevent (Dungeoneer, 2026-07-28, `commit-swept-staged-index`):
+The failure this exists to prevent (Project Tigress, 2026-07-28, `commit-swept-staged-index`):
 a session committing a digest fix ran `git add .ai/digest.py tests/test_board_digest.py`
 and then a separate `git commit`, and read that as "commit only those two files". It is
 not what git does — **`git commit` commits the whole index**, and the index already

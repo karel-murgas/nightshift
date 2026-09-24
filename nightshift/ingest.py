@@ -61,8 +61,9 @@ from nightshift.hostconfig import cannot_edit, host_setting, repo_root
 from nightshift.startup import claude_binary, ensure_workspace_trusted
 from nightshift.worker import run_cli
 
-#: Written at the repo root, next to the digest, because that is the Obsidian vault
-#: root — a report the maintainer has to go looking for is a report they do not read.
+#: Written at the repo root (where the digest's `Digest.md` also lived, until it was
+#: removed 2026-09-02) — a report the maintainer has to go looking for is a report
+#: they do not read.
 #: The name comes from `board`, which owns the set: a view is committed *and* exempt
 #: from the dispatch dirty-check, and this one was neither until 2026-08-14.
 OUT = Path(board.ROUTING_VIEW)
@@ -482,7 +483,7 @@ def classify(found: list[Note], root: Path, *, model: str = "",
 #:   overnight — it does **not** mean Karel typed it. In practice a session does
 #:   the work and Karel only agreed the shape of it beforehand, so `verify:
 #:   review` routed finished, player-visible features straight to `done/` with
-#:   nobody ever having seen them run: three of them on the Dungeoneer board
+#:   nobody ever having seen them run: three of them on the Project Tigress board
 #:   (`alarm-ice`, `self-kill-stats`, `clean-getaway-rework`) before Karel caught
 #:   it on 2026-08-29 — *"I think the card went straight to done instead of to
 #:   the testing"*.

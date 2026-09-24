@@ -2,33 +2,34 @@
 
 **Why a module rather than a form.** Answering a parked card was, until 2026-08-18,
 something you did in an editor: open `needs-decision/<id>.md`, find `## Thread`, type a
-dated heading in the exact shape the digest matches, and remember the two conventions
-that make it count. Nothing enforced any of that, and the usual case is picking between
-two options somebody has already enumerated for you — so the cost of answering was
-wildly out of proportion to the decision, and the board silted up with cards whose
-question had in fact been settled in Karel's head weeks earlier.
+dated heading in the exact shape this module now matches (`answer_pattern`), and
+remember the two conventions that make it count. Nothing enforced any of that, and the
+usual case is picking between two options somebody has already enumerated for you — so
+the cost of answering was wildly out of proportion to the decision, and the board
+silted up with cards whose question had in fact been settled in Karel's head weeks
+earlier.
 
-**No LLM anywhere in here**, the same rule the gates, the digest and `run_record`
-follow. Every function is either a regex over a card's own prose or a string written
-back into it. That matters more here than elsewhere: this is the one place the
-*maintainer's own words* enter the board, and a summariser in that path would be
-paraphrasing the only input on the whole board that must survive verbatim. The panel
-offers a "Chat about it" button for when the question needs a conversation instead; that
-is a different verb, and it deliberately does not write anything.
+**No LLM anywhere in here**, the same rule the gates and `run_record` follow. Every
+function is either a regex over a card's own prose or a string written back into it.
+That matters more here than elsewhere: this is the one place the *maintainer's own
+words* enter the board, and a summariser in that path would be paraphrasing the only
+input on the whole board that must survive verbatim. The panel offers a "Chat about it"
+button for when the question needs a conversation instead; that is a different verb,
+and it deliberately does not write anything.
 
-**Parsing is shared with the digest on purpose.** `digest` already had to know what a
-picker looks like, to list a parked card's options in the morning report. Two parsers
-would drift, and the drift would be invisible — the digest would offer one set of
-options and the panel another, for the same card. So the parsing lives here and
-`digest` calls it, keeping only its own clipping on top.
+**Parsing used to be shared with the digest on purpose** (`digest`, removed
+2026-09-02, needed the same picker parsing to list a parked card's options in its
+morning report; two parsers would have drifted invisibly). The parsing still lives
+here; the panel is now the sole caller, through its own clipping on top.
 
-That sharing immediately paid for itself: the digest's list-item pattern matched only
-`-`/`*` bullets, so a card whose options were written `1.` / `2.` parsed to *nothing*.
-`command-center-back-buttons` — a real card, parked with two numbered options — reported
-zero candidates, and the fallback then mistook the two bold spans in its prose
-(`**What I found:**`, `**This needs a decision…**`) for the sub-questions and listed
-those instead. The morning report had been quietly describing that card wrongly; a
-picker built on the same parser would have offered two non-options and neither real one.
+That sharing immediately paid for itself while the digest still existed: its list-item
+pattern matched only `-`/`*` bullets, so a card whose options were written `1.` / `2.`
+parsed to *nothing*. `command-center-back-buttons` — a real card, parked with two
+numbered options — reported zero candidates, and the fallback then mistook the two
+bold spans in its prose (`**What I found:**`, `**This needs a decision…**`) for the
+sub-questions and listed those instead. The morning report had been quietly describing
+that card wrongly; a picker built on the same parser would have offered two non-options
+and neither real one.
 """
 from __future__ import annotations
 
@@ -99,7 +100,7 @@ _DECIDED_HEAD = re.compile(r"^###[ \t]+Decided\b[ \t]*(?:\(([^)]*)\))?[ \t]*[:�
 _SUBHEAD = re.compile(r"^(?:#{3,6}[ \t]|(?:-{3,}|\*{3,}|_{3,})[ \t]*$)")
 
 #: The heading a recorded answer goes under. `## Thread` is where `manage-board` says
-#: answers live and where `digest._has_maintainer_answer` looks for them; writing
+#: answers live and where `has_maintainer_answer` (below) looks for them; writing
 #: anywhere else would be an answer no report can see.
 THREAD = "Thread"
 
@@ -125,9 +126,9 @@ class Option:
     opinion about the choice rather than part of the choice — a Thread entry reading
     *"> B — split it *(recommended)*"* records the advice, not the decision.
 
-    `raw` is the option exactly as the card wrote it, which is what the digest prints:
-    the morning report is quoting the card, and the mark saying which one triage would
-    take is precisely the most useful thing on the line.
+    `raw` is the option exactly as the card wrote it, which is what the panel prints:
+    the picker is quoting the card, and the mark saying which one triage would take is
+    precisely the most useful thing on the line.
     """
 
     text: str
@@ -248,7 +249,8 @@ def _inside_option(lines: list[str], index: int) -> bool:
 def _options(lines: list[str], *, nested_folds: bool = False) -> list[Option]:
     """Each top-level list item as an `Option`, wrapped lines folded in.
 
-    The folding is lifted from `digest._bullets` and is not incidental: an option that
+    The folding is lifted from the digest's old `_bullets` (removed 2026-09-02) and is
+    not incidental: an option that
     ran onto a second source line would otherwise be truncated at the wrap — Karel's
     "random end of line", 2026-07-28. A following list item always starts a new option
     and is never folded in, so a card that nests detail under an option keeps it.
@@ -314,8 +316,8 @@ class DecideError(RuntimeError):
 def attributor(root: Path) -> str:
     """The token the maintainer signs a decision with, from the manifest.
 
-    Not guessed, and an empty value is a refusal rather than a fallback. The digest
-    matches this literally against `### <date> · <token>` to spot a card that was
+    Not guessed, and an empty value is a refusal rather than a fallback. `answer_pattern`
+    (below) matches this literally against `### <date> · <token>` to spot a card that was
     answered but never moved; a wrong guess makes that check silently never fire, and
     a check that cannot fire while reporting a clean board is worse than no check at
     all (`manifest.Board.decision_attributor`).
@@ -369,14 +371,14 @@ def write_answer(root: Path, card_id: str, picks: list[str], note: str,
     park-over-promote and gives the asymmetry — a card wrongly promoted is picked up by
     a worker and produces confident wrong work that costs more to review than to redo,
     while a card wrongly left parked simply waits one more cycle. The panel offers the
-    next step as a separate, deliberate click, and the digest's answered-but-not-moved
-    nudge is what stops an answered card being forgotten.
+    next step as a separate, deliberate click, and its answered-but-not-moved nudge
+    (via `has_maintainer_answer`) is what stops an answered card being forgotten.
     """
     who = attributor(root)
     if not who:
         raise DecideError(
-            "no `[board].decision_attributor` in the manifest — the digest matches that "
-            "token literally to tell your answer from an agent's note, so an answer "
+            "no `[board].decision_attributor` in the manifest — `answer_pattern` matches "
+            "that token literally to tell your answer from an agent's note, so an answer "
             "written without one would not be recognised as yours. Declare it and retry.")
     card = board.find(root, card_id)
     if card is None:
@@ -457,7 +459,7 @@ def open_questions_settled(card_text: str) -> bool:
     The precondition on offering "Send to tasks": `card_schema` refuses any card in
     `tasks/` whose open questions are not `none`, so a button that moved the card
     without this would simply turn the board red on the next gate run. Kept as a
-    name here because the panel and the digest both reach for it through this
+    name here because the panel reaches for it through this
     module, but the rule itself is `board.open_questions_settled` — see its
     docstring for the drift this delegation ended.
     """
@@ -512,14 +514,14 @@ def has_maintainer_answer(card_text: str, attributor: str) -> bool:
     searches the whole section exactly as before, so this is backward compatible
     with the existing corpus.
 
-    Two readers use it, for the same fact at different distances. The digest flags an
-    answered-but-never-moved card in tomorrow's report (the 2026-07-24
-    `needs-decision-card-not-moved-after-answer` correction). The panel's decide page
-    says it on the page itself, so an answer that already landed is visible while you
-    are looking at the card rather than a day later. It lives here, beside `compose`,
-    because the writer of a shape should own recognising it — the digest had the only
-    copy until 2026-08-23 and the panel could not reach it without importing the
-    reporting layer.
+    The digest (removed 2026-09-02) used to flag an answered-but-never-moved card in
+    its morning report (the 2026-07-24 `needs-decision-card-not-moved-after-answer`
+    correction); the panel's decide page now says it on the page itself, so an answer
+    that already landed is visible while you are looking at the card rather than a
+    day later. It lives here, beside `compose`, because the writer of a shape should
+    own recognising it — the digest had the only copy until 2026-08-23, when the
+    panel gained its own route to it without importing the (now-removed) reporting
+    layer.
     """
     pattern = answer_pattern(attributor)
     if pattern is None:

@@ -39,7 +39,7 @@ project gets upstreamed, after which the two sides hold the same bytes and the r
 alone is behind. Comparing each side against the receipt and never against the other
 reported that as a conflict with an empty diff: the panel said "nothing is overwritten
 until you say which wins" about two versions that were byte-identical, and the DIFF button
-right beside it said `identical`. Found 2026-08-18 in the Dungeoneer install, on a
+right beside it said `identical`. Found 2026-08-18 in the Project Tigress install, on a
 `command-center.bat` whose edit had been taken into the template. Nothing here writes the
 receipt straight — `survey` reads and never writes, which is what lets the panel call it on
 every page load — so the receipt stays behind until a verb touches the file; that costs

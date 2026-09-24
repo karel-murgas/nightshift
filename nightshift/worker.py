@@ -43,7 +43,7 @@ _STREAM_ARGV = ["--output-format", "stream-json", "--verbose"]
 #
 # **This is determinism, not a saving, and the difference was measured.** The
 # guess it replaces was that workers were carrying a pile of MCP tool schemas;
-# the `system`/`init` event of Dungeoneer's `tile-layer-surface-cache` attempt
+# the `system`/`init` event of Project Tigress's `tile-layer-surface-cache` attempt
 # says otherwise — exactly one server was present ("claude.ai Google Drive",
 # status `needs-auth`), contributing zero tools, and the browser server the guess
 # named was never in the session at all. Trimming that is worth approximately
@@ -73,10 +73,11 @@ def _run_worker(argv: list[str], cwd: Path, timeout: int,
 
     A named seam rather than an inline call, for two reasons. It is the only
     line in this file that is not deterministic, so isolating it makes the §12
-    claim checkable rather than a promise (`tests/test_board_runner.py` asserts
-    no decision function reaches it). And it is what lets the whole dispatch
-    cycle — worktree, verdict, gates, tests, card move, digest — be driven end
-    to end in a test without spending a night and a budget to find out that a
+    claim checkable rather than a promise (Project Tigress's
+    tests/test_board_runner.py asserts no decision function reaches it). And it
+    is what lets the whole dispatch
+    cycle — worktree, verdict, gates, tests, card move, run record — be driven
+    end to end in a test without spending a night and a budget to find out that a
     file move was wrong.
 
     `Popen` + two draining threads, not `subprocess.run`: reading only one of

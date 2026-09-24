@@ -33,7 +33,7 @@ def worktree_root(root: Path) -> Path:
     """Outside the repo, deliberately.
 
     A worktree under `Board/`'s repo would be walked by `doc_scan`,
-    `card_schema` and the digest, and every card would appear N+1 times. Putting
+    `card_schema` and the panel, and every card would appear N+1 times. Putting
     it beside the repo costs one `..` and removes a whole class of confusion.
     """
     return root.parent / _manifest.sibling_dir_name(hostconfig._project_name(root), "worktrees")
@@ -531,7 +531,7 @@ def _drop_rescue_branch(root: Path, name: str) -> None:
 
     `publish()` pushes *every* ref under `refs/heads/ai/` and a rescue branch
     lives there like any other, so on a host that declares `publish_remote`
-    (Dungeoneer's laptop does) the ref being reaped here has a copy on the
+    (Project Tigress's laptop does) the ref being reaped here has a copy on the
     remote. Reaping only the local half would leave exactly the orphaned
     `<remote>/ai/<id>@failed-N` that `rebase_and_merge` stopped leaving behind
     for card branches on 2026-08-09 — up to `MAX_ATTEMPTS` per card, and
@@ -1121,7 +1121,7 @@ def assert_integration_unmoved(root: Path, base: str, expected_sha: str) -> bool
     dispatch runs in the background, which happens whenever the launch checkout
     is still on the integration branch (`run-the-runner`'s in-place topology).
     "Did the tip move" alone cannot tell those apart, and conflating them cost a
-    board edit outright: 2026-09-10, Dungeoneer — this reset `test` mid-dispatch
+    board edit outright: 2026-09-10, Project Tigress — this reset `test` mid-dispatch
     and silently discarded a card the interactive session had committed seconds
     earlier, blaming it on the dispatched worker in the log line below even
     though that worker had made no git call at all (confirmed from its
@@ -1198,7 +1198,7 @@ def publish(root: Path, remote: str, base: str, trusted_branch: str = "") -> Non
     push.** It was originally read that way — a laptop's checkout *is* the
     maintainer's repo, so a branch there is already reachable — and that reading
     was wrong about what the remote is for: reachable-on-this-disk is not the
-    same as backed up, visible from another machine, or survivable. Dungeoneer's
+    same as backed up, visible from another machine, or survivable. Project Tigress's
     laptop declares `publish_remote: "origin"` for that reason (Karel,
     2026-08-08: *"Pushing to test after card success should be automatic"*), so
     a persistent host opting in is now the expected case, not the exception.

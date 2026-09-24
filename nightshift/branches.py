@@ -1,6 +1,7 @@
 """Branch roles — the one place a branch *name* is bound to a *job*.
 
-Moved out of Dungeoneer's `.ai/branches.py` by `07_portability.md` §8 step 4.
+Moved out of Project Tigress's *.ai/branches.py* (retired that step) by
+`07_portability.md` §8 step 4.
 The reasoning below is that file's, because it is the reasoning that makes this
 a module rather than a constant, and it is not project-specific: only the three
 names were.
@@ -61,7 +62,7 @@ that property.
 
 `manifest.py`'s third shape: a field that *bounds behaviour* is never guessed.
 `forbidden_bases()` depends on it and a wrong answer means the runner builds on
-a branch nobody wanted. Dungeoneer is the cautionary case — `dev` is *stable*
+a branch nobody wanted. Project Tigress is the cautionary case — `dev` is *stable*
 there while `development_team` carries the work, which no heuristic would get
 right. So reading it goes through `require()`, which raises naming the manifest
 key rather than returning something plausible.

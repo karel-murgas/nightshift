@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """PreToolUse hook: no judgment actor may open the board's private lane.
 
-The failure this exists to prevent (Dungeoneer, 2026-07-27, `triage-read-private-ideas`):
+The failure this exists to prevent (Project Tigress, 2026-07-27, `triage-read-private-ideas`):
 the `triage` agent, dispatched on an inbox note, glob/grep'd the board for context and
 read `Board/ideas/Generovani zvuku.md` — the lane its own charter says no judgment actor
 may ever open ("Not avoid unless useful: never"). It self-reported afterwards and
@@ -190,9 +190,10 @@ def _board_root(repo_root: Path) -> str:
 def known_lanes(repo_root: Path) -> tuple[str, ...]:
     """The lanes the board machinery enumerates — `board.LANES`.
 
-    Parsed out of `.ai/board.py` until 07_portability.md §8 step 4, because
-    `.ai/` is not an importable package and a hook must not depend on it being
-    one. `board` now ships in this package, so the honest move is to import the
+    Parsed out of the since-retired *.ai/board.py* until 07_portability.md §8
+    step 4, because `.ai/` is not an importable package and a hook must not
+    depend on it being one. `board` now ships in this package, so the honest
+    move is to import the
     one definition instead of keeping a parser that could disagree with it.
 
     `()` on any failure, which turns the fence off — the same safe direction the

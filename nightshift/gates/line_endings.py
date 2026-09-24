@@ -91,7 +91,7 @@ def eol_report(repo_root: Path) -> dict[str, tuple[str, str]] | None:
 
     This gate used to derive the same facts itself: `git cat-file` per tracked file for
     the blob, plus a `read_bytes()` per file for the worktree, plus a NUL sniff to guess
-    binary. That is 546 subprocesses on Dungeoneer and **25.2 seconds** — 76% of the
+    binary. That is 546 subprocesses on Project Tigress and **25.2 seconds** — 76% of the
     entire 31-gate suite, and paid three times per card (the on-save hook, the runner's
     gate step, the rebase re-verification). `git ls-files --eol` reports index eol,
     worktree eol and the resolved attribute for every tracked file in **0.45s**, which is

@@ -3,7 +3,7 @@
 
 `worker_prompt.TOOL_ECONOMY` has told workers to batch their searches and stop
 re-reading files since it was written, and the dispatch prompt has told them how to
-run the suite for just as long. Measured on Dungeoneer's `tile-layer-surface-cache`
+run the suite for just as long. Measured on Project Tigress's `tile-layer-surface-cache`
 (2026-08-29), a card that reviewed `ok` on its first attempt and was in every other
 respect a well-behaved run:
 
@@ -112,7 +112,7 @@ _TOOL_FOR = {
 
 #: A bare word that looks like a path operand rather than a pattern or a flag
 #: value — it has a separator or a short extension. `grep -n foo bar.py` trips
-#: this on `bar.py`; `grep -n foo` (reading stdin) does not.
+#: this on the *bar.py* operand; `grep -n foo` (reading stdin) does not.
 _PATHISH = re.compile(r"[/\\]|\.\w{1,4}$")
 
 #: The two module invocations the Approach names as "no fence covers": long
@@ -260,7 +260,7 @@ def _verdict(command: str) -> str | None:
     """The reason to deny a dispatched worker's Bash command, or None to allow."""
     for cmd in shellwords.commands(command) or ():
         if _is_full_suite_pytest(cmd):
-            return (  # gate-ok(source_reference_liveness): `tests/test_x.py` below is a placeholder in advice shown to a worker, not a reference to any file in this repo.
+            return (  # gate-ok(source_reference_liveness): the test path below is a placeholder in advice shown to a worker, not a reference to any file in this repo.
                 "Do not run the whole suite. `python -m nightshift.suite slice` runs "
                 "exactly the test slice the runner will judge your branch on, in "
                 "parallel — run it once before your verdict. The runner runs that "

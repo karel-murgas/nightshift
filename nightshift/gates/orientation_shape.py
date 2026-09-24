@@ -58,7 +58,7 @@ documents.
 
 ## The second shape: a log made of bullets (2026-09-06)
 
-The heading rule above has a blind spot, and Dungeoneer fell straight into it. Its
+The heading rule above has a blind spot, and Project Tigress fell straight into it. Its
 `state.md` grew to **240 register lines under a single `## Current State` heading** — one
 bullet per shipped card, newest first, 22.1 KB of a 91.8 KB always-loaded set, appended
 automatically by a `[[memory.fold]]` row. Not one heading was dated, so this gate passed
@@ -82,7 +82,7 @@ subsystem and stops; a log has one per card and does not.
 
 ## The corpus, counted
 
-Steps 2-4 of `verify-before-shipping-a-rule.md`, run over Dungeoneer's 42 memory and
+Steps 2-4 of `verify-before-shipping-a-rule.md`, run over Project Tigress's 42 memory and
 instruction documents on 2026-09-06 rather than reasoned about:
 
 | Document | Dated list items | In scope? |
@@ -193,7 +193,7 @@ def check(repo_root: Path) -> list[Violation]:
                 f"origin project reached 196 KB this way, at which point the file cost more "
                 f"to read than the code it described"))
 
-        # The same rule, the other syntax. A log does not need dated headings — Dungeoneer's
+        # The same rule, the other syntax. A log does not need dated headings — Project Tigress's
         # ran to 240 bullets under one undated `## Current State` and this gate passed it
         # daily. Counted rather than pattern-matched: a register bullet and a log bullet are
         # the same object, and only the quantity tells them apart.

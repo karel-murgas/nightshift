@@ -83,8 +83,9 @@ from nightshift import (dispatch, git, hostconfig, review, settle,
 from nightshift import outcome as _outcome
 from nightshift.hostconfig import repo_root
 
-#: Written at the repo root next to the digest, because that is the vault root. The
-#: name comes from `board`, which owns the set — see `GENERATED_VIEWS` on why a view
+#: Written at the repo root (where `Routing.md` and, until 2026-09-02, the digest's
+#: `Digest.md` also lived). The name comes from `board`, which owns the set — see
+#: `GENERATED_VIEWS` on why a view
 #: has to be in one list to be committed and in another to not block a dispatch.
 OUT = Path(board.CHORES_VIEW)
 
@@ -670,7 +671,7 @@ def _route_flagged(work: Path, card: board.Card, kind: str, detail: str) -> tupl
     review already produced this item's own verdict, in the one pass.
 
     Returns `(message, record_outcome)` — the second for `_record_outcomes`, so the
-    digest calls a retried card `needs_fix` and an escalated one `needs_decision`
+    panel calls a retried card `needs_fix` and an escalated one `needs_decision`
     rather than folding both into one label.
 
     A chore gets exactly one dispatch attempt (`hostconfig.CHORE_MAX_ATTEMPTS`), and it
@@ -738,7 +739,7 @@ def _workspace(root: Path, base: str) -> tuple[Path, str]:
 
 #: How a `Batch` outcome state reads in a run record. The record's vocabulary is the
 #: runner's, and mapping onto it rather than inventing a parallel one is what lets the
-#: digest and the Command Center report a batch and a night through the same accessors
+#: Command Center report a batch and a night through the same accessors
 #: (`run_record.landed`/`failures`/`decisions`).
 #:
 #: `done` is `review`, not `reviewed`: at the end of phase 1 the item is green on its
@@ -754,7 +755,7 @@ def _workspace(root: Path, base: str) -> tuple[Path, str]:
 #:   `settle` put the card in `needs-decision/` with its `## Question`. That is a
 #:   decision, and the record says `parked` so `decisions()` lists it and
 #:   `quality_counters`' `parked_rate` counts it. Mapping it to a literal `"bounced"`
-#:   left it in none of the three sets: the morning digest did not mention a card
+#:   left it in none of the three sets: the panel did not mention a card
 #:   that was sitting in `needs-decision/` waiting to be answered, and phase 0.3's
 #:   park rate — the tripwire for the whole chore path — read `0.0` on a night that
 #:   parked half its chores (`token-economy.md` §5, 2026-09-16).
@@ -790,7 +791,7 @@ def _record_outcomes(record: run_record.Record, batch: Batch,
     batch. `landed_ids` names which `done` outcomes actually merged; `escalated`
     overrides the mapping entirely for a card `_route_flagged` sent to
     `needs-decision/`/`tasks/` off the batch reviewer's own per-item verdict, so
-    the digest does not call a flagged card "review" (still pending) once it has
+    the panel does not call a flagged card "review" (still pending) once it has
     already been routed.
     """
     escalated = escalated or {}
@@ -1110,7 +1111,7 @@ def _land_the_batch(work: Path, base: str, batch: Batch, cards: dict[str, board.
     order = list(survivors)
     #: `_route_flagged` id -> its own record outcome (`needs_fix` / `needs_decision`),
     #: read by the final `_record_outcomes` call so a card the batch reviewer flagged
-    #: and routed individually is not reported as still "review" (pending) in the digest.
+    #: and routed individually is not reported as still "review" (pending) in the panel.
     escalated: dict[str, str] = {}
     #: Set only when a reviewer-cleared subset unexpectedly fails its own
     #: re-verification once the flagged item(s) are dropped — the one path into the

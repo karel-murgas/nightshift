@@ -652,7 +652,7 @@ def check(snapshot: Snapshot, *, allow_paid: bool = False,
 
 
 def describe(snapshot: Snapshot) -> list[str]:
-    """Human-readable meter lines, for a log, a digest or a panel."""
+    """Human-readable meter lines, for a log or a panel."""
     if not snapshot.fetched:
         return [f"usage unavailable - {snapshot.reason}"]
     lines = []
@@ -670,7 +670,7 @@ def describe(snapshot: Snapshot) -> list[str]:
 
 
 def describe_identity(identity: Identity) -> list[str]:
-    """Human-readable identity lines, for a log, a digest or a panel."""
+    """Human-readable identity lines, for a log or a panel."""
     if not identity.fetched:
         return [f"identity unavailable - {identity.reason}"]
     lines = [f"account: {identity.email or '(no email on file)'}"]

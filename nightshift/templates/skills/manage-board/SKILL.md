@@ -236,7 +236,7 @@ and needs no re-tracing (that is how the ICE and menu cards were reformatted).
 ## What runs when — do not over-test
 
 Moving a card or editing its markdown changes **no Python**. The gate suite
-(`python -m nightshift.gates.run`, ~5s) runs on every edit via a hook and is all the proof a board
+(`python -m nightshift.gates.run`, ~12s) runs on every edit via a hook and is all the proof a board
 change needs; `card_schema` is the relevant part. That figure was `~1s` here until 2026-08-01
 and had drifted to 33s without anything noticing — it is load-bearing (it is the reason
 running the gates on every edit is worth it), so treat it as a claim to re-measure rather

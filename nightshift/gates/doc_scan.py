@@ -94,9 +94,9 @@ def doc_file_names(repo_root: Path) -> tuple[str, ...]:
     except ManifestError:
         return _manifest.Project().doc_files
 
-# Root-level entry points are included because docs reference `main.py`
-# constantly. Deliberately a glob rather than a name, so a second entry point
-# needs no gate change.
+# Root-level entry points are included because docs reference a project's
+# entry-point script (Project Tigress's *main.py*) constantly. Deliberately a
+# glob rather than a name, so a second entry point needs no gate change.
 SOURCE_GLOBS: tuple[str, ...] = ("*.py",)
 
 
@@ -110,7 +110,7 @@ def source_dirs(repo_root: Path) -> tuple[str, ...]:
     and without it every doc describing this tooling reports its own subject as
     dangling. That is a framework fact, true of any consuming project.
 
-    A manifest read since 07_portability.md §8 step 4. For Dungeoneer the result
+    A manifest read since 07_portability.md §8 step 4. For Project Tigress the result
     is `("dungeoneer", "tests", "tools", ".ai")` — byte-identical to the tuple
     this replaced, which is the property step 4's checklist asks for.
     """
@@ -612,7 +612,7 @@ def _path_suffixes(repo_root_str: str) -> tuple[frozenset[str], frozenset[str]]:
     """(every path suffix of every project file, every file stem).
 
     Suffixes because docs write paths **package-relative**, not repo-relative:
-    `core/i18n.py` means `dungeoneer/core/i18n.py`, `memory/ref_i18n.md` means
+    *core/i18n.py* means *project_tigress/core/i18n.py*, `memory/ref_i18n.md` means
     `.claude/memory/ref_i18n.md`. That is the house style across CLAUDE.md and
     every plan doc, so a gate that demanded repo-relative paths would report
     hundreds of "violations" that are really a notation it disagrees with.

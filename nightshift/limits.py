@@ -26,7 +26,7 @@ around it. Every dispatch's raw CLI output is archived under
 phrasing after the fact. And the runner carries a consecutive-failure circuit
 breaker, so an unrecognised wall costs three cards instead of the whole queue.
 Fixing a missed wall means adding a line to `_WALL` and a case to
-`tests/test_board_limits.py`; nothing else has to change.
+`tests/test_limits.py`; nothing else has to change.
 
 The scan only ever runs on a **non-zero exit**, or on a CLI *error terminal* —
 a line that parses as the CLI's own `{"type": "result", "is_error": true,

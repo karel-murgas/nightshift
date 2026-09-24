@@ -21,7 +21,7 @@ than disagreement, and exactly one of them can be dissolved safely:
   review exists to catch, so it must not be dissolved by a flag. A merge is allowed to be
   wrong about formatting; it is not allowed to be wrong about scope.
 
-**Why the reporting half lives here too.** The Dungeoneer runner returned
+**Why the reporting half lives here too.** The Project Tigress runner returned
 `detail[-1]` of `(stdout or stderr)`, which is the worst possible selection: git prints
 the specific cause *first* and a generic summary *last*, and puts errors on **stderr**
 while `or` stops at a non-empty stdout. On 2026-08-01 a merge failed and the only record

@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """Run one of the consuming project's own hook scripts, from any working directory.
 
-Why this exists (Dungeoneer, 2026-07-30, `hook-command-resolved-against-a-moved-cwd`):
+Why this exists (Project Tigress, 2026-07-30, `hook-command-resolved-against-a-moved-cwd`):
 every command in a project's `.claude/settings.json` is run by the harness with the
 *session's* current working directory, not the repo root. A mid-session `cd` into a
 subdirectory was still in effect when a `PostToolUse` hook fired, so
-`python .ai/recipes/hint.py` resolved as `.ai/gates/.ai/recipes/hint.py` — "can't open
-file" — and both the Edit that triggered it and the next Bash call were refused until
+`python .ai/recipes/hint.py` resolved as the (nonexistent) *.ai/gates/.ai/recipes/hint.py*
+— "can't open file" — and both the Edit that triggered it and the next Bash call were refused until
 the cwd was reset. The hooks that exist to *refuse* things are disabled by the same
 wedge, which is why a relative path in a hook command is not a cosmetic problem: a cwd a
 worker happens to leave behind breaks the guard rather than tripping it.
 
 `python -m nightshift.hooks.<name>` fixed that for every hook living in this package —
 module resolution goes through the installed distribution and never consults the cwd. A
-project's own scripts cannot move here (`.ai/recipes/hint.py`'s rule table is Dungeoneer
-paths, and `00_architecture.md` §15 keeps a project's rules in the project), so they
+project's own scripts cannot move here (Project Tigress's *.ai/recipes/hint.py*'s rule
+table is Project Tigress paths, and `00_architecture.md` §15 keeps a project's rules
+in the project), so they
 need a cwd-independent way to be *reached* instead:
 
     python -m nightshift.hooks.project_script .ai/recipes/hint.py

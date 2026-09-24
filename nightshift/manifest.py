@@ -22,7 +22,7 @@ framework repo can serve N projects instead of being forked per project.
   manifest table is this package's vocabulary whoever consumes it.
 * A field that bounds behaviour is **never defaulted and never guessed**.
   `branches.integration` is the one: `forbidden_bases()` depends on it and a wrong
-  answer means the runner builds on a branch nobody wanted. Dungeoneer is the
+  answer means the runner builds on a branch nobody wanted. Project Tigress is the
   cautionary case — `dev` is *stable* there and is a forbidden base, which no
   heuristic would guess. Reading it goes through `require()`, which raises with the
   manifest key in the message rather than returning something plausible.
@@ -92,8 +92,8 @@ class Project:
     reading expected to find hardcoded are globs *by design* — a newly added
     `test_gate_*.py` must classify without anyone remembering a list.
 
-    `extra_source_dirs` are scanned for symbols (so a doc naming `tests/conftest.py`
-    resolves) but are not part of the code slice.
+    `extra_source_dirs` are scanned for symbols (so a doc naming a file under
+    `tests/` resolves) but are not part of the code slice.
 
     `tooling_dirs` are directories holding code that *runs the machinery* rather
     than code under test — the scope of the discipline gates, alongside `.ai/`,
@@ -106,7 +106,7 @@ class Project:
     `maintainer` is the name the templates address the operator by — every
     `{{maintainer}}` in a charter or a skill. It falls back to `git config
     user.name`, which is what it was read from outright until 2026-08-20, and that
-    is a *commit identity*, not a name: Dungeoneer's is `karel-murgas`, so every
+    is a *commit identity*, not a name: Project Tigress's is `karel-murgas`, so every
     re-render addressed him by his GitHub handle. Harmless on a first install,
     because nobody compares a fresh file to anything — but `update` re-renders on
     every survey, so the wrong name reappeared as conflict noise in five files at
@@ -125,7 +125,7 @@ class Tests:
     """`dir` is where pytest is pointed. `parallel` is a *permission*, not a
     detection: whether xdist is installed is a fact the code checks at run time, but
     whether this project's suite may be split across workers at all is a property of
-    the suite. Dungeoneer's needs `--dist loadfile` because the default `load` splits
+    the suite. Project Tigress's needs `--dist loadfile` because the default `load` splits
     a file across workers and its game tests flake — a project whose tests are not
     file-coupled loses nothing by saying so, and one that has never checked should
     say `false` rather than find out at 3 AM.
@@ -144,7 +144,7 @@ class Tests:
 class Branches:
     """`integration` has no default on purpose (module docstring). `forbidden_extra`
     covers the case that has no heuristic: a branch that is neither the integration
-    branch nor `stable` but must still be refused as a base — Dungeoneer's `dev`,
+    branch nor `stable` but must still be refused as a base — Project Tigress's `dev`,
     which *is* stable there while `development_team` carries the work."""
     integration: str | None = None
     stable: str = "main"
@@ -160,8 +160,8 @@ class Board:
     #: The attributor token that means "the maintainer decided this", as it appears
     #: after the `·` in a `## Thread` heading: `### 2026-08-04 · karel`.
     #:
-    #: Declared rather than guessed, and this is not a style preference. The digest
-    #: uses it to spot a card that was answered but never moved out of
+    #: Declared rather than guessed, and this is not a style preference.
+    #: `decide.answer_pattern` uses it to spot a card that was answered but never moved out of
     #: `needs-decision/`, and the token is the ONLY thing separating that from an
     #: agent's own note — counted over the origin project's 62-entry board corpus
     #: on 2026-08-04, the bare single-token attributors are `karel` (24), `triage`
@@ -293,7 +293,7 @@ class Memory:
     #: These are the shared append-at-the-top logs: a per-subsystem register, a
     #: dated history. Every card wants to add a line at the same anchor, so two
     #: cards finishing the same night collide **by construction** — which is what
-    #: produced four hand-resolved rebases in Dungeoneer (2026-08-09, 2026-08-13,
+    #: produced four hand-resolved rebases in Project Tigress (2026-08-09, 2026-08-13,
     #: and two on 2026-08-22). Declaring a file here moves the write off the card's
     #: branch and into a serial post-merge step, where two cards cannot race.
     fold: tuple[FoldTarget, ...] = ()
@@ -330,7 +330,7 @@ class I18n:
 
     **Schema without a core consumer, on purpose.** No gate in this package reads
     this table: `i18n_parity`, `i18n_untranslated` and `i18n_loanwords` left core
-    on 2026-08-03 for Dungeoneer's `.ai/gates/`, because "generic" was decided to
+    on 2026-08-03 for Project Tigress's `.ai/gates/`, because "generic" was decided to
     mean *broadly applicable*, not merely domain-free — most repos have no
     translations, and reading three inapplicable gate names in every run said the
     framework was game-shaped. What stays is the vocabulary those gates speak:
@@ -360,10 +360,10 @@ class DeadCode:
     must be before it speaks.
 
     **Both fields exist because `source_dirs` is the wrong answer twice**, in
-    opposite directions — measured on Dungeoneer, 2026-08-01, and written down
+    opposite directions — measured on Project Tigress, 2026-08-01, and written down
     at length in the gate's own docstring:
 
-    * an entry point *outside* the source dirs (`main.py`) has to be included,
+    * an entry point *outside* the source dirs (*main.py*) has to be included,
       or every `if TYPE_CHECKING:` import it is the sole consumer of reads as
       dead — 8 false positives there, all of which the entry point resolves
       with no whitelist file at all;
@@ -421,7 +421,7 @@ class Audit:
 
     Both empty by default, and that is a working configuration rather than a
     gap: §7 is explicit that a new repo starts with an *empty* audit matrix,
-    because the 55 rows here are Dungeoneer's earned evidence and shipping them
+    because the 55 rows here are Project Tigress's earned evidence and shipping them
     as someone else's rules is the thing the extraction must not do. So
     `nightshift.audit` reports "nothing to count" rather than failing.
 
@@ -470,7 +470,7 @@ class Tiers:
 
     The default is what `nightshift init` writes when no document already carries a
     ```tier-binding``` block — a real path in the repo being configured. It used to
-    be Dungeoneer's plan doc, which is a path *no other project has*: the same
+    be Project Tigress's plan doc, which is a path *no other project has*: the same
     coupling `deferral-note-nobody-collected` recorded for the error message, left
     in the value it was complaining about. Every consuming project's manifest either
     declares its own or gets a file that exists.

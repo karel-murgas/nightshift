@@ -9,7 +9,7 @@ convention a worker can forget is not a mechanism.
 log — a per-subsystem register, a dated history — and every card wants to add its
 entry at the same anchor. A card that edits one directly conflicts with any sibling
 card that finishes the same night, by construction rather than by disagreement. That
-cost four hand-resolved rebases in Dungeoneer (2026-08-09, 2026-08-13, and two on
+cost four hand-resolved rebases in Project Tigress (2026-08-09, 2026-08-13, and two on
 2026-08-22) before anyone counted them as one problem.
 
 So a dispatched worker writes `.ai/memory-fragments/<card-id>.md` instead — a file no

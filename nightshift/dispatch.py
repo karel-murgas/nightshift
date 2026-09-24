@@ -61,8 +61,9 @@ def card_bytes(card: board.Card) -> int:
     `card.text` rather than `path.stat().st_size` for two reasons: the text is
     the thing put in front of a worker, and it is the same number on a checkout
     whose working files carry CRLF. One function because there are now two
-    callers — the message below and the digest's record entry — and a signal
-    whose two surfaces disagreed about the size would be worse than no signal.
+    callers — the message below and the run record's `oversized` entry — and a
+    signal whose two surfaces disagreed about the size would be worse than no
+    signal.
     """
     return len(card.text.encode("utf-8"))
 
@@ -74,8 +75,8 @@ def oversize_note(card: board.Card) -> str:
     `reason`, which is what `run()` logs per card — it never touches
     `dispatchable`. `run()` also uses "returned something" as its *predicate*
     for `record.oversized`, which is how a dispatched oversized card reaches
-    `Digest.md` at all: it is dispatchable, so it is not in `record.skipped`,
-    so before that field the digest was silent about exactly the case this
+    the panel at all: it is dispatchable, so it is not in `record.skipped`,
+    so before that field the old digest was silent about exactly the case this
     signal exists for. Reusing this function as the test rather than
     re-deriving the condition is deliberate — it keeps the lane rule and the
     comparison in one place for both readers. That is the
@@ -159,7 +160,7 @@ def select(root: Path, capabilities: set[str], bad_schema: dict[str, list[str]],
     whichever reason it earned. It is a remark about the card, not a verdict on
     it: an oversized card is dispatchable exactly when it would have been at
     half the size, and the note rides the `reason` field precisely because that
-    field is already carried to both readers — the run log and the digest.
+    field is already carried to both readers — the run log and the panel.
     """
     out: list[Candidate] = []
     for card in board.cards(root, "tasks"):
@@ -210,8 +211,8 @@ def oversized_entries(candidates: list[Candidate]) -> list[tuple[str, int, int]]
     skip reason, so it is reported under `### Skipped` where it belongs;
     repeating it here would double-report it *and* file a card that never ran
     under a heading whose first two words are "Dispatched anyway". The cards
-    left are precisely the ones no other section of the digest can mention — the
-    reason `Digest.md` was silent about a card being dispatched over and over
+    left are precisely the ones no other section of the panel can mention — the
+    reason the old digest was silent about a card being dispatched over and over
     while it grew.
 
     A named function rather than a comprehension inline in `run()` for the

@@ -17,7 +17,7 @@ never returns an empty list on a tool it could not run — green-and-wrong is th
 one outcome a dead-code check must not have, because nobody ever investigates a
 gate that passes.
 
-**Two things about the invocation, measured on Dungeoneer with vulture 2.16 on
+**Two things about the invocation, measured on Project Tigress with vulture 2.16 on
 2026-08-01, that cost more to find than the gate did to write.**
 
 | invocation | conf 60 | conf 80 | verdict |
@@ -27,7 +27,7 @@ gate that passes.
 | `… main.py tests/` | 107 | 30 | never — ~25 pytest fixtures vulture cannot see are used |
 
 1. **Pass the entry point, do not write a whitelist.** A module that nothing
-   under the package imports — the `main.py` that constructs the app — is the
+   under the package imports — the *main.py* that constructs the app — is the
    sole consumer of a good deal of the package, and leaving it out reports all
    of it as dead: six `if TYPE_CHECKING:` imports, the application class, the
    logging setup. The instinct is to whitelist those. Adding the entry point to
@@ -60,7 +60,7 @@ at confidence 80. A repo that has configured nothing still gets the check.
 
 Appeals are vulture's own, not this package's: a `# noqa`-style marker would be a
 second mechanism for something the tool already does. Name the symbol in a
-`whitelist.py` that vulture scans, or — better, and the reason this gate is worth
+whitelist module that vulture scans, or — better, and the reason this gate is worth
 having — delete it.
 """
 from __future__ import annotations

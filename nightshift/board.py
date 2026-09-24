@@ -655,11 +655,13 @@ def cards(root: Path, lane: str, card_cls: type[Card] = Card) -> list[Card]:
     """Every card in one lane, in dispatch order (see `dispatch_order`).
 
     `card_cls` lets a caller with its own `Card` subclass reuse this scan
-    without duplicating the glob-and-filter loop — `digest.Card` adds judgments
-    (`is_visual`, `waited`, `link`) that belong to the digest, not to the shared
-    model, so it subclasses rather than growing this one.
+    without duplicating the glob-and-filter loop — the digest's own `Card`
+    (removed 2026-09-02) added judgments (`is_visual`, `waited`, `link`) that
+    belonged to the digest, not to the shared model, so it subclassed rather
+    than growing this one. No current caller passes a subclass, but the hook
+    stays cheap to keep.
 
-    The ordering applies whatever the class: the digest then lists a lane in the
+    The ordering applies whatever the class: a caller lists a lane in the
     order the runner would actually take it, which is the order Karel put it in.
     That is the useful reading of a queue, and it comes free — `dispatch_order`
     only touches `fields` and `path`, which every `Card` has.

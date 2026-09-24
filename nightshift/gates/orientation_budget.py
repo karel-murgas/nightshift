@@ -11,7 +11,7 @@ value is in where the number comes from.
 `[memory].budget_bytes` has no default, and its absence means **this gate does not
 run**. That is not an oversight to be tidied up later; it is the rule.
 
-Dungeoneer, where the rule was earned, is the worked example. The correction log
+Project Tigress, where the rule was earned, is the worked example. The correction log
 proposed the gate at a ~60 KB target (`memory-orientation-cost`, 2026-07-22).
 Measuring first found the set at 102.4 KB — red on arrival by 42 KB. There were two
 ways forward and only one of them was honest: compress the tree, or pick a budget

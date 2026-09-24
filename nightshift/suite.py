@@ -33,7 +33,7 @@ checks of which one is the project's, and `split_test_files`/`board_test_files`
 read the real tree and parse imports rather than consulting a table. The
 per-part test globs a first reading expects to find hardcoded are globs *by
 design*: a newly added `test_gate_*.py` must classify without anyone remembering
-a list. The incidents quoted below are Dungeoneer's, because they are the
+a list. The incidents quoted below are Project Tigress's, because they are the
 evidence this module was built from; the rules they justify are not.
 
 The suite it was measured on is ~1650 tests, ~500 of them AI-team infrastructure
@@ -102,8 +102,8 @@ union would already run it.
 **Which side a test file is on is read off its imports, not only its name.** The
 first version of this module decided that from the filename alone
 (`test_board_*`/`test_gate_*`/`test_stale*`), and two files sat outside those
-globs while importing `.ai/` modules: `tests/test_self_improvement.py` (the
-preflight's and the runner's own tests) and `tests/test_asset_hygiene.py`. Both
+globs while importing `.ai/` modules: *tests/test_self_improvement.py* (the
+preflight's and the runner's own tests) and *tests/test_asset_hygiene.py*. Both
 were classified GAME, so a `.ai/`-only diff selected SYSTEM and skipped them —
 the tests for the changed code were exactly what the selection dropped. Note that
 both directions of a wrong answer lose coverage here, so this is not a place to
@@ -242,7 +242,7 @@ def is_system_test(name: str) -> bool:
 
     **Not sufficient on its own** — see `touches_ai`. Two files under `tests/`
     import `.ai/` modules while being named outside these globs
-    (`test_self_improvement.py`, `test_asset_hygiene.py`), so a glob-only answer
+    (*test_self_improvement.py*, *test_asset_hygiene.py*), so a glob-only answer
     put them in the GAME half and a `.ai/`-only diff skipped the tests for the
     very code it changed. Kept as its own function because the *convention* is
     still worth expressing and a file matching it needs no source read.
@@ -253,7 +253,7 @@ def is_system_test(name: str) -> bool:
 # The framework package the tooling was extracted into (07_portability.md §8
 # step 2). A test that imports it is a system test in exactly the same sense as
 # one importing `.ai/` — and without this, the move opened a silent hole: a future
-# `tests/test_something.py` importing only `nightshift` would be classified GAME, so
+# tests/test_something.py importing only `nightshift` would be classified GAME, so
 # the SYSTEM slice would not run it and a `.ai/`-only diff would skip it entirely.
 # That is the same bug `touches_ai` was written to fix, reintroduced by relocation.
 _FRAMEWORK_PACKAGE = "nightshift"
@@ -499,7 +499,7 @@ class Selection:
 # Every bucket label mapped back to the parts it stands for. Used only for a bare
 # `Selection(bucket, reason)` (the `--full-tests` escape hatch and the tests); a
 # `select` result carries its parts directly. Kept in agreement with `_label` by
-# `test_board_suite.py`, which round-trips every label through both.
+# Project Tigress's test_board_suite.py, which round-trips every label through both.
 _BUCKET_PARTS: dict[str, frozenset] = {
     NONE: frozenset(),
     GAME: frozenset({GAME}),
@@ -611,10 +611,10 @@ TOUCHED = "touched"
 def module_of(path: str, where: Layout) -> str:
     """The dotted import name of a changed source file, or `""`.
 
-    `dungeoneer/core/i18n.py` → `dungeoneer.core.i18n`; a package's `__init__.py`
-    → the package itself. Only the *last* segment of a source dir survives,
-    because that is what the module is imported as: `src/game/core/x.py` is
-    `game.core.x`, matching `Layout.source_packages`.
+    *project_tigress/core/i18n.py* → `project_tigress.core.i18n`; a package's
+    `__init__.py` → the package itself. Only the *last* segment of a source dir
+    survives, because that is what the module is imported as: *src/game/core/x.py*
+    is `game.core.x`, matching `Layout.source_packages`.
     """
     p = path.replace("\\", "/")
     if not p.endswith(".py"):
@@ -1063,7 +1063,7 @@ def check_junit(path: Path) -> tuple[bool, str]:
                        "pass (suite.select picked an empty set)")
     if failures or errors:
         # The counts alone were the whole verdict until 2026-07-31, and they are
-        # what the card and the digest quote. "2 failure(s) across 1860 test(s)"
+        # what the card and the panel quote. "2 failure(s) across 1860 test(s)"
         # is a fact about the run that says nothing about the bug, so the first
         # failing test rides along — one clause, from the report already parsed.
         # `failure_excerpt` is the block form for the card; this is the line form.
@@ -1216,7 +1216,7 @@ def first_failure(path: Path) -> str:
 
 def failure_excerpt(path: Path, *, tests: int = EXCERPT_TESTS,
                     lines: int = EXCERPT_LINES) -> str:
-    """A bounded, indented block naming what failed — for a card or the digest.
+    """A bounded, indented block naming what failed — for a card or the panel.
 
     Bounded, and the bound is the whole point: cards are committed, synced and
     read in Obsidian, so this must be the part a human recognises the bug from,

@@ -9,7 +9,7 @@ gone). Path-list readers (`changed`, `committed`, `name_status`, `status`,
 `dirty`, `tracked`) all ask git for `-z` output and split on NUL, because a
 newline- or quote-based split mangles a filename git is free to contain either
 (`gates/git_path_lists.py` is the regression guard). Absorbs what was
-`nightshift/gitpaths.py`.
+`nightshift/gitpaths.py` (since removed).
 """
 from __future__ import annotations
 

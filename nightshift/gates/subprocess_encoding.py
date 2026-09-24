@@ -7,10 +7,10 @@ as *failed* with the reason `"gates: "`. Nothing after the colon.
 
 The chain, because every link is reusable and none of it is about git:
 
-1. `deletion_sweep._git` ran `git show <base>:dungeoneer/core/i18n.py` with
+1. `deletion_sweep._git` ran `git show <base>:project_tigress/core/i18n.py` with
    `text=True` and no `encoding=`. `text=True` alone decodes using the **locale**
    codec, which is `cp1252` on this machine.
-2. `i18n.py` carries 245 bytes cp1252 has no mapping for — the cs and es
+2. *i18n.py* carries 245 bytes cp1252 has no mapping for — the cs and es
    translations, which `CLAUDE.md` *requires* every user-visible string to have.
 3. The `UnicodeDecodeError` was raised inside subprocess's **reader thread**,
    where `run()` cannot observe it. So it did not propagate: `.stdout` simply
@@ -24,7 +24,7 @@ The rule is therefore: **`text=True` without `encoding=` is a latent crash whose
 trigger is somebody adding a non-Latin-1 string to the repo.** Every one of the
 18 sites under `.ai/` had it. It fired on the one that happened to read the
 biggest file with the most diacritics, and it would have fired on the others in
-turn — a card that touches `i18n.py` is the *normal* case here, not the exotic
+turn — a card that touches *i18n.py* is the *normal* case here, not the exotic
 one, which is why this cost a whole night's queue rather than one card.
 
 Scope: `.ai/` only — the orchestrator, where a silent failure costs a night, and

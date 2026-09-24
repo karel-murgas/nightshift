@@ -1,7 +1,7 @@
 """Gate: the runner never logs a stop reason without recording it.
 
 **Earned by the bug it would have caught** (`00_architecture.md` §15). Since
-2026-07-30 the morning digest reports *runs*, not board state, and it learns why a
+2026-07-30 the panel reports *runs*, not board state, and it learns why a
 run ended from `run_record`'s `stop_reason`. The dispatch loop in `runner.run()`
 has nine `break` paths — max-cards, the deadline, the budget, the kill switch, a
 broken gate harness, the session-limit ceiling, endless transient limits, a
@@ -11,18 +11,19 @@ to both the log and the record, and the first draft of it converted seven of the
 nine.
 
 That is a silent failure of exactly the kind this suite exists to close: a night
-that ends for an unrecorded reason renders in the digest as a night that simply
+that ends for an unrecorded reason renders in the panel as a night that simply
 ran out of cards. Nothing fails, no test breaks, and the report is confidently
 wrong about the most important fact of the morning — which is the same shape as
 the "0 failed · Nothing failed" bug the whole restructure was fixing.
 
-The rule is one line: **in `.ai/runner.py`, "stopping — " belongs to `_stop()`.**
+The rule is one line: **in `runner.py`, "stopping — " belongs to `_stop()`.**
 Call `_stop("<reason>")`, which logs *and* records; never `_log("stopping — …")`.
 
 Scope and precision:
 
-  * `.ai/runner.py` only. Every other module logs through its own helpers and has
-    no run record to keep in sync.
+  * `runner.py` only (matched by name -- see `_TARGET_NAME` below, not a hardcoded
+    path). Every other module logs through its own helpers and has no run record
+    to keep in sync.
   * Flagged on a **call to `_log`** whose first argument is a string starting with
     `stopping —`, whether plain or an f-string. Restricted to the call site rather
     than a text search because this gate's own prose and the docstrings that
@@ -128,7 +129,7 @@ def check(repo_root: Path) -> list[Violation]:
                 rel, node.lineno,
                 f"run_stop_recorded: this logs a stop reason directly. Call "
                 f"`{_HELPER}(\"<reason>\")` instead — it writes the same log line *and* "
-                f"puts the reason in the run record, which is where the morning digest "
+                f"puts the reason in the run record, which is where the panel "
                 f"reads why the run ended. A stop that only reaches the log renders as "
                 f"a run that simply ran out of cards",
             ))

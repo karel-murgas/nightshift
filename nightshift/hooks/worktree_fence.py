@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """PreToolUse hook: a dispatched worker may only write inside its own worktree.
 
-The failure this exists to prevent (Dungeoneer, 2026-07-25,
+The failure this exists to prevent (Project Tigress, 2026-07-25,
 `drop-item-action-unwired`): a worker was handed a git worktree and told to do
 all its work there, but it typed an **absolute path** to the canonical checkout
 — the path it knows from the project's own instructions and memory — and ran

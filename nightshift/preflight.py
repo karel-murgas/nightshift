@@ -5,9 +5,9 @@
 Everything else in `.ai/` is a trigger or a report — a hook that asks, a script
 that counts. This is the single place that can *refuse*. It runs the checks a
 session's work must pass before it leaves the branch, and it records a receipt
-for the content it validated. `.ai/hooks/preflight_guard.py` (a `PreToolUse`
-hook on `git push` / `git merge` / `gh pr create`) reads that receipt and denies
-the operation when the commit being published has none.
+for the content it validated. `nightshift/hooks/preflight_guard.py` (a
+`PreToolUse` hook on `git push` / `git merge` / `gh pr create`) reads that
+receipt and denies the operation when the commit being published has none.
 
 **A receipt is about a tree, not a commit** (`is_validated`). The three expensive
 checks all read the working tree and nothing else, so re-running them over
@@ -18,7 +18,8 @@ matched first; the tree is what makes a merge, an amended message or a clean
 rebase cost nothing.
 
 **Why here and not at commit time.** Commits are cheap and frequent; a check on
-every one would be tuned out within a day (`.ai/recipes/hint.py`'s own lesson).
+every one would be tuned out within a day (Project Tigress's
+*.ai/recipes/hint.py*'s own lesson).
 The merge/push boundary is rare, deterministic to detect, and it is the last
 moment a session's lessons still exist in context (`10_self_improvement.md` §3,
 `explained-instead-of-fixed`). So the expensive checks run once, there.
@@ -41,7 +42,10 @@ script card).
    disguise themselves as something else — a CRLF worktree fails `line_endings`
    once per file, and no other gate's signal is legible under three hundred of
    those.
-1. `python -m nightshift.gates.run` — the whole gate suite, ~8 s.
+1. `python -m nightshift.gates.run` — the whole gate suite: a few seconds for
+   this package's own 27 core gates alone, longer once a consuming project's
+   `.ai/gates/` join in (order ten seconds at Project Tigress's 55). `--json`'s
+   `per_gate` has the current number for any one tree.
 2. `python -m nightshift.audit --check` — the enforcement matrix has not
    drifted. The script moved to the package at 07_portability.md §8 step 4; the
    matrix it reads is still the project's own earned evidence (§7 — "an *empty*

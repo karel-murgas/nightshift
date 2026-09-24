@@ -44,7 +44,7 @@ if hasattr(sys.stdout, "reconfigure"):
 _CORE_GATES_DIR = Path(__file__).resolve().parent
 
 # Not gates: `run` is this file, `base` is the shared type. Helper modules --
-# core's `doc_scan` and `appeal_markers`, or a project's own (Dungeoneer's
+# core's `doc_scan` and `appeal_markers`, or a project's own (Project Tigress's
 # `i18n_adapter_loader`, shared by its three i18n gates) -- need no entry here:
 # they are identified by having no `check`, which is why adding a helper has never
 # required editing this list.

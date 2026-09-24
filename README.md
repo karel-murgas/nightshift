@@ -522,6 +522,7 @@ project's one.
 | `orientation_budget` | the declared orientation files stay under [memory].budget_bytes |
 | `orientation_shape` | declared orientation docs hold current state, not dated history |
 | `prompt_not_in_argv` | no argv carries a worker prompt on `-p`; it goes down the child's stdin |
+| `prose_reference_liveness` | a backticked dotted nightshift module or .py file name in a docstring or comment must resolve to something real |
 | `pytest_invocation` | only suite.py may spell pytest's parallel flags; callers use parallel_args() |
 | `readme_generated` | README.md's generated blocks (gate list, runner flags, manifest fields) match a fresh generation |
 | `run_stop_recorded` | runner.py logs a stop reason only via _stop(), which also records it |
@@ -617,12 +618,12 @@ no-op.
 
 `[i18n]` is the one table with no consumer inside this package. `i18n_parity`,
 `i18n_untranslated` and `i18n_loanwords` shipped as core gates until 2026-08-03
-and are now Dungeoneer's, under its own `.ai/gates/` — "generic" was decided to
+and are now Project Tigress's, under its own `.ai/gates/` — "generic" was decided to
 mean *broadly applicable*, not merely domain-free, and most repos have no
 translations to check. The table stays because those gates still read it, from
 outside, through `manifest.load(root).i18n`: it is the vocabulary any localised
 project's gates speak, and `validate()` still checks it. A project adopting the
-same three gates copies them out of Dungeoneer's `.ai/gates/` and writes an
+same three gates copies them out of Project Tigress's `.ai/gates/` and writes an
 adapter.
 
 ### The staleness sweep
