@@ -121,3 +121,20 @@ def test_the_three_way_verbs_refuse_a_composed_file(repo):  # noqa: F811
 def test_install_lays_down_the_empty_addenda_dirs(repo):  # noqa: F811
     for kind in ("agents", "skills"):
         assert (repo / compose.ADDENDA / kind / ".gitkeep").is_file()
+
+
+def test_a_composed_file_the_receipt_never_recorded_is_still_regenerated(repo):  # noqa: F811
+    """A charter whose template arrived after the install is not the project's own file."""
+    import json
+    from nightshift import init
+    receipt = init.read_receipt(repo)
+    receipt["created"].pop(REL)
+    (repo / init.RECEIPT).write_text(json.dumps(receipt), encoding="utf-8")
+    edited = (repo / REL).read_text(encoding="utf-8") + "\nlocal text\n"
+    (repo / REL).write_text(edited, encoding="utf-8")
+
+    found = update.survey(repo)
+    assert update.find(found, REL).verdict == update.REGENERATE
+    update.apply(found)
+    assert (repo / (REL + update.BACKUP_SUFFIX)).read_text(encoding="utf-8") == edited
+    assert composed_text.check(repo) == []

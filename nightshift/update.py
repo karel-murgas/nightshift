@@ -263,6 +263,14 @@ def survey(root: Path) -> Survey:
         # comparison — handled below, out of the staged loop.
         if rel == init.SETTINGS:
             continue
+        if rel in compose.COMPOSED:
+            # Generated, so never "yours" or a conflict, with or without a receipt entry:
+            # the project's passages are in the addendum by construction.
+            current = _on_disk(root / rel)
+            verdict = MISSING if current is None else (
+                CURRENT if current == staged else REGENERATE)
+            out.findings.append(Finding(rel, verdict, staged))
+            continue
         was = recorded.get(rel)
         if was is None:
             # Either the project's own file that `init` deliberately left alone, or one
@@ -272,12 +280,6 @@ def survey(root: Path) -> Survey:
         current = _on_disk(root / rel)
         if current is None:
             out.findings.append(Finding(rel, MISSING, staged))
-            continue
-        if rel in compose.COMPOSED:
-            # Generated, so never "yours" and never a conflict, and no outgoing drift:
-            # the project's passages are in the addendum by construction.
-            out.findings.append(Finding(rel, CURRENT if current == staged else REGENERATE,
-                                        staged))
             continue
         now = init.content_hash(current)
         ahead = init.content_hash(staged)
